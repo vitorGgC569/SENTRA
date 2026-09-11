@@ -19,8 +19,8 @@
     "retry_count": 0,
     "max_retries": 3,
     "depth": 0,
-    "created_at": 1789125876.5971782,
-    "updated_at": 1789125876.5971782,
+    "created_at": 1789125953.789724,
+    "updated_at": 1789125953.789724,
     "target_files": [],
     "active_candidate_id": null,
     "metadata": {
@@ -55,8 +55,8 @@
     "retry_count": 0,
     "max_retries": 3,
     "depth": 0,
-    "created_at": 1789125876.5971782,
-    "updated_at": 1789125876.5971782,
+    "created_at": 1789125953.789724,
+    "updated_at": 1789125953.789724,
     "target_files": [],
     "active_candidate_id": null,
     "metadata": {}

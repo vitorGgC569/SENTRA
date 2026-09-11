@@ -508,5 +508,209 @@
       "estimated_cost": 0.0
     },
     "created_at": 1789125876.7858124
+  },
+  {
+    "report_id": "val_183bb4b3",
+    "candidate_id": "cand_d8ddf502",
+    "task_id": "T-01",
+    "validator_id": "validator.logic",
+    "validator_role": "validator.logic",
+    "status": "APPROVED",
+    "confidence": 0.95,
+    "summary": "Validation passed without errors.",
+    "findings": [],
+    "evidence": [],
+    "tests": [
+      {
+        "command": "python -c \"print('Tests passed')\"",
+        "passed": true,
+        "exit_code": 0,
+        "stdout": "Tests passed\r\n",
+        "stderr": ""
+      }
+    ],
+    "requirements_checked": [
+      "RF-001",
+      "RF-002"
+    ],
+    "token_usage": {
+      "input_tokens": 177,
+      "output_tokens": 59,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-e2e",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125953.8983388
+  },
+  {
+    "report_id": "val_0e7b1a25",
+    "candidate_id": "cand_d8ddf502",
+    "task_id": "T-01",
+    "validator_id": "validator.requirements",
+    "validator_role": "validator.requirements",
+    "status": "APPROVED",
+    "confidence": 0.95,
+    "summary": "Validation passed without errors.",
+    "findings": [],
+    "evidence": [],
+    "tests": [
+      {
+        "command": "python -c \"print('Tests passed')\"",
+        "passed": true,
+        "exit_code": 0,
+        "stdout": "Tests passed\r\n",
+        "stderr": ""
+      }
+    ],
+    "requirements_checked": [
+      "RF-001",
+      "RF-002"
+    ],
+    "token_usage": {
+      "input_tokens": 177,
+      "output_tokens": 59,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-e2e",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125953.8983388
+  },
+  {
+    "report_id": "val_3e4144bf",
+    "candidate_id": "cand_d8ddf502",
+    "task_id": "T-01",
+    "validator_id": "validator.edge_cases",
+    "validator_role": "validator.edge_cases",
+    "status": "APPROVED",
+    "confidence": 0.95,
+    "summary": "Validation passed without errors.",
+    "findings": [],
+    "evidence": [],
+    "tests": [
+      {
+        "command": "python -c \"print('Tests passed')\"",
+        "passed": true,
+        "exit_code": 0,
+        "stdout": "Tests passed\r\n",
+        "stderr": ""
+      }
+    ],
+    "requirements_checked": [
+      "RF-001",
+      "RF-002"
+    ],
+    "token_usage": {
+      "input_tokens": 177,
+      "output_tokens": 59,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-e2e",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125953.8983388
+  },
+  {
+    "report_id": "val_9af7e3f5",
+    "candidate_id": "cand_665dfc87",
+    "task_id": "T-02",
+    "validator_id": "validator.logic",
+    "validator_role": "validator.logic",
+    "status": "APPROVED",
+    "confidence": 0.95,
+    "summary": "Validation passed without errors.",
+    "findings": [],
+    "evidence": [],
+    "tests": [
+      {
+        "command": "python -c \"print('Tests passed')\"",
+        "passed": true,
+        "exit_code": 0,
+        "stdout": "Tests passed\r\n",
+        "stderr": ""
+      }
+    ],
+    "requirements_checked": [
+      "RF-001",
+      "RF-002"
+    ],
+    "token_usage": {
+      "input_tokens": 180,
+      "output_tokens": 59,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-e2e",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125954.0393646
+  },
+  {
+    "report_id": "val_4ac4fdca",
+    "candidate_id": "cand_665dfc87",
+    "task_id": "T-02",
+    "validator_id": "validator.requirements",
+    "validator_role": "validator.requirements",
+    "status": "APPROVED",
+    "confidence": 0.95,
+    "summary": "Validation passed without errors.",
+    "findings": [],
+    "evidence": [],
+    "tests": [
+      {
+        "command": "python -c \"print('Tests passed')\"",
+        "passed": true,
+        "exit_code": 0,
+        "stdout": "Tests passed\r\n",
+        "stderr": ""
+      }
+    ],
+    "requirements_checked": [
+      "RF-001",
+      "RF-002"
+    ],
+    "token_usage": {
+      "input_tokens": 180,
+      "output_tokens": 59,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-e2e",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125954.0393646
+  },
+  {
+    "report_id": "val_b4785aa3",
+    "candidate_id": "cand_665dfc87",
+    "task_id": "T-02",
+    "validator_id": "validator.edge_cases",
+    "validator_role": "validator.edge_cases",
+    "status": "APPROVED",
+    "confidence": 0.95,
+    "summary": "Validation passed without errors.",
+    "findings": [],
+    "evidence": [],
+    "tests": [
+      {
+        "command": "python -c \"print('Tests passed')\"",
+        "passed": true,
+        "exit_code": 0,
+        "stdout": "Tests passed\r\n",
+        "stderr": ""
+      }
+    ],
+    "requirements_checked": [
+      "RF-001",
+      "RF-002"
+    ],
+    "token_usage": {
+      "input_tokens": 180,
+      "output_tokens": 59,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-e2e",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125954.0393646
   }
 ]
