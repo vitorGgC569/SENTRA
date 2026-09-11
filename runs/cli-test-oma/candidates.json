@@ -1,0 +1,74 @@
+[
+  {
+    "candidate_id": "cand_5366553e",
+    "task_id": "T-01",
+    "run_id": "cli-test-oma",
+    "version": 1,
+    "summary": "Implemented solution successfully.",
+    "solution": "BEGIN_RESULT\nSTATUS: COMPLETE\nSUMMARY: Implemented solution successfully.\nPATCH:\n```diff\n--- a/math_utils.py\n+++ b/math_utils.py\n@@ -0,0 +1,10 @@\n+def factorial(n: int) -> int:\n+    if n < 0:\n+        raise ValueError('Negative not allowed')\n+    return 1 if n <= 1 else n * factorial(n - 1)\n```\nVALIDATION_COMMANDS:\n- python -c \"print('Tests passed')\"\nEND_RESULT",
+    "patch": "--- a/math_utils.py\n+++ b/math_utils.py\n@@ -0,0 +1,10 @@\n+def factorial(n: int) -> int:\n+    if n < 0:\n+        raise ValueError('Negative not allowed')\n+    return 1 if n <= 1 else n * factorial(n - 1)",
+    "files_affected": [],
+    "validation_commands": [
+      "python -c \"print('Tests passed')\""
+    ],
+    "created_by": "executor.primary",
+    "status": "CREATED",
+    "token_usage": {
+      "input_tokens": 61,
+      "output_tokens": 90,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-primary",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125885.3051035
+  },
+  {
+    "candidate_id": "cand_d38177d1",
+    "task_id": "T-01",
+    "run_id": "cli-test-oma",
+    "version": 1,
+    "summary": "Implemented solution successfully.",
+    "solution": "BEGIN_RESULT\nSTATUS: COMPLETE\nSUMMARY: Implemented solution successfully.\nPATCH:\n```diff\n--- a/math_utils.py\n+++ b/math_utils.py\n@@ -0,0 +1,10 @@\n+def factorial(n: int) -> int:\n+    if n < 0:\n+        raise ValueError('Negative not allowed')\n+    return 1 if n <= 1 else n * factorial(n - 1)\n```\nVALIDATION_COMMANDS:\n- python -c \"print('Tests passed')\"\nEND_RESULT",
+    "patch": "--- a/math_utils.py\n+++ b/math_utils.py\n@@ -0,0 +1,10 @@\n+def factorial(n: int) -> int:\n+    if n < 0:\n+        raise ValueError('Negative not allowed')\n+    return 1 if n <= 1 else n * factorial(n - 1)",
+    "files_affected": [],
+    "validation_commands": [
+      "python -c \"print('Tests passed')\""
+    ],
+    "created_by": "executor.primary",
+    "status": "CREATED",
+    "token_usage": {
+      "input_tokens": 61,
+      "output_tokens": 90,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-primary",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125914.630686
+  },
+  {
+    "candidate_id": "cand_24c67d06",
+    "task_id": "T-02",
+    "run_id": "cli-test-oma",
+    "version": 1,
+    "summary": "Implemented solution successfully.",
+    "solution": "BEGIN_RESULT\nSTATUS: COMPLETE\nSUMMARY: Implemented solution successfully.\nPATCH:\n```diff\n--- a/math_utils.py\n+++ b/math_utils.py\n@@ -0,0 +1,10 @@\n+def factorial(n: int) -> int:\n+    if n < 0:\n+        raise ValueError('Negative not allowed')\n+    return 1 if n <= 1 else n * factorial(n - 1)\n```\nVALIDATION_COMMANDS:\n- python -c \"print('Tests passed')\"\nEND_RESULT",
+    "patch": "--- a/math_utils.py\n+++ b/math_utils.py\n@@ -0,0 +1,10 @@\n+def factorial(n: int) -> int:\n+    if n < 0:\n+        raise ValueError('Negative not allowed')\n+    return 1 if n <= 1 else n * factorial(n - 1)",
+    "files_affected": [],
+    "validation_commands": [
+      "python -c \"print('Tests passed')\""
+    ],
+    "created_by": "executor.primary",
+    "status": "CREATED",
+    "token_usage": {
+      "input_tokens": 66,
+      "output_tokens": 90,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-primary",
+      "estimated_cost": 0.0
+    },
+    "created_at": 1789125914.7502246
+  }
+]

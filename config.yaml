@@ -1,0 +1,45 @@
+# AutonomousInfinityAI Configuration (OMA Architecture)
+
+local_model:
+  base_url: "http://127.0.0.1:11434/v1"  # Ollama OpenAI-compatible endpoint (or 8000/v1 for vLLM)
+  model_name: "qwen2.5:0.5b-instruct-q4_K_M"
+  api_key: "local"
+  temperature: 0.1
+  timeout: 120
+
+browser:
+  headless: false
+  storage_state_path: "auth.json"
+  user_data_dir: null
+  cdp_url: null  # Optional Chrome Remote Debugging URL e.g. "http://localhost:9222"
+  timeout_seconds: 15
+  stable_samples: 3
+
+orchestrator:
+  mode: "oma"  # "oma" (full multi-agent architecture) or "legacy" (original MVP loop)
+  max_rounds: 20
+  max_parallel_sessions: 3
+  repeated_failure_limit: 3
+  no_progress_limit: 3
+  worktree_isolation: true
+
+oma:
+  validators_required: 3
+  minimum_approvals: 2
+  critical_rejection_blocks: true
+  objective_test_required: true
+  minimum_confidence_threshold: 0.75
+  max_repair_rounds: 4
+  branching_factor_limit: 5
+  max_depth: 5
+  global_task_budget: 200
+  token_budget_master: 50000
+  token_budget_secondary: 1000000
+  circuit_failure_threshold: 3
+  circuit_recovery_timeout: 30.0
+
+default_acceptance_criteria:
+  - "Project compiles / builds without errors"
+  - "Primary tests pass cleanly"
+  - "No critical syntax or logic bugs introduced"
+  - "Out of scope code modifications are avoided"

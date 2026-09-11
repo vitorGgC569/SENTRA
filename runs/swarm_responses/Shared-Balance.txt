@@ -1,0 +1,203 @@
+[Contrato de rede sem tipagem, direção ou autoridade]
+
+src/Shared/NetworkEvents.luau apenas registra nomes como BuyPack, SellCard, UpgradeCard, FuseCards, TeleportPlayer e ClaimReward; não existe contrato dizendo quem pode disparar, quais argumentos são aceitos e quais valores são exclusivamente calculados pelo servidor.
+
+Isso é o maior risco de exploit da camada compartilhada. Um cliente adulterado pode tentar enviar preço, recompensa, raridade, posição, multiplicador, nível ou IDs arbitrários caso algum handler do servidor confie nesses parâmetros.
+
+Definir para cada remote: direção Client→Server ou Server→Client, payload tipado e quais campos são apenas identificadores. Compras, fusão, venda, upgrades, teleportes e recompensas devem ser recalculados/validados integralmente pelo servidor.
+
+[Economia ultrapassa a precisão segura de number]
+
+O problema mais importante de FormatUtils.FormatMoney não é overflow em 1e69: Luau usa números IEEE-754 double e ainda representa magnitudes muito maiores que isso. O problema é que inteiros deixam de ser exatos acima de 2^53, aproximadamente 9,0e15.
+
+Com dinheiro chegando a 1e18, 1e30, 1e69 etc., somar/subtrair valores pequenos deixa de alterar o saldo de forma confiável. Isso pode causar preços aparentemente errados, ganhos que desaparecem, diferenças cliente/servidor e problemas de persistência. A formatação apenas mascara o problema.
+
+Definir agora uma representação econômica própria, por exemplo mantissa+expoente/big-number decimal compartilhado, e não tratar dinheiro gigantesco como number comum em toda a economia.
+
+[Tabela de sufixos termina antes da escala esperada]
+
+FormatUtils.SUFFIXES termina em "Cent". Pela posição atual, "Cent" corresponde a expoente 22, isto é, aproximadamente 1e66. Em 1e69, exp deveria ser 23, mas é limitado a 22 e o resultado passa a ser algo como $1000.00Cent.
+
+Conforme a economia cresce, o jogador verá números cada vez maiores presos no mesmo sufixo, anulando o propósito da abreviação e deixando progression/endgame visualmente ruim.
+
+Expandir formalmente a escala ou usar uma representação que consiga gerar tiers além da tabela; também definir claramente qual potência cada sufixo representa.
+
+[Rebirth e Quests precisam de protocolo autoritativo próprio]
+
+Não há contrato para Rebirth nem para claiming/progresso de quests. O ClaimReward genérico não é suficiente para distinguir recompensa diária, quest, torre, código, achievement etc.
+
+Esses dois sistemas mexem diretamente em moeda, multiplicadores e progressão permanente; improvisar sobre remotes genéricos aumenta muito a chance de duplicação de recompensa e exploits.
+
+Contrato mínimo sugerido: RequestRebirth() Client→Server; RebirthStateChanged(state) Server→Client; ClaimQuest(questId) Client→Server; QuestStateChanged(state/delta) Server→Client. Não criar QuestProgress Client→Server: progresso deve ser derivado pelo servidor das ações reais do jogador.
+
+[SyncData/GetPlayerData não possuem schema compartilhado]
+
+SyncData e GetPlayerData existem, mas nesses arquivos não há um PlayerData compartilhado, versão de schema ou definição de estrutura para inventário, cartas colocadas, upgrades, quests, rebirth etc.
+
+Cliente e servidor podem evoluir independentemente e começar a esperar campos diferentes. Em jogo persistente isso também complica migração de saves e compatibilidade após updates.
+
+Criar tipos compartilhados para PlayerData, QuestState, UpgradeState, CardState, RebirthState e incluir uma versão explícita do schema.
+
+[QuestData descreve comportamento apenas em texto/ID]
+
+QuestData.Quests tem somente TargetAmount. Informações essenciais estão escondidas em Id e Description. Por exemplo, ReachGradeS exige "Nota S ou superior", mas "S" não existe como dado estruturado; OpenPacks diz "esteira ou loja", mas essas fontes também não existem no contrato.
+
+Isso força o servidor a escrever casos especiais como if quest.Id == "ReachGradeS" e reproduzir regras fora de QuestData, criando exatamente a duplicação que uma camada Shared deveria evitar.
+
+Adicionar definição machine-readable de objetivo: métrica/evento observado, filtros, threshold, origem permitida e condições de conclusão.
+
+[Sistema de quests não escala para retenção]
+
+As três quests são fixas, aparentemente completáveis uma única vez. Não existem categorias, reset, pool, daily/weekly, cooldown, ExpiresAt, repetibilidade ou regras de seleção.
+
+Depois de completar três objetivos, esse sistema deixa de gerar gameplay. Para um tycoon/gacha isso desperdiça um mecanismo forte de retenção diária e retorno ao jogo.
+
+Separar quests permanentes/tutorial de quests diárias/semanais e definir pools rotativos controlados pelo servidor. O cliente deve receber quais quests estão ativas e quando resetam.
+
+[FormatNumber possui bug real com números negativos]
+
+Em FormatUtils.FormatNumber, a condição é if value < 1000. Portanto todo número negativo, independentemente da magnitude, entra nesse ramo. FormatNumber(-1000000) vira aproximadamente "-1000000" em vez de "-1.00M".
+
+Qualquer UI futura de perda, delta, custo, ranking ou estatística negativa terá comportamento diferente do equivalente positivo.
+
+Tratar sinal separadamente, como FormatMoney já faz, e formatar a magnitude absoluta.
+
+[FormatChance(0) e probabilidades inválidas não são tratadas]
+
+Para chanceFraction == 0, a função entra no ramo 1 / chanceFraction, produzindo infinito. Valores negativos, NaN ou maiores que 1 também não possuem contrato consistente.
+
+Tabelas de gacha são particularmente sensíveis a dados inválidos. Um erro de configuração pode virar texto absurdo ou propagar números inválidos para outras camadas.
+
+Definir intervalo aceito [0,1], comportamento explícito para zero e validação dos dados de chance antes da formatação.
+
+[NetworkEvents aceita colisão de classe silenciosamente]
+
+NetworkEvents.Init() usa apenas folder:FindFirstChild(eventName). Se existir um objeto chamado BuyPack que seja RemoteFunction, por exemplo, ele é considerado válido. Depois GetEvent() simplesmente força :: RemoteEvent.
+
+Isso transforma erro de configuração/Rojo em falha tardia e difícil de diagnosticar.
+
+O registry deve verificar IsA("RemoteEvent")/IsA("RemoteFunction") e falhar imediatamente diante de um contrato incompatível.
+
+[GetEvent e GetFunction são stringly-typed e podem esperar para sempre]
+
+Ambos recebem qualquer string e executam WaitForChild(name) sem timeout. Um typo como "ClaimQuests" pode deixar uma thread aguardando indefinidamente em vez de denunciar um remote inexistente.
+
+Erros de integração entre vários sistemas tornam-se hangs silenciosos, especialmente problemáticos em inicialização.
+
+Centralizar nomes em um registry tipado/constante e validar nomes conhecidos; em pontos críticos, falhar com mensagem clara em vez de esperar indefinidamente.
+
+[Direção dos remotes é semanticamente ambígua]
+
+Nomes como CardSpawned, PlaySound, SyncData parecem Server→Client, enquanto BuyPack, SellCard e FuseCards parecem Client→Server, mas o arquivo não registra isso.
+
+Sem essa distinção, fica fácil criar handlers acidentalmente bidirecionais ou confiar em uma chamada que deveria ser exclusivamente do servidor.
+
+Incorporar direção ao próprio contrato. Para comandos sensíveis, nomes como RequestBuyPack, RequestFuseCards e RequestUpgradeCard tornam a autoridade mais explícita.
+
+[ClaimReward é genérico demais para uma economia real]
+
+Um único remote chamado ClaimReward não identifica de qual subsistema vem a recompensa nem qual estrutura é esperada.
+
+À medida que quests, offline earnings, torre, login diário e eventos forem adicionados, esse remote tende a virar um dispatcher gigante ou, pior, aceitar informação demais do cliente.
+
+Usar ações específicas (ClaimQuest, ClaimOfflineEarnings, ClaimTowerReward etc.) ou um contrato fortemente tipado com origem/ID validado pelo servidor.
+
+[UpgradeData.GetCost usa 0 como erro válido]
+
+Em UpgradeData.GetCost, um upgradeId inexistente retorna 0. Zero também é um preço perfeitamente utilizável como conceito econômico.
+
+Se algum servidor esquecer de validar o ID antes de chamar essa função, um upgrade inválido pode virar compra gratuita ou gerar comportamento incorreto silenciosamente.
+
+ID inválido deve ser erro/nil claramente distinguível de custo legítimo; validação de MaxLevel e nível atual também deve fazer parte do contrato.
+
+[GetCost não define domínio válido de currentLevel]
+
+A função aceita nível negativo, fracionário ou acima de MaxLevel. Não há clamp nem rejeição no Shared.
+
+Se o nível chegar de um payload adulterado ou de save corrompido, o custo pode ficar drasticamente menor ou completamente incoerente.
+
+Definir semanticamente currentLevel como inteiro entre 0 e MaxLevel e obrigar o servidor a usar o nível armazenado, nunca o nível informado pelo cliente.
+
+[BaseExpansion tem semântica de nível inconsistente]
+
+GetValue(level) retorna 4 + level. Portanto level 0 = 4 slots; level 1 = 5. O comentário diz "Starts at 5 slots, max 34 slots", misturando aparentemente estado base com estado após primeira compra.
+
+Esse tipo de ambiguidade costuma gerar off-by-one entre UI, save e servidor: mostrar 5 slots enquanto o servidor autoriza 4, por exemplo.
+
+Formalizar que level 0 representa estado inicial e corrigir descrição/comentário para refletir exatamente a quantidade em cada nível.
+
+[ConveyorSpeed mistura duas grandezas em um único upgrade]
+
+A descrição afirma aumentar "velocidade da esteira e a frequência de spawn", porém GetValue() retorna apenas um intervalo em segundos. Não existe dado estruturado representando velocidade física da esteira.
+
+Cliente e servidor podem interpretar esse number como intervalo, velocidade ou multiplicador, resultando em esteira visualmente rápida mas spawn igual, ou vice-versa.
+
+Dar significado explícito ao valor (SpawnIntervalSeconds) e, se realmente afetar movimento, expor separadamente o multiplicador de velocidade da esteira.
+
+[GetValue e GetDisplayValue duplicam fórmulas]
+
+Em praticamente todos os upgrades a mesma matemática aparece duas vezes. BaseExpansion repete 4 + level; LuckBoost repete level * 10; MoneyBoost repete level * 15; ConveyorSpeed repete a fórmula completa.
+
+Uma futura alteração de balanceamento pode mudar gameplay sem mudar o texto exibido, fazendo o jogador pagar por um valor diferente daquele anunciado.
+
+Calcular o valor uma única vez e fazer a formatação consumir esse resultado; manter regra de gameplay e apresentação derivadas da mesma fonte.
+
+[LuckBoost não define matematicamente o que significa “sorte”]
+
+GetValue() retorna 1.0 + level * 0.1, mas a descrição diz melhorar "pacotes e cartas mais raras". Não há definição se esse 1.5x multiplica pesos raros, reduz pesos comuns, faz reroll, afeta pack rarity ou card rarity.
+
+Sistemas de gacha são extremamente sensíveis a essa interpretação; duas implementações aparentemente razoáveis produzem probabilidades completamente diferentes.
+
+Definir no contrato de dados qual algoritmo consome LuckBoost e o que exatamente o multiplicador modifica.
+
+[RobuxCost não deveria ser a fonte de verdade do preço]
+
+UpgradeData.LuckBoost.RobuxCost = 19 coloca preço comercial diretamente no dado compartilhado.
+
+O preço mostrado pode divergir do produto/gamepass realmente configurado no Roblox, especialmente com alterações comerciais, regional pricing ou produto incorreto.
+
+Armazenar a identidade do produto/gamepass e obter metadados comerciais pela infraestrutura apropriada; não tratar o número hardcoded como preço autoritativo.
+
+[Formatação quebra a unidade na fronteira entre sufixos]
+
+A seleção do sufixo ocorre antes do arredondamento. Um valor próximo de 1.000.000, por exemplo 999999.999, pode ser exibido como aproximadamente $1000.00K em vez de $1.00M.
+
+É um problema de polimento visível justamente em um tycoon onde números sobem constantemente.
+
+Após arredondar o valor escalado, promover para o próximo sufixo quando ele atingir 1000.
+
+[FormatMoney é inconsistente abaixo/acima de 1000]
+
+Valores abaixo de 1000 removem .00 com gsub, mas valores abreviados sempre mantêm duas casas: $500, porém $1.00K.
+
+Não quebra gameplay, mas faz a apresentação da economia parecer menos refinada e pode duplicar formatação em UIs que tentem corrigir isso localmente.
+
+Definir uma única política de casas decimais compartilhada conforme magnitude.
+
+[FormatPercent produz "+-" para debuffs]
+
+FormatPercent sempre prefixa "+". Um valor -0.1 resulta em "+-10%".
+
+Assim que houver debuffs, penalidades de rebirth/tower ou modificadores negativos, o texto fica incorreto.
+
+Fazer o sinal depender do valor ou separar formatadores de bônus e percentual neutro.
+
+[FormatTime não atende ganho offline/durações longas]
+
+FormatTime é apenas MM:SS; 24 horas seriam exibidas como 1440:00.
+
+Para ganho offline, cooldown diário, quests e torre isso rapidamente deixa de ser uma apresentação profissional.
+
+Manter MM:SS para timers curtos e criar formatação compartilhada de duração longa (HH:MM:SS, dias/horas etc.).
+
+[QuestData só suporta dinheiro como recompensa]
+
+QuestDef possui exclusivamente RewardCash.
+
+Quando o jogo tiver packs, luck boosts, gems, tower currency, itens, spins ou recompensas de rebirth, quests exigirão campos paralelos ou lógica especial fora do Shared.
+
+Migrar para um contrato de recompensa extensível e estruturado, mantendo o servidor como autoridade de concessão.
+
+Prioridade de arquitetura: eu consideraria os itens 1–7 bloqueadores antes de expandir Rebirth/Quests. Em especial, eu evitaria que qualquer outra sessão introduzisse um QuestProgress Client→Server: o cliente pode pedir claim, mas jamais deve declarar que avançou uma missão. O servidor deve observar BuyPack, colocação de carta, obtenção de grade etc. e atualizar o progresso internamente.
+
+Sobre sua dúvida específica de números gigantes: FormatMoney não sofre overflow em 1e69, mas o modelo econômico já perdeu precisão inteira cerca de 53 ordens binárias / 9e15, muito antes disso. E acima do último sufixo ele apenas acumula milhares/milhões de "Cent". Para um tycoon que pretende realmente chegar nessas escalas, isso merece correção arquitetural, não apenas mais sufixos.

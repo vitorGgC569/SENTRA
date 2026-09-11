@@ -1,0 +1,71 @@
+A correção foi feita diretamente em CardService.RollCard(), adicionando uma ordem canônica de raridade e filtrando o pool de cartas elegíveis quando o pacote informado possui MinRarity. Se a configuração do pack gerar um pool vazio por erro de dados, a função faz fallback para CardData.Cards inteiro, preservando o comportamento seguro atual sem quebrar a rolagem.
+
+Diff
+--- a/src/Server/CardService.luau
++++ b/src/Server/CardService.luau
+@@ -8,10 +8,34 @@ local CardGradeService = require(Shared:WaitForChild("CardGradeService"))
+ local PlayerDataStore = require(script.Parent.PlayerDataStore)
+ 
+ local CardService = {}
+ 
++local RARITY_ORDER: { [string]: number } = {
++	Comum = 1,
++	Incomum = 2,
++	Raro = 3,
++	["Épico"] = 4,
++	["Lendário"] = 5,
++	["Mítico"] = 6,
++	Divino = 7,
++	Caos = 8,
++}
++
++local function getRarityRank(rarity: string): number
++	return RARITY_ORDER[rarity] or 0
++end
++
+ function CardService.RollCard(player: Player, packId: string?): (CardData.CardDef, TraitData.TraitDef)
+  local data = PlayerDataStore.GetData(player)
+  local totalLuck = (data.LuckMultiplier or 1.0)
+ 
+  local pack = packId and PackData.GetPackById(packId)
+  if pack then
+   totalLuck = totalLuck * pack.LuckMultiplier
+  end
++
++	local eligibleCards = CardData.Cards
++	if pack then
++		local minRarityRank = getRarityRank(pack.MinRarity)
++		local filteredCards = {}
++		for _, card in ipairs(CardData.Cards) do
++			if getRarityRank(card.Rarity) >= minRarityRank then
++				table.insert(filteredCards, card)
++			end
++		end
++		if #filteredCards > 0 then
++			eligibleCards = filteredCards
++		end
++	end
+ 
+  -- Weighted Roll for Card
+  local weightedCards = {}
+  local totalWeight = 0
+ 
+- for _, card in ipairs(CardData.Cards) do
++ for _, card in ipairs(eligibleCards) do
+   local weight = card.Weight
+   if card.Rarity ~= "Comum" then
+    weight = weight * totalLuck
+   end
+   table.insert(weightedCards, { Card = card, Weight = weight })
+   totalWeight += weight
+  end
+ 
+  local roll = math.random() * totalWeight
+  local currentWeight = 0
+- local selectedCard = CardData.Cards[1]
++ local selectedCard = eligibleCards[1]
+ 
+  for _, item in ipairs(weightedCards) do
+   currentWeight += item.Weight
+   if roll <= currentWeight then
+    selectedCard = item.Card

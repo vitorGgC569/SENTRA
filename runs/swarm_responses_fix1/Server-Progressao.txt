@@ -1,0 +1,217 @@
+A abordagem usa um estado interno Loading / Loaded / Failed por jogador: somente a primeira chamada executa GetAsync, enquanto chamadas concorrentes de LoadData()/GetData() aguardam essa mesma operação terminar. Falhas reais de leitura — e dados retornados em formato inválido — deixam a sessão em Failed, expulsam o jogador com uma mensagem clara e fazem SaveData() recusar qualquer escrita nessa sessão; somente GetAsync bem-sucedido com resultado nil cria DEFAULT_DATA.
+
+Diff
+--- a/src/Server/PlayerDataStore.luau
++++ b/src/Server/PlayerDataStore.luau
+@@ -1,14 +1,18 @@
+ --!strict
+ local DataStoreService = game:GetService("DataStoreService")
+ local Players = game:GetService("Players")
++local RunService = game:GetService("RunService")
+ 
+ local PlayerDataStore = {}
+ local DATA_STORE_NAME = "AnimeCardTycoonData_v2"
+ local dataStore = DataStoreService:GetDataStore(DATA_STORE_NAME)
+ 
++type LoadState = "Loading" | "Loaded" | "Failed"
++
+ local sessionData: { [number]: any } = {}
++local loadStates: { [number]: LoadState } = {}
+ local isShuttingDown = false
+ 
+ local DEFAULT_DATA = {
+  Cash = 1000,
+  LuckMultiplier = 1.0,
+  CashMultiplier = 1.0,
+@@ -42,6 +46,35 @@
+  return data
+ end
+ 
++local function waitForExistingLoad(userId: number): any
++ while loadStates[userId] == "Loading" do
++  task.wait()
++ end
++
++ if loadStates[userId] == "Loaded" then
++  return sessionData[userId]
++ end
++
++ return nil
++end
++
++local function markLoadFailed(player: Player, reason: string): any
++ local userId = player.UserId
++
++ -- Never create fallback data after an actual read failure. Keeping
++ -- sessionData nil guarantees there is nothing that can later be saved.
++ sessionData[userId] = nil
++ loadStates[userId] = "Failed"
++
++ warn(string.format(
++  "[PlayerDataStore] Failed to safely load data for %s (%d): %s",
++  player.Name,
++  userId,
++  reason
++ ))
++
++ task.defer(function()
++  if player.Parent == Players then
++   player:Kick(
++    "Não foi possível carregar seus dados com segurança. "
++    .. "Nenhum progresso foi sobrescrito. Tente entrar novamente."
++   )
++  end
++ end)
++
++ return nil
++end
++
+ function PlayerDataStore.Init()
+  Players.PlayerAdded:Connect(function(player)
+   PlayerDataStore.LoadData(player)
+@@ -49,6 +82,7 @@
+ 
+  Players.PlayerRemoving:Connect(function(player)
+   PlayerDataStore.SaveData(player)
+   sessionData[player.UserId] = nil
++  loadStates[player.UserId] = nil
+  end)
+ 
+  -- Save all players on Server Shutdown
+@@ -69,45 +103,60 @@
+  end)
+ end
+ 
+-local RunService = game:GetService("RunService")
+-
+ function PlayerDataStore.LoadData(player: Player): any
+- local key = "Player_" .. player.UserId
++ local userId = player.UserId
++ local existingState = loadStates[userId]
++
++ if existingState == "Loaded" then
++  return sessionData[userId]
++ elseif existingState == "Failed" then
++  return nil
++ elseif existingState == "Loading" then
++  -- Another caller already owns the GetAsync for this player.
++  -- Wait for that exact load instead of starting another read.
++  return waitForExistingLoad(userId)
++ end
++
++ -- This caller becomes the single owner of the initial load.
++ loadStates[userId] = "Loading"
++
++ local key = "Player_" .. userId
+  local attempts = 0
+  local success, result = false, nil
++ local maxAttempts = RunService:IsStudio() and 1 or 2
+ 
+- if RunService:IsStudio() then
++ repeat
++  attempts += 1
+   success, result = pcall(function()
+    return dataStore:GetAsync(key)
+   end)
+-  if not success or result == nil then
+-   sessionData[player.UserId] = deepCopy(DEFAULT_DATA)
+-   return sessionData[player.UserId]
++
++  if not success and attempts < maxAttempts then
++   task.wait(0.5)
+   end
+- else
+-  repeat
+-   attempts += 1
+-   success, result = pcall(function()
+-    return dataStore:GetAsync(key)
+-   end)
+-   if not success then
+-    task.wait(0.5)
+-   end
+-  until success or attempts >= 2
++ until success or attempts >= maxAttempts
++
++ if not success then
++  return markLoadFailed(
++   player,
++   string.format("GetAsync failed after %d attempt(s)", attempts)
++  )
+  end
+ 
+- if success and result and type(result) == "table" then
+-  sessionData[player.UserId] = reconcileData(result)
++ -- The player may have disconnected while GetAsync was yielding.
++ if player.Parent ~= Players then
++  sessionData[userId] = nil
++  loadStates[userId] = nil
++  return nil
++ end
++
++ if result == nil then
++  -- Successful read with no existing value means this really is a new save.
++  sessionData[userId] = deepCopy(DEFAULT_DATA)
++ elseif type(result) == "table" then
++  sessionData[userId] = reconcileData(result)
+  else
+-  sessionData[player.UserId] = deepCopy(DEFAULT_DATA)
++  -- A successful read returning an unexpected schema must not be replaced
++  -- with defaults, because doing so could destroy recoverable persisted data.
++  return markLoadFailed(
++   player,
++   string.format("GetAsync returned unexpected data type '%s'", type(result))
++  )
+  end
+ 
+- return sessionData[player.UserId]
++ loadStates[userId] = "Loaded"
++ return sessionData[userId]
+ end
+ 
+ function PlayerDataStore.GetData(player: Player): any
+- if not sessionData[player.UserId] then
++ local userId = player.UserId
++ local state = loadStates[userId]
++
++ if state == "Loaded" then
++  return sessionData[userId]
++ elseif state == "Failed" then
++  return nil
++ elseif state == "Loading" then
++  return waitForExistingLoad(userId)
++ else
+   return PlayerDataStore.LoadData(player)
+  end
+- return sessionData[player.UserId]
+ end
+ 
+ function PlayerDataStore.SaveData(player: Player)
+- local data = sessionData[player.UserId]
++ local userId = player.UserId
++
++ -- Only a session whose persisted state was successfully loaded is ever
++ -- allowed to write back to the DataStore.
++ if loadStates[userId] ~= "Loaded" then
++  return
++ end
++
++ local data = sessionData[userId]
+  if not data then return end
+ 
+- local key = "Player_" .. player.UserId
++ local key = "Player_" .. userId
+  local attempts = 0
+  local success = false
+ 
+  repeat
+   attempts += 1
+   success = pcall(function()
+    dataStore:SetAsync(key, data)
+   end)
+   if not success then
+    task.wait(1)
+   end
+  until success or attempts >= 3
+ end
+ 
+ return PlayerDataStore

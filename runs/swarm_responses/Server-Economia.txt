@@ -1,0 +1,163 @@
+A auditoria abaixo considera apenas o código fornecido. Onde a exploração depende de um RemoteEvent/handler não mostrado, marco isso explicitamente.
+
+[CRÍTICO] PackData.MinRarity é completamente ignorado
+
+PackData define MinRarity, mas CardService.RollCard() percorre sempre CardData.Cards inteiro sem filtrar pela raridade mínima. Isso quebra diretamente o contrato dos packs.
+
+O impacto é muito grande: com os pesos atuais, o Pacote Divino, que declara MinRarity = "Lendário", ainda tem aproximadamente 97,3% de chance de entregar algo abaixo de Lendário. O Mestre tem ~73,1% de chance de vir abaixo de Raro; o Galactico, ~89,7% abaixo de Épico.
+
+A rolagem precisa construir o pool respeitando MinRarity antes de calcular pesos. Idealmente cada pack deveria também poder declarar explicitamente seu próprio pool/tabela de odds.
+
+[CRÍTICO] RollCard() não autentica nem cobra o pack que está sendo usado
+
+CardService.RollCard(player, packId) recebe qualquer packId e imediatamente aplica pack.LuckMultiplier; não existe nesse serviço verificação de PackData.Cost, compra, ownership, receipt ou autorização.
+
+Se algum RemoteEvent repassar um packId fornecido pelo cliente diretamente para essa função, o jogador poderá simplesmente pedir "divino" e receber LuckMultiplier = 30 sem pagar. O código mostrado não prova que isso já está exposto, mas a API atual torna esse exploit muito fácil de introduzir.
+
+O servidor deve decidir qual pack o jogador está autorizado a abrir e efetuar/delegar atomicamente o débito antes da RNG; o cliente nunca deve ser autoridade sobre packId, preço ou entitlement.
+
+[CRÍTICO] O algoritmo de LuckMultiplier não melhora realmente os tiers altos
+
+Em RollCard(), todas as cartas não-Comuns recebem exatamente o mesmo multiplicador. Portanto, Luck só altera a relação Comum vs. qualquer coisa não-Comum; a proporção entre Incomum, Raro, Épico, Lendário, Mítico, Divino e Caos permanece idêntica.
+
+Isso torna os números dos packs comercialmente enganosos do ponto de vista de gameplay. Por exemplo, LuckMultiplier = 30 aumenta a chance de Caos de aproximadamente 0,0062% para apenas 0,0169%, cerca de 2,7x, e não algo remotamente próximo de 30x.
+
+Luck deveria atuar por curva/tier, por exemplo modificando progressivamente raridades superiores, ou cada pack deveria possuir uma tabela de pesos explícita e auditável.
+
+[CRÍTICO] UpgradeCardLevel() usa cardInst.Income persistido para determinar o preço
+
+O custo é calculado por math.floor(cardInst.Income * 15 * Level), mas Income é um campo materializado/persistido da instância, em vez de ser recalculado a partir de CardData, TraitData e Level antes da cobrança.
+
+Um save legado, corrompido ou manipulado pode gerar upgrade barato, gratuito ou até cost < 0. Como a função faz data.Cash -= cost, um custo negativo adiciona Cash ao jogador. Alterações futuras de balanceamento também deixariam cartas antigas pagando preços baseados em valores obsoletos.
+
+Custo e renda devem sempre ser derivados de dados canônicos do servidor; campos derivados persistidos devem ser tratados como cache, nunca como autoridade econômica.
+
+[CRÍTICO] CreateCardInstance() aceita qualquer level, inclusive zero, negativo, NaN ou absurdo
+
+local lvl = level or 1 não valida inteiro, mínimo, máximo nem math.huge/NaN. Um nível 0 gera renda reduzida e depois um upgrade de custo zero; níveis negativos podem produzir custos negativos em UpgradeCardLevel().
+
+Além de exploits econômicos, NaN/infinito podem contaminar Income, GradeScore, Cash e posteriormente quebrar serialização/persistência. Níveis gigantes também permitem explosão numérica.
+
+Toda criação deve normalizar o level para um inteiro dentro de limites definidos pelo design, com rejeição explícita de números não finitos.
+
+[ALTO] Não existe limite de nível nem teto econômico
+
+UpgradeCardLevel() permite aumentar Level indefinidamente. Income e CardGradeService.CalculateGrade() também continuam crescendo indefinidamente.
+
+Isso transforma qualquer carta em progressão ilimitada, reduz a importância de conseguir cartas melhores e permite alcançar grades máximas simplesmente acumulando níveis. Também aumenta o risco de valores enormes em Cash.
+
+Defina MaxLevel, possivelmente por raridade/ascensão, e use fusão, evolução ou outra camada de progressão para ultrapassar limites em vez de crescimento infinito.
+
+[ALTO] IDs inválidos são tratados silenciosamente em vez de falhar
+
+Em UpgradeCardLevel(), um cardInst.Id inexistente vira BaseIncome = 10. TraitData.GetTrait() transforma qualquer TraitId inválido em Normal. Já um packId inválido em RollCard() simplesmente perde o pack e continua com a RNG básica.
+
+Isso mascara corrupção de save e erros de conteúdo. Uma carta removida pode perder brutalmente sua renda após um upgrade; um trait inválido pode continuar aparecendo na UI com nome antigo enquanto mecanicamente virou Normal; um pack digitado incorretamente pode consumir uma operação e entregar odds erradas.
+
+Para operações econômicas, use comportamento fail-closed: ID inválido deve abortar a operação e gerar telemetria/log de integridade, com migração explícita para conteúdo legado.
+
+[ALTO] Existem duas fontes conflitantes de dados de traits
+
+CardData.Mutators e TraitData.Traits representam praticamente o mesmo sistema, mas já divergiram. Ex.: Normal.Weight é 7000 em CardData e 6500 em TraitData; Abençoado é 1500 versus 1600; Divino, 800 versus 900; vários outros pesos também diferem.
+
+Há ainda inconsistência de identidade: CardData.MutatorType usa "Abençoado" e "Legado Colossal", enquanto TraitData trabalha com IDs "Abencoado" e "LegadoColossal". Se UI, preview ou outro sistema usar CardData.Mutators, as odds exibidas poderão divergir das odds reais do servidor.
+
+TraitData deveria ser a única fonte canônica. Remova/deprecie o sistema duplicado ou deixe CardData apenas referenciar IDs de TraitData.
+
+[ALTO] Luck de traits sofre o mesmo problema conceitual da rarity
+
+Todos os traits exceto Normal recebem totalLuck ^ 0.5 igualmente. Assim, Luck aumenta a chance de obter algum trait especial, mas não favorece Falha, Caos, Administrador etc. em relação a Abençoado.
+
+Com Luck 30, por exemplo, Caos passa de aproximadamente 0,0102% para 0,0223%, somente ~2,2x. Um jogador pode interpretar um pack com Luck alto como melhora relevante na chance de traits premium, quando quase todo o ganho vai para traits especiais comuns.
+
+Separe “chance de possuir trait” de “qualidade do trait”, ou aplique uma curva de luck por tier de trait.
+
+[ALTO] Passive income confia cegamente no Income armazenado
+
+StartPassiveIncomeLoop() soma diretamente cardInst.Income dentro de data.PlacedCards, sem validar Id, TraitId, Level, valor finito ou recalcular a renda canônica.
+
+Qualquer inconsistência persistida passa a gerar dinheiro para sempre. Income = math.huge ou NaN pode contaminar totalPerSec e data.Cash; uma renda artificialmente alta vira uma torneira permanente de moeda.
+
+A renda de cartas colocadas deve ser validada/recalculada a partir da configuração canônica em momentos controlados, e valores econômicos precisam passar por verificações de sanidade.
+
+[ALTO] StartPassiveIncomeLoop() pode ser iniciado mais de uma vez
+
+Cada chamada executa um novo task.spawn() com while true. Não existe flag indicando que o sistema já foi iniciado.
+
+Uma inicialização duplicada, hot reload mal controlado ou refatoração futura pode fazer duas ou mais loops creditarem a mesma produção, multiplicando globalmente a economia sem qualquer erro visível.
+
+Torne a inicialização idempotente ou mova o scheduler para um único serviço de economia responsável pelo tick global.
+
+[ALTO] Grade não representa a força econômica real da carta
+
+CardGradeService.CalculateGrade() considera apenas Rarity, trait e level. CardData.BaseIncome, que determina a produção real, não participa do score.
+
+Duas cartas da mesma raridade, trait e nível recebem exatamente o mesmo GradeScore apesar de poderem produzir 3x–5x rendimentos diferentes. Ex.: as duas cartas Divinas possuem BaseIncome de 50M e 250M, mas têm a mesma grade.
+
+Decida semanticamente o que “Grade” significa. Se for nota de poder/valor da carta, o cálculo precisa refletir estatísticas econômicas reais ou um Power canônico separado.
+
+[MÉDIO/ALTO] Metadados da grade ficam inconsistentes após upgrade
+
+CreateCardInstance() grava Grade, GradeScore e GradeColor; UpgradeCardLevel() atualiza somente Grade e GradeScore. A nova Color calculada é descartada. Stars, apesar de fazer parte de GradeInfo, nunca é armazenado na instância.
+
+Quando uma carta atravessar um threshold, por exemplo A -> S, poderá continuar carregando a cor antiga. UI baseada nos dados persistidos pode mostrar informações contraditórias.
+
+Ou derive toda apresentação de grade sob demanda, ou atualize atomicamente todos os campos derivados (Grade, score, color, stars).
+
+[MÉDIO/ALTO] Dados redundantes da instância podem divergir da configuração canônica
+
+CreateCardInstance() persiste Name, Anime, Rarity, Mutator, MutatorMultiplier, Income, grade etc. UpgradeCardLevel() depois mistura alguns valores canônicos com outros persistidos: renda usa cardDef.BaseIncome e trait atual, mas grade usa cardInst.Rarity.
+
+Após balanceamento/migração, uma mesma carta pode ter Rarity antiga, multiplier antigo e renda recalculada com dados novos. Isso cria estados impossíveis e torna upgrades muito difíceis de auditar.
+
+Persista principalmente identidade e estado mutável (UniqueId, Id, TraitId, Level etc.); derive atributos de definição sempre que possível, com versionamento/migração quando necessário.
+
+[MÉDIO/ALTO] A progressão de upgrade tende a ficar economicamente morta nos níveis altos
+
+A renda cresce linearmente com nível: 1 + 0.25*(level-1). Já o custo usa Income * 15 * Level, fazendo o custo crescer aproximadamente de forma quadrática enquanto o ganho marginal permanece constante.
+
+O payback de cada nível piora rapidamente. Em níveis altos o jogador tende a parar completamente de usar upgrade, tornando o sistema uma opção falsa em vez de uma decisão econômica interessante.
+
+Defina uma curva explícita de custo × ganho × tempo de retorno e balanceie por estágio de jogo; não deixe a fórmula emergir incidentalmente do Income atual.
+
+[MÉDIO/ALTO] Falta um verdadeiro sink para cartas duplicadas — fusão vale a pena
+
+Como você já apontou, FuseCards existe em NetworkEvents, mas não existe implementação em CardService nem handler. Com um gacha baseado em duplicatas, isso significa inventário congestionado e pulls repetidos sem valor de progressão.
+
+Para esse gênero, fusão é particularmente útil porque cria demanda permanente por cartas inferiores/duplicadas, reduz frustração de RNG e funciona como sink de cartas e potencialmente de Cash.
+
+Vale desenhar. Uma direção segura seria fusão server-authoritative por UniqueId, consumindo duplicatas e avançando estrelas/ascensão/nível de fusão com limites claros, sem permitir que a fusão torne a raridade-base irrelevante.
+
+[MÉDIO] Não há pity, proteção contra sequência ruim ou valorização de duplicatas
+
+RollCard() é stateless: cada roll é completamente independente. Não existe contador de pity, soft pity, garantia por número de aberturas, first-time collection nem proteção contra longas sequências ruins.
+
+Num jogo centrado em gacha — principalmente quando PackData já prevê preços em Robux — sequências estatisticamente ruins podem resultar em forte sensação de injustiça e abandono. Sem fusão, duplicatas pioram ainda mais essa percepção.
+
+Introduza pelo menos histórico/pity server-side e use fusão ou shards para que pulls duplicados continuem tendo valor.
+
+[MÉDIO] A magnitude econômica alcança rapidamente faixas problemáticas
+
+A carta rei_caos já possui BaseIncome = 1.000.000.000; com trait Caos, chega a 1e12 por segundo no nível 1 antes de CashMultiplier. Níveis e multiplicadores continuam sem teto.
+
+Nessa escala, a economia alcança rapidamente números onde precisão numérica, formatação, persistência, leaderboards e futuras fórmulas ficam difíceis de controlar. Na casa de 2^53 (~9e15), números inteiros já não são todos representáveis exatamente em double.
+
+Defina orçamento numérico para toda a progressão, limites máximos e representação consistente antes de expandir rebirths/prestiges/multiplicadores.
+
+[MÉDIO] Não existe contrato explícito entre pack e pool de cartas
+
+Além do MinRarity quebrado, todos os packs usam exatamente CardData.Cards; a única diferença funcional atualmente é LuckMultiplier.
+
+Isso limita bastante a progressão: um pack de 500 milhões não possui conteúdo próprio, apenas uma transformação matemática sobre a mesma tabela do pack inicial. Também dificulta eventos, mundos, banners e conteúdo futuro.
+
+Evolua PackDef para descrever explicitamente pools/tabelas de raridade ou regras de inclusão, mantendo odds totalmente calculadas no servidor.
+
+[BAIXO, mas deve ser registrado] CardData contém referências diretas a propriedades de anime
+
+O campo Anime contém "Naruto", "One Piece", "Demon Slayer", "Jujutsu Kaisen", "Attack on Titan" e outras propriedades reais, exatamente o risco que você já identificou.
+
+Não é um bug da economia, mas esses valores estão sendo copiados para cada instância por CreateCardInstance(), portanto também acabam entrando em dados persistidos e possivelmente UI.
+
+Apenas registrar para uma futura etapa de conteúdo/IP; não é necessário misturar essa correção com o refactor econômico atual.
+
+Prioridade prática da futura correção: eu trataria os itens 1–10 como bloqueadores antes de lançar/monetizar o loop de gacha, especialmente MinRarity, autorização do pack, fórmula de Luck, validação de level/custo e autoridade sobre Income. A ausência de fusão não é um exploit, mas é um dos maiores gaps de gameplay do sistema atual.

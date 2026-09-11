@@ -1,0 +1,190 @@
+A abordagem usa um allocator crescente com freePlotIndices para reutilizar slots liberados, mantendo assignedPlots exclusivamente como UserId -> Model. O teardown em PlayerRemoving cancela o estado da esteira e seus tweens ativos, destrói o plot e devolve o índice ao pool.
+
+Diff
+--- a/src/Server/PlotManager.luau
++++ b/src/Server/PlotManager.luau
+@@ -9,6 +9,22 @@ local ConveyorManager = require(script.Parent.ConveyorManager)
+ 
+ local PlotManager = {}
+ local assignedPlots = {}
++local assignedPlotIndices: {[number]: number} = {}
++local freePlotIndices: {number} = {}
++local nextPlotIndex = 1
++
++local function allocatePlotIndex(): number
++	if #freePlotIndices > 0 then
++		return table.remove(freePlotIndices) :: number
++	end
++
++	local plotIndex = nextPlotIndex
++	nextPlotIndex += 1
++	return plotIndex
++end
++
++local function releasePlotIndex(plotIndex: number)
++	table.insert(freePlotIndices, plotIndex)
++end
+ 
+ function PlotManager.CreatePlot3D(plotIndex: number, origin: Vector3): Model
+  local plotModel = Instance.new("Model")
+@@ -109,11 +125,17 @@ function PlotManager.CreatePlot3D(plotIndex: number, origin: Vector3): Model
+ end
+ 
+ function PlotManager.AssignPlot(player: Player): Model
+- local plotCount = #assignedPlots + 1
+- local origin = Vector3.new((plotCount - 1) * 150, 5, 0)
+- local plotModel = PlotManager.CreatePlot3D(plotCount, origin)
++ local existingPlot = assignedPlots[player.UserId]
++ if existingPlot then
++  return existingPlot
++ end
++
++ local plotIndex = allocatePlotIndex()
++ local origin = Vector3.new((plotIndex - 1) * 150, 5, 0)
++ local plotModel = PlotManager.CreatePlot3D(plotIndex, origin)
+ 
+  assignedPlots[player.UserId] = plotModel
++ assignedPlotIndices[player.UserId] = plotIndex
+  ConveyorManager.CreateConveyorForPlot(plotModel, player)
+ 
+  local function teleportToSpawn(character: Model)
+@@ -136,6 +158,23 @@ function PlotManager.GetPlot(player: Player): Model?
+  return assignedPlots[player.UserId]
+ end
+ 
++function PlotManager.ReleasePlot(player: Player)
++ local userId = player.UserId
++
++ ConveyorManager.StopConveyorForPlayer(player)
++
++ local plotModel = assignedPlots[userId]
++ if plotModel then
++  plotModel:Destroy()
++  assignedPlots[userId] = nil
++ end
++
++ local plotIndex = assignedPlotIndices[userId]
++ if plotIndex then
++  assignedPlotIndices[userId] = nil
++  releasePlotIndex(plotIndex)
++ end
++end
++
+ function PlotManager.RefreshPlotDisplay(player: Player)
+  local plotModel = assignedPlots[player.UserId]
+  if not plotModel then return end
+--- a/src/Server/ConveyorManager.luau
++++ b/src/Server/ConveyorManager.luau
+@@ -8,8 +8,33 @@ local PlayerDataStore = require(script.Parent.PlayerDataStore)
+ local CardService = require(script.Parent.CardService)
+ 
+ local ConveyorManager = {}
++local conveyorStates: {[number]: {
++ Active: boolean,
++ Tweens: {[any]: boolean},
++}} = {}
++
++function ConveyorManager.StopConveyorForPlayer(player: Player)
++ local state = conveyorStates[player.UserId]
++ if not state then return end
++
++ state.Active = false
++ conveyorStates[player.UserId] = nil
++
++ local tweens = {}
++ for tween in pairs(state.Tweens) do
++  table.insert(tweens, tween)
++ end
++
++ for _, tween in ipairs(tweens) do
++  tween:Cancel()
++ end
++
++ table.clear(state.Tweens)
++end
+ 
+ function ConveyorManager.CreateConveyorForPlot(plotModel: Model, player: Player)
++ ConveyorManager.StopConveyorForPlayer(player)
++
++ local state = {
++  Active = true,
++  Tweens = {},
++ }
++ conveyorStates[player.UserId] = state
++
+  local belt = plotModel:FindFirstChild("ConveyorBelt") :: BasePart?
+  local spawner = plotModel:FindFirstChild("PackSpawner") :: BasePart?
+  local collector = plotModel:FindFirstChild("CollectorPad") :: BasePart?
+@@ -39,15 +64,25 @@ function ConveyorManager.CreateConveyorForPlot(plotModel: Model, player: Player)
+ 
+  -- Auto Spawner Loop based on Conveyor Speed upgrade
+  task.spawn(function()
+-  while plotModel and plotModel.Parent and player and player.Parent do
++  while state.Active and plotModel.Parent and player.Parent do
+    local data = PlayerDataStore.GetData(player)
+    local speedLvl = data.Upgrades.ConveyorSpeed or 0
+    local interval = math.max(0.8, 3.0 - (speedLvl * 0.1))
+    task.wait(interval)
+ 
++   if not state.Active or not plotModel.Parent or not player.Parent then
++    break
++   end
++
+    ConveyorManager.SpawnPackOnConveyor(plotModel, player, "iniciante")
+   end
+  end)
+ end
+ 
+ function ConveyorManager.SpawnPackOnConveyor(plotModel: Model, player: Player, packId: string)
++ local state = conveyorStates[player.UserId]
++ if not state or not state.Active then return end
++ if not player.Parent or not plotModel.Parent then return end
++
+  local spawner = plotModel:FindFirstChild("PackSpawner") :: BasePart?
+  local collector = plotModel:FindFirstChild("CollectorPad") :: BasePart?
+  if not spawner or not collector then return end
+@@ -89,10 +124,26 @@ function ConveyorManager.SpawnPackOnConveyor(plotModel: Model, player: Player, p
+  local tween = TweenService:Create(box, tweenInfo, { CFrame = targetCFrame })
+  tween:Play()
+ 
+- tween.Completed:Connect(function()
++ state.Tweens[tween] = true
++
++ tween.Completed:Connect(function(playbackState)
++  state.Tweens[tween] = nil
++
++  if playbackState ~= Enum.PlaybackState.Completed then
++   if box.Parent then
++    box:Destroy()
++   end
++   return
++  end
++
++  if not state.Active
++   or conveyorStates[player.UserId] ~= state
++   or not player.Parent
++   or not plotModel.Parent then
++   if box.Parent then
++    box:Destroy()
++   end
++   return
++  end
++
+   box:Destroy()
++
+   -- Collect pack and grant card to player
+   local cardDef, mutatorDef = CardService.RollCard(player, packId)
+   local cardInst = CardService.CreateCardInstance(cardDef, mutatorDef)
+--- a/src/Server/MainServer.server.luau
++++ b/src/Server/MainServer.server.luau
+@@ -34,6 +34,10 @@ end
+ 
+ Players.PlayerAdded:Connect(handlePlayerJoined)
+ 
++Players.PlayerRemoving:Connect(function(player: Player)
++ PlotManager.ReleasePlot(player)
++end)
++
+ for _, player in ipairs(Players:GetPlayers()) do
+  task.spawn(handlePlayerJoined, player)
+ end

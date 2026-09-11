@@ -1,0 +1,64 @@
+[
+  {
+    "id": "T-01",
+    "run_id": "e2e-test-run",
+    "objective": "Implement core logic",
+    "description": "Create base module implementation",
+    "dependencies": [],
+    "priority": "HIGH",
+    "risk": "LOW",
+    "required_capabilities": [
+      "python"
+    ],
+    "validation_strategy": "standard",
+    "status": "QUEUED",
+    "max_iterations": 4,
+    "max_repair_rounds": 4,
+    "current_repair_round": 0,
+    "token_budget": 30000,
+    "retry_count": 0,
+    "max_retries": 3,
+    "depth": 0,
+    "created_at": 1789125876.5971782,
+    "updated_at": 1789125876.5971782,
+    "target_files": [],
+    "active_candidate_id": null,
+    "metadata": {
+      "transition_history": [
+        {
+          "from": "PENDING",
+          "to": "QUEUED",
+          "reason": "All dependencies satisfied"
+        }
+      ]
+    }
+  },
+  {
+    "id": "T-02",
+    "run_id": "e2e-test-run",
+    "objective": "Add tests and validation",
+    "description": "Create unit tests verifying correctness",
+    "dependencies": [
+      "T-01"
+    ],
+    "priority": "MEDIUM",
+    "risk": "LOW",
+    "required_capabilities": [
+      "pytest"
+    ],
+    "validation_strategy": "deterministic",
+    "status": "PENDING",
+    "max_iterations": 4,
+    "max_repair_rounds": 4,
+    "current_repair_round": 0,
+    "token_budget": 30000,
+    "retry_count": 0,
+    "max_retries": 3,
+    "depth": 0,
+    "created_at": 1789125876.5971782,
+    "updated_at": 1789125876.5971782,
+    "target_files": [],
+    "active_candidate_id": null,
+    "metadata": {}
+  }
+]

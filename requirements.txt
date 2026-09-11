@@ -1,0 +1,6 @@
+playwright>=1.40.0
+openai>=1.10.0
+pydantic>=2.5.0
+pyyaml>=6.0
+gitpython>=3.1.40
+typing-extensions>=4.9.0

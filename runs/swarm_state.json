@@ -1,0 +1,26 @@
+{
+  "Client-Gameplay": {
+    "url": "https://chatgpt.com/c/6a772099-a744-83e9-b2a8-7a38e4516523",
+    "title": "Auditoria de Monetização"
+  },
+  "Client-Nucleo": {
+    "url": "https://chatgpt.com/c/6a772099-b214-83e9-badd-9aea37eb1f9e",
+    "title": "Auditoria de UI Tycoon"
+  },
+  "Shared-Balance": {
+    "url": "https://chatgpt.com/c/6a772098-f84c-83e9-ab44-f192511cc932",
+    "title": "Auditoria de mecânica e dados"
+  },
+  "Server-Progressao": {
+    "url": "https://chatgpt.com/c/6a772099-65d4-83e9-8427-da21dccca5d8",
+    "title": "Auditoria Persistência Dados"
+  },
+  "Server-Mundo": {
+    "url": "https://chatgpt.com/c/6a772099-7e10-83e9-918b-65eefba0c151",
+    "title": "Auditoria de mecânica e código"
+  },
+  "Server-Economia": {
+    "url": "https://chatgpt.com/c/6a77214e-9fd8-83e9-94c5-ed07bd259d0e",
+    "title": "Auditoria sistema cartas"
+  }
+}

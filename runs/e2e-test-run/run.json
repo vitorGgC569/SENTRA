@@ -1,0 +1,41 @@
+{
+  "run_id": "e2e-test-run",
+  "objective": "Implement factorial function in math_utils.py",
+  "status": "COMPLETED",
+  "completed_tasks": 2,
+  "total_tasks": 2,
+  "final_synthesis": "{\"decision\": \"APPROVED\", \"confidence\": 0.98, \"critical_issues\": [], \"remaining_risks\": [], \"needs_more_work\": false, \"final_response\": \"The solution meets all quality and functional requirements.\", \"reasoning\": \"All validators approved and objective tests passed with 100% confidence.\"}",
+  "metrics": {
+    "tasks_total": 2,
+    "tasks_completed": 2,
+    "tasks_failed": 0,
+    "tasks_escalated": 0,
+    "validation_attempts": 6,
+    "validation_approvals": 6,
+    "validation_pass_rate": 1.0,
+    "repair_rounds": 0,
+    "master_calls": 2,
+    "tokens_master": {
+      "input_tokens": 329,
+      "output_tokens": 142,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-e2e",
+      "estimated_cost": 0.0
+    },
+    "tokens_secondary": {
+      "input_tokens": 1198,
+      "output_tokens": 534,
+      "reasoning_tokens": 0,
+      "cached_tokens": 0,
+      "model": "mock-e2e",
+      "estimated_cost": 0.0
+    },
+    "latencies": {
+      "p50": 0.11366963386535645,
+      "p95": 0.11366963386535645,
+      "p99": 0.11366963386535645
+    },
+    "elapsed_seconds": 0.38
+  }
+}

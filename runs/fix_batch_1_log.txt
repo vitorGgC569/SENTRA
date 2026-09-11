@@ -1,0 +1,6 @@
+=== ROLE: Server-Progressao | TITLE: Auditoria Persistência Dados ===
+Saved to runs\swarm_responses_fix1\Server-Progressao.txt (6144 chars)
+=== ROLE: Server-Mundo | TITLE: Auditoria de mecânica e código ===
+Saved to runs\swarm_responses_fix1\Server-Mundo.txt (6047 chars)
+=== ROLE: Server-Economia | TITLE: Auditoria sistema cartas ===
+Saved to runs\swarm_responses_fix1\Server-Economia.txt (2243 chars)

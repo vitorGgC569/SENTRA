@@ -1,0 +1,147 @@
+A auditoria mostra alguns problemas que hoje afetam diretamente multiplayer, economia e segurança. Os mais graves estão no alocador de plots, na produção ilimitada da esteira e na ausência de proteção dos remotes.
+
+[CRÍTICO] Alocação de plots está quebrada em multiplayer
+
+O que está errado / faltando: em PlotManager.AssignPlot(), assignedPlots é indexado por player.UserId, mas o índice do novo plot é calculado com #assignedPlots + 1. # só é confiável para arrays sequenciais 1..N; uma tabela com chaves de UserId não representa a quantidade de jogadores. Portanto, múltiplos jogadores podem receber plotCount = 1, Plot_1 e origin = Vector3.new(0, 5, 0).
+
+Por que importa: dois ou mais jogadores podem ter bases literalmente sobrepostas, com pedestais, esteiras, spawners e SpawnLocations ocupando as mesmas coordenadas. Isso inviabiliza o multiplayer.
+
+Direção de correção sugerida: criar um allocator real de slots de plot, separado de assignedPlots, com índices livres/reutilizáveis e liberação no PlayerRemoving. assignedPlots deve continuar sendo apenas o mapa UserId -> Plot.
+
+[CRÍTICO] Esteira cria economia infinita e sem backpressure
+
+O que está errado / faltando: ConveyorManager.CreateConveyorForPlot() gera "iniciante" automaticamente a cada 3.0s até 0.8s, sem cobrar Cash, sem limite de pacotes simultâneos, sem capacidade da esteira e sem limite aparente de inventário. Além disso, o ProximityPrompt chamado "Comprar Pacote" chama SpawnPackOnConveyor() também sem cobrar nada.
+
+Por que importa: atualmente a mecânica implementada é efetivamente uma fábrica de cartas gratuitas. No máximo upgrade são até 4.500 gerações automáticas por hora por jogador, antes de considerar o prompt manual. Isso pode destruir progressão, raridade, monetização e tamanho do save.
+
+Direção de correção sugerida: definir formalmente a intenção. Minha recomendação para esse gênero é manter a esteira como produção idle gratuita, mas limitada por throughput, capacidade de esteira/inventário e upgrades; o prompt manual deve então ser “produzir/acelerar” com cooldown, ou cobrar explicitamente se for realmente uma compra.
+
+[CRÍTICO] Jogador pode sair e ainda receber cartas da esteira
+
+O que está errado / faltando: SpawnPackOnConveyor() conecta tween.Completed e, quando chamado, acessa CardService.RollCard(), PlayerDataStore.GetData() e FireClient() sem verificar se player.Parent ainda existe. O loop também verifica player.Parent antes do task.wait(), então se o jogador sair durante a espera ainda pode ocorrer mais um SpawnPackOnConveyor().
+
+Por que importa: ficam callbacks trabalhando sobre jogadores desconectados e dados potencialmente já em processo de fechamento. Pode gerar erros, gravação tardia, objetos órfãos e inconsistências no perfil.
+
+Direção de correção sugerida: cancelar toda produção/tweens pertencentes ao jogador no teardown do plot e revalidar player.Parent, plot e profile ativo imediatamente antes de conceder qualquer recompensa.
+
+[CRÍTICO] Tween.Completed pode conceder carta mesmo se a animação for cancelada
+
+O que está errado / faltando: o callback de tween.Completed ignora o PlaybackState. Em Roblox, a conclusão pode informar estado diferente de uma finalização normal; o código concede a carta independentemente disso.
+
+Por que importa: quando futuramente plots forem destruídos corretamente no logout/reset ou tweens forem cancelados por capacidade/rebuild, o sistema pode conceder a recompensa mesmo sem o pacote chegar ao coletor.
+
+Direção de correção sugerida: recompensa só deve acontecer quando o tween terminar no estado esperado e a operação de pacote ainda estiver registrada como válida/ativa.
+
+[CRÍTICO] Remotes não possuem uma camada real de anti-exploit
+
+O que está errado / faltando: MainServer.server.luau aceita chamadas de BuyPack, PlaceCard, RemoveCard, SellCard, SellAll, BuyUpgrade, TeleportPlayer, ClaimReward e UpgradeCard sem rate-limit. Também há pouca validação de tipo, inteiro, NaN, limites absolutos e estado da ação. Por exemplo, PlaceCard executa comparações numéricas em slotIndex sem primeiro garantir que ele é um número válido.
+
+Por que importa: um executor pode disparar centenas/milhares de requests. Mesmo quando não consegue fabricar dinheiro diretamente, consegue consumir CPU, provocar sincronizações, forçar mutações de inventário e potencialmente produzir exceptions em handlers com argumentos malformados.
+
+Direção de correção sugerida: criar validação central de remotes com schema + limites semânticos e rate-limit/token bucket por jogador/ação. Todo argumento vindo do cliente deve ser tratado como não confiável.
+
+[CRÍTICO] Cálculo de BaseExpansion possui erro de Lua/Luau
+
+O que está errado / faltando: tanto PlotManager.RefreshPlotDisplay() quanto PlaceCard usam data.Upgrades.BaseExpansion and (4 + data.Upgrades.BaseExpansion) or 5. Em Lua/Luau, 0 é truthy. Portanto, se BaseExpansion = 0, o jogador recebe 4 + 0 = 4 slots, e não os 5 iniciais aparentemente pretendidos.
+
+Por que importa: o estado inicial pode mostrar/bloquear quantidade errada de pedestais e divergir da progressão esperada.
+
+Direção de correção sugerida: definir explicitamente a fórmula de slots, provavelmente 5 + level, e centralizá-la em uma única função para não duplicar essa regra entre PlotManager e MainServer.
+
+[CRÍTICO] PlaceCard permite slots que fisicamente não existem
+
+O que está errado / faltando: existem exatamente 30 pedestais, mas maxSlots não é limitado a 30. Se BaseExpansion crescer suficientemente, PlaceCard aceita, por exemplo, slotIndex = 31 e grava em data.PlacedCards["31"], embora RefreshPlotDisplay() só percorra 1..30.
+
+Por que importa: uma carta pode desaparecer da interface e ficar armazenada num pedestal inexistente, criando estado “fantasma”.
+
+Direção de correção sugerida: o servidor deve sempre aplicar 1 <= slotIndex <= min(unlockedSlots, PHYSICAL_SLOT_COUNT) e manter o limite físico em configuração compartilhada.
+
+[ALTO] Pipeline de obtenção de cartas está duplicado e inconsistente
+
+O que está errado / faltando: MainServer.BuyPack e ConveyorManager.SpawnPackOnConveyor implementam separadamente RollCard -> CreateCardInstance -> Inventory. O fluxo da esteira dispara CardSpawned, enquanto BuyPack faz syncClient() e não dispara o mesmo evento.
+
+Por que importa: duas formas de “abrir pacote” têm comportamentos diferentes para UI, efeitos e futuros sistemas. Isso também torna muito fácil uma Quest OpenPacks contabilizar loja e esquecer esteira, ou vice-versa.
+
+Direção de correção sugerida: centralizar a aquisição/abertura em uma operação server-authoritative única, usada pela loja, esteira e futuros sistemas. Quest, analytics e notificações devem ser conectados a esse ponto comum.
+
+[ALTO] QuestData está completamente órfão; falta o QuestManager
+
+O que está errado / faltando: existem definições para OpenPacks, ReachGradeS e PlaceCards, mas nenhum estado persistente, progresso, claim ou integração com as ações do jogo.
+
+Por que importa: é conteúdo aparentemente existente para o jogador, mas sem gameplay. Quests são ainda um componente importante de retenção, onboarding e direcionamento da progressão.
+
+Direção de correção sugerida: criar QuestManager.luau server-side. Em PlayerDataStore, persistir somente algo como Quests[questId] = {Progress, Claimed}; Title, TargetAmount e recompensas continuam em QuestData. O manager inicializa/migra missões ao carregar o perfil e atualiza o estado em memória; a persistência deve seguir o autosave/PlayerRemoving do PlayerDataStore, não executar DataStore writes em cada incremento. Para rede, são suficientes um QuestUpdated/QuestSync servidor → cliente e um ClaimQuest cliente → servidor. Não deve existir remote cliente → servidor dizendo “aumente meu progresso”. O claim valida Progress >= TargetAmount, not Claimed e usa RewardCash do QuestData. OpenPacks deve ser chamado pela aquisição centralizada; ReachGradeS na criação/aquisição de uma carta e com ranking formal de grades; para PlaceCards, recomendo derivar a quantidade real de pedestais ocupados, em vez de simplesmente incrementar a cada PlaceCard, evitando completar a missão colocando/removendo a mesma carta cinco vezes.
+
+[ALTO] Inventário pode crescer indefinidamente
+
+O que está errado / faltando: não há capacidade aparente antes de table.insert(data.Inventory, cardInst), inclusive no conveyor automático.
+
+Por que importa: além de quebrar a economia, milhares de cartas aumentam consumo de memória, tempo de serialização, tamanho do DataStore e custo de sincronização. Eventualmente pode atingir limites da plataforma ou produzir perfil impossível de salvar.
+
+Direção de correção sugerida: implementar limite de inventário e comportamento definido quando cheio: parar a esteira, criar buffer de saída, exigir coleta ou converter excedente conforme a regra de design. Não simplesmente descartar carta silenciosamente.
+
+[ALTO] Sincronização completa a cada 2 segundos escala muito mal
+
+O que está errado / faltando: MainServer chama syncClient(player) para todos os jogadores a cada dois segundos, enviando aparentemente todo PlayerData, inclusive inventário e PlacedCards.
+
+Por que importa: com a produção automática e inventários grandes, o servidor retransmite repetidamente grandes tabelas que na maior parte do tempo não mudaram. Isso aumenta bandwidth, serialização e trabalho de cliente/servidor.
+
+Direção de correção sugerida: usar snapshot completo apenas no carregamento/recovery e eventos delta para mudanças (CashChanged, inventário, quests, upgrades etc.), ou pelo menos sincronização dirty-state/versionada.
+
+[ALTO] Não existe teardown do plot em PlayerRemoving
+
+O que está errado / faltando: assignedPlots[player.UserId] nunca é removido e o Model nunca é destruído pelos arquivos apresentados.
+
+Por que importa: servidores com entradas/saídas acumulam plots, objetos, prompts, conexões e potencialmente tweens. Também impede um allocator correto de reutilizar espaços.
+
+Direção de correção sugerida: implementar PlotManager.ReleasePlot(player) que encerra conveyor, cancela operações, destrói o Model, limpa assignedPlots e devolve o índice ao pool; chamá-lo no Players.PlayerRemoving.
+
+[MÉDIO/ALTO] SellCard contradiz a proteção de SellAll
+
+O que está errado / faltando: SellAll protege cartas "Divino" e "Caos", mas SellCard permite vender essas mesmas raridades sem nenhuma restrição server-side.
+
+Por que importa: uma interface bugada ou chamada maliciosa pode destruir uma carta que o próprio jogo considera rara demais para venda em massa.
+
+Direção de correção sugerida: definir uma política única de CanSellCard() no servidor, incluindo raridade e futuramente Locked/Favorite, e usá-la em venda individual e em massa.
+
+[MÉDIO] Upgrade chamado ConveyorSpeed não altera a velocidade da esteira
+
+O que está errado / faltando: data.Upgrades.ConveyorSpeed reduz o intervalo de spawn, mas SpawnPackOnConveyor() mantém local speed = 8 fixo.
+
+Por que importa: um jogador que compra “velocidade da esteira” provavelmente espera ver pacotes se movendo mais rápido; atualmente o upgrade é de taxa de produção.
+
+Direção de correção sugerida: ou renomear a progressão para ProductionRate/SpawnRate, ou fazer o upgrade alterar também a velocidade real do pacote, dependendo do design econômico escolhido.
+
+[MÉDIO] Movimento visual do pacote não acompanha realmente a superfície da esteira
+
+O que está errado / faltando: a caixa nasce usando spawner.CFrame * CFrame.new(0, 1.5, 0), enquanto o spawner tem 8 studs de altura. Ela começa dentro/na região superior da máquina e é tweenada diretamente para o CollectorPad, inclusive alterando Y durante o trajeto, em vez de seguir um caminho consistente sobre o belt.
+
+Por que importa: a principal mecânica visual do tycoon parece uma caixa flutuando/atravessando a máquina, em vez de uma esteira de produção profissional.
+
+Direção de correção sugerida: definir pontos Spawn -> BeltStart -> BeltEnd/Collector, todos derivados das peças do plot, e mover o pacote sobre a superfície da esteira. Isso também prepara o sistema para curvas ou máquinas futuras.
+
+[MÉDIO] Todos os SpawnLocation são neutros e globais
+
+O que está errado / faltando: cada plot cria um SpawnLocation com Neutral = true, e a praça cria outro. O Roblox pode selecionar um desses spawns antes de CharacterAdded teleportar o jogador para o próprio plot.
+
+Por que importa: respawns podem ocorrer momentaneamente em bases de terceiros ou na praça, causando flashes, streaming incorreto e comportamento imprevisível antes do teleport corretivo.
+
+Direção de correção sugerida: usar Player.RespawnLocation para o spawn pertencente ao jogador ou transformar os pontos dos plots em simples Parts/Attachments usados exclusivamente pelo sistema de teleport.
+
+[MÉDIO] Área de venda da praça não existe de fato no mundo
+
+O que está errado / faltando: PlazaManager.TeleportToSellArea() apenas envia o jogador para CFrame.new(0, 5, -270). Não há SellArea, máquina, trigger ou referência física criada naquele local. A praça atualmente é essencialmente piso + spawn + monumento.
+
+Por que importa: “Vender” teleporta para uma coordenada mágica sem sistema físico correspondente, enfraquecendo bastante a sensação de hub central e de mundo conectado.
+
+Direção de correção sugerida: criar pontos/zonas nomeadas dentro do Plaza (SellArea, futuro Fusion, Tower, etc.) e teleportar usando essas instâncias, nunca coordenadas duplicadas hardcoded.
+
+[MÉDIO] MainServer concentra validação, economia e mutação de dados diretamente nos remotes
+
+O que está errado / faltando: handlers como BuyPack, PlaceCard, SellCard e ClaimReward mexem diretamente no profile. Não existe uma camada server-side única de operações econômicas.
+
+Por que importa: conforme Quests, achievements, analytics, tower, fusion e offline rewards forem adicionados, os mesmos efeitos precisarão ser lembrados em diversos remotes. Isso favorece bugs de contagem dupla, missões não registradas e regras diferentes para a mesma ação.
+
+Direção de correção sugerida: deixar MainServer como roteador de requests e colocar regras autoritativas em services/managers específicos, por exemplo aquisição de cartas, inventário, venda e quests.
+
+Nos arquivos enviados não aparecem nomes de personagens ou franquias reais; "ANIME" e os nomes das quests são genéricos. Não dá para auditar esse risco dentro de CardData/PackData, porque seus conteúdos não foram incluídos nesta rodada.
