@@ -18,6 +18,9 @@ Rules:
 3. Assign priority: CRITICAL, HIGH, MEDIUM, or LOW.
 4. Keep the decomposition balanced (avoid creating more than 5 tasks unless absolutely necessary).
 5. Output MUST be valid JSON with a 'tasks' array.
+6. Respond with ONLY the JSON: no prose before or after it.
+7. Escape every double quote inside strings with a backslash (e.g. \"name\").
+   Unescaped inner quotes produce invalid JSON and your answer is rejected.
 
 JSON Schema:
 {
@@ -38,7 +41,41 @@ JSON Schema:
 """
 
 
+def _extract_tasks(content: str) -> List[Any]:
+    """Parse the tasks array from model output.
+
+    Prefers a ```json fenced block (models wrap answers in fences); falls
+    back to the first-{ to last-} slice. Raises ValueError when unparseable
+    or when no tasks array is present — callers decide retry vs abort.
+    A silent single-task fallback here once burned whole runs (1 task with
+    the raw objective instead of the planned DAG), so this never invents
+    tasks: no JSON, no plan.
+    """
+    text = content or ""
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidates = [fence.group(1)] if fence else []
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.append(text[start : end + 1])
+    last_error: Optional[Exception] = None
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except Exception as exc:  # noqa: BLE001 - trying next candidate
+            last_error = exc
+            continue
+        tasks = data.get("tasks", []) if isinstance(data, dict) else []
+        if isinstance(tasks, list) and tasks:
+            return tasks
+        last_error = ValueError("no non-empty 'tasks' array in planner JSON")
+    raise ValueError(f"planner returned no parseable task JSON ({last_error})")
+
+
 class TaskPlanner:
+    #: Bounded planning attempts: the first uses the base prompt, retries
+    #: append a strict JSON-only repair note (same seat continuation).
+    max_attempts: int = 3
+
     def __init__(self, router: ModelRouter):
         self.router = router
 
@@ -49,7 +86,7 @@ class TaskPlanner:
         acceptance_criteria: Optional[List[str]] = None,
         repo_summary: str = "",
     ) -> List[Task]:
-        user_prompt = f"""OBJECTIVE:
+        base_prompt = f"""OBJECTIVE:
 {objective}
 
 ACCEPTANCE CRITERIA:
@@ -58,45 +95,37 @@ ACCEPTANCE CRITERIA:
 REPOSITORY CONTEXT:
 {repo_summary}
 """
-        req = AgentRequest(
-            system_prompt=PLANNER_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            role="planner",
-        )
-
-        resp = await self.router.execute(req)
-        if not resp.success:
-            raise RuntimeError(resp.error or "planner provider failed")
-        tasks_data = []
-
-        if resp.structured_data and "tasks" in resp.structured_data:
-            tasks_data = resp.structured_data["tasks"]
-        else:
+        tasks_data: List[Any] = []
+        last_error = "no attempt made"
+        for attempt in range(max(1, self.max_attempts)):
+            user_prompt = base_prompt
+            if attempt:
+                user_prompt += (
+                    "\nSUA RESPOSTA ANTERIOR NAO ERA JSON VALIDO. "
+                    "Responda APENAS com o JSON (sem cercas de codigo, sem prosa), "
+                    "com array 'tasks', e escape aspas internas com backslash.\n"
+                )
+            req = AgentRequest(
+                system_prompt=PLANNER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                role="planner",
+            )
+            resp = await self.router.execute(req)
+            if not resp.success:
+                last_error = resp.error or "planner provider failed"
+                continue
+            if resp.structured_data and "tasks" in resp.structured_data:
+                tasks_data = resp.structured_data["tasks"]
+                break
             try:
-                # Try finding JSON block
-                start = resp.content.find("{")
-                end = resp.content.rfind("}")
-                if start != -1 and end != -1:
-                    data = json.loads(resp.content[start : end + 1])
-                    tasks_data = data.get("tasks", [])
-            except Exception:
-                pass
+                tasks_data = _extract_tasks(resp.content)
+                break
+            except ValueError as exc:
+                last_error = str(exc)
+                continue
 
         if not tasks_data:
-            # Deterministic fallback task
-            tasks_data = [
-                {
-                    "id": "T-01",
-                    "objective": objective,
-                    "description": "Execute core objective and verify all criteria",
-                    "dependencies": [],
-                    "priority": "HIGH",
-                    "risk": "LOW",
-                    "required_capabilities": [],
-                    "validation_strategy": "standard",
-                    "target_files": [],
-                }
-            ]
+            raise RuntimeError(f"planner failed after attempts: {last_error}")
 
         if not isinstance(tasks_data, list) or len(tasks_data) > 200:
             raise ValueError("planner must return at most 200 tasks")

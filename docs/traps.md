@@ -322,6 +322,14 @@
   estado real (processo vivo? log? run dir?) antes de relançar.
 
 ## 8. Programa (isolamento, supervisor, memória, marcos, CI)
+- **Planner silencioso virava 1 tarefa só.** Modelo devolve JSON estruturalmente
+  completo mas com aspas internas sem escape (`"titulo "X", resto"`) → parse
+  falhava → fallback determinístico criava T-01 com o objetivo cru, sem aviso,
+  e a run queimava chats no escopo errado (visto 2x seguidas). Correção:
+  prompt exige só-JSON + escape, parser prefere bloco ```json, retry limitado
+  (3 tentativas) e **sem fallback: sem JSON, sem plano** (falha alta).
+  Prova: `tests/unit/test_planner_retry.py` usa o padrão real observado.
+  Regra: fallback silencioso que degrada escopo é bug, não resiliência.
 
 - **Falha isola o galho, não a run.** Status `PARTIAL` = algumas tarefas
   prontas, resto falhou; só dependentes inalcançáveis caem em cascata
