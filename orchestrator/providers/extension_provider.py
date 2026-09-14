@@ -138,12 +138,26 @@ class BrowserExtensionProvider:
                                  latency=time.time() - start, success=False,
                                  error=f"[MODEL_ERROR] task={task_id} {res.get('error', 'unknown')}",
                                  model=self.model_name, metadata=classify_failure(res.get('error')))
+        if images and int(res.get("images_attached", 0) or 0) < len(images):
+            # Texto foi entregue, mas a evidência NÃO anexou (extensão antiga
+            # sem paste, ou clipboard bloqueado). Aceitar calado mentiria ao
+            # validador, que foi instruído a examinar as imagens. Falha alto;
+            # operador recarrega a extensão / verifica o composer.
+            return AgentResponse(content="", success=False, model=self.model_name,
+                                  error=("[IMAGE_VERSION] evidence failed to attach "
+                                         f"({res.get('images_attached', 0)}/{len(images)}); "
+                                         "reload edge_extension (>=1.4.0) and reconcile; "
+                                         "text may already be delivered"),
+                                  metadata={"delivery_state": "UNCERTAIN", "retry_safe": False,
+                                            "images_requested": len(images),
+                                            "images_attached": res.get("images_attached", 0)})
         content = res.get("result", "") or ""
         info = {
             "conversation_id": res.get("conversation_id"),
             "conversation_url": res.get("conversation_url"),
             "worker": res.get("worker", ""),
             "delivery_state": "CONFIRMED",
+            "images_attached": int(res.get("images_attached", 0) or 0),
         }
         match = re.fullmatch(r"https://chatgpt\.com/c/([A-Za-z0-9-]{1,128})", info["conversation_url"] or "")
         if not match or match[1] != info["conversation_id"]:

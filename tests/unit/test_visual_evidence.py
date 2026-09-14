@@ -122,3 +122,36 @@ def test_capture_task_renders_caps_at_two_and_skips_failures(tmp_path, monkeypat
                         lambda *a, **k: {"ok": False, "error": "x"})
     recs = ve.capture_task_renders(["a.html", "b.html", "c.html"], tmp_path)
     assert recs == []
+
+
+def test_provider_fails_closed_when_image_not_attached(tmp_path):
+    import asyncio
+    from orchestrator.providers.base import AgentRequest
+    from orchestrator.providers.extension_provider import BrowserExtensionProvider
+    good = tmp_path / "render-1.png"
+    good.write_bytes(_png())
+
+    class StubTransport:
+        def __init__(self, attached):
+            self.attached = attached
+            self.sent = None
+
+        async def submit_chat(self, **kwargs):
+            self.sent = kwargs
+            return {"status": "COMPLETED", "task_id": "T-1",
+                    "result": "ok", "conversation_url": "https://chatgpt.com/c/abc-1",
+                    "conversation_id": "abc-1", "worker": "W",
+                    "images_attached": self.attached}
+
+    prov = BrowserExtensionProvider(relay_base="http://127.0.0.1:8765", token="x")
+    prov.transport = StubTransport(attached=0)
+    req = AgentRequest(system_prompt="s", user_prompt="u",
+                       metadata={"task_id": "T-1", "images": [str(good)]})
+    resp = asyncio.run(prov.execute(req))
+    assert resp.success is False and resp.error.startswith("[IMAGE_VERSION]")
+    assert prov.transport.sent["images"] and len(prov.transport.sent["images"]) == 1
+
+    prov.transport = StubTransport(attached=1)
+    resp = asyncio.run(prov.execute(req))
+    assert resp.success is True
+    assert resp.metadata["images_attached"] == 1
