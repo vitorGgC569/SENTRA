@@ -3,7 +3,7 @@
  *      GET_CONVERSATION_ID, GET_CONVERSATION_URL, STOP_GENERATION, GET_STATUS. */
 "use strict";
 
-const OMA_CS_VERSION = "1.5.0";
+const OMA_CS_VERSION = "1.5.1";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {

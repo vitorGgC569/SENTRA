@@ -7,7 +7,7 @@
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 2, maxTabs: 4 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.5.0";
+const OMA_SW_VERSION = "1.5.1";
 // Budgets MV3 (somente-leitura; a verdade está no servidor/Chrome):
 // - native_bridge/job_store.py concede lease de 30s: renovar < 30s ou o relay
 //   marca DELIVERY_EXPIRED e nenhum post tardio é aceito.
@@ -209,8 +209,12 @@ async function omaRenewAllActive() {
 
 // Post durável: resultado primeiro no storage (outbox), depois flush. Se o SW
 // morrer entre os dois, o próximo tick re-flusha — nunca perde post pronto.
+// Identidade primeiro, payload depois: a string rica worker (sw/cs/hb/slices)
+// do payload vence o id seco da identidade; job_id/lease_token vêm da
+// identidade (o payload nunca os define). Antes era o inverso e a telemetria
+// de vida era descartada em todo post sem ninguém notar.
 async function omaPostResult(identity, jobRef, payload) {
-  await chrome.storage.local.set({ [`oma_result_${jobRef.job_id}`]: { ...payload, ...identity } });
+  await chrome.storage.local.set({ [`oma_result_${jobRef.job_id}`]: { ...identity, ...payload } });
   await omaFlushOutbox();
 }
 
