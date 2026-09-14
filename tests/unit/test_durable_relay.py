@@ -39,7 +39,7 @@ def test_expired_lease_fails_without_duplicate_remote_execution():
     store = JobStore(clock=lambda: now[0])
     jid = store.submit(ChatJob(task_id="T", prompt="hi"))
     job = store.poll("TAB-1")
-    now[0] += 31
+    now[0] += 121  # janela de lease 120s: +121 expira
     assert store.poll("TAB-2") is None
     assert store.result(jid)["status"] == "FAILED"
     with pytest.raises(ValueError, match="STALE"):
@@ -73,14 +73,17 @@ def test_progress_extends_lease_past_heartbeat_window():
     store = JobStore(clock=lambda: now[0])
     jid = store.submit(ChatJob(task_id="T", prompt="hi", timeout_s=300))
     job = store.poll("TAB-1")
-    assert job["lease_until"] == pytest.approx(1030.0)
+    assert job["lease_until"] == pytest.approx(1120.0)
     now[0] = 1010.0
     info = store.progress(jid, "TAB-1", job["lease_token"], "waiting")
     assert info["lease_until"] == pytest.approx(1130.0)
-    now[0] = 1060.0  # 30s alem do lease original de 1030
+    now[0] = 1060.0  # dentro da janela de 120s: segue leased
     assert store.result(jid) is None
     assert store.counts()["leased"] == 1
     assert store.poll("TAB-2") is None
+    now[0] = 1121.0  # sobrevive além da janela antiga de 30s
+    assert store.result(jid) is None
+    assert store.counts()["leased"] == 1
     store.close()
 
 
@@ -111,12 +114,12 @@ def test_orphan_safe_requeues_once_then_fails():
     first = store.poll("TAB-1")
     now[0] = 3010.0
     store.progress(jid, "TAB-1", first["lease_token"], "navigating")
-    now[0] = 3131.0  # lease (3130) + progresso (120s) ambos vencidos, deadline futuro
+    now[0] = 3131.0  # lease (3120->3130 via progresso) + progresso (120s) vencidos, deadline futuro
     counts = store.counts()
     assert counts["queued"] == 1 and counts["failed"] == 0 and counts["leased"] == 0
     second = store.poll("TAB-2")
     assert second is not None and second["requeues"] == 1
-    now[0] += 31  # lease do segundo dono expira sem nenhum progresso: prova ausente
+    now[0] += 121  # lease 120s do segundo dono expira sem nenhum progresso: prova ausente
     assert store.poll("TAB-3") is None
     res = store.result(jid)
     assert res["status"] == "FAILED"

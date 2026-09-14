@@ -4,7 +4,7 @@
 # 2. Fases pre-send seguras: preparing|navigating|settling|ready (prova de nada enviado).
 # 3. Fases pos-send incertas: sending|sent|waiting|reading (nunca re-enfileira).
 # 4. Worker DEVE POST sending e aguardar 200 ANTES de SEND_MESSAGE (senao seguranca nula).
-# 5. Heartbeat /jobs/lease (10s) renova 30s; progresso renova 120s; deadline nunca cresce.
+# 5. Heartbeat /jobs/lease (10s) renova 120s; progresso renova 120s; deadline nunca cresce.
 # 6. Expiracao: sem sinal => WORKER_LOST; progresso recente + deadline => DELIVERY_SLOW.
 # 7. Orfao seguro volta a QUEUED no maximo 1 vez (requeues visivel); depois FAILED.
 # 8. Requeue so se phase segura + may_have_sent=0 + deadline futuro; senao FAILED incerto.
@@ -33,8 +33,11 @@ MAX_IMAGES_PER_JOB = 2
 MAX_IMAGE_CHARS = 400000  # ~300 KiB PNG each
 MAX_IMAGES_TOTAL_CHARS = 700000
 
-# Lease resilience: heartbeat renova 30s, progresso renova 120s, teto = created+timeout.
-LEASE_WINDOW_S = 30.0
+# Lease resilience: heartbeat renova LEASE_WINDOW_S, progresso renova
+# PROGRESS_WINDOW_S, teto = created+timeout. Janela 120s: cobre suspensao MV3
+# (~30-60s sem eventos) com folga, sem chegar perto dos deadlines de job
+# (300s+); deteccao de morte real continua via progresso vencido.
+LEASE_WINDOW_S = 120.0
 PROGRESS_WINDOW_S = 120.0
 MAX_REQUEUES_DEFAULT = 1
 # Fases que provam que nada foi enviado (antes de qualquer SEND_MESSAGE).

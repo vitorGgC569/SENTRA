@@ -9,8 +9,9 @@ const OMA_POOL = { minTabs: 2, maxTabs: 4 };
 const OMA_POLL_MS = 2000;
 const OMA_SW_VERSION = "1.5.2";
 // Budgets MV3 (somente-leitura; a verdade está no servidor/Chrome):
-// - native_bridge/job_store.py concede lease de 30s: renovar < 30s ou o relay
-//   marca DELIVERY_EXPIRED e nenhum post tardio é aceito.
+// - native_bridge/job_store.py concede lease de 120s: renovar < 120s ou o relay
+//   marca expirado e nenhum post tardio é aceito. Janela folgada de propósito
+//   (suspensão MV3 ~30-60s); heartbeat 10s + fatias 25s + pings renovam sempre.
 // - Chrome suspende o SW após ~30s sem eventos; setInterval NÃO impede e o
 //   contexto (heartbeat, promises pendentes, mapa em memória) morre junto.
 // Estratégia anti-morte-silenciosa, sem permissão nova:

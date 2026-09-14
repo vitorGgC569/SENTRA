@@ -377,6 +377,8 @@
 - **Sintoma:** jobs LEASED expiravam ~60s após pickup (lease 30s + sweep
   preguiçoso), deadline intacto, zero erros na extensão, resposta do modelo
   visível na tab mas nunca postada. 3x seguidas em tabs diferentes.
+  **Janela elevada para 120s** (`LEASE_WINDOW_S`): suspensão MV3 cabe na
+  folga sem expirar; morte real continua detectada via progresso vencido.
 - **Causa:** Chrome suspende o service worker após ~30s sem eventos;
   `setInterval` de heartbeat morria junto; renovar+postar eram exclusivos do
   SW enquanto a espera longa rodava na tab. Alarme de 60s > lease de 30s não
