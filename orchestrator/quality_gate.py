@@ -287,3 +287,37 @@ class QualityGate:
         )
 
         return True, "Passed Quality Gate! READY_FOR_MASTER.", package
+
+
+# ---------------------------------------------------------------------------
+# WS4 milestone/scale validation (additive re-exports; no behavior change).
+# Existing QualityGate/QuorumPolicy behavior above is untouched. These thin
+# delegates give the engine integrator a single import point; the
+# authoritative implementation lives in orchestrator.milestones.
+# ---------------------------------------------------------------------------
+from .milestones import validate_contracts as _validate_contracts
+from .milestones import evaluate_milestone as _evaluate_milestone
+from .milestones import check_budgets as _check_budgets
+from .milestones import evaluate_visual_evidence as _evaluate_visual_evidence
+
+
+def validate_task_contracts(tasks):
+    """Delegate to milestones.validate_contracts (contracts between tasks)."""
+    return _validate_contracts(tasks)
+
+
+def evaluate_milestone_gate(name, task_ids, tasks, validations=None,
+                            min_bar=9.5, required_evidence=()):
+    """Delegate to milestones.evaluate_milestone (milestone gate)."""
+    return _evaluate_milestone(name, task_ids, tasks, validations,
+                               min_bar=min_bar, required_evidence=required_evidence)
+
+
+def check_milestone_budgets(work_dir, budgets=None, test_command=None, timeout=None):
+    """Delegate to milestones.check_budgets (per-milestone budgets)."""
+    return _check_budgets(work_dir, budgets, test_command, timeout)
+
+
+def evaluate_visual_integrity(evidence, work_dir):
+    """Delegate to milestones.evaluate_visual_evidence (integrity only)."""
+    return _evaluate_visual_evidence(evidence, work_dir)

@@ -336,3 +336,158 @@ def relay_health(relay_base: str, timeout: float = 8.0) -> Dict[str, Any]:
                     "uptime_s": data.get("uptime_s", 0)}
     except Exception as exc:
         return {"reachable": False, "error": type(exc).__name__}
+
+
+def program_stats(roots, max_runs: int = 500, max_events_per_run: int = 200,
+                  velocity_days: int = 14) -> Dict[str, Any]:
+    """Program analytics over all runs: status, velocity, failure taxonomy, flakiness.
+
+    Read-only and pure over explicit roots (no network, no writes). Caps bound
+    work on large checkouts: at most max_runs run dirs are scanned and at most
+    max_events_per_run trailing events.jsonl lines are parsed per run.
+    Velocity buckets COMPLETED tasks by run-dir mtime into 24h UTC-day windows
+    covering the last velocity_days days (today inclusive). Failure taxonomy
+    counts reasons from TASK_FAILED / QUALITY_GATE_FAILED / CANDIDATE_REJECTED
+    payloads (top 10). Flakiness is the fraction of tasks with
+    current_repair_round > 0.
+    """
+    import collections
+    import datetime
+
+    failure_types = ("TASK_FAILED", "QUALITY_GATE_FAILED", "CANDIDATE_REJECTED")
+
+    def _tail_lines(path: Path, limit: int):
+        try:
+            size = path.stat().st_size
+        except OSError:
+            return []
+        try:
+            if size > 1_000_000:
+                with open(path, "rb") as handle:
+                    handle.seek(max(0, size - 1_000_000))
+                    chunk = handle.read().decode("utf-8", errors="ignore")
+                lines = chunk.splitlines()
+                if lines:
+                    lines = lines[1:]
+                return lines[-limit:] if limit > 0 else []
+            return path.read_text(encoding="utf-8").splitlines()[-limit:] if limit > 0 else []
+        except OSError:
+            return []
+
+    def _failure_reason(event: Dict[str, Any]) -> str:
+        payload = event.get("payload")
+        reason = ""
+        if isinstance(payload, dict):
+            reason = (payload.get("reason") or payload.get("error")
+                      or payload.get("message") or "")
+        reason = " ".join(str(reason).split())
+        if not reason:
+            reason = str(event.get("event_type") or "UNKNOWN")
+        return reason[:160]
+
+    roots_list = [Path(r) for r in (roots or [])]
+    run_dirs: List[Path] = []
+    truncated = False
+    for root in roots_list:
+        if truncated:
+            break
+        for run_dir in _iter_run_dirs(root):
+            if not RUN_ID.fullmatch(run_dir.name):
+                continue
+            if len(run_dirs) >= max(1, max_runs):
+                truncated = True
+                break
+            run_dirs.append(run_dir)
+
+    by_status: Dict[str, int] = {}
+    total_tasks = 0
+    completed_tasks = 0
+    failed_tasks = 0
+    repaired_tasks = 0
+    per_day: Dict[str, int] = collections.defaultdict(int)
+    taxonomy: Dict[str, int] = collections.Counter()
+
+    for run_dir in run_dirs:
+        hand = _read_json(run_dir / "handoff.json", {})
+        run = _read_json(run_dir / "run.json", {})
+        if not isinstance(hand, dict):
+            hand = {}
+        if not isinstance(run, dict):
+            run = {}
+        status = hand.get("status") or run.get("status") or "UNKNOWN"
+        by_status[str(status)] = by_status.get(str(status), 0) + 1
+
+        tasks = _run_tasks(run_dir)
+        done = 0
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            total_tasks += 1
+            task_status = task.get("status") or ""
+            if task_status == "COMPLETED":
+                completed_tasks += 1
+                done += 1
+            if task_status == "FAILED":
+                failed_tasks += 1
+            try:
+                repairs = int(task.get("current_repair_round", 0) or 0)
+            except (TypeError, ValueError):
+                repairs = 0
+            if repairs > 0:
+                repaired_tasks += 1
+        if not tasks:
+            try:
+                fallback_done = int(hand.get("completed_tasks", 0) or 0)
+            except (TypeError, ValueError):
+                fallback_done = 0
+            done = max(0, fallback_done)
+
+        try:
+            mtime = run_dir.stat().st_mtime
+            day = datetime.datetime.fromtimestamp(
+                mtime, tz=datetime.timezone.utc).date().isoformat()
+            per_day[day] += done
+        except OSError:
+            pass
+
+        for line in _tail_lines(run_dir / "events.jsonl", max(1, max_events_per_run)):
+            try:
+                event = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(event, dict):
+                continue
+            if event.get("event_type") not in failure_types:
+                continue
+            taxonomy[_failure_reason(event)] += 1
+
+    try:
+        today = datetime.datetime.now(tz=datetime.timezone.utc).date()
+    except Exception:
+        today = datetime.date.today()
+    days = max(1, min(int(velocity_days or 14), 90))
+    velocity = []
+    for offset in range(days - 1, -1, -1):
+        try:
+            day = today - datetime.timedelta(days=offset)
+        except Exception:
+            continue
+        key = day.isoformat()
+        velocity.append({"date": key, "completed": int(per_day.get(key, 0))})
+
+    ranked = sorted(taxonomy.items(), key=lambda kv: (-kv[1], kv[0]))[:10]
+    flaky_fraction = (repaired_tasks / total_tasks) if total_tasks else 0.0
+    return {
+        "runs_total": len(run_dirs),
+        "by_status": dict(sorted(by_status.items())),
+        "tasks": {"total": total_tasks, "completed": completed_tasks,
+                  "failed": failed_tasks},
+        "velocity": velocity,
+        "failure_taxonomy": [{"reason": reason, "count": count}
+                             for reason, count in ranked],
+        "flakiness": {"total_tasks": total_tasks,
+                      "repaired_tasks": repaired_tasks,
+                      "flaky_fraction": flaky_fraction},
+        "caps": {"max_runs": max_runs, "max_events_per_run": max_events_per_run,
+                 "truncated": truncated},
+    }

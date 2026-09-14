@@ -40,6 +40,68 @@ from .verification import CandidateVerifier
 from .budgets import TokenBudget
 
 
+# WS1: explicit transient vs permanent classification. Transient delivery
+# failures retry with exponential backoff without consuming repair rounds
+# or quorum; exhausted retries fail isolated per task. Permanent is the rest.
+TRANSIENT_MARKERS = (
+    "STALE_CONVERSATION",
+    "DELIVERY_EXPIRED",
+    "DELIVERY_UNCERTAIN",
+    "SUBMISSION_UNCERTAIN",
+    "CONVERSATION_BLOCKED",
+    "IN_FLIGHT",
+    # NOTA: "UNCERTAIN" puro foi removido de propósito — DELIVERY_UNCERTAIN e
+    # SUBMISSION_UNCERTAIN acima já cobrem os casos reais; o marcador genérico
+    # reclassificava como transitório qualquer texto com "uncertain" (ex: um
+    # veredito de qualidade), adiando o repair correto em retries inúteis.
+    "TIMEOUT",
+    "TIMED OUT",
+    "LEASE_LOST",
+    "LEASE_EXPIRED",
+    "TAB_STALE",
+)
+
+
+def classify_error(message: str) -> str:
+    """Return TRANSIENT for retriable delivery/timeout/lease failures."""
+    text = str(message or "").upper()
+    for marker in TRANSIENT_MARKERS:
+        if marker in text:
+            return "TRANSIENT"
+    return "PERMANENT"
+
+
+def is_transient_error(message: str) -> bool:
+    return classify_error(message) == "TRANSIENT"
+
+
+def _has_usable_tasks(tasks) -> bool:
+    """Resume poison guard: True when at least one persisted task can be
+    recovered or preserves completed work. Empty or only terminal failures
+    without any completion means there is nothing to recover."""
+    if not tasks:
+        return False
+    usable = {
+        TaskStatus.COMPLETED,
+        TaskStatus.PENDING,
+        TaskStatus.QUEUED,
+        TaskStatus.RUNNING,
+        TaskStatus.VALIDATING,
+        TaskStatus.REPAIRING,
+        TaskStatus.QUALITY_GATE,
+        TaskStatus.READY_FOR_MASTER,
+        TaskStatus.MASTER_REVIEW,
+        TaskStatus.RETRYING,
+    }
+    for t in tasks:
+        try:
+            if t.status in usable:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _rejection_signature(gate_reason: str, reports, test_results) -> tuple:
     """Assinatura estável de uma rejeição: classe do motivo + comandos falhos +
     categorias/severidades dos findings. Rejeições idênticas seguidas = repair
@@ -90,6 +152,8 @@ class OMAEngine:
         max_seats: int = 8,
         conversation_pool_dir=None,
         conversation_namespace=None,
+        transient_max_retries: int = 3,
+        transient_backoff_base_s: float = 30.0,
     ):
         self.run_id = run_id
         self.objective = objective
@@ -106,6 +170,12 @@ class OMAEngine:
             raise ValueError("stagnation_limit must be a positive int")
         self.max_rounds, self.no_progress_limit = max_rounds, no_progress_limit
         self.stagnation_limit = stagnation_limit
+        if type(transient_max_retries) is not int or not 0 <= transient_max_retries <= 10:
+            raise ValueError("transient_max_retries must be an int 0..10")
+        if not isinstance(transient_backoff_base_s, (int, float)) or not 0 <= float(transient_backoff_base_s) <= 600:
+            raise ValueError("transient_backoff_base_s must be 0..600 seconds")
+        self.transient_max_retries = transient_max_retries
+        self.transient_backoff_base_s = float(transient_backoff_base_s)
         self._running_futures = {}
         self.checkpoint_callback = checkpoint_callback
         self.task_token_budget = task_token_budget
@@ -214,6 +284,78 @@ class OMAEngine:
     def _check_cancelled(self, task: Task) -> bool:
         return self._cancel_requested or task.status == TaskStatus.CANCELLED
 
+    def _transient_delay(self, attempt: int) -> float:
+        """Exponential backoff for transient retries: base * 2**attempt."""
+        try:
+            base = float(self.transient_backoff_base_s)
+        except Exception:
+            base = 30.0
+        return max(0.0, base * (2.0 ** max(0, attempt)))
+
+    async def _with_transient_retry(self, label: str, func, *args, **kwargs):
+        """Retry transient delivery failures with backoff without consuming
+        repair rounds or quorum. Permanent errors raise immediately. Exhausted
+        retries raise for isolated per-task failure."""
+        attempt = 0
+        while True:
+            try:
+                return await func(*args, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except (TimeoutError, asyncio.TimeoutError) as exc:
+                if attempt >= self.transient_max_retries:
+                    raise RuntimeError(f"[TIMEOUT] {label}: {exc}") from exc
+                delay = self._transient_delay(attempt)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                attempt += 1
+                continue
+            except Exception as exc:
+                if not is_transient_error(str(exc)):
+                    raise
+                if attempt >= self.transient_max_retries:
+                    raise
+                delay = self._transient_delay(attempt)
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                attempt += 1
+                continue
+
+    def _collect_task_errors(self) -> Dict[str, str]:
+        """Per-task error map for partial runs. Siblings keep their own
+        outcome; only strictly unreachable dependents carry DEPENDENCY_ERROR."""
+        dlq = {}
+        try:
+            for entry in self.task_queue.get_dlq():
+                tid = entry.get("task_id")
+                if tid and tid not in dlq:
+                    dlq[tid] = str(entry.get("error", ""))
+        except Exception:
+            pass
+        out: Dict[str, str] = {}
+        for tid, task in list(self.task_queue._all_tasks.items()):
+            try:
+                st = task.status
+            except Exception:
+                continue
+            if st not in (TaskStatus.FAILED, TaskStatus.ESCALATED, TaskStatus.CANCELLED):
+                continue
+            reason = dlq.get(tid, "")
+            if not reason:
+                try:
+                    hist = (task.metadata or {}).get("transition_history", []) or []
+                    if hist:
+                        reason = str(hist[-1].get("reason", "") or hist[-1].get("to", ""))
+                except Exception:
+                    reason = ""
+            if not reason:
+                try:
+                    reason = st.value
+                except Exception:
+                    reason = str(st)
+            out[tid] = reason
+        return out
+
     def _expand_validators(self, task: Task, reports: List[ValidationReport],
                            gate_reason: str) -> List[ValidatorRole]:
         """Compute-policy escalation: standby roles join on disagreement
@@ -261,9 +403,25 @@ class OMAEngine:
             "start_time": time.time(),
         })
 
+    def _program_memory_brief(self) -> str:
+        """Recall program memory (ADRs + lessons) for the planner context.
+
+        Fail-open: empty/corrupt memory contributes nothing, never raises.
+        """
+        try:
+            from .program_memory import ProgramMemory
+            hits = ProgramMemory(self.workspace_path).recall(self.objective, limit=5)
+        except Exception:
+            return ""
+        lines = [f"- [{h.get('kind', '?')}:{h.get('ref', '?')}] "
+                 f"{h.get('snippet', '')}"[:400] for h in hits or []]
+        brief = "\n".join(lines)[:2000]
+        return f"\n\n## Program memory (decisoes e licoes de runs anteriores)\n{brief}\n" if brief else ""
+
     async def plan_initial_tasks(self) -> List[Task]:
         print(f"\n[+] [OMA Engine] Planning task decomposition for Run: {self.run_id}")
         repo_summary = await self.tool_gateway.git_manager.inspect_repository()
+        repo_summary = (repo_summary or "") + self._program_memory_brief()
         with self.router.repository_scope(self.workspace_path, self._repository_event):
             tasks = await self.planner.plan(
                 run_id=self.run_id, objective=self.objective,
@@ -289,11 +447,37 @@ class OMAEngine:
                 )
 
         self.persistence.save_tasks(tasks)
+        from .milestones import validate_contracts
+        violations = validate_contracts(tasks)
+        if violations:
+            detail = "; ".join(
+                f"{v.consumer_id}:{v.kind}:{v.artifact}" for v in violations[:10])
+            raise ValueError(f"DEPENDENCY_ERROR: task contract violations: {detail}")
         print(f"[+] [OMA Engine] Queued {len(tasks)} subtasks into PriorityTaskQueue.")
         return tasks
 
+    def _reset_provider_breakers(self) -> None:
+        """Isolation: one task tripping the provider circuit must not poison
+        siblings. Each task starts with a fresh breaker view; the breaker still
+        protects within a task (rapid consecutive failures still open it for
+        that task's remaining attempts)."""
+        try:
+            router = self.router
+            inner = getattr(router, "_inner", None)
+            target = inner if inner is not None else router
+            breakers = getattr(target, "circuit_breakers", None)
+            if isinstance(breakers, dict):
+                for breaker in breakers.values():
+                    try:
+                        breaker.record_success()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     async def process_task(self, task: Task) -> bool:
         self.budget.register_task(task.id, task.token_budget)
+        self._reset_provider_breakers()
         with self.router.repository_scope(self.workspace_path, self._repository_event):
             try:
                 return await self._process_task(task)
@@ -347,9 +531,13 @@ class OMAEngine:
             candidate = cached_candidate
         else:
             # 2. Execution phase (CancelledError propagates -> caller handles RF-017)
+            # Transient delivery failures retry with backoff here without
+            # consuming repair rounds or quorum; exhausted retries raise for
+            # isolated per-task failure.
             try:
                 context_summary = f"Objective: {task.objective}\nDescription: {task.description}"
-                candidate = await self.executor.execute_task(task, context_summary=context_summary)
+                candidate = await self._with_transient_retry(
+                    "executor", self.executor.execute_task, task, context_summary=context_summary)
             except asyncio.CancelledError:
                 await self.cancel_task(task.id, reason="cancelled during execution")
                 raise
@@ -458,15 +646,25 @@ class OMAEngine:
 
             # 3b. Validators abstained (infra failure, not evidence): retry the
             # VALIDATION boundedly. Never burns a repair round on the candidate.
+            # Transient delivery failures use oma.transient_* budget with backoff;
+            # permanent infra keeps the historic bound of 2 retries.
             if gate_reason.startswith("INSUFFICIENT_VALIDATION"):
                 await self.event_bus.publish(EventEnvelope(
                     event_type=EventType.QUALITY_GATE_FAILED, correlation_id=self.run_id,
                     task_id=task.id, candidate_id=candidate.candidate_id, producer="quality_gate",
                     payload={"reason": gate_reason}))
-                if validation_retries < max_validation_retries and not self._check_cancelled(task):
+                transient_validation = is_transient_error(gate_reason) or any(
+                    (not r.ran) and is_transient_error(getattr(r, "error", ""))
+                    for r in reports)
+                allowed_validation = self.transient_max_retries if transient_validation else max_validation_retries
+                if validation_retries < allowed_validation and not self._check_cancelled(task):
                     validation_retries += 1
+                    if transient_validation:
+                        delay = self._transient_delay(validation_retries - 1)
+                        if delay > 0:
+                            await asyncio.sleep(delay)
                     print(f"[Task {task.id}] {gate_reason} Retrying validation "
-                          f"({validation_retries}/{max_validation_retries}) without consuming a repair round...")
+                          f"({validation_retries}/{allowed_validation}) without consuming a repair round...")
                     continue
                 print(f"[Task {task.id}] Validators never ran; escalating.")
                 await self.task_queue.mark_escalated(task.id, reason=gate_reason)
@@ -571,9 +769,13 @@ class OMAEngine:
                 )
             )
 
-            # Repair Agent produces new candidate version
+            # Repair Agent produces new candidate version. Transient delivery
+            # failures retry here with backoff without consuming an extra
+            # repair round beyond the one already counted above.
             try:
-                candidate = await self.repair_agent.repair_candidate(
+                candidate = await self._with_transient_retry(
+                    "repair",
+                    self.repair_agent.repair_candidate,
                     task=task,
                     previous_candidate=candidate,
                     validation_reports=reports,
@@ -662,15 +864,24 @@ class OMAEngine:
         pending = {"status": "PENDING_REVIEW", "candidate": candidate.to_dict(),
                    "package": package.to_dict(), "verification": test_results}
         self.persistence._atomic_write_json(path, pending)
-        try:
-            with self.verifier.reviewed_snapshot(candidate, test_results) as root:
-                with self.router.repository_scope(root, self._repository_event):
-                    decision = await self.master.review_candidate_package(self.objective, package)
-        except asyncio.CancelledError:
-            await self.cancel_task(task.id, reason="cancelled during master review")
-            raise
-        except (ReviewProtocolError, ValueError) as exc:
-            reason = f"REVIEW_BLOCKED: {exc}"
+        attempt = 0
+        while True:
+            try:
+                with self.verifier.reviewed_snapshot(candidate, test_results) as root:
+                    with self.router.repository_scope(root, self._repository_event):
+                        decision = await self.master.review_candidate_package(self.objective, package)
+                break
+            except asyncio.CancelledError:
+                await self.cancel_task(task.id, reason="cancelled during master review")
+                raise
+            except (ReviewProtocolError, ValueError, TimeoutError, asyncio.TimeoutError) as exc:
+                if is_transient_error(str(exc)) and attempt < self.transient_max_retries:
+                    delay = self._transient_delay(attempt)
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                reason = f"REVIEW_BLOCKED: {exc}"
             self.persistence._atomic_write_json(path, {**pending, "status": "BLOCKED", "reason": reason})
             await self.task_queue.mark_escalated(task.id, reason=reason)
             await self.event_bus.publish(EventEnvelope(event_type=EventType.TASK_ESCALATED,
@@ -687,7 +898,13 @@ class OMAEngine:
         return decision
 
     async def run(self, resume: bool = False) -> Dict[str, Any]:
-        """Bounded concurrent DAG execution. No git commit or external publication."""
+        """Bounded concurrent DAG execution. No git commit or external publication.
+
+        Isolation: one task failure never fails DAG siblings; only strictly
+        unreachable dependents fail with DEPENDENCY_ERROR. Partial runs report
+        PARTIAL with per-task errors. Resume with missing/empty/unusable
+        tasks.json replans from the objective instead of silent FAILED.
+        """
         self.is_running = True
         previous = self.persistence.load_run_metadata()
         if previous and not resume:
@@ -696,11 +913,26 @@ class OMAEngine:
             raise ValueError("resume objective differs from persisted run")
         dispatch_file = self.persistence.run_dir / "dispatch.json"
         dispatched = self.persistence._load_json(dispatch_file, {}).get("dispatched", 0)
-        errors = []
+        errors: List[str] = []
         no_progress = 0
         try:
-            if resume and self.persistence.tasks_file.exists():
-                await self.load_and_recover()
+            if resume:
+                # Poisoned resume guard: missing, empty or without any usable
+                # task means there is nothing to recover, replan from objective.
+                needs_replan = False
+                if not self.persistence.tasks_file.exists():
+                    needs_replan = True
+                else:
+                    persisted = self.persistence.load_tasks()
+                    if not _has_usable_tasks(persisted):
+                        needs_replan = True
+                if needs_replan:
+                    await self.initialize()
+                    await self.plan_initial_tasks()
+                    dispatched = 0
+                    self.persistence._atomic_write_json(dispatch_file, {"dispatched": dispatched})
+                else:
+                    await self.load_and_recover()
             else:
                 await self.initialize()
                 await self.plan_initial_tasks()
@@ -727,7 +959,9 @@ class OMAEngine:
                     made_progress = bool(await future) or made_progress
                 no_progress = 0 if made_progress else no_progress + 1
                 self.persistence.save_tasks(list(self.task_queue._all_tasks.values()))
-                if no_progress >= self.no_progress_limit:
+                # Isolation: sibling failures must not abort runnable work.
+                # Only stop for no-progress when no ready task remains to try.
+                if no_progress >= self.no_progress_limit and not self.task_queue._ready_queue:
                     errors.append("NO_PROGRESS: consecutive unsuccessful dispatch batches")
                     break
         except asyncio.CancelledError:
@@ -745,9 +979,23 @@ class OMAEngine:
             self.persistence.save_tasks(list(self.task_queue._all_tasks.values()))
             self.is_running = False
 
-        complete = (self.metrics.tasks_total > 0 and
-                    self.task_queue.completed_count == self.metrics.tasks_total and not errors)
-        status = "COMPLETED" if complete else ("CANCELLED" if self._cancel_requested else "FAILED")
+        task_error_map = self._collect_task_errors()
+        for tid in sorted(task_error_map):
+            errors.append(f"{tid}: {task_error_map[tid]}")
+        completed_count = self.task_queue.completed_count
+        total_tasks = self.metrics.tasks_total
+        if self._cancel_requested:
+            status = "CANCELLED"
+            complete = False
+        elif total_tasks > 0 and completed_count == total_tasks and not errors:
+            status = "COMPLETED"
+            complete = True
+        elif completed_count > 0 and completed_count < total_tasks:
+            status = "PARTIAL"
+            complete = False
+        else:
+            status = "FAILED"
+            complete = False
         # A deterministic handoff does not spend another model call to narrate facts.
         self.final_synthesis = "\n".join(
             f"{p.task_id}: {p.solution_summary} | verification profiles {p.tests_passed}/{p.tests_total}; "
@@ -769,8 +1017,9 @@ class OMAEngine:
         self.persistence.save_metrics(metrics)
         result = {
             "run_id": self.run_id, "objective": self.objective, "status": status,
-            "completed_tasks": self.task_queue.completed_count, "total_tasks": self.metrics.tasks_total,
-            "final_synthesis": self.final_synthesis, "errors": errors, "metrics": metrics,
+            "completed_tasks": completed_count, "total_tasks": total_tasks,
+            "final_synthesis": self.final_synthesis, "errors": errors,
+            "task_errors": dict(task_error_map), "metrics": metrics,
         }
         self.persistence.save_run_metadata(result)
         await self.event_bus.publish(EventEnvelope(

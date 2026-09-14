@@ -1,4 +1,4 @@
-/* SENTRA Console: overview, runs, conversas, falhas, resumos. Só GET. */
+/* SENTRA Console: overview, runs, conversas, falhas, resumos, programa. Só GET. */
 "use strict";
 const $ = (id) => document.getElementById(id);
 let view = "overview", cache = {}, docSel = { kind: "", name: "" };
@@ -28,6 +28,7 @@ async function tick() {
     const n = (f.counts?.seats || 0) + (f.counts?.jobs || 0) + (f.counts?.tasks || 0);
     const badge = $("failcnt");
     badge.hidden = n === 0; badge.textContent = n;
+    try { cache.program = await api("/api/program"); } catch (e) {}
   } catch (e) { $("relay").textContent = "relay: erro"; }
   render();
 }
@@ -41,6 +42,7 @@ function render() {
   if (view === "chats") return vChats(m);
   if (view === "failures") return vFailures(m);
   if (view === "docs") return vDocs(m);
+  if (view === "program") return vProgram(m);
 }
 
 function vOverview(m) {
@@ -128,6 +130,44 @@ function vFailures(m) {
     <table><tr><th>Run</th><th>Task</th><th>Repairs</th><th>Objetivo</th></tr>
     ${rows((f.tasks || []).slice(0, 50), (t) => `<tr><td>${esc(t.run_id)}</td><td>${esc(t.task_id)}</td>` +
       `<td>${t.repairs}</td><td><small>${esc(t.objective)}</small></td></tr>`)}
+    </table>`;
+}
+
+function vProgram(m) {
+  const p = cache.program;
+  if (!p) {
+    m.innerHTML = `<h2>Programa</h2><div class="note">carregando…</div>`;
+    api("/api/program").then((d) => { cache.program = d; if (view === "program") render(); }).catch(() => {});
+    return;
+  }
+  const by = p.by_status || {};
+  const tasks = p.tasks || {};
+  const fl = p.flakiness || {};
+  const vel = p.velocity || [];
+  const tax = p.failure_taxonomy || [];
+  const pct = ((fl.flaky_fraction || 0) * 100).toFixed(1);
+  const velTotal = vel.reduce((a, d) => a + (d.completed || 0), 0);
+  m.innerHTML = `<h2>Programa</h2>
+    <div class="note">Agregado local sobre todas as runs (somente leitura):
+    velocidade por mtime em janelas de 24h nos ultimos 14 dias, taxonomia de
+    falhas dos eventos e flakiness por repair rounds.</div>
+    <div class="cards">
+      <div class="card"><b>${p.runs_total ?? 0}</b><small>runs</small></div>
+      <div class="card"><b>${tasks.completed ?? 0}/${tasks.total ?? 0}</b><small>tarefas concluidas</small></div>
+      <div class="card"><b>${velTotal}</b><small>concluidas / 14 dias</small></div>
+      <div class="card"><b>${pct}%</b><small>flakiness (${fl.repaired_tasks ?? 0}/${fl.total_tasks ?? 0})</small></div>
+    </div>
+    <h3>Runs por status (${p.runs_total ?? 0})</h3>
+    <table><tr><th>Status</th><th>Runs</th></tr>
+    ${rows(Object.entries(by), ([s, c]) => `<tr><td>${pill(s)}</td><td>${c}</td></tr>`)}
+    </table>
+    <h3>Velocidade — concluidas/dia (14 dias)</h3>
+    <table><tr><th>Dia (UTC)</th><th>Concluidas</th></tr>
+    ${rows(vel, (d) => `<tr><td>${esc(d.date)}</td><td>${d.completed}</td></tr>`)}
+    </table>
+    <h3>Taxonomia de falhas (top ${(tax || []).length})</h3>
+    <table><tr><th>Motivo</th><th>Ocorrencias</th></tr>
+    ${rows(tax, (t) => `<tr><td><small>${esc(t.reason)}</small></td><td>${t.count}</td></tr>`)}
     </table>`;
 }
 

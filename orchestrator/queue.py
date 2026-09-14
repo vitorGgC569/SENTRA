@@ -176,6 +176,10 @@ class PriorityTaskQueue:
     def _fail_dependents_locked(self, terminal_task_id: str, reason: str) -> List[str]:
         """Release tasks blocked on a terminal task as FAILED (cascade to fixpoint).
 
+        Isolation: only tasks blocked (directly or transitively) on the terminal
+        task fail here with DEPENDENCY_ERROR. Ready siblings without a
+        dependency path to the failure are never touched; the run continues.
+
         Must be called with the queue lock held. A run must never deadlock on
         dependents of ESCALATED/FAILED/CANCELLED tasks.
         """
@@ -389,6 +393,33 @@ class PriorityTaskQueue:
     @property
     def failed_count(self) -> int:
         return len(self._failed_tasks)
+
+    @property
+    def escalated_count(self) -> int:
+        return sum(1 for t in self._all_tasks.values() if t.status == TaskStatus.ESCALATED)
+
+    def task_error_map(self) -> Dict[str, str]:
+        """Per-task errors for partial-run reporting. DLQ reason wins,
+        otherwise the last state-machine reason is used."""
+        dlq: Dict[str, str] = {}
+        for entry in self._dlq:
+            tid = entry.get("task_id")
+            if tid and tid not in dlq:
+                dlq[tid] = str(entry.get("error", ""))
+        out: Dict[str, str] = {}
+        for tid, task in self._all_tasks.items():
+            if task.status not in (TaskStatus.FAILED, TaskStatus.ESCALATED, TaskStatus.CANCELLED):
+                continue
+            reason = dlq.get(tid, "")
+            if not reason:
+                try:
+                    hist = (task.metadata or {}).get("transition_history", []) or []
+                    if hist:
+                        reason = str(hist[-1].get("reason", "") or hist[-1].get("to", ""))
+                except Exception:
+                    reason = ""
+            out[tid] = reason or task.status.value
+        return out
 
     @property
     def dlq_count(self) -> int:

@@ -193,3 +193,126 @@ def test_server_v2_endpoints(tmp_path):
     finally:
         server.shutdown()
         server.server_close()
+
+
+def _seed_program_runs(root):
+    import os
+    import time
+    now = time.time()
+
+    pa = root / "PA"
+    pa.mkdir(parents=True, exist_ok=True)
+    (pa / "tasks.json").write_text(json.dumps([
+        {"id": "T-1", "objective": "alpha", "status": "COMPLETED",
+         "current_repair_round": 0},
+        {"id": "T-2", "objective": "beta", "status": "COMPLETED",
+         "current_repair_round": 1},
+        {"id": "T-3", "objective": "gamma", "status": "FAILED",
+         "current_repair_round": 2}]), encoding="utf-8")
+    (pa / "handoff.json").write_text(json.dumps(
+        {"status": "COMPLETED", "objective": "prog A",
+         "completed_tasks": 2, "total_tasks": 3}), encoding="utf-8")
+    (pa / "events.jsonl").write_text("\n".join([
+        json.dumps({"event_type": "TASK_CREATED", "task_id": "T-1",
+                    "payload": {}}),
+        json.dumps({"event_type": "TASK_FAILED", "task_id": "T-3",
+                    "payload": {"reason": "TIMEOUT: backend lento"}}),
+        json.dumps({"event_type": "QUALITY_GATE_FAILED", "task_id": "T-2",
+                    "payload": {"reason": "LOW_SCORE: cobertura baixa"}}),
+    ]) + "\n", encoding="utf-8")
+
+    pb = root / "PB"
+    pb.mkdir(parents=True, exist_ok=True)
+    (pb / "tasks.json").write_text(json.dumps([
+        {"id": "T-1", "objective": "delta", "status": "FAILED",
+         "current_repair_round": 2},
+        {"id": "T-2", "objective": "epsilon", "status": "COMPLETED",
+         "current_repair_round": 0}]), encoding="utf-8")
+    (pb / "handoff.json").write_text(json.dumps(
+        {"status": "FAILED", "objective": "prog B",
+         "completed_tasks": 1, "total_tasks": 2}), encoding="utf-8")
+    (pb / "events.jsonl").write_text("\n".join([
+        json.dumps({"event_type": "TASK_FAILED", "task_id": "T-1",
+                    "payload": {"reason": "TIMEOUT: backend lento"}}),
+        json.dumps({"event_type": "CANDIDATE_REJECTED", "task_id": "T-1",
+                    "payload": {"reason": "BAD_PATCH: diff invalido"}}),
+    ]) + "\n", encoding="utf-8")
+
+    pc = root / "PC"
+    pc.mkdir(parents=True, exist_ok=True)
+    (pc / "tasks.json").write_text(json.dumps([
+        {"id": "T-1", "objective": "zeta", "status": "RUNNING",
+         "current_repair_round": 0}]), encoding="utf-8")
+    (pc / "handoff.json").write_text(json.dumps(
+        {"status": "RUNNING", "objective": "prog C",
+         "completed_tasks": 0, "total_tasks": 1}), encoding="utf-8")
+
+    os.utime(str(pa), (now, now))
+    os.utime(str(pb), (now - 86400, now - 86400))
+    os.utime(str(pc), (now - 20 * 86400, now - 20 * 86400))
+    return {"PA": pa, "PB": pb, "PC": pc}
+
+
+def test_program_stats_counts_taxonomy_velocity(tmp_path):
+    import datetime
+    _seed_program_runs(tmp_path)
+    stats = store.program_stats([tmp_path])
+    assert stats["runs_total"] == 3
+    assert stats["by_status"] == {"COMPLETED": 1, "FAILED": 1, "RUNNING": 1}
+    assert stats["tasks"] == {"total": 6, "completed": 3, "failed": 2}
+    assert stats["flakiness"]["total_tasks"] == 6
+    assert stats["flakiness"]["repaired_tasks"] == 3
+    assert stats["flakiness"]["flaky_fraction"] == 3 / 6
+
+    tax = {row["reason"]: row["count"] for row in stats["failure_taxonomy"]}
+    assert tax.get("TIMEOUT: backend lento") == 2
+    assert tax.get("LOW_SCORE: cobertura baixa") == 1
+    assert tax.get("BAD_PATCH: diff invalido") == 1
+    assert len(stats["failure_taxonomy"]) == 3
+    assert stats["failure_taxonomy"][0]["reason"] == "TIMEOUT: backend lento"
+
+    today = datetime.datetime.now(tz=datetime.timezone.utc).date()
+    expected = [(today - datetime.timedelta(days=o)).isoformat()
+                for o in range(13, -1, -1)]
+    assert [row["date"] for row in stats["velocity"]] == expected
+    by_day = {row["date"]: row["completed"] for row in stats["velocity"]}
+    assert by_day[expected[-1]] == 2
+    assert by_day[expected[-2]] == 1
+    assert sum(by_day.values()) == 3
+    assert stats["caps"]["truncated"] is False
+
+    capped = store.program_stats([tmp_path], max_runs=2)
+    assert capped["runs_total"] == 2
+    assert capped["caps"]["truncated"] is True
+    assert store.program_stats([tmp_path / "nope"])["runs_total"] == 0
+
+
+def test_server_program_endpoint(tmp_path):
+    from dashboard.server import Handler
+    from http.server import ThreadingHTTPServer
+    _seed_program_runs(tmp_path)
+    Handler.roots = [tmp_path]
+    Handler.relay_base = "http://127.0.0.1:19999"
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        def get(path):
+            try:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}",
+                                            timeout=10) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read().decode("utf-8"))
+
+        status, body = get("/api/program")
+        assert status == 200
+        assert body["runs_total"] == 3
+        assert body["by_status"]["FAILED"] == 1
+        assert len(body["velocity"]) == 14
+        assert body["failure_taxonomy"][0]["count"] == 2
+        assert body["flakiness"]["repaired_tasks"] == 3
+    finally:
+        server.shutdown()
+        server.server_close()

@@ -321,6 +321,30 @@
   para conteúdo, shell só para gatilhos curtos; após qualquer queda, verificar
   estado real (processo vivo? log? run dir?) antes de relançar.
 
+## 8. Programa (isolamento, supervisor, memória, marcos, CI)
+
+- **Falha isola o galho, não a run.** Status `PARTIAL` = algumas tarefas
+  prontas, resto falhou; só dependentes inalcançáveis caem em cascata
+  (`DEPENDENCY_ERROR`). Irmãs `READY` nunca são tocadas.
+- **Transitório retenta, permanente repara.** Marcadores: `STALE_CONVERSATION`,
+  `DELIVERY_EXPIRED/UNCERTAIN`, `SUBMISSION_UNCERTAIN`, `TIMEOUT`, perda de
+  lease (`oma.transient_max_retries=3`, backoff `base*2^n`, sem consumir repair).
+  `UNCERTAIN` puro NÃO é marcador (reclassificava veredito de qualidade).
+- **Resume replaneja quando não há o que recuperar** (`tasks.json` ausente ou
+  vazio/sem tarefa aproveitável) em vez de FAILED silencioso.
+- **Supervisor** (`main.py --supervise`): mastiga a fila, backoff após falhas,
+  sai ocioso (`--idle-exit-secs`), sentinelas `runs/SUPERVISOR.pause|.stop`,
+  watchdog por `events.jsonl` parado, snapshot `runs/supervisor-status.json`.
+- **Memória de programa** (`<workspace>/memory/`): ADRs + lições (só com
+  evidência run+arquivo) + índice de candidatos; `recall` alimenta o planner
+  automaticamente (fail-open). Rotação de assento = chat NOVO com brief,
+  nunca replay de incerto.
+- **Marcos**: `provides/requires` em metadata → violação aborta cedo
+  (`DEPENDENCY_ERROR`); `evaluate_milestone` + `check_budgets` por marco;
+  evidência visual = integridade (sha256/PNG), julgamento é do operador.
+- **CI** (`.github/workflows/ci.yml`, windows-latest): `tests/unit` +
+  `tests/failure` + `tests/integration`. E2E/load fora (exigem Edge/Docker).
+
 ### Anti-simulação (regra dura, vale para todos os capítulos)
 
 - Doubles de teste só injetam **falha real** (hang, atraso, erro) no código

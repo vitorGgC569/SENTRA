@@ -100,6 +100,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send({"conversations": chats})
         if parsed.path == "/api/failures":
             return self._send(store.failures(self.roots, self._db()))
+        if parsed.path == "/api/program":
+            return self._send(store.program_stats(self.roots))
         if parsed.path == "/api/summary":
             if arg("project"):
                 return self._send({"project": arg("project"),

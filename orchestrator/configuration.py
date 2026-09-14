@@ -91,6 +91,12 @@ def engine_options(config, max_rounds=None, workers=None):
     max_seats = oma.get("max_seats", 8)
     if type(max_seats) is not int or not 1 <= max_seats <= 8:
         raise ValueError("oma.max_seats must be an int 1..8 (chat-creation cap; 5 = master+executor+3 validators)")
+    transient_max_retries = oma.get("transient_max_retries", 3)
+    if type(transient_max_retries) is not int or not 0 <= transient_max_retries <= 10:
+        raise ValueError("oma.transient_max_retries must be an int 0..10 (transient delivery retries before isolated failure)")
+    transient_backoff = oma.get("transient_backoff_base_s", 30.0)
+    if not isinstance(transient_backoff, (int, float)) or not 0 <= float(transient_backoff) <= 600:
+        raise ValueError("oma.transient_backoff_base_s must be 0..600 seconds (exponential backoff base for transient retries)")
     if not isinstance(profiles, dict) or any(not isinstance(argv, list) or not argv or
             any(not isinstance(arg, str) or not arg for arg in argv) for argv in profiles.values()):
         raise ValueError("validation.profiles must map names to nonempty argv lists (never shell strings)")
@@ -118,6 +124,8 @@ def engine_options(config, max_rounds=None, workers=None):
         "fixed_conversations": bool(oma.get("fixed_conversations", False)),
         "inter_call_delay_s": float(delay),
         "max_seats": max_seats,
+        "transient_max_retries": transient_max_retries,
+        "transient_backoff_base_s": float(transient_backoff),
     }
 
 

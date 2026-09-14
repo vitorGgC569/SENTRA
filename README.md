@@ -5,6 +5,7 @@
 ![Edge MV3](https://img.shields.io/badge/edge-MV3-orange)
 ![Tests pytest](https://img.shields.io/badge/tests-pytest-green)
 ![Stdlib dashboard](https://img.shields.io/badge/dashboard-stdlib-lightgrey)
+![CI](https://github.com/vitorGgC569/SENTRA/actions/workflows/ci.yml/badge.svg)
 
 **Orquestração auditável de implementação de código com agentes de IA.**
 LLMs propõem; software verifica as evidências e controla o fluxo.
@@ -157,6 +158,19 @@ sem replay. Códigos de saída: `0` pronto/aplicado · `1` falhou ·
 
 Sem Edge? `--provider local --reviewer local` com Ollama/vLLM
 (`local_model` no `config.yaml`). `--demo` nunca representa live.
+
+### 8. Operação contínua (programas, não só runs)
+
+```powershell
+python -B main.py --supervise --workspace '<pasta-do-projeto>' --idle-exit-secs 300
+```
+
+O supervisor mastiga a fila sozinho (backoff após falhas, watchdog por
+`events.jsonl` parado, sentinelas `runs/SUPERVISOR.pause|.stop`). Falha isola
+o galho (status `PARTIAL`); transitório retenta com backoff sem gastar repair;
+`<workspace>/memory/` acumula ADRs e lições entre runs; `provides/requires`
+entre tarefas aborta cedo em violação. O console tem a visão **Programa**
+(velocidade, taxonomia de falhas, flakiness) e o push roda CI no Windows.
 
 ---
 

@@ -39,6 +39,8 @@ def parser():
     cli.add_argument("--reason", help="Motivo auditável para abandonar uma tarefa interrompida")
     action.add_argument("--reconcile", action="store_true",
                         help="Lista assentos travados da run com evidência forense; não envia mensagens")
+    action.add_argument("--supervise", action="store_true",
+                        help="Mastiga MASTER_QUEUE 24/7 com watchdog; Ctrl+C ou runs/SUPERVISOR.stop encerra")
     cli.add_argument("--drop-seat", metavar="SEAT",
                      help="Com --reconcile: descarta a intenção incerta de um assento travado "
                           "(ex. RUN-X:validator.logic). O próximo envio abre chat novo; sem replay")
@@ -59,6 +61,10 @@ def parser():
     cli.add_argument("--allow-protected", action="store_true",
                      help="Aprovação explícita de componentes protegidos, somente com --promote")
     cli.add_argument("--mock", action="store_true", help="Alias de --demo; nunca representa execução live")
+    cli.add_argument("--max-iterations", type=int, default=None,
+                     help="Com --supervise: encerra após N itens executados (padrão: ilimitado)")
+    cli.add_argument("--idle-exit-secs", type=float, default=300,
+                     help="Com --supervise: segundos ociosos até sair sozinho (padrão: 300; 0 = nunca)")
     cli.add_argument("--mode", choices=["oma", "legacy"], default="oma", help=argparse.SUPPRESS)
     return cli
 
@@ -142,6 +148,10 @@ async def main_async(argv=None) -> int:
         raise ValueError("--workers deve ser 1..8")
     if args.max_rounds is not None and args.max_rounds < 1:
         raise ValueError("--max-rounds deve ser positivo")
+    if args.max_iterations is not None and args.max_iterations < 1:
+        raise ValueError("--max-iterations deve ser positivo")
+    if args.idle_exit_secs is not None and args.idle_exit_secs < 0:
+        raise ValueError("--idle-exit-secs deve ser >= 0 (0 = nunca sai por ociosidade)")
     if args.allow_protected and not args.promote:
         raise ValueError("--allow-protected só pode ser usado com --promote")
     config = load_config(Path(args.config).resolve())
@@ -173,6 +183,14 @@ async def main_async(argv=None) -> int:
             result = queue.abandon(args.job_id, args.reason)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 2 if isinstance(result, dict) and result.get("status") in {"FAILED", "BLOCKED"} else 0
+    if args.supervise:
+        from orchestrator.supervisor import Supervisor
+        supervisor = Supervisor(workspace, max_iterations=args.max_iterations,
+                                idle_exit_secs=args.idle_exit_secs,
+                                trust_workspace=args.trust_workspace)
+        result = await supervisor.serve()
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("failed", 0) == 0 and result.get("stalled", 0) == 0 else 1
     if args.doctor:
         result = await doctor(config, workspace, worker=args.provider, reviewer=args.reviewer)
         print(json.dumps(result, ensure_ascii=False, indent=2))

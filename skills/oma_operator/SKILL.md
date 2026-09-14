@@ -282,7 +282,7 @@ Defensivo, sempre:
 |---|---|
 | `STALE_CONVERSATION` (id repetido após new_chat) | Guarda agiu certo (sem replay). **Operador no Edge:** abrir novo chat/recarregar a aba presa. Depois lançar **run nova** (novo `--job-id`), com o objetivo reaproveitado byte-idêntico do `run.json`. |
 | Assento `UNCERTAIN`/`BLOCKED` | `--reconcile` (+ `--drop-seat` se `relay_jobs: []`). |
-| `--resume` | Só com `tasks.json` **não-vazio**. `tasks.json` vazio (`[]`) envenena o resume: a engine entra em "recuperar", não há o que recuperar → FAILED silencioso. Nesse caso use run nova. Objective do resume deve ser idêntico ao persistido. |
+| `--resume` | Com `tasks.json` aproveitável, recupera; **vazio/ausente/sem tarefa útil → replaneja do objetivo** (veneno antigo corrigido). Objective deve ser idêntico ao persistido. Falha isola o galho: status `PARTIAL`, só dependente inalcançável cai (`DEPENDENCY_ERROR`). |
 | Repair em loop / estagnação | `stagnation_limit=5` rejeições idênticas escala p/ STAGNANT. Intervenção do operador é **texto no próximo --prompt**, nunca injeção no chat. |
 | Quota/rate-limit | Conta **chats criados**, não mensagens. `SUBMIT_FAILED`/`send_available=False` sem banner explícito = UNKNOWN, não prova de teto. Falha alto e visível; não force. |
 
@@ -308,5 +308,21 @@ Defensivo, sempre:
 - Assentos fixos: `orchestrator/conversation_pool.py` (`max_seats: 5`)
 - Provider live: `orchestrator/providers/extension_provider.py`,
   `browser/tab_pool.py`, `browser/extension_transport.py`
-- Portas: relay `8765`, dashboard `8899`, preview ruim `8876` (não tocar)
+- Portas: relay `8765`, dashboard `8899` (um processo por porta; confira antes)
 - Workspaces: `runs/` (runs da engine), `.oma/` (pilotos), `dashboard/` (observabilidade)
+
+## 8. Programa (longa duração)
+
+- **Supervisor:** `python -B main.py --supervise --workspace <dir>
+  [--max-iterations N] [--idle-exit-secs 300]` mastiga a fila sozinho;
+  `runs/SUPERVISOR.pause|.stop` controlam; estado em
+  `runs/supervisor-status.json`.
+- **Memória:** `<workspace>/memory/` (ADRs, lições com evidência, índice de
+  candidatos) alimenta o planner sozinha; rotação de assento = chat novo com
+  brief, nunca replay.
+- **Marcos:** declare `provides/requires` em metadata das tarefas (violação
+  aborta cedo); `evaluate_milestone` + `check_budgets` por marco; evidência
+  visual = integridade, julgamento é seu.
+- **CI:** push roda `tests/unit` + `tests/failure` + `tests/integration` no
+  Windows; console tem a visão **Programa** (velocidade, taxonomia de falhas,
+  flakiness).
