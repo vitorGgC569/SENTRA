@@ -48,7 +48,10 @@ TRANSIENT_MARKERS = (
     "DELIVERY_EXPIRED",
     "DELIVERY_UNCERTAIN",
     "SUBMISSION_UNCERTAIN",
-    "CONVERSATION_BLOCKED",
+    # NOTA: CONVERSATION_BLOCKED foi removido de propósito — assento travado
+    # exige reconcile do operador e nenhum retry automático pode destravar;
+    # retentar queimava ~3min de backoff para falhar igual (visto em run live).
+    # Falha rápido e isolado com o motivo, operador reconcilia.
     "IN_FLIGHT",
     # NOTA: "UNCERTAIN" puro foi removido de propósito — DELIVERY_UNCERTAIN e
     # SUBMISSION_UNCERTAIN acima já cobrem os casos reais; o marcador genérico

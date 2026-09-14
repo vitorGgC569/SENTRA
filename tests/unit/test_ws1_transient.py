@@ -11,7 +11,6 @@ from orchestrator.engine import classify_error, is_transient_error
     "DELIVERY_EXPIRED: execution uncertain; not automatically resent",
     "DELIVERY_UNCERTAIN: ambiguous browser state",
     "SUBMISSION_UNCERTAIN: send unconfirmed",
-    "[CONVERSATION_BLOCKED] seat requires reconciliation",
     "IN_FLIGHT intent already persisted",
     "LEASE_LOST during relay poll",
     "LEASE_EXPIRED before ack",
@@ -36,6 +35,9 @@ def test_transient_markers_classified_transient(msg):
     # DELIVERY_UNCERTAIN / SUBMISSION_UNCERTAIN markers retry.
     "UNCERTAIN delivery, retry_safe False",
     "QUALITY: verdict uncertain, needs repair",
+    # Assento travado: só o operador destrava via reconcile; retry automático
+    # nunca teria sucesso (backoff inútil observado em run live).
+    "[CONVERSATION_BLOCKED] seat requires reconciliation",
     "",
 ])
 def test_permanent_errors_stay_permanent(msg):
