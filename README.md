@@ -237,15 +237,4 @@ casadas + `workers_online`.
 | `self_improvement/`, `research/` | Ciclo de melhoria, verificadores de apoio |
 | `skills/oma_operator/` | Runbook do operador · `skills/sentra_repo/` gateway local |
 
-## Estado e limites (honesto)
 
-- Suite local verde não prova seletores do Edge, quota da conta nem
-  segurança contra código hostil (Docker ajuda, não é VM).
-- Quota/rate-limit do provedor é opaco: `UNKNOWN` não é nem sim nem não.
-- Sem canal de imagem: QA visual é do operador; agentes recebem texto.
-- Transmissão automática do contexto à IA central: manual (`handoff`).
-
-## Licença
-
-Sem arquivo de licença por enquanto — adicione um (ex.: MIT) se quiser
-permitir reuso por terceiros.
