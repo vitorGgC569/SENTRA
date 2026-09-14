@@ -1,4 +1,15 @@
 """Protocolo OMA <-> Edge Extension via relay local. Schemas validam tudo."""
+# PROGRESS CONTRACT (extensao -> relay, 10 linhas):
+# 1. POST /jobs/progress {job_id,worker,lease_token,phase} estende lease +120s, teto deadline.
+# 2. Fases pre-send seguras: preparing|navigating|settling|ready (prova de nada enviado).
+# 3. Fases pos-send incertas: sending|sent|waiting|reading (nunca re-enfileira).
+# 4. Worker DEVE POST sending e aguardar 200 ANTES de SEND_MESSAGE (senao seguranca nula).
+# 5. Heartbeat /jobs/lease (10s) renova 30s; progresso renova 120s; deadline nunca cresce.
+# 6. Expiracao: sem sinal => WORKER_LOST; progresso recente + deadline => DELIVERY_SLOW.
+# 7. Orfao seguro volta a QUEUED no maximo 1 vez (requeues visivel); depois FAILED.
+# 8. Requeue so se phase segura + may_have_sent=0 + deadline futuro; senao FAILED incerto.
+# 9. Poll retorna requeues; FAILED traz erro distinto para retry (seguro) vs reconcile.
+# 10. Poll/lease/result/ack/cancel inalterados; progresso e opcional e compativel.
 from __future__ import annotations
 
 import time
@@ -21,6 +32,15 @@ JOB_TYPES = {"CHAT_TASK", "STATUS_PROBE"}
 MAX_IMAGES_PER_JOB = 2
 MAX_IMAGE_CHARS = 400000  # ~300 KiB PNG each
 MAX_IMAGES_TOTAL_CHARS = 700000
+
+# Lease resilience: heartbeat renova 30s, progresso renova 120s, teto = created+timeout.
+LEASE_WINDOW_S = 30.0
+PROGRESS_WINDOW_S = 120.0
+MAX_REQUEUES_DEFAULT = 1
+# Fases que provam que nada foi enviado (antes de qualquer SEND_MESSAGE).
+PRE_SEND_PHASES = frozenset({"preparing", "navigating", "settling", "ready"})
+# Todas as fases validas; tudo fora de PRE_SEND e considerado pos-send/incerto.
+PROGRESS_PHASES = frozenset(PRE_SEND_PHASES | {"sending", "sent", "waiting", "reading"})
 
 
 def _valid_image_url(url: Any) -> bool:
@@ -94,6 +114,27 @@ class ChatResult:
             raise ValueError("invalid conversation URL")
         if self.status not in ("COMPLETED", "FAILED"):
             raise ValueError(f"unknown status {self.status!r}")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ProgressReport:
+    job_id: str = ""
+    worker: str = ""
+    lease_token: str = ""
+    phase: str = ""
+
+    def validate(self) -> None:
+        if not self.job_id:
+            raise ValueError("job_id required")
+        if not self.worker or len(self.worker) > 100:
+            raise ValueError("worker required (max 100 chars)")
+        if not self.lease_token:
+            raise ValueError("lease_token required")
+        if self.phase not in PROGRESS_PHASES:
+            raise ValueError(f"unknown phase {self.phase!r}")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

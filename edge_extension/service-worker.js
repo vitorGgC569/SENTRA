@@ -7,7 +7,22 @@
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 2, maxTabs: 4 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.4.0";
+const OMA_SW_VERSION = "1.5.0";
+// Budgets MV3 (somente-leitura; a verdade está no servidor/Chrome):
+// - native_bridge/job_store.py concede lease de 30s: renovar < 30s ou o relay
+//   marca DELIVERY_EXPIRED e nenhum post tardio é aceito.
+// - Chrome suspende o SW após ~30s sem eventos; setInterval NÃO impede e o
+//   contexto (heartbeat, promises pendentes, mapa em memória) morre junto.
+// Estratégia anti-morte-silenciosa, sem permissão nova:
+//  a) WAIT fatiado em 25s (nenhuma pendência atravessa a janela de kill);
+//  b) a tab (viva) pinga o SW a cada ~10s e cada ping renova o lease;
+//  c) job ativo persistido em storage: restart do SW retoma sem reenviar;
+//  d) alarme de 30s como backstop (pode ser clampado p/ 60s — não é o plano A).
+const OMA_LEASE_MS = 30000;
+const OMA_HB_MS = 10000;
+const OMA_WAIT_SLICE_MS = 25000;
+const OMA_HB_ALARM = "oma-hb";
+const OMA_ACTIVE_PREFIX = "oma_active_";
 const OMA_UPDATE_CHECK_MS = 30000;
 let omaLastUpdateCheck = 0;
 let omaTickBusy = false;
@@ -101,6 +116,102 @@ async function omaForgetOwned(tabId) {
   ids.delete(tabId);
   await chrome.storage.local.set({ oma_owned_tabs: [...ids] });
   omaWorkers.delete(tabId);
+}
+
+function omaActiveKey(tabId) { return `${OMA_ACTIVE_PREFIX}${tabId}`; }
+
+async function omaSaveActive(tabId, patch) {
+  // Job em voo TEM que sobreviver a restart do SW (só memória = amnésia =
+  // resultado órfão). NUNCA persiste prompt/imagens (quota do storage; o
+  // resume jamais reenvia — só renova, espera e posta).
+  try {
+    const key = omaActiveKey(tabId);
+    const stored = await chrome.storage.local.get({ [key]: null });
+    const prev = stored[key] || {};
+    await chrome.storage.local.set({ [key]: { ...prev, ...patch, tabId, updated: Date.now() } });
+  } catch (_) {}
+}
+
+async function omaLoadActive(tabId) {
+  try {
+    const stored = await chrome.storage.local.get({ [omaActiveKey(tabId)]: null });
+    return stored[omaActiveKey(tabId)];
+  } catch (_) { return null; }
+}
+
+async function omaLoadAllActive() {
+  try {
+    const stored = await chrome.storage.local.get(null);
+    return Object.entries(stored).filter(([k]) => k.startsWith(OMA_ACTIVE_PREFIX))
+      .map(([k, v]) => [k.slice(OMA_ACTIVE_PREFIX.length), v]);
+  } catch (_) { return []; }
+}
+
+async function omaClearActive(tabId) {
+  try { await chrome.storage.local.remove(omaActiveKey(tabId)); } catch (_) {}
+}
+
+async function omaRenewIdentity(identity) {
+  await omaRelay("/jobs/lease", { method: "POST", body: JSON.stringify(identity) });
+}
+
+// Fases de progresso (contrato native_bridge/job_store.py: ready, sending,
+// sent, waiting, reading). Best-effort de propósito: relay antigo devolve 404
+// e rede pode soluçar — telemetria nunca pode quebrar a entrega. O latch
+// may_have_sent do servidor só é confiável com relay novo; sem ele, o
+// comportamento volta ao anterior (sem requeue, expira honesto).
+async function omaProgressPhase(tabId, identity, phase) {
+  try {
+    await omaRelay("/jobs/progress", { method: "POST", body: JSON.stringify({
+      job_id: identity.job_id, worker: identity.worker,
+      lease_token: identity.lease_token, phase,
+    }) });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Renova o lease de um job persistido. Quem chama é sempre um EVENTO Chrome
+// (alarme, ping da tab, fatia de espera) — eventos acordam SW suspenso, que é
+// exatamente o que o setInterval morto não fazia.
+async function omaRenewActive(tabId) {
+  const active = await omaLoadActive(tabId);
+  if (!active || !active.job_id || !active.lease_token) return false;
+  await omaRenewIdentity({ job_id: active.job_id, worker: active.worker, lease_token: active.lease_token });
+  active.hb_sw = (active.hb_sw || 0) + 1;
+  active.updated = Date.now();
+  try { await chrome.storage.local.set({ [omaActiveKey(tabId)]: active }); } catch (_) {}
+  return true;
+}
+
+// Backstop do alarme: renova tudo em voo. NÃO substitui os pings da tab
+// (alarme pode ser clampado para 60s > lease de 30s); só encurta a janela.
+async function omaRenewAllActive() {
+  const all = await omaLoadAllActive();
+  for (const [suffix, active] of all) {
+    const tabId = Number(suffix);
+    if (!Number.isFinite(tabId) || !active) continue;
+    try {
+      await omaRenewActive(tabId);
+    } catch (e) {
+      await omaNoteError("renew_active");
+      if (String((e && e.message) || e).includes("RELAY_HTTP_400")) {
+        // Servidor declarou o lease morto: geração órfã nunca postará.
+        // Para (economiza quota/compute) e para de rastrear.
+        try { await omaSendToTab(tabId, { operation: "STOP_GENERATION" }); } catch (_) {}
+        await omaClearActive(tabId);
+      }
+      // Erro de rede/transiente: mantém o active; a próxima tentativa cura.
+    }
+  }
+}
+
+// Post durável: resultado primeiro no storage (outbox), depois flush. Se o SW
+// morrer entre os dois, o próximo tick re-flusha — nunca perde post pronto.
+async function omaPostResult(identity, jobRef, payload) {
+  await chrome.storage.local.set({ [`oma_result_${jobRef.job_id}`]: { ...payload, ...identity } });
+  await omaFlushOutbox();
 }
 
 chrome.tabs.onRemoved.addListener((tabId) => { omaForgetOwned(tabId); });
@@ -241,16 +352,38 @@ async function omaProcessJob(tabId, job) {
   worker.job_id = job.job_id;
   worker.task_id = job.task_id;
   const identity = { job_id: job.job_id, worker: `TAB-${tabId}`, lease_token: job.lease_token };
-  const renew = () => omaRelay("/jobs/lease", { method: "POST", body: JSON.stringify(identity) });
+  // Telemetria de vida (vai no resultado): hb_sw = renovações do SW,
+  // slices = fatias de WAIT, cshb = pings da tab, rec = 1 se houve resume.
+  // Vão DENTRO da string worker: o relay rejeita campos desconhecidos (400).
+  let hbSw = 0;
+  let slices = 0;
+  let csHb = 0;
+  // Persiste ANTES de qualquer efeito no browser: restart no meio do caminho
+  // recupera pelo storage em vez de órfão. Sem prompt/imagens (ver omaSaveActive).
+  await omaSaveActive(tabId, {
+    job_id: job.job_id, task_id: job.task_id, worker: identity.worker,
+    lease_token: job.lease_token, kind: job.kind || "CHAT_TASK",
+    timeout_s: job.timeout_s || 180, new_chat: !!job.new_chat,
+    conversation_url: job.conversation_url || null,
+    deadlineMs: Date.now() + (job.timeout_s || 180) * 1000,
+    last_conv: worker.last_conv || null,
+    sent: false, hb_sw: 0, slices: 0, images_attached: 0,
+  });
+  const renew = async () => {
+    await omaRenewIdentity(identity);
+    hbSw++;
+    await omaSaveActive(tabId, { hb_sw: hbSw });
+  };
   let leaseLost = false;
-  const heartbeat = setInterval(() => renew().catch(async () => {
+  const heartbeat = setInterval(() => renew().catch(async (e) => {
+    // Só 400 (servidor rejeitou o lease) prova perda. Blip de rede cura no
+    // próximo ciclo: o lease tem 30s de folga e o heartbeat roda a cada 10s.
+    // (Antes: QUALQUER erro abortava uma geração saudável.)
+    if (!String((e && e.message) || e).includes("RELAY_HTTP_400")) return;
     leaseLost = true;
     try { await omaSendToTab(tabId, { operation: "STOP_GENERATION" }); } catch (_) {}
-  }), 10000);
-  const postResult = async (payload) => {
-    await chrome.storage.local.set({ [`oma_result_${job.job_id}`]: { ...payload, ...identity } });
-    await omaFlushOutbox();
-  };
+  }), OMA_HB_MS);
+  const postResult = async (payload) => omaPostResult(identity, job, payload);
   // Read-only probe: do not reload or discard an uncertain submission/draft.
   if (job.kind === "STATUS_PROBE") {
     try {
@@ -266,13 +399,14 @@ async function omaProcessJob(tabId, job) {
           composer_found: r.composer_found, diagnostics: r.diagnostics || null,
           sw_version: OMA_SW_VERSION, cs_version: r.cs_version || "unknown",
           worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION}` }),
-        worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION}`,
+        worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION} hb=${hbSw} rec=0`,
       });
     } catch (e) {
       await postResult({ job_id: job.job_id, task_id: job.task_id, status: "FAILED",
-        error: `[sw=${OMA_SW_VERSION}] probe: ` + String((e && e.message) || e) });
+        error: `[sw=${OMA_SW_VERSION} hb=${hbSw} rec=0] probe: ` + String((e && e.message) || e) });
     } finally {
       clearInterval(heartbeat);
+      await omaClearActive(tabId);
       if (omaWorkers.has(tabId)) omaWorkers.set(tabId, { state: "IDLE" });
     }
     return;
@@ -323,15 +457,58 @@ async function omaProcessJob(tabId, job) {
     }
     if (leaseLost) throw new Error("LEASE_LOST");
     await renew();
+    await omaProgressPhase(tabId, identity, "ready");
+    await omaProgressPhase(tabId, identity, "sending");
     // A channel/submit error is not proof that nothing was sent. Never replay.
     const sent = await omaSendToTab(tabId, {
       operation: "SEND_MESSAGE", text: job.prompt, images: job.images || [],
     });
     const attached = (sent && sent.result && sent.result.images_attached) || 0;
+    // Envio confirmado: a partir daqui o resume pode esperar+postar sem reenviar.
+    await omaSaveActive(tabId, { sent: true, images_attached: attached });
+    await omaProgressPhase(tabId, identity, "sent");
     worker.state = "WAITING_RESPONSE";
-    const waited = await omaSendToTab(tabId, {
-      operation: "WAIT_RESPONSE", timeout_ms: (job.timeout_s || 180) * 1000,
-    });
+    // WAIT FATIADO (o coração do fix): nenhuma pendência SW<->tab atravessa a
+    // janela de suspensão do SW (~30s) nem o lease (30s). Cada fatia renova o
+    // lease antes de esperar; TIMEOUT de fatia com geração em curso = continuar,
+    // não falhar. A tab preserva omaPendingResponseBaseline entre fatias, então
+    // re-entrar no WAIT nunca confunde o turno anterior com o atual. Se a
+    // resposta já estiver pronta no DOM (caso do sintoma), a primeira fatia
+    // resolve em ~2-3s (3 amostras estáveis).
+    const waitDeadline = Date.now() + (job.timeout_s || 180) * 1000;
+    let waited = null;
+    for (;;) {
+      const remaining = waitDeadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error("TIMEOUT waiting stable response (WAIT fatiado esgotou o timeout do job)");
+      }
+      if (leaseLost) throw new Error("LEASE_LOST");
+      try {
+        await renew();
+      } catch (e) {
+        if (String((e && e.message) || e).includes("RELAY_HTTP_400")) throw new Error("LEASE_LOST");
+      }
+      const slice = Math.min(OMA_WAIT_SLICE_MS, remaining);
+      slices++;
+      if (slices % 3 === 1) await omaProgressPhase(tabId, identity, "waiting");
+      try {
+        waited = await omaSendToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice });
+        const hb = waited && waited.result && waited.result.hb_cs;
+        if (typeof hb === "number" && Number.isFinite(hb)) csHb += hb;
+        break;
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        const m = msg.match(/csping=(\d+)/);
+        if (m) { try { csHb += parseInt(m[1], 10); } catch (_) {} }
+        if (/TIMEOUT/.test(msg) && Date.now() < waitDeadline) {
+          await omaSaveActive(tabId, { slices });
+          continue;
+        }
+        throw e;
+      }
+    }
+    await omaSaveActive(tabId, { slices });
+    await omaProgressPhase(tabId, identity, "reading");
     const conv = await omaSendToTab(tabId, { operation: "GET_CONVERSATION_URL" });
     const convId = conv.result ? conv.result.conversation_id : null;
     // Guarda anti-contaminação: com new_chat, o ID da conversa TEM que mudar.
@@ -346,7 +523,7 @@ async function omaProcessJob(tabId, job) {
       conversation_url: conv.result ? conv.result.url : null,
       conversation_id: conv.result ? conv.result.conversation_id : null,
       images_attached: attached,
-      worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION} cs=${omaLastCsVersion} err=${omaSwErrors}`,
+      worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION} cs=${omaLastCsVersion} err=${omaSwErrors} hb=${hbSw} slices=${slices} cshb=${csHb} rec=0`,
     });
   } catch (e) {
     await omaNoteError("process_job");
@@ -362,14 +539,147 @@ async function omaProcessJob(tabId, job) {
     }
     await postResult({
       job_id: job.job_id, task_id: job.task_id, status: "FAILED",
-      error: `[sw=${OMA_SW_VERSION}] ` + msg,
+      error: `[sw=${OMA_SW_VERSION} hb=${hbSw} slices=${slices} rec=0] ` + msg,
     });
   } finally {
     clearInterval(heartbeat);
+    await omaClearActive(tabId);
     if (omaWorkers.has(tabId)) {
       // Preserva last_conv entre jobs (guarda anti-contaminação); limpa o resto.
       omaWorkers.set(tabId, { state: "IDLE", last_conv: omaWorkers.get(tabId).last_conv });
     }
+  }
+}
+
+const omaResumeBusy = new Set();
+
+// Retoma job órfão de restart do SW: a tab está viva (a resposta pode já estar
+// no DOM) mas o contexto que renovava/postava morreu com o SW antigo. NUNCA
+// reenvia: só renova, espera fatiado (o baseline da tab continua intacto) e
+// posta. Respeita o deadline original — resume não estende o timeout do job.
+async function omaResumeJob(tabId, active) {
+  if (!omaWorkers.has(tabId)) omaWorkers.set(tabId, { state: "IDLE" });
+  const worker = omaWorkers.get(tabId);
+  if (!worker || worker.state !== "IDLE") return;
+  worker.state = "WAITING_RESPONSE";
+  worker.job_id = active.job_id;
+  worker.task_id = active.task_id;
+  const identity = { job_id: active.job_id, worker: active.worker, lease_token: active.lease_token };
+  let hbSw = active.hb_sw || 0;
+  let slices = active.slices || 0;
+  let csHb = 0;
+  const deadline = active.deadlineMs || (Date.now() + 60000);
+  try {
+    try {
+      await omaRenewIdentity(identity);
+      hbSw++;
+    } catch (e) {
+      if (!String((e && e.message) || e).includes("RELAY_HTTP_400")) {
+        // Blip de rede no primeiro renew: segue para o loop fatiado, que
+        // renova a cada fatia (e detecta LEASE_LOST real lá).
+      } else {
+        // Lease já expirou no servidor (DELIVERY_EXPIRED registrado lá):
+        // nenhum post salvaria; para a geração órfã e desiste sem ruído.
+        try { await omaSendToTab(tabId, { operation: "STOP_GENERATION" }); } catch (_) {}
+        return;
+      }
+    }
+    let waited = null;
+    for (;;) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new Error("TIMEOUT waiting stable response (resume esgotou o timeout do job)");
+      }
+      try {
+        await omaRenewIdentity(identity);
+        hbSw++;
+      } catch (e) {
+        if (String((e && e.message) || e).includes("RELAY_HTTP_400")) throw new Error("LEASE_LOST");
+      }
+      const slice = Math.min(OMA_WAIT_SLICE_MS, remaining);
+      slices++;
+      if (slices % 3 === 1) await omaProgressPhase(tabId, identity, "waiting");
+      try {
+        waited = await omaSendToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice });
+        const hb = waited && waited.result && waited.result.hb_cs;
+        if (typeof hb === "number" && Number.isFinite(hb)) csHb += hb;
+        break;
+      } catch (e) {
+        const msg = String((e && e.message) || e);
+        const m = msg.match(/csping=(\d+)/);
+        if (m) { try { csHb += parseInt(m[1], 10); } catch (_) {} }
+        if (/TIMEOUT/.test(msg) && Date.now() < deadline) continue;
+        throw e;
+      }
+    }
+    const conv = await omaSendToTab(tabId, { operation: "GET_CONVERSATION_URL" });
+    const convId = conv.result ? conv.result.conversation_id : null;
+    // Guarda anti-contaminação do caminho normal, com o last_conv de ANTES do
+    // job (persistido — o em memória morreu com o SW antigo).
+    if (active.new_chat && active.last_conv && convId && convId === active.last_conv) {
+      throw new Error("STALE_CONVERSATION: conversa não mudou após new_chat "
+        + `(id repetido ${convId}); prompt pode ter caído no chat anterior`);
+    }
+    if (convId) {
+      const mem = omaWorkers.get(tabId);
+      if (mem) mem.last_conv = convId;
+    }
+    await omaPostResult(identity, active, {
+      job_id: active.job_id, task_id: active.task_id, status: "COMPLETED",
+      result: waited.result ? waited.result.text : "",
+      conversation_url: conv.result ? conv.result.url : null,
+      conversation_id: conv.result ? conv.result.conversation_id : null,
+      images_attached: active.images_attached || 0,
+      worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION} cs=${omaLastCsVersion} err=${omaSwErrors} hb=${hbSw} slices=${slices} cshb=${csHb} rec=1`,
+    });
+  } catch (e) {
+    await omaNoteError("resume_job");
+    const msg = String((e && e.message) || e);
+    // Se o lease já expirou no servidor, este post é descartado pelo relay
+    // (400) e some no flush — correto: o servidor já registrou DELIVERY_EXPIRED.
+    await omaPostResult(identity, active, {
+      job_id: active.job_id, task_id: active.task_id, status: "FAILED",
+      error: `[sw=${OMA_SW_VERSION} rec=1 hb=${hbSw} slices=${slices}] ` + msg,
+    });
+  } finally {
+    await omaClearActive(tabId);
+    if (omaWorkers.has(tabId)) {
+      omaWorkers.set(tabId, { state: "IDLE", last_conv: (omaWorkers.get(tabId) || {}).last_conv });
+    }
+  }
+}
+
+// Varre jobs persistidos sem dono em memória (SW reiniciou no meio do voo).
+// Só retoma CHAT_TASK já enviado. Não-enviado expira honestamente no servidor
+// (reenviar envio incerto = risco de duplicar geração) e probe é barato de
+// repetir via novo poll — ambos sem reanimação incerta aqui.
+async function omaRecoverActive() {
+  let all;
+  try { all = await omaLoadAllActive(); } catch (_) { return; }
+  for (const [suffix, active] of all) {
+    try {
+      const tabId = Number(suffix);
+      if (!Number.isFinite(tabId) || !active || !active.job_id) {
+        try { await chrome.storage.local.remove(OMA_ACTIVE_PREFIX + suffix); } catch (_) {}
+        continue;
+      }
+      const mem = omaWorkers.get(tabId);
+      if (mem && mem.state !== "IDLE") continue; // loop vivo é o dono
+      if (omaResumeBusy.has(tabId)) continue;
+      try {
+        await chrome.tabs.get(tabId);
+      } catch (_) {
+        await omaClearActive(tabId); // tab sumiu: para de rastrear, servidor expira
+        continue;
+      }
+      if (!active.sent || (active.kind && active.kind !== "CHAT_TASK")) continue;
+      omaResumeBusy.add(tabId);
+      // Sem await (paralelo como o poll); a trava + WAITING síncrono evitam
+      // que o poll lease outro job para esta tab no mesmo tick.
+      omaResumeJob(tabId, active)
+        .catch(() => {})
+        .finally(() => { omaResumeBusy.delete(tabId); });
+    } catch (_) {}
   }
 }
 
@@ -382,6 +692,7 @@ async function omaTick() {
     await omaFlushOutbox();
     await omaCheckForUpdates();
     await omaEnsureTabs();
+    await omaRecoverActive(); // órfãos de restart antes de leasear trabalho novo
     for (const [tabId, worker] of omaWorkers) {
       if (worker.state !== "IDLE") continue;
       const busy = [...omaWorkers.values()].filter((w) => w.state !== "IDLE").length;
@@ -415,15 +726,57 @@ async function omaStartupCleanup() {
     await chrome.storage.local.set({ oma_owned_tabs: [] });
   } catch (_) {}
   try { omaWorkers.clear(); } catch (_) {}
+  try {
+    // Tabs mortas = gerações mortas: actives pendentes virariam renovações
+    // eternas de lease já expirado. Outbox (oma_result_*) é preservada — é
+    // trabalho PRONTO que o próximo tick flusha.
+    const stored = await chrome.storage.local.get(null);
+    const actives = Object.keys(stored || {}).filter((k) => k.startsWith(OMA_ACTIVE_PREFIX));
+    if (actives.length) await chrome.storage.local.remove(actives);
+  } catch (_) {}
+  try { omaResumeBusy.clear(); } catch (_) {}
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.set({ oma_state: "PAIR_IN_OPTIONS" });
   chrome.alarms.create("oma-poll", { periodInMinutes: 1 });
+  try { chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 0.5 }); }
+  catch (_) { try { chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 1 }); } catch (_) {} }
 });
 chrome.runtime.onStartup.addListener(async () => {
   await omaStartupCleanup();
 });
-chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === "oma-poll") omaTick(); });
+chrome.alarms.onAlarm.addListener((alarm) => {
+  // Retornar a promise estende a vida do SW até o trabalho assentar.
+  if (alarm.name === "oma-poll") return omaTick();
+  if (alarm.name === OMA_HB_ALARM) return omaRenewAllActive().catch(() => {});
+  return undefined;
+});
+// Alarmes sobrevivem ao restart do SW, mas recriar no topo (idempotente)
+// cobre update/reload que limpe a agenda sem disparar onInstalled.
+try { chrome.alarms.create("oma-poll", { periodInMinutes: 1 }); } catch (_) {}
+try { chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 0.5 }); }
+catch (_) { try { chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 1 }); } catch (_) {} }
+
+// Acordado pela tab: OMA_LEASE_PING (a cada ~10s durante o WAIT) renova o
+// lease na hora; OMA_RESULT_READY (resposta estabilizou) dispara o recover.
+// Mensagem de content-script ACORDA SW suspenso — é o canal que atravessa o
+// kill de ~30s. Não conflita com omaSendToTab (tabs.sendMessage usa o canal
+// de resposta, não este listener).
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (!request || (request.operation !== "OMA_LEASE_PING" && request.operation !== "OMA_RESULT_READY")) return false;
+  const tabId = sender && sender.tab && sender.tab.id;
+  (async () => {
+    if (request.operation === "OMA_LEASE_PING" && typeof tabId === "number") {
+      try { await omaRenewActive(tabId); } catch (_) {}
+      return { ok: true };
+    }
+    try { await omaRecoverActive(); } catch (_) {}
+    return { ok: true };
+  })()
+    .then((r) => { try { sendResponse(r); } catch (_) {} })
+    .catch((e) => { try { sendResponse({ ok: false, error: String((e && e.message) || e) }); } catch (_) {} });
+  return true;
+});
 setInterval(omaTick, OMA_POLL_MS);
 

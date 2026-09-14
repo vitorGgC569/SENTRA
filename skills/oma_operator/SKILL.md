@@ -67,7 +67,7 @@ No Edge, com sua conta logada no site de chat:
 3. A extensão cria **duas tabs próprias** e começa o polling em
    `http://127.0.0.1:8765`. Ela **não** adota suas tabs pessoais.
 4. Recarregue a extensão (`edge://extensions` → recarregar) sempre que
-   atualizar os arquivos dela. Versão atual: `1.4.0` (com paste de imagem)
+   atualizar os arquivos dela. Versão atual: `1.5.0` (paste de imagem + anti-morte-silenciosa)
    (`edge_extension/manifest.json`); doctor recusa se divergir.
 
 ```powershell

@@ -3,7 +3,7 @@
  *      GET_CONVERSATION_ID, GET_CONVERSATION_URL, STOP_GENERATION, GET_STATUS. */
 "use strict";
 
-const OMA_CS_VERSION = "1.4.0";
+const OMA_CS_VERSION = "1.5.0";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -355,8 +355,19 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         };
         return await omaSendMessage(request.text || "", request.images || []);
       }
-      case "WAIT_RESPONSE":
-        return { text: await omaWaitForStableResponse(request.timeout_ms || 120000, 3, omaPendingResponseBaseline) };
+      case "WAIT_RESPONSE": {
+        // Fatia do SW (< 30s, ver service-worker.js): cada chamada relata os
+        // pings enviados na fatia (hb_cs = prova de vida da tab). No TIMEOUT
+        // o contador vai na mensagem (csping=N) para o SW acumular.
+        omaStableWaitPings = 0;
+        try {
+          const text = await omaWaitForStableResponse(request.timeout_ms || 120000, 3, omaPendingResponseBaseline);
+          return { text, hb_cs: omaStableWaitPings };
+        } catch (e) {
+          try { e.message = `${(e && e.message) || e} csping=${omaStableWaitPings}`; } catch (_) {}
+          throw e;
+        }
+      }
       case "READ_RESPONSE":
         return { text: omaLastAssistantText() };
       case "GET_CONVERSATION_ID":

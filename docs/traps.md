@@ -372,6 +372,25 @@
 - Regra: evidência ausente é registrada (`visual_evidence.error`), nunca
   inventada; validador nunca alega ter visto o que não está nas imagens.
 
+## 10. Morte silenciosa MV3 (lease vencia com a tab viva)
+
+- **Sintoma:** jobs LEASED expiravam ~60s após pickup (lease 30s + sweep
+  preguiçoso), deadline intacto, zero erros na extensão, resposta do modelo
+  visível na tab mas nunca postada. 3x seguidas em tabs diferentes.
+- **Causa:** Chrome suspende o service worker após ~30s sem eventos;
+  `setInterval` de heartbeat morria junto; renovar+postar eram exclusivos do
+  SW enquanto a espera longa rodava na tab. Alarme de 60s > lease de 30s não
+  salvava. Prova forense: pickup rápido + 1 renew + silêncio; probe de 0.75s
+  no mesmo worker; `lease_until-upd` negativo com `deadline-upd` positivo.
+- **Correção:** WAIT fatiado 25s, job ativo em storage, pings tab→SW
+  (acordam suspenso), resume sem reenvio com guarda anti-contaminação,
+  fases via `/jobs/progress`, erros distintos `WORKER_LOST/DELIVERY_SLOW/
+  QUEUE_TIMEOUT`, requeue 1x só de nunca-enviado (latch `sending`).
+  Telemetria `hb/slices/cshb/rec` na string worker prova vida por job.
+- **Regra:** contexto que renova lease não pode morar só em memória volátil;
+  expiração precisa dizer morto vs lento; reenvio cego de incerto continua
+  proibido (requeue só com prova de não-envio).
+
 ### Anti-simulação (regra dura, vale para todos os capítulos)
 
 - Doubles de teste só injetam **falha real** (hang, atraso, erro) no código

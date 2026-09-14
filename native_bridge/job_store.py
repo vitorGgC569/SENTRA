@@ -1,4 +1,13 @@
 """Durable leased jobs. Expired deliveries fail; they are never blindly resent."""
+# REQUEUE SAFETY (por que so o nunca-iniciado volta a QUEUED):
+# - Seguro: worker reportou apenas fases pre-send (preparing/navigating/settling/ready)
+#   e NUNCA reportou sending/sent/waiting/reading. Como o contrato exige POST sending
+#   com 200 ANTES de qualquer SEND_MESSAGE, ausencia de sending prova nada enviado.
+# - Inseguro: qualquer fase pos-send (ou ausencia total de progresso em job LEASED)
+#   significa envio incerto (pode ter enviado sem reportar); re-enfileirar duplicaria
+#   mensagem no ChatGPT. Por isso vira FAILED/WORKER_LOST ou DELIVERY_SLOW, nunca QUEUED.
+# - Teto: requeue preserva deadline original (created+timeout); lease novo nunca passa dele.
+# - Limite: no maximo max_requeues (default 1) retornos a QUEUED; depois FAILED definitivo.
 from __future__ import annotations
 
 import json
@@ -7,12 +16,26 @@ import sqlite3
 import threading
 import time
 
-from .protocol import ChatJob, ChatResult
+from .protocol import (
+    ChatJob,
+    ChatResult,
+    LEASE_WINDOW_S,
+    MAX_REQUEUES_DEFAULT,
+    PRE_SEND_PHASES,
+    PROGRESS_WINDOW_S,
+    ProgressReport,
+)
 
 
 class JobStore:
-    def __init__(self, path=":memory:", clock=time.time):
+    LEASE_WINDOW_S = LEASE_WINDOW_S
+    PROGRESS_WINDOW_S = PROGRESS_WINDOW_S
+
+    def __init__(self, path=":memory:", clock=time.time, max_requeues=MAX_REQUEUES_DEFAULT):
         self.clock = clock
+        self.max_requeues = int(max_requeues)
+        if self.max_requeues < 0:
+            raise ValueError("max_requeues must be >= 0")
         self.lock = threading.RLock()
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
@@ -20,17 +43,88 @@ class JobStore:
                         "state TEXT, worker TEXT, lease TEXT, lease_until REAL, deadline REAL, "
                         "result TEXT, ack INTEGER DEFAULT 0, updated REAL)")
         self.db.commit()
+        self._ensure_columns()
+        self._backfill_created()
+
+    def _ensure_columns(self):
+        cols = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)").fetchall()}
+        wanted = {
+            "phase": "ALTER TABLE jobs ADD COLUMN phase TEXT DEFAULT ''",
+            "progress_at": "ALTER TABLE jobs ADD COLUMN progress_at REAL DEFAULT 0",
+            "created": "ALTER TABLE jobs ADD COLUMN created REAL DEFAULT 0",
+            "requeues": "ALTER TABLE jobs ADD COLUMN requeues INTEGER DEFAULT 0",
+            "may_have_sent": "ALTER TABLE jobs ADD COLUMN may_have_sent INTEGER DEFAULT 0",
+        }
+        for name, ddl in wanted.items():
+            if name not in cols:
+                self.db.execute(ddl)
+        self.db.commit()
+
+    def _backfill_created(self):
+        rows = self.db.execute("SELECT id,payload,deadline FROM jobs WHERE created IS NULL OR created=0").fetchall()
+        for jid, payload, deadline in rows:
+            try:
+                timeout = int(json.loads(payload).get("timeout_s", 180))
+            except (ValueError, TypeError, AttributeError):
+                timeout = 180
+            created = (deadline or 0) - timeout
+            self.db.execute("UPDATE jobs SET created=? WHERE id=?", (created, jid))
+        self.db.commit()
+
+    def _fail(self, jid, task_id, error, now):
+        result = ChatResult(job_id=jid, task_id=task_id, status="FAILED", error=error).to_dict()
+        self.db.execute("UPDATE jobs SET state='FAILED',result=?,updated=? WHERE id=?",
+                        (json.dumps(result), now, jid))
 
     def _expire(self):
         now = self.clock()
-        rows = self.db.execute("SELECT id,payload FROM jobs WHERE state IN ('QUEUED','LEASED') "
-                               "AND (deadline<=? OR (state='LEASED' AND lease_until<=?))", (now, now)).fetchall()
-        for jid, payload in rows:
-            job = json.loads(payload)
-            result = ChatResult(job_id=jid, task_id=job['task_id'], status="FAILED",
-                                error="DELIVERY_EXPIRED: execution uncertain; not automatically resent").to_dict()
-            self.db.execute("UPDATE jobs SET state='FAILED',result=?,updated=? WHERE id=?",
-                            (json.dumps(result), now, jid))
+        rows = self.db.execute(
+            "SELECT id,payload,state,lease_until,deadline,phase,progress_at,requeues,may_have_sent "
+            "FROM jobs WHERE state IN ('QUEUED','LEASED') "
+            "AND (deadline<=? OR (state='LEASED' AND lease_until<=? "
+            "AND (progress_at IS NULL OR progress_at<=0 OR progress_at+?<=?)))",
+            (now, now, float(self.PROGRESS_WINDOW_S), now)).fetchall()
+        for jid, payload, state, lease_until, deadline, phase, progress_at, requeues, may_sent in rows:
+            try:
+                job = json.loads(payload)
+            except ValueError:
+                job = {}
+            task_id = job.get("task_id", "")
+            phase = phase or ""
+            progress_at = progress_at or 0
+            requeues = requeues or 0
+            may_sent = may_sent or 0
+            recent = progress_at > 0 and (now - progress_at) <= float(self.PROGRESS_WINDOW_S)
+            if state == "QUEUED":
+                # Nunca alocado: nada foi enviado, seguro retentar por fora (sem auto-requeue).
+                self._fail(jid, task_id,
+                           "QUEUE_TIMEOUT: no worker claimed job before deadline; nothing was sent", now)
+            elif deadline <= now:
+                if recent:
+                    # Lento: worker vivo (progresso recente) mas teto absoluto estourou.
+                    self._fail(jid, task_id,
+                               f"DELIVERY_SLOW: recent progress in phase '{phase}' but absolute "
+                               "deadline exceeded; execution uncertain; reconcile before retry", now)
+                else:
+                    self._fail(jid, task_id,
+                               "WORKER_LOST: no heartbeat nor progress before absolute deadline; "
+                               "execution uncertain; not automatically resent", now)
+            else:
+                # Lease + progresso ambos vencidos, mas ainda ha orcamento de deadline.
+                safe = (not may_sent) and progress_at > 0 and phase in PRE_SEND_PHASES
+                if safe and requeues < self.max_requeues:
+                    self.db.execute(
+                        "UPDATE jobs SET state='QUEUED',worker='',lease='',lease_until=0,"
+                        "updated=?,requeues=? WHERE id=?", (now, requeues + 1, jid))
+                else:
+                    reason = "uncertain execution" if may_sent or not progress_at else \
+                        f"last phase '{phase}' not provably pre-send"
+                    exhausted = f"; requeues exhausted ({requeues}/{self.max_requeues})" \
+                        if safe and requeues >= self.max_requeues else ""
+                    self._fail(jid, task_id,
+                               f"WORKER_LOST: no heartbeat nor progress for "
+                               f">{float(self.PROGRESS_WINDOW_S):.0f}s ({reason}); "
+                               "execution uncertain; not automatically resent" + exhausted, now)
         self.db.execute("DELETE FROM jobs WHERE state IN ('COMPLETED','FAILED') AND updated<?", (now - 86400,))
         self.db.commit()
 
@@ -40,8 +134,14 @@ class JobStore:
             self._expire()
             if self.db.execute("SELECT count(*) FROM jobs").fetchone()[0] >= 10000:
                 raise ValueError("QUEUE_FULL")
-            self.db.execute("INSERT INTO jobs VALUES (?,?, 'QUEUED','', '',0,?,NULL,0,?)",
-                            (job.job_id, json.dumps(job.to_dict()), self.clock()+job.timeout_s, self.clock()))
+            now = self.clock()
+            created = now
+            deadline = created + job.timeout_s
+            self.db.execute(
+                "INSERT INTO jobs (id,payload,state,worker,lease,lease_until,deadline,"
+                "result,ack,updated,phase,progress_at,created,requeues,may_have_sent) "
+                "VALUES (?,?, 'QUEUED','', '',0,?,NULL,0,?,'',0,?,0,0)",
+                (job.job_id, json.dumps(job.to_dict()), deadline, now, created))
             self.db.commit()
         return job.job_id
 
@@ -52,16 +152,19 @@ class JobStore:
             self._expire()
             if self.db.execute("SELECT id FROM jobs WHERE state='LEASED' AND worker=?", (worker,)).fetchone():
                 return None
-            row = self.db.execute("SELECT id,payload,deadline FROM jobs WHERE state='QUEUED' ORDER BY updated LIMIT 1").fetchone()
+            row = self.db.execute(
+                "SELECT id,payload,deadline,created,requeues,phase FROM jobs "
+                "WHERE state='QUEUED' ORDER BY updated LIMIT 1").fetchone()
             if not row:
                 return None
-            jid, raw, deadline = row
+            jid, raw, deadline, created, requeues, phase = row
             lease = secrets.token_urlsafe(32)
-            until = min(deadline, self.clock()+30)
+            until = min(deadline, self.clock() + float(self.LEASE_WINDOW_S))
             self.db.execute("UPDATE jobs SET state='LEASED',worker=?,lease=?,lease_until=?,updated=? WHERE id=?",
                             (worker, lease, until, self.clock(), jid))
             self.db.commit()
-            return {**json.loads(raw), "lease_token": lease, "deadline": deadline, "lease_until": until}
+            return {**json.loads(raw), "lease_token": lease, "deadline": deadline, "lease_until": until,
+                    "requeues": requeues or 0, "phase": phase or ""}
 
     def lease(self, jid, worker, token):
         with self.lock:
@@ -70,8 +173,30 @@ class JobStore:
             if not row or row[0] != 'LEASED' or row[1] != worker or not secrets.compare_digest(row[2], token):
                 raise ValueError("STALE_OR_FOREIGN_LEASE")
             self.db.execute("UPDATE jobs SET lease_until=?,updated=? WHERE id=?",
-                            (min(row[3], self.clock()+30), self.clock(), jid))
+                            (min(row[3], self.clock() + float(self.LEASE_WINDOW_S)), self.clock(), jid))
             self.db.commit()
+
+    def progress(self, jid, worker, token, phase):
+        ProgressReport(job_id=jid, worker=worker, lease_token=token, phase=phase).validate()
+        with self.lock:
+            self._expire()
+            row = self.db.execute(
+                "SELECT state,worker,lease,deadline,lease_until,may_have_sent FROM jobs WHERE id=?",
+                (jid,)).fetchone()
+            if not row or row[0] != 'LEASED' or row[1] != worker or not secrets.compare_digest(row[2], token):
+                raise ValueError("STALE_OR_FOREIGN_LEASE")
+            _, _, _, deadline, lease_until, may_sent = row
+            now = self.clock()
+            if deadline is None:
+                raise ValueError("STALE_OR_FOREIGN_LEASE")
+            # Invariante: lease nunca passa do deadline (teto = created+timeout_s).
+            extended = min(deadline, max(lease_until or 0, now + float(self.PROGRESS_WINDOW_S)))
+            latched = 1 if (may_sent or phase not in PRE_SEND_PHASES) else 0
+            self.db.execute("UPDATE jobs SET phase=?,progress_at=?,lease_until=?,"
+                            "may_have_sent=?,updated=? WHERE id=?",
+                            (phase, now, extended, latched, now, jid))
+            self.db.commit()
+            return {"lease_until": extended, "deadline": deadline}
 
     def store_result(self, res: ChatResult, token):
         res.validate()

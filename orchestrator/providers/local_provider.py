@@ -3,11 +3,91 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Dict, Optional
+import urllib.request
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 from openai import AsyncOpenAI
 
 from .base import AgentProvider, AgentRequest, AgentResponse
 from ..models import TokenUsage
+
+
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host in {"127.0.0.1", "localhost"}
+
+
+def _http_get_json(url: str, timeout_s: float) -> Dict[str, Any]:
+    req = urllib.request.Request(url, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        raw = resp.read(8192).decode("utf-8", errors="replace")
+    try:
+        data = json.loads(raw)
+    except Exception:
+        data = {"_raw": raw[:500]}
+    if not isinstance(data, dict):
+        return {"_raw": str(data)[:500]}
+    return data
+
+
+def probe_local_endpoint(
+    base_url: str = "http://127.0.0.1:11434/v1",
+    timeout_s: float = 3.0,
+) -> Dict[str, Any]:
+    """Read-only reachability probe for a local OpenAI-compatible endpoint.
+
+    Only performs GET of version/model metadata (Ollama /api/version and
+    /v1/models). Never sends prompts, never downloads models. Loopback only.
+    Returns {"reachable", "checked", "version", "models", "error"}.
+    """
+    if not _is_loopback_url(base_url):
+        raise ValueError("local probe must use loopback HTTP")
+    base = base_url.rstrip("/")
+    root = base.split("/v1")[0].rstrip("/")
+    candidates = [root + "/api/version", base + "/models"]
+    checked: List[str] = []
+    version: Optional[str] = None
+    models: Optional[list] = None
+    last_error = ""
+    for url in candidates:
+        checked.append(url)
+        try:
+            data = _http_get_json(url, max(0.5, float(timeout_s)))
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"[:300]
+            continue
+        if "version" in data and version is None:
+            try:
+                version = str(data.get("version"))[:100]
+            except Exception:
+                pass
+        items = data.get("data") if isinstance(data.get("data"), list) else None
+        if items is not None and models is None:
+            try:
+                models = [str(m.get("id", ""))[:120] for m in items[:50]
+                          if isinstance(m, dict)][:50]
+            except Exception:
+                models = []
+        # Any well-formed JSON answer proves the endpoint is alive.
+        return {"reachable": True, "checked": checked, "version": version,
+                "models": models, "error": ""}
+    return {"reachable": False, "checked": checked, "version": version,
+            "models": models, "error": last_error}
+
+
+def mark_as_degraded(response: AgentResponse, original_error: Any) -> AgentResponse:
+    """Label a local answer as weak evidence (honest degradation).
+
+    Thin wrapper over degradation.mark_degraded so local answers always
+    carry metadata {degraded: True, original_error}. Import is local to
+    avoid any import cycle at module load.
+    """
+    from .degradation import mark_degraded as _mark
+
+    return _mark(response, original_error)
 
 
 class LocalModelProvider:
@@ -27,6 +107,10 @@ class LocalModelProvider:
         self.model_name = model_name
         self.temperature = temperature
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+
+    def probe(self, timeout_s: float = 3.0) -> Dict[str, Any]:
+        """Read-only liveness check for this instance (GET version, no prompts)."""
+        return probe_local_endpoint(self.base_url, timeout_s=timeout_s)
 
     def _extract_json(self, text: str) -> Optional[Dict[str, Any]]:
         match = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)

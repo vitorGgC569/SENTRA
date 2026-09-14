@@ -112,6 +112,9 @@ def make_handler(state, token):
                 if self.path == "/jobs/result":
                     lease_token = data.pop("lease_token", "")
                     state.store_result(ChatResult(**data), lease_token)
+                elif self.path == "/jobs/progress":
+                    info = state.progress(data["job_id"], data["worker"], data["lease_token"], data["phase"])
+                    return self._send({"ok": True, **info})
                 elif self.path == "/jobs/lease":
                     state.lease(data["job_id"], data["worker"], data["lease_token"])
                 elif self.path == "/jobs/ack":

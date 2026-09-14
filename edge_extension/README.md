@@ -10,7 +10,13 @@ uma no composer via clipboard real ANTES do texto e confirma quantas anexaram
 (`images_attached` no resultado; 0 com imagens enviadas = paste falhou, job
 FAILED honesto, nada enviado). Nunca executa "paste" sem antes escrever o
 próprio conteúdo (jamais toca no clipboard do usuário). Após atualizar os
-arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.4.0).
+arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.5.0).
+
+Anti-morte-silenciosa MV3: WAIT fatiado em 25s (cada fatia renova o lease),
+job ativo persistido em storage (restart retoma sem reenviar), a tab pinga o
+SW a cada ~10s (mensagem acorda SW suspenso) e o worker carrega telemetria
+`hb/slices/cshb/rec`. Fases `ready/sending/sent/waiting/reading` via
+`POST /jobs/progress` (best-effort; relay antigo ignora sem quebrar).
 
 > Nota de conformidade: automatizar a UI do chatgpt.com pode violar os Termos
 > do serviço. Para ChatGPT, o caminho suportado é a API. Esta arquitetura é
