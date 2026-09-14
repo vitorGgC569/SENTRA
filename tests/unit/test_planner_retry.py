@@ -83,6 +83,18 @@ def test_total_failure_raises_instead_of_fake_single_task():
     assert router.calls == 3
 
 
+def test_blocked_seat_fails_fast_without_burning_retries():
+    planner, router = _planner([
+        _fail(),
+        AgentResponse(content="", success=False,
+                      error="[CONVERSATION_BLOCKED] R:master requires delivery reconciliation"),
+        _valid_json(1),
+    ])
+    with pytest.raises(RuntimeError, match="CONVERSATION_BLOCKED"):
+        __import__("asyncio").run(planner.plan(run_id="R", objective="obj"))
+    assert router.calls == 2
+
+
 def test_structured_data_path_untouched():
     planner, router = _planner([{"tasks": [_task(1)]}])
     tasks = __import__("asyncio").run(

@@ -113,6 +113,10 @@ REPOSITORY CONTEXT:
             resp = await self.router.execute(req)
             if not resp.success:
                 last_error = resp.error or "planner provider failed"
+                if "CONVERSATION_BLOCKED" in last_error:
+                    # Assento travado: nenhum retry destrava (só reconcile do
+                    # operador). Falha rápido em vez de queimar tentativas.
+                    raise RuntimeError(last_error)
                 continue
             if resp.structured_data and "tasks" in resp.structured_data:
                 tasks_data = resp.structured_data["tasks"]
