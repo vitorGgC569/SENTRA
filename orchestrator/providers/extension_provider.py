@@ -133,6 +133,14 @@ class BrowserExtensionProvider:
                                  error=f"[TOOL_ERROR] task={task_id} {e}", model=self.model_name,
                                  metadata=classify_failure(e))
 
+        if "IMAGE_PASTE_FAILED" in str(res.get("error") or ""):
+            # Prova pre-envio: o content-script anexa antes de preencher, e
+            # falha ali significa nada entregue. Assento segue limpo e reusavel.
+            return AgentResponse(content="", token_usage=TokenUsage(model=self.model_name),
+                                 latency=time.time() - start, success=False,
+                                 error=f"[MODEL_ERROR] task={task_id} {res.get('error')}",
+                                 model=self.model_name,
+                                 metadata={"delivery_state": "NOT_SENT", "retry_safe": True})
         if res.get("status") != "COMPLETED":
             return AgentResponse(content="", token_usage=TokenUsage(model=self.model_name),
                                  latency=time.time() - start, success=False,

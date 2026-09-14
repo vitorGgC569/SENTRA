@@ -155,3 +155,24 @@ def test_provider_fails_closed_when_image_not_attached(tmp_path):
     resp = asyncio.run(prov.execute(req))
     assert resp.success is True
     assert resp.metadata["images_attached"] == 1
+
+
+def test_provider_marks_paste_failure_not_sent_reusable(tmp_path):
+    import asyncio
+    from orchestrator.providers.base import AgentRequest
+    from orchestrator.providers.extension_provider import BrowserExtensionProvider
+
+    class StubTransport:
+        async def submit_chat(self, **kwargs):
+            return {"status": "FAILED", "task_id": "T-1",
+                    "error": "[sw=1.5.1] IMAGE_PASTE_FAILED: imagem 1 nao apareceu",
+                    "conversation_url": None, "conversation_id": None}
+
+    prov = BrowserExtensionProvider(relay_base="http://127.0.0.1:8765", token="x")
+    prov.transport = StubTransport()
+    req = AgentRequest(system_prompt="s", user_prompt="u",
+                       metadata={"task_id": "T-1"})
+    resp = asyncio.run(prov.execute(req))
+    assert resp.success is False
+    assert resp.metadata["delivery_state"] == "NOT_SENT"
+    assert resp.metadata["retry_safe"] is True

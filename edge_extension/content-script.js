@@ -3,7 +3,7 @@
  *      GET_CONVERSATION_ID, GET_CONVERSATION_URL, STOP_GENERATION, GET_STATUS. */
 "use strict";
 
-const OMA_CS_VERSION = "1.5.1";
+const OMA_CS_VERSION = "1.5.2";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -99,10 +99,68 @@ async function omaWaitAttachment(box, timeoutMs = 15000) {
   return false;
 }
 
+function omaFindFileInputs(box) {
+  // Inputs file escondidos junto ao composer são o vetor mais confiável:
+  // atribuir File via DataTransfer não depende de permissão de clipboard.
+  const inputs = [...document.querySelectorAll("input[type='file']")];
+  const near = [];
+  const far = [];
+  for (const input of inputs) {
+    try {
+      const accept = (input.getAttribute("accept") || "").toLowerCase();
+      if (/image/.test(accept)) { near.unshift(input); continue; }
+      let node = input;
+      let close = false;
+      for (let depth = 0; node && depth < 6; depth++) {
+        if (node === box || (box.contains && box.contains(node))) { close = true; break; }
+        node = node.parentElement;
+      }
+      (close ? near : far).push(input);
+    } catch (_) {}
+  }
+  return [...near, ...far];
+}
+
+async function omaAttachViaFileInput(box, file) {
+  const inputs = omaFindFileInputs(box);
+  for (const input of inputs) {
+    try {
+      const dt = new DataTransfer();
+      dt.items.add(file);
+      input.files = dt.files;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    } catch (_) {
+      continue;
+    }
+    if (await omaWaitAttachment(box, 12000)) return true;
+    try {
+      input.files = new DataTransfer().files; // limpa tentativa parcial
+    } catch (_) {}
+  }
+  return false;
+}
+
+async function omaAttachViaDrop(box, file) {
+  // Último vetor: drop sintético com NOSSO DataTransfer (sem tocar no
+  // clipboard do usuário). Editores podem ignorar evento não-confiável.
+  try {
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    const evt = new DragEvent("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(evt, "dataTransfer", { value: dt });
+    (box.parentElement || box).dispatchEvent(evt);
+  } catch (_) {
+    return false;
+  }
+  return await omaWaitAttachment(box, 10000);
+}
+
 async function omaPasteImages(box, dataUrls) {
-  // Cola data URLs de imagem no composer via clipboard real; NUNCA executa
-  // "paste" sem antes escrever NOSSO conteúdo (colaria o clipboard do usuário).
-  // Retorna quantas anexaram; qualquer falha aborta antes de qualquer envio.
+  // Ordem de vetores: file-input (determinístico) -> clipboard real ->
+  // drop sintético. NUNCA execCommand("paste") sem antes escrever NOSSO
+  // conteúdo (colaria o clipboard do usuário). Retorna quantas anexaram;
+  // qualquer falha total aborta antes de qualquer envio.
   let attached = 0;
   for (const url of (dataUrls || []).slice(0, 2)) {
     if (typeof url !== "string" || !url.startsWith("data:image/")) {
@@ -110,30 +168,23 @@ async function omaPasteImages(box, dataUrls) {
     }
     const blob = await (await fetch(url)).blob();
     const type = (blob.type && blob.type.startsWith("image/")) ? blob.type : "image/png";
+    const file = new File([blob], `evidence-${attached + 1}.png`, { type });
     box.focus();
-    let pasted = false;
-    try {
-      await navigator.clipboard.write([new ClipboardItem({ [type]: blob })]);
-      pasted = document.execCommand("paste");
-    } catch (_) {
-      pasted = false;
-    }
-    if (!pasted) {
-      // Fallback sem tocar no clipboard do usuário: evento sintético com
-      // NOSSO DataTransfer (pode ser ignorado pelo editor; ok, falha alto).
+    let ok = await omaAttachViaFileInput(box, file);
+    if (!ok) {
       try {
-        const dt = new DataTransfer();
-        dt.items.add(new File([blob], `evidence-${attached + 1}.png`, { type }));
-        pasted = box.dispatchEvent(new ClipboardEvent("paste",
-          { clipboardData: dt, bubbles: true, cancelable: true }));
-      } catch (_) {
-        pasted = false;
-      }
+        await navigator.clipboard.write([new ClipboardItem({ [type]: blob })]);
+        if (document.execCommand("paste")) {
+          ok = await omaWaitAttachment(box, 15000);
+        }
+      } catch (_) {}
     }
-    const ok = pasted && await omaWaitAttachment(box, 15000);
+    if (!ok) {
+      ok = await omaAttachViaDrop(box, file);
+    }
     if (!ok) {
       throw new Error(`IMAGE_PASTE_FAILED: imagem ${attached + 1} não apareceu no `
-        + "composer (clipboard bloqueado?); nada foi enviado");
+        + "composer (file-input, clipboard e drop falharam); nada foi enviado");
     }
     attached++;
   }
