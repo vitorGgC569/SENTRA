@@ -20,11 +20,12 @@ from typing import Any, Dict, List, Optional
 
 OPS_TO_EXTENSION = {"CREATE_CHAT", "SEND_MESSAGE", "WAIT_RESPONSE", "READ_RESPONSE",
                     "GET_CONVERSATION_ID", "GET_CONVERSATION_URL", "STOP_GENERATION",
-                    "GET_STATUS", "NEW_CHAT"}
+                    "GET_STATUS", "NEW_CHAT", "DELETE_CONVERSATION"}
 # Job que o OMA submete ao relay (a extensão traduz para ops primitivas).
 # STATUS_PROBE só lê o DOM (envio disponível? banner de cap?) — nunca envia
 # mensagem, nunca consome quota. É a forma segura de vigiar rate-limit.
-JOB_TYPES = {"CHAT_TASK", "STATUS_PROBE"}
+# DELETE_CHAT instrui a exclusão remota de conversas para manter a conta limpa.
+JOB_TYPES = {"CHAT_TASK", "STATUS_PROBE", "DELETE_CHAT"}
 
 
 # Visual evidence attachments: screenshots travel as data URLs inside the job
@@ -76,8 +77,13 @@ class ChatJob:
         if self.kind not in JOB_TYPES:
             raise ValueError(f"unknown job kind {self.kind!r}")
         if self.kind == "STATUS_PROBE":
+            self.new_chat = False
             if self.prompt and len(self.prompt) > 20000:
                 raise ValueError("prompt max 20000 chars")
+        elif self.kind == "DELETE_CHAT":
+            self.new_chat = False
+            if not self.conversation_url and not self.prompt:
+                raise ValueError("conversation_url or prompt (conversation_id) required for DELETE_CHAT")
         elif not isinstance(self.prompt, str) or not self.prompt or len(self.prompt) > 20000:
             raise ValueError("prompt required (max 20000 chars)")
         if type(self.new_chat) is not bool or type(self.timeout_s) is not int or not (5 <= self.timeout_s <= 900):
@@ -85,9 +91,9 @@ class ChatJob:
         if self.conversation_url is not None and not re.fullmatch(
                 r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
             raise ValueError("invalid conversation URL")
-        if self.kind != "STATUS_PROBE" and not self.new_chat and not self.conversation_url:
+        if self.kind not in {"STATUS_PROBE", "DELETE_CHAT"} and not self.new_chat and not self.conversation_url:
             raise ValueError("continuation requires an explicit conversation URL")
-        if self.new_chat and self.conversation_url:
+        if self.kind not in {"STATUS_PROBE", "DELETE_CHAT"} and self.new_chat and self.conversation_url:
             raise ValueError("new chat cannot target an existing conversation")
 
     def to_dict(self) -> Dict[str, Any]:

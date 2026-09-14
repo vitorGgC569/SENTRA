@@ -208,7 +208,7 @@ class JobStore:
             job = json.loads(row[0])
             if res.task_id != job['task_id']:
                 raise ValueError("TASK_MISMATCH")
-            if res.status == 'COMPLETED' and not job['new_chat'] and res.conversation_url != job['conversation_url']:
+            if res.status == 'COMPLETED' and job.get('kind') not in ('STATUS_PROBE', 'DELETE_CHAT') and not job['new_chat'] and res.conversation_url != job['conversation_url']:
                 raise ValueError("CONVERSATION_MISMATCH")
             encoded = json.dumps(res.to_dict())
             if row[1] in ('COMPLETED', 'FAILED'):

@@ -65,6 +65,8 @@ def parser():
                      help="Com --supervise: encerra após N itens executados (padrão: ilimitado)")
     cli.add_argument("--idle-exit-secs", type=float, default=300,
                      help="Com --supervise: segundos ociosos até sair sozinho (padrão: 300; 0 = nunca)")
+    cli.add_argument("--clear", action="store_true",
+                     help="Após a execução (ou com --job-id), exclui os chats criados no provedor remoto para não poluir a conta do usuário")
     cli.add_argument("--mode", choices=["oma", "legacy"], default="oma", help=argparse.SUPPRESS)
     return cli
 
@@ -237,6 +239,23 @@ async def main_async(argv=None) -> int:
             report["dropped"] = record
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
+    if args.clear and not (args.prompt or args.demo or args.mock or args.promote or args.status or args.reconcile or args.resume):
+        if not args.job_id:
+            raise ValueError("--clear isolado exige --job-id")
+        path = workspace / "runs" / args.job_id
+        import re
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", args.job_id) or not path.is_dir():
+            raise ValueError("run não encontrada")
+        from orchestrator.conversation_pool import clear_run_conversations
+        from browser.extension_transport import ExtensionTransport
+        transport = None
+        try:
+            transport = ExtensionTransport(config.get("browser", {}).get("relay_base", "http://127.0.0.1:8765"))
+        except Exception:
+            pass
+        report = await clear_run_conversations(path, args.job_id, transport=transport)
+        print(json.dumps({"run_id": args.job_id, "clear_report": report}, ensure_ascii=False, indent=2))
+        return 0
     from orchestrator.configuration import build_router, close_router, engine_options
     from orchestrator.runtime import IntegratedRun, promote_candidate
     options = engine_options(config, args.max_rounds, args.workers)
@@ -291,6 +310,20 @@ async def main_async(argv=None) -> int:
         try:
             result = await IntegratedRun(workspace, run_id, objective, router, resume=args.resume, **options).run()
         finally:
+            if args.clear:
+                from orchestrator.conversation_pool import clear_run_conversations
+                ext_prov = getattr(router, "providers", {}).get("extension")
+                transport = getattr(ext_prov, "transport", None)
+                if transport is None and not demo:
+                    try:
+                        from browser.extension_transport import ExtensionTransport
+                        transport = ExtensionTransport(config.get("browser", {}).get("relay_base", "http://127.0.0.1:8765"))
+                    except Exception:
+                        transport = None
+                clear_res = await clear_run_conversations(workspace / "runs" / run_id, run_id, transport=transport)
+                n_cleared = len(clear_res.get("cleared", []))
+                n_failed = len(clear_res.get("failed", []))
+                print(f"\n[--clear] Chats excluídos/limpos: {n_cleared} (falhas: {n_failed})")
             await close_router(router)
     print(f"\nStatus: {result['status']}\nTarefas: {result['completed_tasks']}/{result['total_tasks']}")
     print(f"Contexto para a central: {result['handoff_path']}\nPatch: {result['patch_path']}")

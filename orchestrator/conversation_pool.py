@@ -94,7 +94,7 @@ class FixedConversationRouter:
                 if url is not None and (not match or match[1] != entry.get("conversation_id")):
                     raise ValueError("invalid conversation URL/identity")
                 state = entry.setdefault("state", "CONFIRMED" if url else "NOT_SENT")
-                if state not in _BLOCKING | {"CONFIRMED", "NOT_SENT"}:
+                if state not in _BLOCKING | {"CONFIRMED", "NOT_SENT", "CLEARED"}:
                     raise ValueError("invalid conversation delivery state")
                 if state == "CONFIRMED" and not url:
                     raise ValueError("confirmed conversation has no URL")
@@ -266,6 +266,51 @@ class FixedConversationRouter:
     def seats(self):
         return deepcopy(self._map)
 
+    async def clear_conversations(self, transport=None) -> Dict[str, Any]:
+        """Exclui todas as conversas confirmadas gerenciadas por este pool para manter a conta limpa."""
+        results = {"cleared": [], "failed": [], "skipped": []}
+        async with self._lock:
+            self._load()
+            if not self._map:
+                return results
+
+            if transport is None and self._inner is not None:
+                providers = getattr(self._inner, "providers", {})
+                for prov in providers.values():
+                    if hasattr(prov, "transport") and hasattr(prov.transport, "delete_chat"):
+                        transport = prov.transport
+                        break
+
+            for seat, entry in list(self._map.items()):
+                url = entry.get("url")
+                conv_id = entry.get("conversation_id")
+                provider_name = entry.get("provider", "")
+                if provider_name in {"mock", "local", "scripted"}:
+                    entry["state"] = "CLEARED"
+                    entry["cleared_at"] = time.time()
+                    results["cleared"].append({"seat": seat, "provider": provider_name, "note": "local/mock"})
+                    continue
+                if not url and not conv_id:
+                    results["skipped"].append({"seat": seat, "reason": "no_url"})
+                    continue
+                target = conv_id or url
+                if transport and hasattr(transport, "delete_chat"):
+                    try:
+                        res = await transport.delete_chat(target)
+                        if res.get("status") == "COMPLETED":
+                            entry["state"] = "CLEARED"
+                            entry["cleared_at"] = time.time()
+                            results["cleared"].append({"seat": seat, "target": target, "result": res.get("result")})
+                        else:
+                            results["failed"].append({"seat": seat, "target": target, "error": res.get("error")})
+                    except Exception as exc:
+                        results["failed"].append({"seat": seat, "target": target, "error": str(exc)})
+                else:
+                    results["failed"].append({"seat": seat, "target": target, "error": "no_active_transport"})
+
+            self._save()
+        return results
+
 
 def inspect_conversations(store_dir, run_id):
     """Read-only operator diagnostic. Does not adopt, migrate, lock or send."""
@@ -281,3 +326,24 @@ def inspect_conversations(store_dir, run_id):
     return {"state": "BLOCKED" if blocked else "IDLE", "path": str(path),
             "seat_count": len(seats), "blocked_seats": blocked, "seats": seats,
             "scope": "run", "note": "IDLE is local state, not proof of browser readiness or quota."}
+
+
+async def clear_run_conversations(store_dir_or_workspace, run_id: str, transport=None) -> Dict[str, Any]:
+    """Lê conversations.json do run_id e limpa os chats remotos."""
+    p = Path(store_dir_or_workspace)
+    if (p / "runs" / run_id).is_dir():
+        run_dir = p / "runs" / run_id
+    elif p.is_dir() and (p / FixedConversationRouter.FILENAME).exists():
+        run_dir = p
+    elif (p / run_id).is_dir():
+        run_dir = p / run_id
+    else:
+        run_dir = p
+
+    path = run_dir / FixedConversationRouter.FILENAME
+    if not path.exists():
+        return {"cleared": [], "failed": [], "skipped": [], "note": "conversations.json não encontrado"}
+
+    pool = FixedConversationRouter(None, run_id, str(run_dir))
+    return await pool.clear_conversations(transport=transport)
+

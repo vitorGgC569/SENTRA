@@ -1,9 +1,10 @@
 /* content-script.js — só conhece operações primitivas. Nada de OMA/Quality Gate aqui.
  * Ops: NEW_CHAT, SEND_MESSAGE, WAIT_RESPONSE, READ_RESPONSE,
- *      GET_CONVERSATION_ID, GET_CONVERSATION_URL, STOP_GENERATION, GET_STATUS. */
+ *      GET_CONVERSATION_ID, GET_CONVERSATION_URL, STOP_GENERATION, GET_STATUS,
+ *      DELETE_CONVERSATION. */
 "use strict";
 
-const OMA_CS_VERSION = "1.5.2";
+const OMA_CS_VERSION = "1.6.0";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -462,6 +463,43 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                  send_available: sendAvailable, cap_banner: capBanner,
                  composer_found: composerFound, buttons_sample: buttonsSample,
                  diagnostics: omaComposerDiagnostics() };
+      }
+      case "DELETE_CONVERSATION": {
+        const convId = request.conversation_id || omaConversationId();
+        if (!convId) throw new Error("conversation_id required");
+        let deleted = false;
+        let details = null;
+        try {
+          const sessionResp = await fetch("/api/auth/session", { credentials: "same-origin" });
+          if (sessionResp.ok) {
+            const sessionData = await sessionResp.json();
+            const token = sessionData && sessionData.accessToken;
+            if (token) {
+              const patchResp = await fetch(`/backend-api/conversation/${convId}`, {
+                method: "PATCH",
+                credentials: "same-origin",
+                headers: {
+                  "Authorization": `Bearer ${token}`,
+                  "Content-Type": "application/json",
+                },
+                body: JSON.stringify({ is_visible: false }),
+              });
+              if (patchResp.ok) {
+                deleted = true;
+                details = "api_patch_success";
+              } else {
+                details = `api_patch_failed_${patchResp.status}`;
+              }
+            } else {
+              details = "no_access_token";
+            }
+          } else {
+            details = `session_failed_${sessionResp.status}`;
+          }
+        } catch (e) {
+          details = "api_patch_error: " + String((e && e.message) || e);
+        }
+        return { deleted, conversation_id: convId, details };
       }
       case "NEW_CHAT":
         window.location.href = "https://chatgpt.com/";

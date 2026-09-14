@@ -135,3 +135,41 @@ class ExtensionTransport:
             except Exception:
                 pass
             raise
+
+    async def delete_chat(self, conversation_url_or_id: str, timeout_s: int = 30) -> Dict[str, Any]:
+        """Solicita a exclusão do chat no provedor remoto para não poluir o histórico."""
+        if not self.token:
+            raise RuntimeError("relay pairing required: start python main.py --relay and pair the extension")
+        task_id = "del-" + uuid.uuid4().hex[:8]
+        conv_url = conversation_url_or_id if conversation_url_or_id.startswith("http") else f"https://chatgpt.com/c/{conversation_url_or_id}"
+        body: Dict[str, Any] = {
+            "task_id": task_id,
+            "prompt": conversation_url_or_id,
+            "timeout_s": timeout_s,
+            "new_chat": False,
+            "conversation_url": conv_url,
+            "kind": "DELETE_CHAT",
+        }
+        deadline = time.monotonic() + timeout_s
+        sub = await asyncio.to_thread(_post, f"{self.base}/jobs/submit", body, 10.0, self.token)
+        job_id = sub["job_id"]
+        try:
+            while True:
+                if time.monotonic() > deadline:
+                    raise TimeoutError(f"[TIMEOUT] delete job {job_id} exceeded {timeout_s}s")
+                chunk = min(5.0, max(.1, deadline - time.monotonic()))
+                res = await asyncio.to_thread(_get, f"{self.base}/jobs/wait?job_id={job_id}&timeout_s={chunk}",
+                                              chunk + 2, self.token)
+                if res.get("pending"):
+                    continue
+                if res.get("job_id") != job_id or res.get("task_id") != task_id:
+                    raise RuntimeError("relay response correlation mismatch")
+                await asyncio.to_thread(_post, f"{self.base}/jobs/ack", {"job_id": job_id}, 5, self.token)
+                return res
+        except (asyncio.CancelledError, TimeoutError):
+            try:
+                await asyncio.to_thread(_post, f"{self.base}/jobs/cancel", {"job_id": job_id}, 2, self.token)
+            except Exception:
+                pass
+            raise
+
