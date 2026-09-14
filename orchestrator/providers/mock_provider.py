@@ -95,6 +95,18 @@ class MockProvider:
             })
 
         if "executor" in role or "implementer" in role:
+            if (request.metadata.get("repository_session_id")
+                    and len(request.metadata.get("messages", [])) == 2):
+                # Exercise the actual same-worker repository roundtrip in offline E2Es.
+                return "[[R|math_utils.py|1|40]]"
+            if request.metadata.get("task_id") == "T-02":
+                return (
+                    "BEGIN_RESULT\nSTATUS: COMPLETE\nSUMMARY: Added boundary tests.\nPATCH:\n```diff\n"
+                    "--- /dev/null\n+++ b/tests/test_factorial_edges.py\n@@ -0,0 +1,6 @@\n"
+                    "+import pytest\n+from math_utils import factorial\n+def test_zero():\n"
+                    "+    assert factorial(0) == 1\n+def test_negative():\n"
+                    "+    with pytest.raises(ValueError): factorial(-1)\n"
+                    "```\nVALIDATION_COMMANDS:\n- [[TEST|all]]\nEND_RESULT")
             return (
                 "BEGIN_RESULT\n"
                 "STATUS: COMPLETE\n"
@@ -103,14 +115,16 @@ class MockProvider:
                 "```diff\n"
                 "--- a/math_utils.py\n"
                 "+++ b/math_utils.py\n"
-                "@@ -0,0 +1,10 @@\n"
+                "@@ -0,0 +1,4 @@\n"
                 "+def factorial(n: int) -> int:\n"
                 "+    if n < 0:\n"
                 "+        raise ValueError('Negative not allowed')\n"
                 "+    return 1 if n <= 1 else n * factorial(n - 1)\n"
+                "--- /dev/null\n+++ b/tests/test_factorial.py\n@@ -0,0 +1,3 @@\n"
+                "+from math_utils import factorial\n+def test_factorial():\n+    assert factorial(5) == 120\n"
                 "```\n"
                 "VALIDATION_COMMANDS:\n"
-                "- python -c \"print('Tests passed')\"\n"
+                "- [[TEST|all]]\n"
                 "END_RESULT"
             )
 
@@ -118,8 +132,9 @@ class MockProvider:
             return json.dumps({
                 "status": "APPROVED",
                 "confidence": 0.95,
+                "score": 9.5,  # Scripted demo evidence, never a real-model calibration.
                 "summary": "Validation passed without errors.",
-                "requirements_checked": ["RF-001", "RF-002"],
+                "requirements_checked": request.metadata.get("acceptance_criteria", ["RF-001", "RF-002"]),
                 "findings": [],
                 "tests": [{"name": "test_basic", "status": "PASS"}],
                 "recommended_action": "PROMOTE",
@@ -134,11 +149,11 @@ class MockProvider:
                 "```diff\n"
                 "--- a/math_utils.py\n"
                 "+++ b/math_utils.py\n"
-                "@@ -1,3 +1,5 @@\n"
+                "@@ -0,0 +1 @@\n"
                 "+# Added type assertions\n"
                 "```\n"
                 "VALIDATION_COMMANDS:\n"
-                "- python -c \"print('Repair verified')\"\n"
+                "- [[TEST|all]]\n"
                 "END_RESULT"
             )
 

@@ -157,10 +157,28 @@ Output JSON:
 }
 
 
+def _compact_patch(patch: str, limit: int = 6000) -> str:
+    """Context budgeting for validator prompts: web-size diffs would otherwise
+    exceed the provider's per-message cap and the validator would never run.
+    Keeps head+tail with explicit omission markers and line stats, so the
+    validator knows it sees an excerpt — strictly better than no validation.
+    Pure function (input untouched)."""
+    if len(patch or "") <= limit:
+        return patch or ""
+    lines = (patch or "").splitlines()
+    head, tail = lines[:60], lines[-40:]
+    omitted = len(lines) - len(head) - len(tail)
+    return ("\n".join(head)
+            + f"\n[... OMITTED {omitted} lines / {len(patch) - limit} chars "
+              f"for context budget: {len(lines)} total lines ...]\n"
+            + "\n".join(tail))
+
+
 class SpecializedValidator:
-    def __init__(self, role: ValidatorRole, router: ModelRouter):
+    def __init__(self, role: ValidatorRole, router: ModelRouter, require_explicit_scores=False):
         self.role = role
         self.router = router
+        self.require_explicit_scores = require_explicit_scores
 
     async def validate(
         self,
@@ -170,14 +188,27 @@ class SpecializedValidator:
     ) -> ValidationReport:
         system_prompt = VALIDATOR_PROMPTS.get(
             self.role, VALIDATOR_PROMPTS[ValidatorRole.LOGIC]
+        ) + (
+            "\nStance: assume a defect exists and hunt it; do not agree with other "
+            "validators. Both unsupported approval and invented rejection are "
+            "errors. Never infer evidence you did not see."
+            '\nScore the candidate 0.0-10.0 in "score": 10 = shippable without '
+            "reservations; 9.5 = release bar (minor polish only); 7-9 = needs "
+            "repair (list exactly what); below 7 = fundamentally flawed. The score "
+            "MUST match your findings: any open CRITICAL caps you at 4.0, any "
+            "MAJOR at 7.0 (enforced deterministically). Grade inflation — high "
+            "score alongside severe findings — invalidates your report."
         )
+        patch_text = _compact_patch(candidate.patch)
         user_prompt = f"""TASK OBJECTIVE: {task.objective}
 TASK DESCRIPTION: {task.description}
+TASK ACCEPTANCE CRITERIA (copy exact strings into requirements_checked only if verified):
+{json.dumps(task.metadata.get('acceptance_criteria', []))}
 
 CANDIDATE SUMMARY: {candidate.summary}
 PROPOSED PATCH:
 ```diff
-{candidate.patch}
+{patch_text}
 ```
 
 DETERMINISTIC TEST RESULTS:
@@ -187,7 +218,8 @@ DETERMINISTIC TEST RESULTS:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             role=self.role.value,
-            metadata={"task_id": task.id, "candidate_id": candidate.candidate_id},
+            metadata={"task_id": task.id, "candidate_id": candidate.candidate_id,
+                      "acceptance_criteria": task.metadata.get("acceptance_criteria", [])},
         )
 
         resp = await self.router.execute(req)
@@ -205,8 +237,46 @@ DETERMINISTIC TEST RESULTS:
             except Exception:
                 pass
 
-        status = parsed.get("status", "APPROVED" if resp.success else "REJECTED").upper()
-        confidence = float(parsed.get("confidence", 0.9 if status == "APPROVED" else 0.5))
+        import math
+        if not isinstance(parsed, dict):
+            parsed = {}
+        status = str(parsed.get("status", "REJECTED")).upper()
+        try:
+            confidence = float(parsed.get("confidence", 0.0))
+        except (ValueError, TypeError):
+            confidence = 0.0
+        try:
+            raw_score = float(parsed.get("score"))
+            explicit_score = (raw_score if math.isfinite(raw_score)
+                              and 0.0 <= raw_score <= 10.0 else None)
+        except (ValueError, TypeError):
+            explicit_score = None
+        model_judgment_ok = (
+            resp.success and status in {"APPROVED", "REJECTED", "DISPUTED"}
+            and math.isfinite(confidence) and 0 <= confidence <= 1
+            and isinstance(parsed.get("findings", []), list)
+            and all(isinstance(f, dict) for f in parsed.get("findings", []))
+            and isinstance(parsed.get("requirements_checked", []), list)
+            and all(isinstance(item, str) for item in parsed.get("requirements_checked", []))
+        )
+        if self.require_explicit_scores and (
+                type(parsed.get("score")) not in (int, float) or explicit_score is None):
+            model_judgment_ok = False
+        if explicit_score is not None:
+            score = explicit_score if self.require_explicit_scores else round(explicit_score, 2)
+        elif model_judgment_ok:
+            # Fallback documentado: sem nota explícita, confiança x10.
+            score = round(max(0.0, min(1.0, confidence)) * 10.0, 2)
+        else:
+            score = 0.0
+        # Sem julgamento do modelo (transporte/budget/timeout, ou resposta
+        # inválida), o relatório NÃO é evidência contra o candidato: ran=False
+        # para o Quality Gate excluir do quorum em vez de votar REJECTED.
+        ran = bool(model_judgment_ok)
+        error = "" if ran else (resp.error or "invalid validator response")
+        if not model_judgment_ok:
+            status, confidence = "REJECTED", 0.0
+            parsed = {"summary": resp.error or "invalid validator response"}
         summary = parsed.get("summary", resp.content[:150])
 
         findings = []
@@ -223,10 +293,16 @@ DETERMINISTIC TEST RESULTS:
                 )
             )
 
-        # If tests failed deterministically, always add a CRITICAL finding
-        if test_results and not test_results.get("all_passed", True):
+        # If tests failed deterministically, always add a CRITICAL finding.
+        # Só falhas de checagens que REALMENTE executaram contam: recusas de
+        # política (refused) ou ausência de checagens não são evidência contra
+        # o candidato. Tests executados SÃO evidência: mesmo sem julgamento do
+        # modelo, o relatório conta (ran=True) — só o voto vazio é excluído.
+        ran_results = [r for r in (test_results or {}).get("results", [])]
+        if test_results and ran_results and not test_results.get("all_passed", True):
             status = "REJECTED"
             confidence = min(confidence, 0.4)
+            ran = True
             findings.append(
                 Finding(
                     finding_id=f"fnd_test_{uuid.uuid4().hex[:6]}",
@@ -237,6 +313,44 @@ DETERMINISTIC TEST RESULTS:
                 )
             )
 
+        # Version downgrade sem justificativa bloqueia: nenhuma validação de
+        # lógica enxerga constante de versão como regressão, então o determinismo
+        # injeta o achado (mesmo padrão do TEST_FAILURE). Upgrades viram INFO.
+        for down in (test_results or {}).get("version_check", {}).get("downgrades", []):
+            status = "REJECTED"
+            ran = True
+            findings.append(
+                Finding(
+                    finding_id=f"fnd_ver_{uuid.uuid4().hex[:6]}",
+                    severity=Severity.CRITICAL,
+                    category="VERSION_REGRESSION",
+                    description=(f"Version downgrade without justification: {down.get('path')} "
+                                 f"{down.get('old')} -> {down.get('new')}"),
+                    suggested_fix="Keep version constants monotonic unless the task is a release.",
+                )
+            )
+        for up in (test_results or {}).get("version_check", {}).get("upgrades", []):
+            findings.append(
+                Finding(
+                    finding_id=f"fnd_ver_{uuid.uuid4().hex[:6]}",
+                    severity=Severity.INFO,
+                    category="VERSION_CHANGE",
+                    description=(f"Version upgrade (non-blocking, visible): {up.get('path')} "
+                                 f"{up.get('old')} -> {up.get('new')}"),
+                )
+            )
+
+        # Anti-inflação determinística: nota inconsistente com os achados é
+        # cortada (CRITICAL aberto capa em 4.0, MAJOR em 7.0). Nota alta com
+        # defeito grave é evidência contra o avaliador, não a favor.
+        if any(f.severity == Severity.CRITICAL for f in findings):
+            score = min(score, 4.0)
+        elif any(f.severity == Severity.MAJOR for f in findings):
+            score = min(score, 7.0)
+        score = max(0.0, min(10.0, score))
+        if not self.require_explicit_scores:
+            score = round(score, 2)
+
         # Create report
         report = ValidationReport(
             report_id=f"val_{uuid.uuid4().hex[:8]}",
@@ -246,6 +360,9 @@ DETERMINISTIC TEST RESULTS:
             validator_role=self.role.value,
             status=status,
             confidence=confidence,
+            score=score,
+            ran=ran,
+            error=error,
             summary=summary,
             findings=findings,
             requirements_checked=parsed.get("requirements_checked", []),
@@ -261,10 +378,10 @@ class ValidatorPool:
     Manages a pool of specialized cognitive diversity validators.
     """
 
-    def __init__(self, router: ModelRouter):
+    def __init__(self, router: ModelRouter, require_explicit_scores=False):
         self.router = router
         self.validators = {
-            role: SpecializedValidator(role, router)
+            role: SpecializedValidator(role, router, require_explicit_scores)
             for role in ValidatorRole
             if role != ValidatorRole.GENERAL
         }
@@ -280,7 +397,12 @@ class ValidatorPool:
             ValidatorRole.LOGIC,
             ValidatorRole.REQUIREMENTS,
             ValidatorRole.EDGE_CASES,
+            ValidatorRole.ADVERSARIAL,
         ]
+        selected_roles = list(dict.fromkeys(selected_roles))
+        if str(task.risk).upper() in {"HIGH", "CRITICAL"} or getattr(task.priority, "value", task.priority) == "CRITICAL":
+            if ValidatorRole.SECURITY not in selected_roles:
+                selected_roles.append(ValidatorRole.SECURITY)
 
         tasks = [
             self.validators[role].validate(task, candidate, test_results)

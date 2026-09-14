@@ -1,4 +1,4 @@
-# AutonomousInfinityAI Configuration (OMA Architecture)
+# SENTRA Configuration (OMA Architecture)
 
 local_model:
   base_url: "http://127.0.0.1:11434/v1"  # Ollama OpenAI-compatible endpoint (or 8000/v1 for vLLM)
@@ -8,17 +8,41 @@ local_model:
   timeout: 120
 
 browser:
+  # Alvo oficial: chatgpt.com no Microsoft Edge, modo NÃO-privado, mantendo infos do navegador.
+  target_url: "https://chatgpt.com"
+  browser_channel: "msedge"
   headless: false
   storage_state_path: "auth.json"
-  user_data_dir: null
-  cdp_url: null  # Optional Chrome Remote Debugging URL e.g. "http://localhost:9222"
-  timeout_seconds: 15
+  # Perfil persistente do Edge (nunca efêmero/incógnito). Mantém login/cookies/histórico.
+  user_data_dir: "browser_profiles/edge-orchestrator"
+  cdp_url: null  # Edge já em execução e.g. "http://localhost:9222" (msedge --remote-debugging-port=9222)
+  timeout_seconds: 300
   stable_samples: 3
+  # provider: "playwright" (protótipo/E2E) | "extension" (uso live via Edge real)
+  provider: "extension"
+  # Pool de tabs reais (extensão): poucas tabs servem muitas conversas por reutilização
+  tab_pool:
+    min_tabs: 1
+    max_tabs: 4
+  relay_base: "http://127.0.0.1:8765"
+
+routing:
+  worker: "extension"
+  reviewer: "extension"  # Internal reviewer, not the external central AI
+  fallback: null        # No unexpected provider/cost switch
+  roles: {}
+
+validation:
+  execution:
+    backend: host  # CLI: --sandbox docker (no host fallback; recommended for candidate code)
+  commands: ["[[TEST|all]]"]
+  timeout_seconds: 120
+  profiles: {}  # Operator-only argv lists, e.g. all: ["node", "--test"]
 
 orchestrator:
   mode: "oma"  # "oma" (full multi-agent architecture) or "legacy" (original MVP loop)
   max_rounds: 20
-  max_parallel_sessions: 3
+  max_parallel_sessions: 1  # Start small; --workers overrides actual task concurrency
   repeated_failure_limit: 3
   no_progress_limit: 3
   worktree_isolation: true
@@ -29,14 +53,42 @@ oma:
   critical_rejection_blocks: true
   objective_test_required: true
   minimum_confidence_threshold: 0.75
-  max_repair_rounds: 4
+  # Release bar: MINIMUM critic score 0-10. Loop refines until min >= bar.
+  min_release_score: 9.5
+  max_repair_rounds: 15
+  stagnation_limit: 5  # rejeições idênticas seguidas antes de escalar por STAGNANT
   branching_factor_limit: 5
   max_depth: 5
   global_task_budget: 200
   token_budget_master: 50000
   token_budget_secondary: 1000000
+  task_token_budget: 120000
+  max_output_tokens: 4096
+  max_inflight_requests: 2
   circuit_failure_threshold: 3
   circuit_recovery_timeout: 30.0
+  # 5 assentos iniciais por run: planner/judge usam master; repair usa executor.
+  # Envios serializados, inclusive respostas do gateway. Não é limite global da conta.
+  fixed_conversations: true
+  inter_call_delay_s: 30.0  # cooldown entre mensagens reais, persistido entre processos
+  # LIMITE DE CRIAÇÃO DE CHATS (não de mensagens): o rate limit do provedor
+  # conta conversas abertas. 5 = master + executor + 3 validadores iniciais;
+  # standby por escalada é RECUSADO alto (visível) em vez de abrir o 6º chat.
+  max_seats: 5
+  # Começa pequeno, escala só com causa (disagreement/low-confidence/critical).
+  compute_policy:
+    initial_agents: 5
+    initial_roles: [logic, requirements, adversarial]
+    # add_agents é teto de adição: hoje só há 3 papéis standby distintos.
+    # Portanto este catálogo suporta no máximo 8 assentos, não 500 agentes reais.
+    escalation:
+      disagreement:
+        add_agents: 3
+      low_confidence:
+        add_agents: 5
+      critical_task:
+        add_agents: 10
+    max_agents: 500
 
 default_acceptance_criteria:
   - "Project compiles / builds without errors"

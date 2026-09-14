@@ -16,7 +16,14 @@ Your job is to implement complete, working solutions for the assigned task.
 Instructions:
 1. Provide a concise summary of the implementation.
 2. Deliver code changes as unified diff patches (--- a/file +++ b/file).
-3. Specify concrete validation commands to run (e.g. pytest or python script).
+   Hunk headers "@@ -start,count +start,count @@" MUST match exactly the hunk
+   lines that follow (' ' context, '-' removed, '+' added). Count twice:
+   malformed counts are rejected without review.
+   New files use "--- /dev/null" (never "--- a/..."); deleted files use
+   "+++ /dev/null". A new-file patch starting with "--- a/" is rejected.
+   No renames (separate delete + create instead) and no empty targets.
+3. Specify compact validation directives: [[TEST|all]], [[LINT]], [[BUILD]].
+   The local runtime alone chooses executable arguments. Shell text is rejected.
 4. Enclose your output between BEGIN_RESULT and END_RESULT markers.
 
 Format:
@@ -31,7 +38,7 @@ PATCH:
 +...
 ```
 VALIDATION_COMMANDS:
-- pytest tests/
+- [[TEST|all]]
 END_RESULT
 """
 
@@ -73,6 +80,8 @@ RELEVANT FILE CONTENTS:
         )
 
         resp = await self.router.execute(req)
+        if not resp.success:
+            raise RuntimeError(resp.error or "executor provider failed")
 
         # Parse structured output using Aggregator
         parsed = Aggregator.parse_structured_result(resp.content)

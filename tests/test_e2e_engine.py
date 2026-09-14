@@ -33,7 +33,7 @@ async def test_oma_engine_e2e_full_cycle(tmp_path):
         validators_required=3,
         minimum_approvals=2,
         critical_rejection_blocks=True,
-        objective_test_required=False,  # mock tests
+        objective_test_required=True,  # model is scripted, filesystem tests are real
         minimum_confidence_threshold=0.7,
     )
 
@@ -60,7 +60,7 @@ async def test_oma_engine_e2e_full_cycle(tmp_path):
     assert metrics["validation_pass_rate"] > 0.0
 
     # Verify persistence files were created in runs/e2e-test-run/
-    run_dir = Path("runs") / "e2e-test-run"
+    run_dir = workspace / "runs" / "e2e-test-run"
     assert (run_dir / "tasks.json").exists()
     assert (run_dir / "candidates.json").exists()
     assert (run_dir / "events.jsonl").exists()

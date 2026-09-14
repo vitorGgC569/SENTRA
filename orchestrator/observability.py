@@ -22,6 +22,7 @@ class MetricsCollector:
 
     validation_attempts: int = 0
     validation_approvals: int = 0
+    validation_abstentions: int = 0
     repair_rounds: int = 0
 
     master_calls: int = 0
@@ -43,7 +44,12 @@ class MetricsCollector:
     def record_task_escalated(self) -> None:
         self.tasks_escalated += 1
 
-    def record_validation(self, approved: bool) -> None:
+    def record_validation(self, approved: bool, ran: bool = True) -> None:
+        # Abstenções (validador não executou) não entram na taxa de aprovação:
+        # pass_rate mede evidência, não disponibilidade de infraestrutura.
+        if not ran:
+            self.validation_abstentions += 1
+            return
         self.validation_attempts += 1
         if approved:
             self.validation_approvals += 1
@@ -83,13 +89,15 @@ class MetricsCollector:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "scope": "current_process_attempt; use run_history for cumulative evidence",
             "tasks_total": self.tasks_total,
             "tasks_completed": self.tasks_completed,
             "tasks_failed": self.tasks_failed,
             "tasks_escalated": self.tasks_escalated,
             "validation_attempts": self.validation_attempts,
             "validation_approvals": self.validation_approvals,
-            "validation_pass_rate": round(self.validation_pass_rate, 4),
+            "validation_abstentions": self.validation_abstentions,
+            "validation_pass_rate": round(self.validation_pass_rate, 4) if self.validation_attempts else None,
             "repair_rounds": self.repair_rounds,
             "master_calls": self.master_calls,
             "tokens_master": self.tokens_master.to_dict(),

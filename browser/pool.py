@@ -25,8 +25,13 @@ class BrowserPool:
         session = self.sessions.get(role) or list(self.sessions.values())[0]
         lock = self.locks.get(role) or list(self.locks.values())[0]
 
+        # Per-role lock serializes access to a single Edge tab/profile while
+        # different roles run concurrently. Cancellation propagates (RF-017).
         async with lock:
-            response_text = await session.ask(prompt, timeout_seconds=timeout_seconds)
+            response_text = await asyncio.wait_for(
+                session.ask(prompt, timeout_seconds=timeout_seconds),
+                timeout=timeout_seconds + 10,
+            )
 
         return {
             "role": role,

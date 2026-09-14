@@ -9,7 +9,8 @@ from .router import ModelRouter
 
 
 MASTER_SYSTEM_PROMPT = """You are the OMA Master Model.
-You are the highest-tier cognitive intelligence in the system, acting as auditor, supreme judge, and final synthesizer.
+You are an internal package reviewer, not the user's central AI. Your approval is
+advisory and cannot bypass deterministic tests or authorize deployment/promotion.
 
 Your duties:
 1. Audit the Candidate Package (solution, tests, validator reports, evidence).
@@ -29,6 +30,10 @@ Output JSON format:
   "new_tasks": []
 }
 """
+
+
+class ReviewProtocolError(RuntimeError):
+    """No usable review was received. This is NOT evidence against the patch."""
 
 
 class MasterModelAgent:
@@ -65,7 +70,7 @@ PROPOSED SOLUTION / DIFF:
             system_prompt=MASTER_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             role="master",
-            metadata={"candidate_id": package.candidate_id},
+            metadata={"task_id": package.task_id, "candidate_id": package.candidate_id},
         )
 
         resp = await self.router.execute(req, preferred_provider=self.master_provider_name)
@@ -82,12 +87,32 @@ PROPOSED SOLUTION / DIFF:
             except Exception:
                 pass
 
-        decision_str = parsed.get("decision", "APPROVED" if resp.success else "REJECTED").upper()
+        import math
+        if (not resp.success or not isinstance(parsed, dict)
+                or parsed.get("decision") not in {"APPROVED", "REJECTED", "REPLAN"}
+                or type(parsed.get("confidence")) not in (int, float)
+                or not math.isfinite(parsed["confidence"])
+                or not 0 <= parsed["confidence"] <= 1
+                or type(parsed.get("needs_more_work")) is not bool
+                or any(not isinstance(parsed.get(key, []), list)
+                       for key in ("critical_issues", "remaining_risks", "new_tasks"))
+                or not isinstance(parsed.get("reasoning"), str)
+                or not parsed["reasoning"].strip()):
+            raise ReviewProtocolError(resp.error or "MASTER_REVIEW_PROTOCOL: expected a typed JSON decision")
+        decision_str = str(parsed.get("decision", "REJECTED")).upper()
+        try:
+            confidence = float(parsed.get("confidence", 0.0))
+        except (ValueError, TypeError):
+            confidence = 0.0
+        if (not resp.success or decision_str not in {"APPROVED", "REJECTED", "REPLAN"}
+                or not math.isfinite(confidence) or not 0 <= confidence <= 1
+                or parsed.get("critical_issues") or parsed.get("needs_more_work", True)):
+            decision_str = "REJECTED"
 
         return MasterDecision(
             decision=decision_str,
             selected_candidate_id=package.candidate_id if decision_str == "APPROVED" else None,
-            confidence=float(parsed.get("confidence", 0.95 if decision_str == "APPROVED" else 0.5)),
+            confidence=confidence if math.isfinite(confidence) else 0.0,
             critical_issues=parsed.get("critical_issues", []),
             remaining_risks=parsed.get("remaining_risks", []),
             needs_more_work=bool(parsed.get("needs_more_work", decision_str != "APPROVED")),
@@ -123,4 +148,6 @@ Please provide a clear, comprehensive final report summarizing the work accompli
         )
 
         resp = await self.router.execute(req, preferred_provider=self.master_provider_name)
-        return resp.content or "Work completed successfully across all tasks."
+        if not resp.success or not resp.content:
+            raise RuntimeError(resp.error or "final synthesis returned no content")
+        return resp.content

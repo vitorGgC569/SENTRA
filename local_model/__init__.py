@@ -1,5 +1,5 @@
 """
-Local LLM Integration (Qwen) for AutonomousInfinityAI.
+Local LLM Integration (Qwen) for SENTRA.
 """
 from .qwen_client import QwenLocalClient
 from .prompts import PromptBuilder

@@ -1,141 +1,237 @@
-# AutonomousInfinityAI 🤖♾️
+# SENTRA
 
-**AutonomousInfinityAI** is a multi-agent, multi-session coding orchestrator that pairs a fast, local LLM (**Qwen**) as the local director and critic with powerful, high-capacity web LLMs (**ChatGPT Web**) as remote specialized code generators.
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
+![Windows](https://img.shields.io/badge/platform-Windows-blue)
+![Edge MV3](https://img.shields.io/badge/edge-MV3-orange)
+![Tests pytest](https://img.shields.io/badge/tests-pytest-green)
+![Stdlib dashboard](https://img.shields.io/badge/dashboard-stdlib-lightgrey)
 
----
+**Orquestração auditável de implementação de código com agentes de IA.**
+LLMs propõem; software verifica as evidências e controla o fluxo.
+Consenso entre modelos não é prova de correção — teste verde + quorum é.
 
-## 🏗️ Architecture Overview
-
-```
-                          [ Prompt Inicial ]
-                                  │
-                                  ▼
-                ┌───────────────────────────────────┐
-                │        Qwen Controller            │
-                │  (Local via Ollama / vLLM)        │
-                └─────────────────┬─────────────────┘
-                                  │
-      ┌───────────────────────────┼───────────────────────────┐
-      ▼                           ▼                           ▼
-┌───────────┐               ┌───────────┐               ┌───────────┐
-│ Architect │               │Implementer│               │ Reviewer  │
-│  (Session)│               │ (Session) │               │ (Session) │
-└─────┬─────┘               └─────┬─────┘               └─────┬─────┘
-      │                           │                           │
-      └───────────────────────────┼───────────────────────────┘
-                                  ▼
-                ┌───────────────────────────────────┐
-                │    Playwright Browser Engine      │
-                │    (Chrome / ChatGPT Web UI)      │
-                └─────────────────┬─────────────────┘
-                                  │
-                                  ▼
-                ┌───────────────────────────────────┐
-                │     Git Sandbox & Command Runner  │
-                │     (Patch Apply + Validation)    │
-                └───────────────────────────────────┘
-```
+> Leia também: [`skills/oma_operator/SKILL.md`](skills/oma_operator/SKILL.md)
+> (runbook do operador) · [`docs/traps.md`](docs/traps.md) (armadilhas reais) ·
+> [`docs/OMA_Orquestrador_Multiagente.md`](docs/OMA_Orquestrador_Multiagente.md)
+> (especificação).
 
 ---
 
-## 🔑 Key Features
+## Como funciona
 
-- **Double-Loop State Machine**: Outer project loop (`ANALYZE` ➔ `PLAN` ➔ `DISPATCH` ➔ `COLLECT` ➔ `CRITIQUE` ➔ `APPLY` ➔ `VALIDATE`) and inner session loop.
-- **Zero API Rate Limit Exhaustion**: Offloads file reads, diff analysis, log parsing, and prompt structuring to Qwen running locally via Ollama or vLLM.
-- **Chrome Session Bridge**: Connects directly to your open browser session (via `--cdp-url http://localhost:9222`) or authenticated Playwright contexts (`auth.json`), avoiding Cloudflare bot blocks.
-- **Auto-Continuation Handling**: Detects truncated browser responses, requests exact continuations, and stitches diffs seamlessly.
-- **Git Worktree Isolation**: All patch proposals are applied and tested in clean git environments before being committed.
-- **Stagnation & Anti-Loop Protection**: Tracks progress hashes and limits repeated failures or non-progressing iterations.
+```mermaid
+flowchart LR
+    OP([Operador]) --> CLI[main.py]
+    CLI --> ENG[OMAEngine<br/>DAG + fila + estados]
+    ENG --> PLN[master<br/>planeja tarefas]
+    ENG --> EXE[executor<br/>patch unificado]
+    ENG --> VAL[3 validadores<br/>notas 0-10]
+    EXE <--> GW[repository gateway<br/>diretivas R/T/TEST]
+    GW --> TST[(testes reais<br/>Docker ou host)]
+    VAL --> QG{quality gate<br/>mínimo 9.5}
+    QG -->|abaixo da barra| REP[repair ≤ 15 rounds]
+    REP --> EXE
+    QG -->|aprovado| HO[handoff + candidate.patch]
+    ENG --> PROV[BrowserExtensionProvider]
+    PROV --> REL[relay :8765<br/>SQLite + leases]
+    REL --> EXT[edge_extension<br/>tabs próprias]
+    EXT --> EDGE([Edge real<br/>chats com contexto])
+```
+
+Cada tarefa do DAG percorre o ciclo:
+
+```mermaid
+sequenceDiagram
+    participant E as Engine
+    participant S as Assento (chat fixo)
+    participant M as Modelo
+    participant G as Gateway + Testes
+    participant V as Validadores
+    E->>S: dispatch (prompt ≤ 20k chars)
+    S->>M: SEND_MESSAGE
+    M-->>S: patch unificado
+    S->>G: aplica em cópia isolada + [[TEST|all]]
+    G-->>S: verde / vermelho
+    S->>V: candidato + evidências
+    V-->>E: notas (quorum 2/3, barra 9.5)
+    alt abaixo da barra
+        E->>S: repair com a crítica (≤ 15)
+    else aprovado
+        E->>E: integra em candidate.patch
+    end
+```
+
+Regras que o código impõe (não são sugestões): 5 assentos fixos por run
+(master, executor, 3 validadores) com reutilização de chat e cooldown de 30s;
+teto de 20000 caracteres por mensagem; reparo anti-estagnação;
+**sem replay de envio incerto** (reconciliação explícita do operador);
+**sem promoção automática** — aplicar no original é ` --promote` manual.
 
 ---
 
-## 🚀 Quick Start
+## Passo a passo
 
-### 1. Install Dependencies
-```bash
-cd C:\Users\vitor\OneDrive\Desktop\AutonomousInfinityAI
-pip install -r requirements.txt
-playwright install chromium
+### 0. Pré-requisitos
+
+Windows 10/11, Python 3.11+, Microsoft Edge com login no site de chat
+(modo não-privado), ~4GB livres. Docker Desktop opcional (validação em
+container). Aviso: automatizar UI de chat pode violar Termos do serviço;
+o provedor conta **chats criados** no rate limit.
+
+### 1. Instalar
+
+```powershell
+cd <pasta-do-SENTRA>
+python --version            # 3.11+
+python -m pip install -r requirements.txt
 ```
 
-### 2. Start Qwen Local (Ollama)
-```bash
-ollama run qwen2.5-coder:14b
-```
-*(Ollama exposes an OpenAI-compatible endpoint at `http://127.0.0.1:11434/v1`)*
+### 2. Fumaça offline (sem Edge, sem custo)
 
-### 3. (Optional) Open Chrome with Remote Debugging
-If you want AutonomousInfinityAI to send messages to your already-logged-in ChatGPT account in Google Chrome:
-```cmd
-chrome.exe --remote-debugging-port=9222
+```powershell
+python -B main.py --demo
 ```
 
-### 4. Run AutonomousInfinityAI
-```bash
-python main.py --job-id projeto-001 --prompt "Fix all failing tests and implement persistent storage" --workspace C:\caminho\para\seu\projeto
+Modelos roteirizados + testes reais em `.oma/demo-*`. Prova a máquina local,
+não inteligência nem Edge.
+
+### 3. Caminho live: relay + extensão
+
+```powershell
+# Terminal 1 (deixe aberto)
+python -B main.py --relay   # anote o token em .oma/relay-token
 ```
+
+No Edge logado: `edge://extensions` → modo desenvolvedor →
+**Carregar sem compactação** → pasta `edge_extension/` → Detalhes →
+Opções → cole o token → **Ativar** → salve. A extensão cria 2 tabs próprias
+e fala com `http://127.0.0.1:8765`. Recarregue-a após qualquer update.
+Um relay por porta (sonde `/health` antes — dual-bind = 2 filas invisíveis).
+
+### 4. Doctor (diagnóstico, zero custo)
+
+```powershell
+python -B main.py --doctor   # relay + token + workers_online TAB-*
+```
+
+Prova de fogo (cria **1 conversa real**):
+
+```powershell
+$env:OMA_LIVE_EXTENSION = '1'
+python -B -m pytest tests/e2e/test_extension_live.py -s
+```
+
+### 5. Console de acompanhamento
+
+```powershell
+Start-Process python -ArgumentList '-B','dashboard/server.py','--port','8899' `
+  -WorkingDirectory '<pasta-do-SENTRA>'
+# http://127.0.0.1:8899/  (só leitura: overview, runs, conversas, falhas, resumos)
+```
+
+### 6. Primeira missão (pequena de propósito)
+
+```powershell
+python -B main.py --job-id primeira-run --workspace '<pasta-do-projeto>' `
+  --provider extension --reviewer extension --workers 1 `
+  --prompt 'Corrigir a função X preservando a API e adicionar testes de borda' `
+  --trust-workspace
+```
+
+Cada tarefa = 1 fatia completa (código + teste), **≤ ~250 linhas por
+entrega** (teto de 20k). Missões gigantes de uma vez falham por mecânica;
+projetos grandes nascem do **acúmulo de runs** (baseline + patches + fila
+persistente `MASTER_QUEUE`).
+
+### 7. Resultado e promoção
+
+```powershell
+python -B main.py --status --workspace '<pasta-do-projeto>' --job-id primeira-run
+python -B main.py --promote primeira-run --workspace '<pasta-do-projeto>'  # manual!
+```
+
+Leia `handoff.md` + `candidate.patch` antes. `--resume` retoma (mesmo
+backend/política); `--reconcile` + `--drop-seat` resolve assento travado
+sem replay. Códigos de saída: `0` pronto/aplicado · `1` falhou ·
+`2` config inválida · `130` cancelado.
+
+Sem Edge? `--provider local --reviewer local` com Ollama/vLLM
+(`local_model` no `config.yaml`). `--demo` nunca representa live.
 
 ---
 
-## 📂 Project Structure
+## Console (dashboard)
 
-```
-AutonomousInfinityAI/
-├── main.py                     # CLI Entrypoint
-├── config.yaml                 # System & Model Configuration
-├── requirements.txt            # Python Dependencies
-├── README.md                   # Documentation
-├── orchestrator/               # State machine & Dispatcher
-│   ├── state_machine.py        # Phase enum, JobSpec, JobState, StateStore
-│   ├── dispatcher.py           # Core execution loop
-│   ├── aggregator.py           # Structured output parsing & aggregation
-│   ├── progress.py             # Progress hashing & stagnation tracking
-│   └── stop_conditions.py     # Success & failure criteria checkers
-├── browser/                    # Browser Engine
-│   ├── pool.py                 # Multi-session pool with locks
-│   ├── session.py              # Playwright & CDP bridge
-│   ├── site_adapter.py         # ChatGPT DOM locators & adapters
-│   └── response_capture.py     # Stability & completion detector
-├── local_model/                # Local LLM Integration
-│   ├── qwen_client.py          # OpenAI-compatible local client
-│   ├── prompts.py              # System envelope prompt builders
-│   └── schemas.py              # Pydantic structured output schemas
-├── workspace/                  # Git & Testing Sandbox
-│   ├── git_manager.py          # Worktree & diff management
-│   ├── patch_manager.py        # Unified diff parser & applicator
-│   ├── command_runner.py       # Subprocess build & test runner
-│   └── validator.py            # Comprehensive validation suite
-├── prompts/                    # System Prompts per Role
-│   ├── architect.md
-│   ├── implementer.md
-│   ├── reviewer.md
-│   └── continuation.md
-└── runs/                       # Persistent Job Logs & States
-```
+| Visão | Mostra |
+|---|---|
+| Visão geral | Cards (runs, projetos, failed, chats quebrados) + tabela por projeto |
+| Runs | Status, tarefas x/y, detalhe de chats com link da conversa real |
+| Conversas | Todos os chats, filtro por estado |
+| Falhas | Assentos NOT_SENT/UNCERTAIN/BLOCKED, entregas FAILED, tarefas FAILED |
+| Resumos | Markdown de contexto **gerado localmente** (objetivo, tarefas, chats+URLs, validações, falhas, eventos), por projeto ou run, com copiar/baixar |
+
+APIs: `/api/overview` · `/api/conversations?state=` · `/api/failures` ·
+`/api/summary?run_id=|project=` · `/api/responses` · `/api/relay/jobs`.
+Só GET, só loopback, stdlib, SQLite em `mode=ro`. Um dashboard por porta.
 
 ---
 
-## ⚙️ Configuration (`config.yaml`)
+## Configuração essencial (`config.yaml`)
 
-```yaml
-local_model:
-  base_url: "http://127.0.0.1:11434/v1"
-  model_name: "qwen2.5-coder:14b"
-  temperature: 0.1
-
-browser:
-  headless: false
-  storage_state_path: "auth.json"
-  cdp_url: "http://localhost:9222"  # Set when using open Chrome debugging
-
-orchestrator:
-  max_rounds: 20
-  max_parallel_sessions: 3
-  no_progress_limit: 3
-  repeated_failure_limit: 3
-```
+| Chave | Efeito |
+|---|---|
+| `routing.worker / reviewer` | `extension` (live), `local`, `openai`; sem fallback implícito |
+| `oma.max_seats: 5` | Teto de **criação de chats**: master + executor + 3 validadores |
+| `oma.min_release_score: 9.5` | Barra de release (0–10) |
+| `oma.max_repair_rounds: 15` | Reparos por tarefa; `stagnation_limit: 5` escala |
+| `oma.inter_call_delay_s: 30.0` | Cooldown entre mensagens reais |
+| `validation.commands` | `["[[TEST|all]]"]`; `profiles` = argv locais do operador |
+| `--workers / --max-rounds` | Concorrência de tarefas (1–8) / teto de tentativas |
 
 ---
 
-## 📜 License
-MIT License. Created for Autonomous Multi-Agent Development.
+## Testes
+
+```powershell
+python -B -m pytest tests -q            # suíte (unit + integration + failure + load)
+python -B -m pytest tests/unit -q       # bloco rápido
+$env:OMA_DOCKER_TESTS = '1'             # + containers reais (opt-in)
+```
+
+`pytest.ini` limita a coleta a `tests/` (runs, `.oma`, `Auxiliares` e perfis
+de browser ficam de fora). Doubles de teste só injetam **falha** no código
+real — nunca provam integração; prova live = URL de conversa + versões
+casadas + `workers_online`.
+
+---
+
+## Estrutura
+
+| Área | Responsabilidade |
+|---|---|
+| `main.py`, `orchestrator/configuration.py` | CLI, diagnóstico, roteamento explícito |
+| `orchestrator/runtime.py` | Snapshot, retomada, handoff, promoção externa |
+| `orchestrator/engine.py`, `queue.py`, `state_machine.py` | DAG, fila, estados |
+| `orchestrator/agents/` | Planner, executor, críticos, reparo, revisor |
+| `orchestrator/verification.py`, `quality_gate.py` | Testes no candidato, critérios |
+| `orchestrator/conversation_pool.py` | 5 assentos fixos, pacing, reconciliação |
+| `orchestrator/providers/`, `browser/` | Adaptadores + pool de tabs reais |
+| `native_bridge/` | Relay autenticado, protocolo, SQLite |
+| `edge_extension/` | MV3: tabs próprias, envio, leitura (só primitivas) |
+| `repository/`, `workspace/` | Gateway de diretivas, patches, snapshots, sandbox |
+| `dashboard/` | Console somente-leitura |
+| `self_improvement/`, `research/` | Ciclo de melhoria, verificadores de apoio |
+| `skills/oma_operator/` | Runbook do operador · `skills/sentra_repo/` gateway local |
+
+## Estado e limites (honesto)
+
+- Suite local verde não prova seletores do Edge, quota da conta nem
+  segurança contra código hostil (Docker ajuda, não é VM).
+- Quota/rate-limit do provedor é opaco: `UNKNOWN` não é nem sim nem não.
+- Sem canal de imagem: QA visual é do operador; agentes recebem texto.
+- Transmissão automática do contexto à IA central: manual (`handoff`).
+
+## Licença
+
+Sem arquivo de licença por enquanto — adicione um (ex.: MIT) se quiser
+permitir reuso por terceiros.

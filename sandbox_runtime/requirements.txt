@@ -1,0 +1,8 @@
+# Deliberately operator-owned; candidate requirements are NEVER auto-installed.
+pytest>=8,<10
+openai>=1.10,<3
+pydantic>=2.5,<3
+pyyaml>=6,<7
+gitpython>=3.1.40,<4
+typing-extensions>=4.9,<5
+playwright>=1.40,<2

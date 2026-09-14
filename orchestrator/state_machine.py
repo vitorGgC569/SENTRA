@@ -24,7 +24,7 @@ class Phase(str, Enum):
 
 # Valid state transitions for tasks as specified in Section 7 of OMA specification
 VALID_TASK_TRANSITIONS: Dict[TaskStatus, Set[TaskStatus]] = {
-    TaskStatus.PENDING: {TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.CANCELLED},
+    TaskStatus.PENDING: {TaskStatus.QUEUED, TaskStatus.RUNNING, TaskStatus.FAILED, TaskStatus.CANCELLED},
     TaskStatus.QUEUED: {TaskStatus.RUNNING, TaskStatus.CANCELLED},
     TaskStatus.RUNNING: {TaskStatus.VALIDATING, TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED},
     TaskStatus.VALIDATING: {
@@ -39,7 +39,7 @@ VALID_TASK_TRANSITIONS: Dict[TaskStatus, Set[TaskStatus]] = {
     TaskStatus.REPAIRING: {TaskStatus.VALIDATING, TaskStatus.FAILED, TaskStatus.ESCALATED, TaskStatus.CANCELLED},
     TaskStatus.READY: {TaskStatus.QUALITY_GATE, TaskStatus.READY_FOR_MASTER, TaskStatus.CANCELLED},
     TaskStatus.DISPUTED: {TaskStatus.ESCALATED, TaskStatus.REPAIRING, TaskStatus.CANCELLED},
-    TaskStatus.QUALITY_GATE: {TaskStatus.READY_FOR_MASTER, TaskStatus.REPAIRING, TaskStatus.FAILED, TaskStatus.CANCELLED},
+    TaskStatus.QUALITY_GATE: {TaskStatus.READY_FOR_MASTER, TaskStatus.REPAIRING, TaskStatus.FAILED, TaskStatus.CANCELLED, TaskStatus.ESCALATED, TaskStatus.VALIDATING},
     TaskStatus.READY_FOR_MASTER: {TaskStatus.MASTER_REVIEW, TaskStatus.COMPLETED, TaskStatus.CANCELLED},
     TaskStatus.MASTER_REVIEW: {TaskStatus.COMPLETED, TaskStatus.REPAIRING, TaskStatus.FAILED, TaskStatus.CANCELLED},
     TaskStatus.FAILED: {TaskStatus.RETRYING, TaskStatus.ESCALATED, TaskStatus.CANCELLED},

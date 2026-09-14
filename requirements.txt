@@ -4,3 +4,4 @@ pydantic>=2.5.0
 pyyaml>=6.0
 gitpython>=3.1.40
 typing-extensions>=4.9.0
+pytest>=8.0

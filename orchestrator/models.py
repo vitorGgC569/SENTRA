@@ -58,6 +58,7 @@ class TokenUsage:
     cached_tokens: int = 0
     model: str = ""
     estimated_cost: float = 0.0
+    accounting: str = "estimated"  # provider | estimated; never equate estimates with billed tokens
 
     def add(self, other: TokenUsage) -> TokenUsage:
         return TokenUsage(
@@ -67,6 +68,7 @@ class TokenUsage:
             cached_tokens=self.cached_tokens + other.cached_tokens,
             model=other.model or self.model,
             estimated_cost=self.estimated_cost + other.estimated_cost,
+            accounting="provider" if self.accounting == other.accounting == "provider" else "estimated",
         )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -120,6 +122,15 @@ class Evidence:
         return cls(**{k: v for k, v in data.items() if k in cls.__annotations__})
 
 
+def _opt_score(value) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class ValidationReport:
     report_id: str = field(default_factory=lambda: f"val_{uuid.uuid4().hex[:8]}")
@@ -129,6 +140,15 @@ class ValidationReport:
     validator_role: str = ValidatorRole.GENERAL.value
     status: str = "APPROVED"  # APPROVED, REJECTED, DISPUTED
     confidence: float = 1.0
+    # Critic score 0-10 (release bar: minimum across critics). None = unset
+    # (legacy reports); readers fall back to confidence*10. Set at build time
+    # by validators (explicit model score, else confidence-derived).
+    score: Optional[float] = None
+    # ran=False: o validador NÃO produziu julgamento (falha de transporte,
+    # budget, timeout antes do modelo). Não é evidência contra o candidato e o
+    # Quality Gate o exclui do quorum (INSUFFICIENT_VALIDATION, nunca REJECTED).
+    ran: bool = True
+    error: str = ""
     summary: str = ""
     findings: List[Finding] = field(default_factory=list)
     evidence: List[Evidence] = field(default_factory=list)
@@ -149,6 +169,9 @@ class ValidationReport:
             "validator_role": self.validator_role,
             "status": self.status,
             "confidence": self.confidence,
+            "score": self.score,
+            "ran": self.ran,
+            "error": self.error,
             "summary": self.summary,
             "findings": [f.to_dict() for f in self.findings],
             "evidence": [e.to_dict() for e in self.evidence],
@@ -171,6 +194,9 @@ class ValidationReport:
             validator_role=data.get("validator_role", ValidatorRole.GENERAL.value),
             status=data.get("status", "APPROVED"),
             confidence=float(data.get("confidence", 1.0)),
+            score=_opt_score(data.get("score")),
+            ran=bool(data.get("ran", True)),
+            error=data.get("error", ""),
             summary=data.get("summary", ""),
             findings=findings,
             evidence=evidence,
@@ -250,6 +276,8 @@ class CandidatePackage:
     tests_failed: int = 0
     requirements_coverage: float = 1.0
     calculated_confidence: float = 1.0
+    min_validator_score: float = 0.0
+    mean_validator_score: float = 0.0
     execution_iterations: int = 1
     repair_rounds: int = 0
     critical_risks: List[str] = field(default_factory=list)

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from enum import Enum
 from typing import Dict, List, Optional
 
@@ -30,6 +32,7 @@ class CircuitBreaker:
         self.state: CircuitState = CircuitState.CLOSED
         self.failure_count: int = 0
         self.last_failure_time: float = 0.0
+        self._probe_in_flight = False
 
     def can_attempt(self) -> bool:
         if self.state == CircuitState.CLOSED:
@@ -37,16 +40,24 @@ class CircuitBreaker:
         if self.state == CircuitState.OPEN:
             if time.time() - self.last_failure_time > self.recovery_timeout:
                 self.state = CircuitState.HALF_OPEN
+                self._probe_in_flight = True
                 return True
             return False
-        # HALF_OPEN allows single probe
+        if self._probe_in_flight:
+            return False
+        self._probe_in_flight = True
         return True
 
+    def release_probe(self):
+        self._probe_in_flight = False
+
     def record_success(self) -> None:
+        self.release_probe()
         self.failure_count = 0
         self.state = CircuitState.CLOSED
 
     def record_failure(self) -> None:
+        self.release_probe()
         self.failure_count += 1
         self.last_failure_time = time.time()
         if self.failure_count >= self.failure_threshold:
@@ -76,6 +87,32 @@ class ModelRouter:
         }
         self.success_counts: Dict[str, int] = {name: 0 for name in providers}
         self.total_counts: Dict[str, int] = {name: 0 for name in providers}
+        self._repository_context = ContextVar(f"repository-{id(self)}", default=None)
+        self._provider_boundary = ContextVar(f"provider-boundary-{id(self)}", default=None)
+        self.budget = None
+        self.role_routes = {}
+        self.request_timeout = None
+        self.max_output_tokens = None
+        self.max_inflight_requests = 0
+        self._admission_semaphore = None
+        self.response_sink = None
+
+    @contextmanager
+    def provider_scope(self, boundary):
+        """Observe every provider attempt, including repository rounds/fallbacks."""
+        token = self._provider_boundary.set(boundary)
+        try:
+            yield
+        finally:
+            self._provider_boundary.reset(token)
+
+    @contextmanager
+    def repository_scope(self, root, event_sink=None):
+        token = self._repository_context.set((root, event_sink))
+        try:
+            yield
+        finally:
+            self._repository_context.reset(token)
 
     def get_provider_for_complexity(self, complexity: TaskPriority | str) -> str:
         comp_str = complexity.value if isinstance(complexity, TaskPriority) else str(complexity).upper()
@@ -88,54 +125,128 @@ class ModelRouter:
         return self.primary_name
 
     async def execute(
-        self,
-        request: AgentRequest,
-        preferred_provider: Optional[str] = None,
+        self, request: AgentRequest, preferred_provider: Optional[str] = None,
     ) -> AgentResponse:
-        target_name = preferred_provider or self.primary_name
-        if target_name not in self.providers:
-            target_name = next(iter(self.providers))
+        from dataclasses import replace
+        from .contracts import contract, VERSION
+        request = replace(request, system_prompt=request.system_prompt + "\n" + contract(request.role),
+                          metadata={**request.metadata, "run_id": getattr(self, "run_id", None),
+                                    "role_contract_version": VERSION})
+        context = self._repository_context.get()
+        if context is None:
+            return await self._execute_once(request, preferred_provider)
+        from repository.agent_loop import AgentToolLoop
+        from repository.gateway import CommandGateway
+        root, event_sink = context
+        loop = AgentToolLoop(CommandGateway(root, event_sink=event_sink))
+        return await loop.run(request, lambda turn: self._execute_once(turn, preferred_provider))
 
-        breaker = self.circuit_breakers[target_name]
+    async def _execute_once(self, request: AgentRequest,
+                            preferred_provider: Optional[str] = None) -> AgentResponse:
+        import asyncio
+        from dataclasses import replace
+        if self.request_timeout:
+            request = replace(request, timeout=self.request_timeout)
+        if self.max_output_tokens:
+            request = replace(request, max_output_tokens=self.max_output_tokens)
+        if self.max_inflight_requests:
+            if self._admission_semaphore is None:
+                self._admission_semaphore = asyncio.Semaphore(self.max_inflight_requests)
+            async with self._admission_semaphore:
+                return await self._dispatch_once(request, preferred_provider)
+        return await self._dispatch_once(request, preferred_provider)
 
-        # Check circuit
-        if not breaker.can_attempt():
-            # Trip to fallback if available
-            if self.fallback_name and self.fallback_name in self.providers:
-                target_name = self.fallback_name
-                breaker = self.circuit_breakers[target_name]
-            else:
-                return AgentResponse(
-                    content="",
-                    latency=0.0,
-                    success=False,
-                    error=f"Circuit for provider '{target_name}' is OPEN and no fallback is available.",
-                )
+    async def _dispatch_once(self, request: AgentRequest,
+                             preferred_provider: Optional[str] = None) -> AgentResponse:
+        import asyncio
+        from ..budgets import BudgetExceeded, estimate_input_tokens
 
-        provider = self.providers[target_name]
-        self.total_counts[target_name] = self.total_counts.get(target_name, 0) + 1
-        resp = await provider.execute(request)
+        target = preferred_provider or self.role_routes.get(request.role,
+                    self.role_routes.get(request.role.split(".")[0], self.primary_name))
+        if target not in self.providers:
+            return AgentResponse(content="", success=False, error=f"[POLICY_ERROR] unknown provider {target}")
+        names = [target]
+        if (self.fallback_name in self.providers and self.fallback_name != target
+                and self.providers[self.fallback_name] is not self.providers[target]):
+            names.append(self.fallback_name)
+        last = None
+        timeout = max(1, int(request.timeout or 120))
+        # Grace para o timeout interno do provider disparar primeiro e classificar
+        # a falha (retry_safe/delivery_state); o timeout do router é backstop.
+        dispatch_timeout = timeout + 5
+        for name in names:
+            breaker = self.circuit_breakers[name]
+            if not breaker.can_attempt():
+                continue
+            reservation = None
+            if self.budget is not None:
+                messages = request.metadata.get("messages") or [
+                    {"content": request.system_prompt}, {"content": request.user_prompt}]
+                input_bound = estimate_input_tokens(messages)
+                try:
+                    reservation = self.budget.reserve(request.role, request.metadata.get("task_id", "__run__"),
+                                                      input_bound, request.max_output_tokens)
+                except BudgetExceeded as exc:
+                    breaker.release_probe()
+                    return AgentResponse(content="", success=False, error=f"[BUDGET_EXCEEDED] {exc}")
+            self.total_counts[name] += 1
+            try:
+                async def invoke(turn):
+                    return await asyncio.wait_for(self.providers[name].execute(turn), timeout=dispatch_timeout)
 
-        if resp.success:
-            breaker.record_success()
-            self.success_counts[target_name] = self.success_counts.get(target_name, 0) + 1
-            return resp
+                boundary = self._provider_boundary.get()
+                response = (await boundary(request, name, invoke) if boundary is not None
+                            else await invoke(request))
+            except asyncio.CancelledError:
+                if reservation:
+                    self.budget.settle(reservation, uncertain=True)
+                breaker.release_probe()
+                raise
+            except (TimeoutError, asyncio.TimeoutError) as exc:
+                response = AgentResponse(content="", success=False, error=f"[TIMEOUT] provider '{name}': {exc}",
+                                         metadata=self._external_failure_metadata(name))
+            except Exception as exc:
+                response = AgentResponse(content="", success=False, error=f"[PROVIDER_ERROR] '{name}': {exc}",
+                                         metadata=self._external_failure_metadata(name))
+            if reservation:
+                try:
+                    self.budget.settle(reservation, response.token_usage, uncertain=not response.success)
+                except BudgetExceeded as exc:
+                    breaker.release_probe()
+                    return AgentResponse(content="", success=False, token_usage=response.token_usage,
+                                         error=f"[BUDGET_EXCEEDED] {exc}")
+            if self.response_sink is not None:
+                import hashlib
+                self.response_sink({"task_id": request.metadata.get("task_id"), "role": request.role,
+                                    "provider": name, "model": response.model, "success": response.success,
+                                    "candidate_id": request.metadata.get("candidate_id"),
+                                    "role_contract_version": request.metadata.get("role_contract_version"),
+                                    "latency_s": response.latency,
+                                    "error": response.error, "token_usage": response.token_usage.to_dict(),
+                                    "conversation_key": request.metadata.get("conversation_key"),
+                                    "conversation": response.metadata,
+                                    "response_sha256": hashlib.sha256(response.content.encode()).hexdigest()})
+            if response.success:
+                breaker.record_success()
+                self.success_counts[name] += 1
+                return response
+            breaker.record_failure()
+            last = response
+            # Um side effect externo incerto não pode ser repetido num fallback
+            # (double-send). Quota/UI bloqueada exige diagnóstico, não outra conta.
+            # Mas timeout PURO sem metadados de incerteza (ex. modelo local travado,
+            # sem side effect possível) DEVE fazer failover (RF-016/RF-019).
+            if (response.metadata.get("retry_safe") is False or
+                    response.metadata.get("delivery_state") in {"UNCERTAIN", "BLOCKED"} or
+                    any(code in (response.error or "") for code in ("SUBMISSION_UNCERTAIN", "DELIVERY_EXPIRED"))):
+                return response
+        return last or AgentResponse(content="", success=False,
+                                     error="[POLICY_ERROR] all eligible provider circuits are OPEN")
 
-        # Primary failed: record failure and try fallback if available
-        breaker.record_failure()
-        if self.fallback_name and self.fallback_name in self.providers and target_name != self.fallback_name:
-            fallback_breaker = self.circuit_breakers[self.fallback_name]
-            if fallback_breaker.can_attempt():
-                self.total_counts[self.fallback_name] = self.total_counts.get(self.fallback_name, 0) + 1
-                fallback_provider = self.providers[self.fallback_name]
-                fb_resp = await fallback_provider.execute(request)
-                if fb_resp.success:
-                    fallback_breaker.record_success()
-                    self.success_counts[self.fallback_name] = self.success_counts.get(self.fallback_name, 0) + 1
-                    return fb_resp
-                fallback_breaker.record_failure()
-
-        return resp
+    def _external_failure_metadata(self, name):
+        if getattr(self.providers[name], "persistent_conversations", False):
+            return {"delivery_state": "UNCERTAIN", "retry_safe": False}
+        return {}
 
     def get_reliability_score(self, provider_name: str) -> float:
         total = self.total_counts.get(provider_name, 0)

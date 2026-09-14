@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "limits": {"total_tokens": 220000, "total_seconds": 900},
+  "jobs": [
+    {
+      "id": "bounded-improvement-001",
+      "objective": "Choose one small defect with a reproducible failing test. Implement the fix and its regression test together. Preserve safety boundaries and return a verified candidate only; never promote it.",
+      "priority": 50,
+      "depends_on": [],
+      "agents": 6,
+      "budget": {"master": 20000, "secondary": 200000, "task": 150000, "seconds": 900}
+    }
+  ]
+}

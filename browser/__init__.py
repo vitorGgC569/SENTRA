@@ -1,5 +1,5 @@
 """
-Browser Automation & Multi-Session Management for AutonomousInfinityAI.
+Browser Automation & Multi-Session Management for SENTRA.
 """
 from .session import BrowserSession
 from .pool import BrowserPool

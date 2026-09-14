@@ -5,3 +5,21 @@ __pycache__/
 .pytest_cache/
 runs/cli-test-*/
 runs/e2e-test-*/
+
+# Local state, credentials and independent reference repositories.
+/auth.json
+/.env
+/.env.*
+!/.env.example
+/browser_profiles/
+/.edge-profile/
+/.oma/
+/runs/
+/Auxiliares/
+.venv/
+venv/
+node_modules/
+*.pem
+*.key
+*.p12
+*.pfx

@@ -46,16 +46,23 @@ class LocalModelProvider:
         return None
 
     async def execute(self, request: AgentRequest) -> AgentResponse:
+        import asyncio as _asyncio
+
         start_time = time.time()
+        timeout = max(1, int(request.timeout or 120))
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[
-                    {"role": "system", "content": request.system_prompt},
-                    {"role": "user", "content": request.user_prompt},
-                ],
-                temperature=request.temperature or self.temperature,
-                timeout=request.timeout,
+            response = await _asyncio.wait_for(
+                self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=request.metadata.get("messages") or [
+                        {"role": "system", "content": request.system_prompt},
+                        {"role": "user", "content": request.user_prompt},
+                    ],
+                    temperature=request.temperature or self.temperature,
+                    max_tokens=request.max_output_tokens,
+                    timeout=timeout,
+                ),
+                timeout=timeout + 10,
             )
             latency = time.time() - start_time
             choice = response.choices[0]
@@ -75,6 +82,7 @@ class LocalModelProvider:
                 output_tokens=out_tok,
                 model=self.model_name,
                 estimated_cost=0.0,
+                accounting="provider" if usage else "estimated",
             )
 
             structured = self._extract_json(content)
@@ -87,9 +95,20 @@ class LocalModelProvider:
                 success=True,
                 model=self.model_name,
             )
+        except _asyncio.CancelledError:
+            raise
         except Exception as e:
+            import asyncio as _a2
+
             latency = time.time() - start_time
-            err_msg = str(e)
+            if isinstance(e, (_a2.TimeoutError, TimeoutError)) or "timed out" in str(e).lower() or "timeout" in str(e).lower():
+                err_msg = f"[TIMEOUT] local model '{self.model_name}' exceeded {timeout}s: {e}"
+            elif "connect" in str(e).lower() or "refused" in str(e).lower() or "unreachable" in str(e).lower():
+                err_msg = f"[NETWORK_ERROR] local model unavailable: {e}"
+            elif "model" in str(e).lower() and "not found" in str(e).lower():
+                err_msg = f"[DEPENDENCY_ERROR] {e}"
+            else:
+                err_msg = f"[MODEL_ERROR] {e}"
             return AgentResponse(
                 content="",
                 token_usage=TokenUsage(model=self.model_name),

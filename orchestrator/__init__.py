@@ -1,5 +1,5 @@
 """
-Orchestrator package for AutonomousInfinityAI (OMA Architecture).
+Orchestrator package for SENTRA (OMA Architecture).
 """
 from .state_machine import (
     Phase,

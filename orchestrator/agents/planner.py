@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 from ..models import Task, TaskPriority, TaskStatus, TokenUsage
@@ -64,6 +65,8 @@ REPOSITORY CONTEXT:
         )
 
         resp = await self.router.execute(req)
+        if not resp.success:
+            raise RuntimeError(resp.error or "planner provider failed")
         tasks_data = []
 
         if resp.structured_data and "tasks" in resp.structured_data:
@@ -95,8 +98,12 @@ REPOSITORY CONTEXT:
                 }
             ]
 
+        if not isinstance(tasks_data, list) or len(tasks_data) > 200:
+            raise ValueError("planner must return at most 200 tasks")
         tasks = []
         for d in tasks_data:
+            if not isinstance(d, dict):
+                raise ValueError("planner task must be an object")
             t = Task(
                 id=d.get("id", f"T-{len(tasks) + 1:02d}"),
                 run_id=run_id,
@@ -112,5 +119,18 @@ REPOSITORY CONTEXT:
                 target_files=d.get("target_files", []),
             )
             tasks.append(t)
+
+        by_id = {t.id: t for t in tasks}
+        if len(by_id) != len(tasks) or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", t.id) for t in tasks):
+            raise ValueError("planner task IDs must be unique and path-safe")
+        done = set()
+        for task in tasks:
+            if not isinstance(task.dependencies, list) or any(d not in by_id for d in task.dependencies):
+                raise ValueError("unknown dependency in planner DAG")
+        while len(done) < len(tasks):
+            ready = {t.id for t in tasks if set(t.dependencies) <= done} - done
+            if not ready:
+                raise ValueError("planner returned a cyclic DAG")
+            done.update(ready)
 
         return tasks

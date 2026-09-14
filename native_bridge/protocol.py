@@ -1,0 +1,76 @@
+"""Protocolo OMA <-> Edge Extension via relay local. Schemas validam tudo."""
+from __future__ import annotations
+
+import time
+import uuid
+import re
+from dataclasses import asdict, dataclass, field
+from typing import Any, Dict, List, Optional
+
+OPS_TO_EXTENSION = {"CREATE_CHAT", "SEND_MESSAGE", "WAIT_RESPONSE", "READ_RESPONSE",
+                    "GET_CONVERSATION_ID", "GET_CONVERSATION_URL", "STOP_GENERATION",
+                    "GET_STATUS", "NEW_CHAT"}
+# Job que o OMA submete ao relay (a extensão traduz para ops primitivas).
+# STATUS_PROBE só lê o DOM (envio disponível? banner de cap?) — nunca envia
+# mensagem, nunca consome quota. É a forma segura de vigiar rate-limit.
+JOB_TYPES = {"CHAT_TASK", "STATUS_PROBE"}
+
+
+@dataclass
+class ChatJob:
+    job_id: str = field(default_factory=lambda: f"job_{uuid.uuid4().hex}")
+    task_id: str = ""
+    prompt: str = ""
+    timeout_s: int = 180
+    new_chat: bool = True
+    conversation_url: Optional[str] = None
+    created_at: float = field(default_factory=time.time)
+    kind: str = "CHAT_TASK"
+
+    def validate(self) -> None:
+        if not isinstance(self.task_id, str) or not 1 <= len(self.task_id) <= 128:
+            raise ValueError("task_id required")
+        if self.kind not in JOB_TYPES:
+            raise ValueError(f"unknown job kind {self.kind!r}")
+        if self.kind == "STATUS_PROBE":
+            if self.prompt and len(self.prompt) > 20000:
+                raise ValueError("prompt max 20000 chars")
+        elif not isinstance(self.prompt, str) or not self.prompt or len(self.prompt) > 20000:
+            raise ValueError("prompt required (max 20000 chars)")
+        if type(self.new_chat) is not bool or type(self.timeout_s) is not int or not (5 <= self.timeout_s <= 900):
+            raise ValueError("timeout_s must be 5..900")
+        if self.conversation_url is not None and not re.fullmatch(
+                r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
+            raise ValueError("invalid conversation URL")
+        if self.kind != "STATUS_PROBE" and not self.new_chat and not self.conversation_url:
+            raise ValueError("continuation requires an explicit conversation URL")
+        if self.new_chat and self.conversation_url:
+            raise ValueError("new chat cannot target an existing conversation")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class ChatResult:
+    job_id: str = ""
+    task_id: str = ""
+    status: str = "COMPLETED"  # COMPLETED | FAILED
+    result: str = ""
+    conversation_url: Optional[str] = None
+    conversation_id: Optional[str] = None
+    error: Optional[str] = None
+    worker: str = ""
+
+    def validate(self) -> None:
+        if not self.job_id:
+            raise ValueError("job_id required")
+        if not isinstance(self.result, str) or len(self.result) > 200000:
+            raise ValueError("result must be text (max 200000 chars)")
+        if self.conversation_url and not re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
+            raise ValueError("invalid conversation URL")
+        if self.status not in ("COMPLETED", "FAILED"):
+            raise ValueError(f"unknown status {self.status!r}")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)

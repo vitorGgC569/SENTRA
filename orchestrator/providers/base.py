@@ -15,6 +15,7 @@ class AgentRequest:
     timeout: int = 120
     role: str = "general"
     metadata: Dict[str, Any] = field(default_factory=dict)
+    max_output_tokens: int = 2048
 
 
 @dataclass
@@ -26,6 +27,7 @@ class AgentResponse:
     success: bool = True
     error: Optional[str] = None
     model: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class AgentProvider(Protocol):

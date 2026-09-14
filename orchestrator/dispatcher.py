@@ -34,7 +34,7 @@ class Orchestrator:
         self.state = self.store.load() or JobState()
 
     async def run(self) -> JobState:
-        self.state.log(f"Starting AutonomousInfinityAI job: {self.spec.job_id}")
+        self.state.log(f"Starting SENTRA job: {self.spec.job_id}")
         self.store.save(self.state)
 
         while self.state.phase not in {Phase.DONE, Phase.FAILED}:

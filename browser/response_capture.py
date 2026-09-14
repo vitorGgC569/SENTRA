@@ -49,4 +49,10 @@ class ResponseCapture:
 
             await asyncio.sleep(1.5)
 
-        return last_text
+        # Deadline exceeded without stable finished response: surface a real
+        # timeout (RF-016) instead of silently returning a partial capture.
+        # Callers that want a degraded fallback must catch this explicitly.
+        raise TimeoutError(
+            f"Timed out after {timeout_seconds}s waiting for stable chatgpt.com response "
+            f"(last capture {len(last_text)} chars, stable_samples={stable_count}/{stable_samples})"
+        )

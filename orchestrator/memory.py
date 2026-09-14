@@ -6,7 +6,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .models import Candidate, Task
 
@@ -66,30 +66,57 @@ class ArtifactStore:
 
 
 class SemanticCache:
-    """
-    Cache for reusable candidate solutions and task outcomes as specified in Section 43-44.
+    """Reusable candidate cache (Sections 43-44).
+
+    HONESTY NOTE: this is a lexical near-duplicate cache (normalized hash +
+    Jaccard overlap), NOT an embedding vector DB. Paraphrases with low lexical
+    overlap are NOT matched. Threshold is conservative to avoid false-positive
+    reuse; reused entries must still pass deterministic revalidation.
     """
 
-    def __init__(self):
+    def __init__(self, similarity_threshold: float = 0.9):
         self._cache: Dict[str, Dict[str, Any]] = {}
+        self._token_sets: Dict[str, Set[str]] = {}
+        self.similarity_threshold = similarity_threshold
+
+    def _normalize(self, objective: str) -> str:
+        norm = re.sub(r"[^\w\s]", "", objective.lower())
+        return " ".join(norm.split())
 
     def _hash_objective(self, objective: str) -> str:
-        norm = re.sub(r"[^\w\s]", "", objective.lower())
-        norm = " ".join(norm.split())
-        return hashlib.sha256(norm.encode("utf-8")).hexdigest()
+        return hashlib.sha256(self._normalize(objective).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _jaccard(a: Set[str], b: Set[str]) -> float:
+        if not a and not b:
+            return 1.0
+        if not a or not b:
+            return 0.0
+        return len(a & b) / len(a | b)
 
     def store(self, objective: str, candidate: Candidate) -> None:
         key = self._hash_objective(objective)
         self._cache[key] = {
             "candidate": candidate.to_dict(),
             "timestamp": time.time(),
+            "objective": objective,
         }
+        self._token_sets[key] = set(self._normalize(objective).split())
 
     def lookup(self, objective: str) -> Optional[Candidate]:
         key = self._hash_objective(objective)
         entry = self._cache.get(key)
         if entry:
             return Candidate.from_dict(entry["candidate"])
+        # Near-duplicate fallback (conservative).
+        cand_tokens = set(self._normalize(objective).split())
+        best_key, best_sim = None, 0.0
+        for k, toks in self._token_sets.items():
+            sim = self._jaccard(cand_tokens, toks)
+            if sim > best_sim:
+                best_sim, best_key = sim, k
+        if best_key is not None and best_sim >= self.similarity_threshold:
+            return Candidate.from_dict(self._cache[best_key]["candidate"])
         return None
 
 
