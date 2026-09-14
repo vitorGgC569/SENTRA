@@ -7,7 +7,7 @@
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 2, maxTabs: 4 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.3.17";
+const OMA_SW_VERSION = "1.4.0";
 const OMA_UPDATE_CHECK_MS = 30000;
 let omaLastUpdateCheck = 0;
 let omaTickBusy = false;
@@ -324,7 +324,10 @@ async function omaProcessJob(tabId, job) {
     if (leaseLost) throw new Error("LEASE_LOST");
     await renew();
     // A channel/submit error is not proof that nothing was sent. Never replay.
-    await omaSendToTab(tabId, { operation: "SEND_MESSAGE", text: job.prompt });
+    const sent = await omaSendToTab(tabId, {
+      operation: "SEND_MESSAGE", text: job.prompt, images: job.images || [],
+    });
+    const attached = (sent && sent.result && sent.result.images_attached) || 0;
     worker.state = "WAITING_RESPONSE";
     const waited = await omaSendToTab(tabId, {
       operation: "WAIT_RESPONSE", timeout_ms: (job.timeout_s || 180) * 1000,
@@ -342,6 +345,7 @@ async function omaProcessJob(tabId, job) {
       result: waited.result ? waited.result.text : "",
       conversation_url: conv.result ? conv.result.url : null,
       conversation_id: conv.result ? conv.result.conversation_id : null,
+      images_attached: attached,
       worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION} cs=${omaLastCsVersion} err=${omaSwErrors}`,
     });
   } catch (e) {

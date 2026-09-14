@@ -16,6 +16,18 @@ OPS_TO_EXTENSION = {"CREATE_CHAT", "SEND_MESSAGE", "WAIT_RESPONSE", "READ_RESPON
 JOB_TYPES = {"CHAT_TASK", "STATUS_PROBE"}
 
 
+# Visual evidence attachments: screenshots travel as data URLs inside the job
+# (loopback only). Caps keep every job inside the relay 1 MiB body limit.
+MAX_IMAGES_PER_JOB = 2
+MAX_IMAGE_CHARS = 400000  # ~300 KiB PNG each
+MAX_IMAGES_TOTAL_CHARS = 700000
+
+
+def _valid_image_url(url: Any) -> bool:
+    return (isinstance(url, str) and len(url) <= MAX_IMAGE_CHARS
+            and re.fullmatch(r"data:image/(png|jpeg);base64,[A-Za-z0-9+/=]+", url) is not None)
+
+
 @dataclass
 class ChatJob:
     job_id: str = field(default_factory=lambda: f"job_{uuid.uuid4().hex}")
@@ -26,10 +38,18 @@ class ChatJob:
     conversation_url: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     kind: str = "CHAT_TASK"
+    images: List[str] = field(default_factory=list)
 
     def validate(self) -> None:
         if not isinstance(self.task_id, str) or not 1 <= len(self.task_id) <= 128:
             raise ValueError("task_id required")
+        if not isinstance(self.images, list) or len(self.images) > MAX_IMAGES_PER_JOB:
+            raise ValueError(f"images must be a list of at most {MAX_IMAGES_PER_JOB}")
+        for url in self.images:
+            if not _valid_image_url(url):
+                raise ValueError("image must be a data:image/png|jpeg URL within size cap")
+        if sum(len(u) for u in self.images) > MAX_IMAGES_TOTAL_CHARS:
+            raise ValueError("images exceed total size cap")
         if self.kind not in JOB_TYPES:
             raise ValueError(f"unknown job kind {self.kind!r}")
         if self.kind == "STATUS_PROBE":
@@ -61,6 +81,9 @@ class ChatResult:
     conversation_id: Optional[str] = None
     error: Optional[str] = None
     worker: str = ""
+    # Telemetry: how many job images the extension confirmed pasted.
+    # 0 with images submitted = paste failed (visible, never silent).
+    images_attached: int = 0
 
     def validate(self) -> None:
         if not self.job_id:

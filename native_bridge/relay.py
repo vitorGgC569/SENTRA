@@ -105,7 +105,7 @@ def make_handler(state, token):
                 if not isinstance(data, dict):
                     raise ValueError("JSON object required")
                 if self.path == "/jobs/submit":
-                    allowed = {"task_id", "prompt", "timeout_s", "new_chat", "conversation_url", "kind"}
+                    allowed = {"task_id", "prompt", "timeout_s", "new_chat", "conversation_url", "kind", "images"}
                     if set(data) - allowed:
                         raise ValueError("unknown job fields")
                     return self._send({"job_id": state.submit(ChatJob(**data))})

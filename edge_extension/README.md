@@ -5,6 +5,13 @@ e Recentes reais). A extensão NÃO decide nada: executa operações primitivas
 (`NEW_CHAT`, `SEND_MESSAGE`, `WAIT_RESPONSE`, `READ_RESPONSE`,
 `GET_CONVERSATION_ID/URL`, `STOP_GENERATION`, `GET_STATUS`) e reporta ao relay.
 
+`SEND_MESSAGE` aceita `images` (data URLs PNG/JPEG, máx 2 por job): cola cada
+uma no composer via clipboard real ANTES do texto e confirma quantas anexaram
+(`images_attached` no resultado; 0 com imagens enviadas = paste falhou, job
+FAILED honesto, nada enviado). Nunca executa "paste" sem antes escrever o
+próprio conteúdo (jamais toca no clipboard do usuário). Após atualizar os
+arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.4.0).
+
 > Nota de conformidade: automatizar a UI do chatgpt.com pode violar os Termos
 > do serviço. Para ChatGPT, o caminho suportado é a API. Esta arquitetura é
 > agnóstica a provider — use-a com sites cujos termos permitam automação.

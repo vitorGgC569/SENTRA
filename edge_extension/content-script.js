@@ -3,7 +3,7 @@
  *      GET_CONVERSATION_ID, GET_CONVERSATION_URL, STOP_GENERATION, GET_STATUS. */
 "use strict";
 
-const OMA_CS_VERSION = "1.3.17";
+const OMA_CS_VERSION = "1.4.0";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -82,7 +82,65 @@ function omaDismissBlockingOverlay() {
   return null;
 }
 
-async function omaSendMessage(text) {
+async function omaWaitAttachment(box, timeoutMs = 15000) {
+  // Confirma que o anexo apareceu no composer (img ou chip de anexo).
+  // Estado, não sleep: retorna assim que detecta.
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      if (box.querySelectorAll("img").length > 0) return true;
+      const scope = box.parentElement || document;
+      const chips = [...scope.querySelectorAll("[data-testid]")].filter((el) =>
+        /attach|file|image|preview|upload/i.test(el.getAttribute("data-testid") || ""));
+      if (chips.length > 0) return true;
+    } catch (_) {}
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return false;
+}
+
+async function omaPasteImages(box, dataUrls) {
+  // Cola data URLs de imagem no composer via clipboard real; NUNCA executa
+  // "paste" sem antes escrever NOSSO conteúdo (colaria o clipboard do usuário).
+  // Retorna quantas anexaram; qualquer falha aborta antes de qualquer envio.
+  let attached = 0;
+  for (const url of (dataUrls || []).slice(0, 2)) {
+    if (typeof url !== "string" || !url.startsWith("data:image/")) {
+      throw new Error("IMAGE_PASTE_FAILED: anexo não é data URL de imagem");
+    }
+    const blob = await (await fetch(url)).blob();
+    const type = (blob.type && blob.type.startsWith("image/")) ? blob.type : "image/png";
+    box.focus();
+    let pasted = false;
+    try {
+      await navigator.clipboard.write([new ClipboardItem({ [type]: blob })]);
+      pasted = document.execCommand("paste");
+    } catch (_) {
+      pasted = false;
+    }
+    if (!pasted) {
+      // Fallback sem tocar no clipboard do usuário: evento sintético com
+      // NOSSO DataTransfer (pode ser ignorado pelo editor; ok, falha alto).
+      try {
+        const dt = new DataTransfer();
+        dt.items.add(new File([blob], `evidence-${attached + 1}.png`, { type }));
+        pasted = box.dispatchEvent(new ClipboardEvent("paste",
+          { clipboardData: dt, bubbles: true, cancelable: true }));
+      } catch (_) {
+        pasted = false;
+      }
+    }
+    const ok = pasted && await omaWaitAttachment(box, 15000);
+    if (!ok) {
+      throw new Error(`IMAGE_PASTE_FAILED: imagem ${attached + 1} não apareceu no `
+        + "composer (clipboard bloqueado?); nada foi enviado");
+    }
+    attached++;
+  }
+  return attached;
+}
+
+async function omaSendMessage(text, images) {
   const box = await omaWaitForComposer();
   // Composer virtualizado fora da viewport pode não montar a toolbar de envio:
   // traz para a vista + foca + acomoda antes de preencher/enviar.
@@ -99,6 +157,9 @@ async function omaSendMessage(text) {
   if (!cleared) {
     throw new Error("CLEAR_FAILED: composer manteve rascunho obsoleto após 3 tentativas");
   }
+  // Evidência visual: anexa ANTES do texto (o clear acima destruiria anexos).
+  // Falha aqui = job FAILED honesto, nada enviado.
+  const imagesAttached = await omaPasteImages(box, images);
   // contenteditable ou textarea: preenche de forma compatível com o React.
   const fillOnce = (via) => {
     if (box.isContentEditable) {
@@ -144,7 +205,7 @@ async function omaSendMessage(text) {
   // Se nada de envio existir, espera a hidratação e tenta a 2ª rodada.
   for (let round = 0; round < 2; round++) {
     const r = await omaSubmitAttempt(box, text);
-    if (r.accepted) return r;
+    if (r.accepted) return Object.assign({}, r, { images_attached: imagesAttached });
     if (r.hint === "no-send-affordance" && round === 0) {
       await new Promise((res) => setTimeout(res, 8000));
       continue;
@@ -292,7 +353,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           count: document.querySelectorAll(OMA_SELECTORS.assistantMessages.join(",")).length,
           text: omaLastAssistantText(),
         };
-        return await omaSendMessage(request.text || "");
+        return await omaSendMessage(request.text || "", request.images || []);
       }
       case "WAIT_RESPONSE":
         return { text: await omaWaitForStableResponse(request.timeout_ms || 120000, 3, omaPendingResponseBaseline) };

@@ -353,6 +353,25 @@
 - **CI** (`.github/workflows/ci.yml`, windows-latest): `tests/unit` +
   `tests/failure` + `tests/integration`. E2E/load fora (exigem Edge/Docker).
 
+## 9. Evidência visual nos chats (pipeline de imagem)
+
+- **Validador com 7.0 honesto exigiu render que o pipeline não entregava**
+  (hero→status→rodapé visíveis em ordem): deadlock estrutural de toda tarefa
+  UI. Correção ponta a ponta: captura headless do Edge
+  (`orchestrator/visual_evidence.py`, só PNG válido e limitado, fail-closed) →
+  `task.metadata["images"]` na revisão dos validadores (nota no prompt) →
+  `ChatJob.images` (máx 2, data URLs, dentro do 1 MiB do relay) → paste via
+  clipboard real no composer → `images_attached` confirmado por job (0 =
+  falha visível). Limites: sem canal de imagem não há QA visual de UI.
+- **Recarregar a extensão após update é obrigatório** (código novo não entra
+  sozinho; `edge://extensions` → recarregar; confira 1.4.0). Pasta renomeada?
+  Remova o registro antigo e carregue o novo caminho — path morto dá
+  "File path cannot be resolved".
+- **Headless Edge só escreve `--screenshot` em `.png`**: tmp de captura tem
+  que terminar em `.png` (rc=0 sem arquivo, silencioso e traiçoeiro).
+- Regra: evidência ausente é registrada (`visual_evidence.error`), nunca
+  inventada; validador nunca alega ter visto o que não está nas imagens.
+
 ### Anti-simulação (regra dura, vale para todos os capítulos)
 
 - Doubles de teste só injetam **falha real** (hang, atraso, erro) no código

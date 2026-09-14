@@ -7,14 +7,46 @@ para auditoria, sem acoplar o OMA ao provider (IDs desacoplados em projects.py).
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
 import time
-from typing import Any, Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
 from browser.extension_transport import ExtensionTransport
 from browser.outcomes import classify_failure
+from native_bridge.protocol import MAX_IMAGES_PER_JOB, MAX_IMAGE_CHARS
 from ..models import TokenUsage
 from .base import AgentRequest, AgentResponse
+
+
+def _load_image_attachments(spec: Any) -> Union[List[str], str, None]:
+    """File paths (metadata['images']) -> data URLs, or error text, or None.
+
+    Fail-closed: missing/non-PNG/oversize files refuse the whole send with a
+    clear error instead of delivering a prompt whose evidence is absent.
+    Caps mirror the relay protocol so a job accepted here passes validation.
+    """
+    if not spec:
+        return None
+    paths = [spec] if isinstance(spec, (str, Path)) else list(spec)
+    if len(paths) > MAX_IMAGES_PER_JOB:
+        return (f"[IMAGE_ERROR] at most {MAX_IMAGES_PER_JOB} images per message; "
+                "no text was sent")
+    urls = []
+    for path in paths:
+        try:
+            raw = Path(path).read_bytes()
+        except OSError:
+            return f"[IMAGE_ERROR] evidence file not found: {path}; no text was sent"
+        if raw[:8] != b"\x89PNG\r\n\x1a\n":
+            return f"[IMAGE_ERROR] evidence must be PNG: {path}; no text was sent"
+        url = "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
+        if len(url) > MAX_IMAGE_CHARS:
+            return (f"[IMAGE_ERROR] evidence exceeds size cap "
+                    f"({len(raw)} bytes): {path}; no text was sent")
+        urls.append(url)
+    return urls
 
 
 class BrowserExtensionProvider:
@@ -78,10 +110,16 @@ class BrowserExtensionProvider:
                 return AgentResponse(content="", success=False, model=self.model_name,
                                      error="[CONVERSATION_MISMATCH] continuation is not owned by this session",
                                      metadata={"delivery_state": "NOT_SENT", "retry_safe": False})
+        images = _load_image_attachments(request.metadata.get("images"))
+        if isinstance(images, str):  # error text, fail closed before any send
+            return AgentResponse(content="", success=False, model=self.model_name,
+                                 error=images,
+                                 metadata={"delivery_state": "NOT_SENT", "retry_safe": False})
         try:
             res = await self.transport.submit_chat(
                 task_id=task_id, prompt=prompt, timeout_s=timeout,
-                new_chat=new_chat, conversation_url=conversation_url if not new_chat else None)
+                new_chat=new_chat, conversation_url=conversation_url if not new_chat else None,
+                images=images or None)
         except asyncio.CancelledError:
             raise  # RF-017: nunca engolir cancelamento
         except (TimeoutError, asyncio.TimeoutError) as e:

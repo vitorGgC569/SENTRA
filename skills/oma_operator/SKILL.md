@@ -67,7 +67,7 @@ No Edge, com sua conta logada no site de chat:
 3. A extensão cria **duas tabs próprias** e começa o polling em
    `http://127.0.0.1:8765`. Ela **não** adota suas tabs pessoais.
 4. Recarregue a extensão (`edge://extensions` → recarregar) sempre que
-   atualizar os arquivos dela. Versão atual: `1.3.17`
+   atualizar os arquivos dela. Versão atual: `1.4.0` (com paste de imagem)
    (`edge_extension/manifest.json`); doctor recusa se divergir.
 
 ```powershell
@@ -291,10 +291,16 @@ Defensivo, sempre:
 - `MockProvider`/doubles: só injetam **falha** no código real; **nunca**
   provam integração. Prova live = URL de conversa + `versions.json` casando
   (`sw`/`cs`) + `workers_online`.
-- Screenshots p/ agentes: **não há canal de imagem** na extensão/relay
-  (só texto). Operador captura → `evidence/` → inspeciona → `visual-qa.md`
-  → run de QA cita o arquivo no `--prompt` → agentes leem via `[[R|…]]`
-  como observação do operador. Sem screenshots até ordem contrária.
+- Screenshots p/ agentes: **canal de imagem ativo** (v1.4.0+). A engine
+  renderiza alvos `.html` do candidato (Edge headless) em
+  `runs/<RUN>/evidence/` e anexa nas revisões dos validadores (máx 2/job,
+  confirmação `images_attached` por job no `/api/relay/jobs`; 0 = paste
+  falhou, visível). Validador cita o que viu nas imagens.
+- **Após qualquer update da extensão, RECARREGUE em `edge://extensions`**
+  e confira a versão. Pasta do projeto renomeada? Remova o registro velho
+  e carregue o novo caminho (path morto = "File path cannot be resolved").
+- QA visual do operador continua valendo p/ o que agente não cobre:
+  capture, inspecione, registre `evidence/visual-qa.md`.
 - Validação local quem decide é teste executado (`[[TEST|all]]`), não score
   de LLM. Quorum: 3 validadores, mínimo 2 aprovações, crítica bloqueia.
 - Sem commit/push/entrega automática: handoff exige promoção explícita

@@ -459,6 +459,37 @@ class OMAEngine:
         print(f"[+] [OMA Engine] Queued {len(tasks)} subtasks into PriorityTaskQueue.")
         return tasks
 
+    def _capture_candidate_renders(self, task, candidate, root, evidence) -> None:
+        """Render HTML targets of the applied candidate for validator review.
+
+        Best-effort visual evidence: captures land in runs/<id>/evidence/ and
+        their paths go to task.metadata["images"] (attached to validator
+        calls) plus evidence["visual_evidence"] (machine-readable manifest).
+        Absence is recorded honestly, never raised.
+        """
+        try:
+            from .visual_evidence import capture_task_renders
+            from pathlib import Path as _Path
+            targets = [t for t in (getattr(task, "target_files", None) or [])
+                       if str(t).lower().endswith((".html", ".htm"))]
+            if not targets:
+                evidence["visual_evidence"] = {"files": [], "note": "no HTML targets"}
+                return
+            dest = self.persistence.run_dir / "evidence"
+            recs = capture_task_renders(
+                [str(_Path(root) / t) for t in targets], dest)
+            paths = [r["path"] for r in recs if r.get("path")]
+            if paths:
+                task.metadata["images"] = paths
+            evidence["visual_evidence"] = {
+                "files": [{"path": r["path"], "sha256": r.get("sha256", ""),
+                           "bytes": r.get("bytes", 0)} for r in recs]}
+        except Exception as exc:  # noqa: BLE001 - evidence must never break verification
+            try:
+                evidence["visual_evidence"] = {"files": [], "error": str(exc)[:200]}
+            except Exception:
+                pass
+
     def _reset_provider_breakers(self) -> None:
         """Isolation: one task tripping the provider circuit must not poison
         siblings. Each task starts with a fresh breaker view; the breaker still
@@ -610,6 +641,7 @@ class OMAEngine:
                 # Test the applied candidate in an isolated copy, never the baseline.
                 async def inspect_candidate(root, evidence):
                     with self.router.repository_scope(root, self._repository_event):
+                        self._capture_candidate_renders(task, candidate, root, evidence)
                         return await self.validator_pool.validate_candidate(
                             task=task, candidate=candidate, roles=active_roles,
                             test_results=evidence)

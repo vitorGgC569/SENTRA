@@ -214,12 +214,23 @@ PROPOSED PATCH:
 DETERMINISTIC TEST RESULTS:
 {json.dumps(test_results or {}, indent=2)}
 """
+        images = [p for p in (task.metadata.get("images") or [])
+                  if isinstance(p, str) and p]
+        if images:
+            user_prompt += (
+                "\nEVIDENCIA VISUAL ANEXADA "
+                f"({len(images)} imagem(ns) renderizada(s) desta candidatura, em ordem): "
+                "examine cada imagem e confirme ou refute visualmente os requisitos "
+                "visuais; cite o que observou em cada uma. "
+                "Nunca alegue ter visto o que nao esta nas imagens.\n"
+            )
         req = AgentRequest(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             role=self.role.value,
             metadata={"task_id": task.id, "candidate_id": candidate.candidate_id,
-                      "acceptance_criteria": task.metadata.get("acceptance_criteria", [])},
+                      "acceptance_criteria": task.metadata.get("acceptance_criteria", []),
+                      **({"images": images} if images else {})},
         )
 
         resp = await self.router.execute(req)

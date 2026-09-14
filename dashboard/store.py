@@ -147,6 +147,9 @@ def relay_jobs(db_path, limit: int = 50, task_id: Optional[str] = None,
                     "state": state, "worker": worker or "",
                     "kind": data.get("kind", "CHAT_TASK"),
                     "conversation_url": url, "updated": updated,
+                    "images": len(data.get("images", []) or []),
+                    "images_attached": (res.get("images_attached", 0)
+                                        if isinstance(res, dict) else 0),
                     "prompt": _clip(prompt),
                     "response": _clip(res.get("result", "")) if res else None,
                     "response_error": (res.get("error") if res else None)})
