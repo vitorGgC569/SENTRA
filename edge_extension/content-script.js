@@ -4,7 +4,7 @@
  *      DELETE_CONVERSATION. */
 "use strict";
 
-const OMA_CS_VERSION = "1.6.1";
+const OMA_CS_VERSION = "1.6.2";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -67,33 +67,37 @@ async function omaSubmitAccepted(box, timeoutMs = 8000) {
 }
 
 function omaDismissBlockingOverlay() {
-  // Modais (ex. rate-limit "Excesso de solicitações") interceptam cliques no
-  // composer: o fill passa e o submit morre. Detecta e dispensa se possível.
+  // Modais (ex. rate-limit "Excesso de solicitações", "Você já carregou este arquivo")
+  // interceptam cliques no composer: detecta e dispensa se possível.
   try {
-    const dialogs = [...document.querySelectorAll("[role='dialog'], [role='alertdialog']")];
+    const dialogs = [...document.querySelectorAll("[role='dialog'], [role='alertdialog'], div[class*='modal'], div[class*='dialog']")];
     for (const d of dialogs) {
       const txt = (d.innerText || "").toLowerCase();
-      if (!/excesso|limite|rate|too many|slow down|aguarde/.test(txt)) continue;
+      if (!/excesso|limite|rate|too many|slow down|aguarde|já carregou|carregou|already uploaded/i.test(txt)) continue;
       const btns = [...d.querySelectorAll("button")];
       const ok = btns.find((b) => /entendido|entendi|ok|dismiss|fechar|close/i.test(b.innerText || ""))
         || btns[0];
-      if (ok) { ok.click(); return "dismissed-limit-modal"; }
+      if (ok) { ok.click(); return "dismissed-modal"; }
     }
   } catch (_) {}
   return null;
 }
 
 async function omaWaitAttachment(box, timeoutMs = 15000) {
-  // Confirma que o anexo apareceu no composer (img ou chip de anexo).
-  // Estado, não sleep: retorna assim que detecta.
+  // Confirma que o anexo apareceu no composer (img, chip, preview ou botão remover).
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
-      if (box.querySelectorAll("img").length > 0) return true;
-      const scope = box.parentElement || document;
-      const chips = [...scope.querySelectorAll("[data-testid]")].filter((el) =>
-        /attach|file|image|preview|upload/i.test(el.getAttribute("data-testid") || ""));
-      if (chips.length > 0) return true;
+      omaDismissBlockingOverlay();
+      const scope = box.closest("form") || (box.parentElement && box.parentElement.parentElement) || document;
+      if (scope.querySelectorAll("img").length > 0) return true;
+      const hasAttachment = [...scope.querySelectorAll("button, [data-testid], [class*='thumbnail'], [class*='preview'], [class*='file']")].some((el) => {
+        const testId = el.getAttribute("data-testid") || "";
+        const aria = el.getAttribute("aria-label") || "";
+        const cls = String(el.className || "");
+        return /attach|file|image|preview|upload|remover|remove/i.test(testId + " " + aria + " " + cls);
+      });
+      if (hasAttachment) return true;
     } catch (_) {}
     await new Promise((r) => setTimeout(r, 400));
   }
@@ -169,7 +173,8 @@ async function omaPasteImages(box, dataUrls) {
     }
     const blob = await (await fetch(url)).blob();
     const type = (blob.type && blob.type.startsWith("image/")) ? blob.type : "image/png";
-    const file = new File([blob], `evidence-${attached + 1}.png`, { type });
+    const uniqueSuffix = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const file = new File([blob], `evidence-${attached + 1}-${uniqueSuffix}.png`, { type });
     box.focus();
     let ok = await omaAttachViaFileInput(box, file);
     if (!ok) {
