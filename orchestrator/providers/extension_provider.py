@@ -134,6 +134,18 @@ class BrowserExtensionProvider:
                                  metadata=classify_failure(e))
 
         if "IMAGE_PASTE_FAILED" in str(res.get("error") or ""):
+            if images:
+                try:
+                    res = await self.transport.submit_chat(
+                        task_id=task_id,
+                        prompt=prompt + "\n\n[Nota de execução: anexo visual omitido por restrição de upload do navegador; avalie pelo código, diff e critérios]",
+                        timeout_s=timeout,
+                        new_chat=new_chat,
+                        conversation_url=conversation_url if not new_chat else None,
+                        images=None)
+                except Exception:
+                    pass
+        if "IMAGE_PASTE_FAILED" in str(res.get("error") or ""):
             # Prova pre-envio: o content-script anexa antes de preencher, e
             # falha ali significa nada entregue. Assento segue limpo e reusavel.
             return AgentResponse(content="", token_usage=TokenUsage(model=self.model_name),

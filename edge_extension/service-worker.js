@@ -7,7 +7,7 @@
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 2, maxTabs: 4 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.6.2";
+const OMA_SW_VERSION = "1.6.3";
 // Budgets MV3 (somente-leitura; a verdade está no servidor/Chrome):
 // - native_bridge/job_store.py concede lease de 120s: renovar < 120s ou o relay
 //   marca expirado e nenhum post tardio é aceito. Janela folgada de propósito

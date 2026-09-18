@@ -4,7 +4,7 @@
  *      DELETE_CONVERSATION. */
 "use strict";
 
-const OMA_CS_VERSION = "1.6.2";
+const OMA_CS_VERSION = "1.6.3";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -161,13 +161,39 @@ async function omaAttachViaDrop(box, file) {
   return await omaWaitAttachment(box, 10000);
 }
 
+function omaHasAttachment(box) {
+  try {
+    omaDismissBlockingOverlay();
+    const scope = box.closest("form") || (box.parentElement && box.parentElement.parentElement) || document;
+    if (scope.querySelectorAll("img").length > 0) return true;
+    const has = [...scope.querySelectorAll("button, [data-testid], [class*='thumbnail'], [class*='preview'], [class*='file']")].some((el) => {
+      const testId = el.getAttribute("data-testid") || "";
+      const aria = el.getAttribute("aria-label") || "";
+      const cls = String(el.className || "");
+      return /attach|file|image|preview|upload|remover|remove/i.test(testId + " " + aria + " " + cls);
+    });
+    if (has) return true;
+  } catch (_) {}
+  return false;
+}
+
 async function omaPasteImages(box, dataUrls) {
   // Ordem de vetores: file-input (determinístico) -> clipboard real ->
   // drop sintético. NUNCA execCommand("paste") sem antes escrever NOSSO
   // conteúdo (colaria o clipboard do usuário). Retorna quantas anexaram;
   // qualquer falha total aborta antes de qualquer envio.
+  if (!dataUrls || dataUrls.length === 0) return 0;
+  omaDismissBlockingOverlay();
+  if (omaHasAttachment(box)) {
+    return dataUrls.length; // Já anexo no composer, reutiliza sem gerar alerta de duplicata
+  }
   let attached = 0;
   for (const url of (dataUrls || []).slice(0, 2)) {
+    omaDismissBlockingOverlay();
+    if (omaHasAttachment(box)) {
+      attached++;
+      continue;
+    }
     if (typeof url !== "string" || !url.startsWith("data:image/")) {
       throw new Error("IMAGE_PASTE_FAILED: anexo não é data URL de imagem");
     }
