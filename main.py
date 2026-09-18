@@ -49,8 +49,8 @@ def parser():
     cli.add_argument("--prompt", help="Objetivo concreto da implementação")
     cli.add_argument("--workspace", help="Repositório alvo; padrão: diretório atual")
     cli.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
-    cli.add_argument("--provider", choices=["extension", "local", "openai"], help="Provedor dos workers")
-    cli.add_argument("--reviewer", choices=["extension", "local", "openai"], help="Revisor interno; não é a IA central")
+    cli.add_argument("--provider", choices=["extension", "local", "openai", "browser"], help="Provedor dos workers")
+    cli.add_argument("--reviewer", choices=["extension", "local", "openai", "browser"], help="Revisor interno; não é a IA central")
     cli.add_argument("--workers", type=int, help="Tarefas concorrentes; padrão conservador: 1")
     cli.add_argument("--max-rounds", type=int, help="Máximo de tentativas de tarefas por run")
     cli.add_argument("--resume", action="store_true", help="Retoma --job-id, preservando orçamento e checkpoints")
@@ -305,7 +305,7 @@ async def main_async(argv=None) -> int:
             if not diagnostics["ok"]:
                 print(json.dumps(diagnostics, ensure_ascii=False, indent=2))
                 return 2
-        router = build_router(config, worker=args.provider, reviewer=args.reviewer, mock=demo)
+        router = build_router(config, worker=args.provider, reviewer=args.reviewer, mock=demo, root=PROJECT_ROOT)
         print(f"Run: {run_id}\nWorkspace: {workspace}\nWorkers: {router.primary_name}; revisor interno: {router.providers['master'].model_name}")
         try:
             result = await IntegratedRun(workspace, run_id, objective, router, resume=args.resume, **options).run()

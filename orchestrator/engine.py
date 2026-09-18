@@ -48,6 +48,14 @@ TRANSIENT_MARKERS = (
     "DELIVERY_EXPIRED",
     "DELIVERY_UNCERTAIN",
     "SUBMISSION_UNCERTAIN",
+    # SUBMIT_FAILED é transitório por construção: o gate de aceite só falha
+    # com o composer ainda retendo o texto integral após duas tentativas, ou
+    # seja, NADA foi enviado e retentar não duplica. Cobre throttling
+    # transitório (ex.: cooldown de plano Free após geração longa).
+    "SUBMIT_FAILED",
+    # FILL_FAILED idem, com mais razão: o submit sequer foi tentado, logo
+    # nenhuma mensagem existe para duplicar. Retentar é sempre seguro.
+    "FILL_FAILED",
     # NOTA: CONVERSATION_BLOCKED foi removido de propósito — assento travado
     # exige reconcile do operador e nenhum retry automático pode destravar;
     # retentar queimava ~3min de backoff para falhar igual (visto em run live).

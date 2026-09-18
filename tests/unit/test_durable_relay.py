@@ -34,7 +34,11 @@ def test_restart_leases_correlation_duplicate_and_ack(tmp_path):
     store.close()
 
 
-def test_expired_lease_fails_without_duplicate_remote_execution():
+def test_expired_lease_fails_without_duplicate_remote_execution(monkeypatch):
+    # Mecanismo independente das constantes de produção: fixa as janelas
+    # históricas para exercitar a expiração sem depender do relógio real.
+    monkeypatch.setattr(JobStore, "LEASE_WINDOW_S", 120.0)
+    monkeypatch.setattr(JobStore, "PROGRESS_WINDOW_S", 120.0)
     now = [100.0]
     store = JobStore(clock=lambda: now[0])
     jid = store.submit(ChatJob(task_id="T", prompt="hi"))
@@ -68,7 +72,9 @@ def test_auth_origin_bounds_and_loopback():
         server.stop()
 
 
-def test_progress_extends_lease_past_heartbeat_window():
+def test_progress_extends_lease_past_heartbeat_window(monkeypatch):
+    monkeypatch.setattr(JobStore, "LEASE_WINDOW_S", 120.0)
+    monkeypatch.setattr(JobStore, "PROGRESS_WINDOW_S", 120.0)
     now = [1000.0]
     store = JobStore(clock=lambda: now[0])
     jid = store.submit(ChatJob(task_id="T", prompt="hi", timeout_s=300))
@@ -107,7 +113,9 @@ def test_progress_respects_absolute_cap():
     store.close()
 
 
-def test_orphan_safe_requeues_once_then_fails():
+def test_orphan_safe_requeues_once_then_fails(monkeypatch):
+    monkeypatch.setattr(JobStore, "LEASE_WINDOW_S", 120.0)
+    monkeypatch.setattr(JobStore, "PROGRESS_WINDOW_S", 120.0)
     now = [3000.0]
     store = JobStore(clock=lambda: now[0])
     jid = store.submit(ChatJob(task_id="T", prompt="hi", timeout_s=300))
@@ -128,7 +136,9 @@ def test_orphan_safe_requeues_once_then_fails():
     store.close()
 
 
-def test_unsafe_phase_never_requeues_and_errors_differ():
+def test_unsafe_phase_never_requeues_and_errors_differ(monkeypatch):
+    monkeypatch.setattr(JobStore, "LEASE_WINDOW_S", 120.0)
+    monkeypatch.setattr(JobStore, "PROGRESS_WINDOW_S", 120.0)
     now = [4000.0]
     store = JobStore(clock=lambda: now[0])
     jid = store.submit(ChatJob(task_id="T", prompt="hi", timeout_s=300))
@@ -172,3 +182,13 @@ def test_progress_validation_and_lease_binding():
         store.progress(jid, "TAB-1", "forged", "waiting")
     assert store.result(jid) is None
     store.close()
+
+
+def test_production_windows_cover_long_model_generations():
+    # Guarda a decisão operacional: janelas de lease/progresso precisam cobrir
+    # gerações longas do modelo (900s). Se alguém reduzir, este teste quebra
+    # de propósito — revise o impacto em gerações >2min antes de mudar.
+    from native_bridge import protocol
+
+    assert protocol.LEASE_WINDOW_S >= 900
+    assert protocol.PROGRESS_WINDOW_S >= 900

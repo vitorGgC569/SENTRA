@@ -2,13 +2,72 @@
 from __future__ import annotations
 
 import os
+import re
+from pathlib import Path
+from typing import Any, Dict, List
 
 from .agents.router import ModelRouter
 from .anti_explosion import AntiExplosionConfig
 from .quality_gate import QuorumPolicy
 
 
-def build_router(config, *, worker=None, reviewer=None, mock=False):
+DEFAULT_BOT_PROFILE_DIR = "browser_profiles/edge-bot"
+DEFAULT_LAUNCH_FLAGS: List[str] = [
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+]
+
+
+def browser_bot_settings(browser_cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Validate ``browser.bot_profile_dir / launch_flags / bot_headless``.
+
+    Returns ``{"bot_profile_dir", "launch_flags", "bot_headless"}`` with
+    defaults applied. Raises ``ValueError`` mentioning the offending key.
+    """
+    cfg = browser_cfg or {}
+    if not isinstance(cfg, dict):
+        raise ValueError("browser must be a mapping")
+    bot_profile_dir = cfg.get("bot_profile_dir", DEFAULT_BOT_PROFILE_DIR)
+    launch_flags = cfg.get("launch_flags", list(DEFAULT_LAUNCH_FLAGS))
+    bot_headless = cfg.get("bot_headless", False)
+
+    if not isinstance(bot_profile_dir, str) or not bot_profile_dir.strip():
+        raise ValueError("browser.bot_profile_dir must be a nonempty path string")
+    profile = bot_profile_dir.strip()
+    if len(profile) > 500:
+        raise ValueError("browser.bot_profile_dir must be <= 500 characters")
+    if any(c in profile for c in ("\n", "\r", "\x00")):
+        raise ValueError("browser.bot_profile_dir must not contain control characters")
+    parsed = Path(profile)
+    # Caminhos absolutos sao permitidos (ex.: perfil fora do OneDrive);
+    # o que continua proibido e OneDrive, traversal ".." e controles.
+    if "onedrive" in profile.lower():
+        raise ValueError("browser.bot_profile_dir must not point inside OneDrive")
+    if ".." in parsed.parts:
+        raise ValueError("browser.bot_profile_dir must not contain parent traversal '..'")
+
+    if launch_flags is None:
+        launch_flags = list(DEFAULT_LAUNCH_FLAGS)
+    if not isinstance(launch_flags, list):
+        raise ValueError("browser.launch_flags must be a list of Chromium flags")
+    if len(launch_flags) > 32:
+        raise ValueError("browser.launch_flags must contain at most 32 flags")
+    cleaned: List[str] = []
+    for flag in launch_flags:
+        if (not isinstance(flag, str) or not flag.startswith("--")
+                or not 3 <= len(flag) <= 200):
+            raise ValueError("browser.launch_flags entries must be strings starting with '--' (3..200 chars)")
+        if any(c in flag for c in ("\n", "\r", "\x00")):
+            raise ValueError("browser.launch_flags entries must not contain control characters")
+        cleaned.append(flag)
+
+    if not isinstance(bot_headless, bool):
+        raise ValueError("browser.bot_headless must be a boolean")
+    return {"bot_profile_dir": profile, "launch_flags": cleaned, "bot_headless": bot_headless}
+
+
+def build_router(config, *, worker=None, reviewer=None, mock=False, root=None):
     oma = config.get("oma", {})
     routing = config.get("routing", {})
     worker = worker or routing.get("worker", "extension")
@@ -19,13 +78,45 @@ def build_router(config, *, worker=None, reviewer=None, mock=False):
     if not isinstance(routes, dict):
         raise ValueError("routing.roles must be a mapping")
     selected.update(routes.values())
+    if "browser" in selected:
+        # Fail fast even in --demo: invalid bot config never becomes a live default.
+        browser_bot_settings(config.get("browser", {}) or {})
     providers = {}
     for name in selected:
-        if name not in {"local", "extension", "openai"}:
-            raise ValueError(f"unknown provider '{name}'; choose local, extension or openai")
+        if name not in {"local", "extension", "openai", "browser"}:
+            raise ValueError(f"unknown provider '{name}'; choose local, extension, openai or browser")
         if mock:
             from .providers.mock_provider import MockProvider
             providers[name] = MockProvider(model_name="scripted-demo-" + name)
+        elif name == "browser":
+            from .providers.browser_provider import BrowserProvider
+            from browser.bot_profile import (
+                get_bot_headless,
+                get_browser_channel,
+                get_storage_state_path,
+                resolve_bot_profile_dir,
+            )
+            from browser.session import BrowserSession
+            from browser.pool import BrowserPool
+            bcfg = browser_bot_settings(config.get("browser", {}) or {})
+            base = Path(root).resolve() if root is not None else Path.cwd()
+            profile_dir = resolve_bot_profile_dir(config, base)
+            storage = get_storage_state_path(config, base)
+            session = BrowserSession(
+                role="worker",
+                headless=bcfg["bot_headless"],
+                storage_state_path=str(storage) if storage else None,
+                browser_channel=get_browser_channel(config),
+                user_data_dir=str(profile_dir),
+                target_url=(config.get("browser", {}) or {}).get("target_url", "https://chatgpt.com"),
+                launch_args=bcfg["launch_flags"],
+            )
+            providers[name] = BrowserProvider(
+                pool=BrowserPool({"worker": session}),
+                bot_profile_dir=str(profile_dir),
+                launch_flags=bcfg["launch_flags"],
+                bot_headless=bcfg["bot_headless"],
+            )
         elif name == "openai":
             from .providers.openai_provider import OpenAIProvider
             providers[name] = OpenAIProvider(routing.get("openai_model"),
@@ -138,3 +229,16 @@ async def close_router(router):
         client = getattr(provider, "client", None)
         if client is not None:
             await client.close()
+        pool = getattr(provider, "pool", None)
+        if pool is not None and hasattr(pool, "close_all"):
+            try:
+                await pool.close_all()
+            except Exception:
+                pass
+        else:
+            session = getattr(provider, "session", None)
+            if session is not None and hasattr(session, "close"):
+                try:
+                    await session.close()
+                except Exception:
+                    pass

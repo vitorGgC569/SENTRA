@@ -23,6 +23,10 @@ Instructions:
    "+++ /dev/null". A new-file patch starting with "--- a/" is rejected.
    No renames (separate delete + create instead) and no empty targets.
 3. Specify compact validation directives: [[TEST|all]], [[LINT]], [[BUILD]].
+   ONLY these three are executable. NEVER put repository directives there
+   (no [[R|...]], [[T|...]], [[STATUS]], [[DIFF]] or similar: they are refused
+   and void your validation). If your task adds tests, create them under the
+   tests/ directory so [[TEST|all]] discovers them.
    The local runtime alone chooses executable arguments. Shell text is rejected.
 4. Enclose your output between BEGIN_RESULT and END_RESULT markers.
 

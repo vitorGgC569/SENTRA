@@ -4,6 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import Optional
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from .response_capture import ProgressCallback, emit_progress, supports_kwarg
 from .site_adapter import ChatSiteAdapter
 
 
@@ -33,6 +34,7 @@ class BrowserSession:
         browser_channel: str = "msedge",
         user_data_dir: Optional[str] = None,
         target_url: str = DEFAULT_TARGET_URL,
+        launch_args: Optional[list] = None,
     ):
         self.role = role
         # chatgpt.com actively blocks headless automation; force headed unless explicitly overridden
@@ -41,6 +43,9 @@ class BrowserSession:
         self.cdp_url = cdp_url
         self.browser_channel = browser_channel or "msedge"
         self.target_url = target_url
+        # Extra Chromium flags (ex.: anti-throttling do perfil do bot).
+        # Somados aos args base anti-automacao no launch; nunca substituem.
+        self.launch_args = list(launch_args) if launch_args else []
         if user_data_dir:
             self.user_data_dir = Path(user_data_dir)
         else:
@@ -53,15 +58,66 @@ class BrowserSession:
         self.page: Optional[Page] = None
         self.adapter: Optional[ChatSiteAdapter] = None
         self._using_persistent_context = False
+        self._closed = False
 
     @property
     def is_live(self) -> bool:
-        return self.adapter is not None and self.page is not None
+        if self._closed or self.adapter is None or self.page is None:
+            return False
+        try:
+            if self.page.is_closed():
+                return False
+        except Exception:
+            return False
+        return True
 
-    async def initialize(self, target_url: Optional[str] = None) -> None:
+    async def _cleanup_after_failed_init(self) -> None:
+        """Fecha tudo que foi parcialmente criado (nunca deixa browser zumbi).
+
+        No modo CDP fecha só a aba que abrimos; nunca o browser real do usuário.
+        """
+        try:
+            if self.cdp_url:
+                if self.page is not None:
+                    try:
+                        if not self.page.is_closed():
+                            await self.page.close()
+                    except Exception:
+                        pass
+            else:
+                if self.context is not None:
+                    try:
+                        await self.context.close()
+                    except Exception:
+                        pass
+                elif self.browser is not None:
+                    try:
+                        await self.browser.close()
+                    except Exception:
+                        pass
+        finally:
+            self.page = None
+            self.context = None
+            self.browser = None
+            self._using_persistent_context = False
+            if self._playwright is not None:
+                try:
+                    await self._playwright.stop()
+                except Exception:
+                    pass
+                self._playwright = None
+
+    async def initialize(
+        self,
+        target_url: Optional[str] = None,
+        *,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> None:
         url = target_url or self.target_url or DEFAULT_TARGET_URL
         self.target_url = url
+        self._closed = False
         try:
+            await emit_progress(on_progress, "preparing")
             self._playwright = await async_playwright().start()
 
             if self.cdp_url:
@@ -83,19 +139,24 @@ class BrowserSession:
                 )
                 self.user_data_dir.mkdir(parents=True, exist_ok=True)
                 try:
-                    self.context = await self._playwright.chromium.launch_persistent_context(
-                        str(self.user_data_dir.resolve()),
-                        channel=self.browser_channel,
-                        headless=self.headless,
-                        viewport={"width": 1280, "height": 800},
-                        locale="pt-BR",
-                        timezone_id="America/Sao_Paulo",
-                        storage_state=str(state_file.resolve()) if state_file else None,
-                        args=[
-                            "--disable-blink-features=AutomationControlled",
-                            "--no-first-run",
-                            "--no-default-browser-check",
-                        ],
+                    from browser.bot_profile import launch_persistent_with_cookies
+                    # Teto duro no launch: perfil travado por instancia
+                    # abandona travaria aqui até o timeout externo (15min).
+                    # Falha rápido para o fallback chromium abaixo.
+                    self.context = await asyncio.wait_for(
+                        launch_persistent_with_cookies(
+                            self._playwright,
+                            str(self.user_data_dir.resolve()),
+                            channel=self.browser_channel,
+                            headless=self.headless,
+                            storage_state_path=str(state_file.resolve()) if state_file else None,
+                            args=[
+                                "--disable-blink-features=AutomationControlled",
+                                "--no-first-run",
+                                "--no-default-browser-check",
+                            ] + [a for a in (self.launch_args or []) if isinstance(a, str) and a.startswith("--")],
+                        ),
+                        timeout=120,
                     )
                     self._using_persistent_context = True
                     self.browser = None  # persistent context owns the browser
@@ -114,20 +175,49 @@ class BrowserSession:
                     self.page = await self.context.new_page()
                     self._using_persistent_context = False
 
+            await emit_progress(on_progress, "navigating")
+            if self.page is not None:
+                # Teto global anti-congelamento: qualquer chamada CDP sem
+                # timeout explícito (count, is_visible, inner_text, evaluate,
+                # bring_to_front...) herda 30s em vez de travar para sempre
+                # quando o renderer congela. Timeouts explícitos prevalecem.
+                try:
+                    self.page.set_default_timeout(30000)
+                except Exception:
+                    pass
             await self.page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await emit_progress(on_progress, "settling")
             self.adapter = ChatSiteAdapter(self.page)
+            await emit_progress(on_progress, "ready")
         except Exception as e:
+            await self._cleanup_after_failed_init()
             err_msg = str(e).encode('ascii', 'ignore').decode('ascii')
             print(f"[{self.role}] Browser initialization warning: {err_msg}. Browser offline; calls fail fast.")
             self.adapter = None
 
-    async def ask(self, prompt: str, timeout_seconds: int = 600) -> str:
+    async def ask(
+        self,
+        prompt: str,
+        timeout_seconds: int = 600,
+        *,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> str:
         if self.adapter:
             # Hard timeout enforced here (in addition to adapter-level polling deadline)
             # so RF-016 holds even if the page hangs. Cancellation is NOT swallowed:
             # asyncio.CancelledError propagates to the caller (RF-017).
+            # Heartbeat: on_progress(fase, timestamp) é chamado durante o envio
+            # e a espera, para o provider reportar em gerações longas.
+            if on_progress is not None and supports_kwarg(
+                self.adapter.send_and_capture, "on_progress"
+            ):
+                inner = self.adapter.send_and_capture(
+                    prompt, timeout_seconds=timeout_seconds, on_progress=on_progress
+                )
+            else:
+                inner = self.adapter.send_and_capture(prompt, timeout_seconds=timeout_seconds)
             return await asyncio.wait_for(
-                self.adapter.send_and_capture(prompt, timeout_seconds=timeout_seconds),
+                inner,
                 timeout=timeout_seconds + 10,
             )
 
@@ -139,37 +229,50 @@ class BrowserSession:
         )
 
     async def close(self) -> None:
-        if self.cdp_url:
-            # Attached to the user's real, already-running browser: never close
-            # it, only tidy up the tab this session opened and disconnect.
-            if self.page:
+        """Fecha recursos de forma idempotente; nunca deixa browser zumbi."""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self.cdp_url:
+                # Attached to the user's real, already-running browser: never close
+                # it, only tidy up the tab this session opened and disconnect.
+                if self.page is not None:
+                    try:
+                        if not self.page.is_closed():
+                            await self.page.close()
+                    except Exception:
+                        pass
+                if self._playwright is not None:
+                    try:
+                        await self._playwright.stop()
+                    except Exception:
+                        pass
+                return
+
+            # Persist auth snapshot (backup) while keeping the Edge profile on disk.
+            # The profile dir itself is the source of truth for "manter infos do navegador".
+            if self.context and self.storage_state_path:
                 try:
-                    await self.page.close()
+                    await self.context.storage_state(path=self.storage_state_path)
                 except Exception:
                     pass
+            try:
+                if self._using_persistent_context and self.context:
+                    await self.context.close()
+                elif self.browser:
+                    await self.browser.close()
+            except Exception:
+                pass
             if self._playwright:
                 try:
                     await self._playwright.stop()
                 except Exception:
                     pass
-            return
-
-        # Persist auth snapshot (backup) while keeping the Edge profile on disk.
-        # The profile dir itself is the source of truth for "manter infos do navegador".
-        if self.context and self.storage_state_path:
-            try:
-                await self.context.storage_state(path=self.storage_state_path)
-            except Exception:
-                pass
-        try:
-            if self._using_persistent_context and self.context:
-                await self.context.close()
-            elif self.browser:
-                await self.browser.close()
-        except Exception:
-            pass
-        if self._playwright:
-            try:
-                await self._playwright.stop()
-            except Exception:
-                pass
+        finally:
+            self.page = None
+            self.context = None
+            self.browser = None
+            self.adapter = None
+            self._playwright = None
+            self._using_persistent_context = False

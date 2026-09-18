@@ -16,7 +16,7 @@ browser:
   # Perfil persistente do Edge (nunca efêmero/incógnito). Mantém login/cookies/histórico.
   user_data_dir: "browser_profiles/edge-orchestrator"
   cdp_url: null  # Edge já em execução e.g. "http://localhost:9222" (msedge --remote-debugging-port=9222)
-  timeout_seconds: 300
+  timeout_seconds: 900
   stable_samples: 3
   # provider: "playwright" (protótipo/E2E) | "extension" (uso live via Edge real)
   provider: "extension"
@@ -25,6 +25,14 @@ browser:
     min_tabs: 1
     max_tabs: 4
   relay_base: "http://127.0.0.1:8765"
+  # Perfil dedicado do bot ("nosso próprio navegador", isolado das abas pessoais).
+  bot_profile_dir: "browser_profiles/edge-bot"
+  # Flags anti-throttling: impedem o Chromium de congelar timers/render em 2º plano.
+  launch_flags:
+    - "--disable-background-timer-throttling"
+    - "--disable-backgrounding-occluded-windows"
+    - "--disable-renderer-backgrounding"
+  bot_headless: false
 
 routing:
   worker: "extension"

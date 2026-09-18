@@ -35,11 +35,12 @@ MAX_IMAGE_CHARS = 400000  # ~300 KiB PNG each
 MAX_IMAGES_TOTAL_CHARS = 700000
 
 # Lease resilience: heartbeat renova LEASE_WINDOW_S, progresso renova
-# PROGRESS_WINDOW_S, teto = created+timeout. Janela 120s: cobre suspensao MV3
-# (~30-60s sem eventos) com folga, sem chegar perto dos deadlines de job
-# (300s+); deteccao de morte real continua via progresso vencido.
-LEASE_WINDOW_S = 120.0
-PROGRESS_WINDOW_S = 120.0
+# PROGRESS_WINDOW_S, teto = created+timeout. Janela 900s: cobre geracoes
+# longas do modelo + suspensao MV3 (~30-60s sem eventos) com folga, sem
+# chegar perto dos deadlines de job; deteccao de morte real continua via
+# progresso vencido.
+LEASE_WINDOW_S = 900.0
+PROGRESS_WINDOW_S = 900.0
 MAX_REQUEUES_DEFAULT = 1
 # Fases que provam que nada foi enviado (antes de qualquer SEND_MESSAGE).
 PRE_SEND_PHASES = frozenset({"preparing", "navigating", "settling", "ready"})

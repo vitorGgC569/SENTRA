@@ -75,7 +75,25 @@ class AgentToolLoop:
                     is_directive_turn = bool(lines) and all(d is not None for d in directives)
                     if not is_directive_turn:
                         if response.content.strip().startswith("[["):
-                            return failure("[DIRECTIVE_FORMAT] malformed repository request")
+                            # Turno quase-certo com prosa misturada: corrige UMA vez
+                            # por turno em vez de matar a task. Limitado por
+                            # max_rounds como todo o resto do loop; nada foi
+                            # executado, logo retentar não duplica efeito algum.
+                            if turn >= self.max_rounds:
+                                return failure("[DIRECTIVE_FORMAT] malformed repository request")
+                            correction = ("Formato inválido: reemita SOMENTE diretivas, "
+                                          "uma por linha (ex.: [[T|.|2]]), sem prosa, "
+                                          "sem cercas de código, sem texto extra. Se já "
+                                          "tem contexto suficiente, retorne a resposta final.")
+                            messages.extend([{"role": "assistant", "content": response.content},
+                                             {"role": "user", "content": correction}])
+                            continuation = {**metadata, "new_chat": False,
+                                            "refresh_system_prompt": False,
+                                            "conversation_url": response.metadata.get("conversation_url"),
+                                            "conversation_id": response.metadata.get("conversation_id")}
+                            current = replace(request, system_prompt=system, user_prompt=correction,
+                                              metadata=continuation)
+                            continue
                         response.token_usage = usage
                         response.latency = time.monotonic() - started
                         response.metadata.update(repository_session_id=session.session_id,

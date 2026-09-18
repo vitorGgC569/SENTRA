@@ -1,0 +1,15 @@
+Crie um site moderno e profissional para o projeto SENTRA - um orquestrador multi-agente de IA. O site deve ser uma Single Page Application (SPA) em HTML/CSS/JS puro, sem frameworks externos, totalmente funcional e responsivo.
+
+Decomponha em EXATAMENTE 5 tarefas em DAG (fundação primeiro, smoke final):
+
+Tarefa 1 (fundação - sem dependências): Criar index.html com estrutura semântica HTML5, meta tags SEO, variáveis CSS (dark theme profissional com accent azul #3B82F6), reset CSS, tipografia (system fonts), layout base com header fixo (nav responsivo com hamburger mobile), hero section com headline e CTA, e footer. Incluir smooth scroll e toggle de menu mobile em JS vanilla. Máximo 250 linhas. Teste: validar que index.html existe, contém doctype, meta viewport, nav, main, footer.
+
+Tarefa 2 (depende de 1): Criar styles.css com design system completo: grid responsivo (CSS Grid + Flexbox), seções Features (cards com ícones SVG inline), Architecture (diagrama visual em CSS puro mostrando o fluxo Engine→Relay→Extension→ChatGPT), e How It Works (timeline vertical com 7 steps do ciclo OMA). Animações com @keyframes para entrada dos elementos. Máximo 250 linhas. Teste: validar que styles.css existe, contém media queries, grid-template, keyframes.
+
+Tarefa 3 (depende de 1): Criar app.js com funcionalidades interativas: intersection observer para animações on-scroll, smooth scroll para âncoras, filtro de features por categoria, accordion FAQ com 6 perguntas sobre o OMA, contador animado de estatísticas (ex: 5 agentes, 3 validadores, 9.5 score mínimo, 20000 chars max), dark/light mode toggle persistido em localStorage. Máximo 250 linhas. Teste: validar que app.js existe, contém IntersectionObserver, localStorage, addEventListener.
+
+Tarefa 4 (depende de 2, 3): Integrar seção de demonstração interativa: diagrama SVG animado do fluxo de execução do OMA (Plan→Dispatch→Propose→Verify→Quorum→Repair→Integrate), com highlight step-by-step ao clicar; mini terminal simulado mostrando comandos reais do OMA (--demo, --doctor, --relay); seção de pricing/planos com 3 cards. Máximo 250 linhas. Teste: validar que index.html contém svg, section com id demo, elementos com data-step.
+
+Tarefa 5 (depende de 4 - smoke test final): Integração final e validação completa: verificar todos os links internos, responsividade em 3 breakpoints (mobile 375px, tablet 768px, desktop 1200px), acessibilidade básica (alt texts, aria labels, focus states), performance (sem recursos externos bloqueantes). Corrigir qualquer inconsistência. Máximo 150 linhas de ajustes. Teste: validar estrutura completa do site, todos os arquivos existem, HTML válido, CSS carrega, JS executa sem erro.
+
+Regras: seguir sem reabrir debate de design. Theme dark como padrão. Cores: background #0F172A, surface #1E293B, text #F8FAFC, accent #3B82F6. Toda interatividade em vanilla JS. Zero dependências externas.

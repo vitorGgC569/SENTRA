@@ -28,7 +28,11 @@ class GitAdapter:
 
     def status(self) -> str:
         if not self._repo:
-            return "ERROR: git repository unavailable"
+            # Neutro (sem prefixo ERROR): sandboxes excluem .git por desenho
+            # (EXCLUDED_DIRS), então ausência de repo não é falha operacional.
+            # Validadores seguem com evidência R/T/TEST; mutações (branch/
+            # checkpoint) continuam recusando sem repo.
+            return "NO_GIT_REPO: directory is not a git repository"
         try:
             rows = []
             for path in self._files():
@@ -45,7 +49,7 @@ class GitAdapter:
 
     def diff(self, path: str = "") -> str:
         if not self._repo:
-            return "ERROR: git repository unavailable"
+            return "NO_GIT_REPO: directory is not a git repository"
         try:
             paths = [path] if path else self._files()
             untracked = set(self._repo.untracked_files)
