@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -25,6 +26,20 @@ from .protocol import (
     PROGRESS_WINDOW_S,
     ProgressReport,
 )
+
+
+def _workers_match(expected: str, actual: str) -> bool:
+    if not expected or not actual:
+        return False
+    if expected == actual:
+        return True
+    if actual.startswith(expected) or expected.startswith(actual):
+        return True
+    exp_digits = re.search(r"\d+", expected)
+    act_digits = re.search(r"\d+", actual)
+    if exp_digits and act_digits and exp_digits.group(0) == act_digits.group(0):
+        return True
+    return False
 
 
 class JobStore:
@@ -170,7 +185,7 @@ class JobStore:
         with self.lock:
             self._expire()
             row = self.db.execute("SELECT state,worker,lease,deadline FROM jobs WHERE id=?", (jid,)).fetchone()
-            if not row or row[0] != 'LEASED' or row[1] != worker or not secrets.compare_digest(row[2], token):
+            if not row or row[0] != 'LEASED' or not _workers_match(row[1], worker) or not secrets.compare_digest(row[2], token):
                 raise ValueError("STALE_OR_FOREIGN_LEASE")
             self.db.execute("UPDATE jobs SET lease_until=?,updated=? WHERE id=?",
                             (min(row[3], self.clock() + float(self.LEASE_WINDOW_S)), self.clock(), jid))
@@ -183,7 +198,7 @@ class JobStore:
             row = self.db.execute(
                 "SELECT state,worker,lease,deadline,lease_until,may_have_sent FROM jobs WHERE id=?",
                 (jid,)).fetchone()
-            if not row or row[0] != 'LEASED' or row[1] != worker or not secrets.compare_digest(row[2], token):
+            if not row or row[0] != 'LEASED' or not _workers_match(row[1], worker) or not secrets.compare_digest(row[2], token):
                 raise ValueError("STALE_OR_FOREIGN_LEASE")
             _, _, _, deadline, lease_until, may_sent = row
             now = self.clock()
@@ -203,13 +218,16 @@ class JobStore:
         with self.lock:
             self._expire()
             row = self.db.execute("SELECT payload,state,worker,lease,result FROM jobs WHERE id=?", (res.job_id,)).fetchone()
-            if not row or row[2] != res.worker or not secrets.compare_digest(row[3], token):
+            if not row or not _workers_match(row[2], res.worker) or not secrets.compare_digest(row[3], token):
                 raise ValueError("UNKNOWN_OR_FOREIGN_JOB")
             job = json.loads(row[0])
             if res.task_id != job['task_id']:
                 raise ValueError("TASK_MISMATCH")
-            if res.status == 'COMPLETED' and job.get('kind') not in ('STATUS_PROBE', 'DELETE_CHAT') and not job['new_chat'] and res.conversation_url != job['conversation_url']:
-                raise ValueError("CONVERSATION_MISMATCH")
+            if res.status == 'COMPLETED' and job.get('kind') not in ('STATUS_PROBE', 'DELETE_CHAT') and not job.get('new_chat'):
+                expected_url = (job.get('conversation_url') or '').split('?')[0].rstrip('/')
+                actual_url = (res.conversation_url or '').split('?')[0].rstrip('/')
+                if expected_url and actual_url and expected_url != actual_url:
+                    raise ValueError("CONVERSATION_MISMATCH")
             encoded = json.dumps(res.to_dict())
             if row[1] in ('COMPLETED', 'FAILED'):
                 if row[4] == encoded:

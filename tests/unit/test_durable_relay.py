@@ -192,3 +192,29 @@ def test_production_windows_cover_long_model_generations():
 
     assert protocol.LEASE_WINDOW_S >= 900
     assert protocol.PROGRESS_WINDOW_S >= 900
+
+
+def test_worker_telemetry_match_and_url_canonicalization():
+    store = JobStore()
+    conv_url = "https://chatgpt.com/c/67d6a4bf-427c-800a-b333-a292be9665bc"
+    jid = store.submit(ChatJob(task_id="T-1", prompt="write code", new_chat=False,
+                               conversation_url=conv_url + "/?model=gpt-4o"))
+    leased = store.poll("TAB-1003142828")
+    assert leased is not None
+
+    # Extension posts with full telemetry in worker string and query params in URL
+    res = ChatResult(
+        job_id=jid,
+        task_id="T-1",
+        status="COMPLETED",
+        result="done",
+        conversation_url=conv_url + "?temporary-chat=false",
+        worker="BROWSER_WORKER_1003142828 sw=1.6.1 cs=1.6.1 err=0 hb=3 slices=1 cshb=0 rec=0",
+    )
+    store.store_result(res, leased["lease_token"])
+    assert store.counts()["completed"] == 1
+    stored = store.result(jid)
+    assert stored["status"] == "COMPLETED"
+    assert stored["conversation_url"] == conv_url
+    store.close()
+

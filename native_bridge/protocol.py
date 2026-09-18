@@ -89,9 +89,12 @@ class ChatJob:
             raise ValueError("prompt required (max 20000 chars)")
         if type(self.new_chat) is not bool or type(self.timeout_s) is not int or not (5 <= self.timeout_s <= 900):
             raise ValueError("timeout_s must be 5..900")
-        if self.conversation_url is not None and not re.fullmatch(
-                r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
-            raise ValueError("invalid conversation URL")
+        if self.conversation_url is not None:
+            m = re.search(r"https?://chatgpt\.com/c/([A-Za-z0-9-]+)", self.conversation_url)
+            if m:
+                self.conversation_url = f"https://chatgpt.com/c/{m.group(1)}"
+            elif not re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
+                raise ValueError("invalid conversation URL")
         if self.kind not in {"STATUS_PROBE", "DELETE_CHAT"} and not self.new_chat and not self.conversation_url:
             raise ValueError("continuation requires an explicit conversation URL")
         if self.kind not in {"STATUS_PROBE", "DELETE_CHAT"} and self.new_chat and self.conversation_url:
@@ -120,8 +123,14 @@ class ChatResult:
             raise ValueError("job_id required")
         if not isinstance(self.result, str) or len(self.result) > 200000:
             raise ValueError("result must be text (max 200000 chars)")
-        if self.conversation_url and not re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
-            raise ValueError("invalid conversation URL")
+        if self.conversation_url:
+            m = re.search(r"https?://chatgpt\.com/c/([A-Za-z0-9-]+)", self.conversation_url)
+            if m:
+                self.conversation_url = f"https://chatgpt.com/c/{m.group(1)}"
+                if not self.conversation_id:
+                    self.conversation_id = m.group(1)
+            elif not re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
+                raise ValueError("invalid conversation URL")
         if self.status not in ("COMPLETED", "FAILED"):
             raise ValueError(f"unknown status {self.status!r}")
 
