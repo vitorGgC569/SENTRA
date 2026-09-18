@@ -324,7 +324,7 @@ async function omaEnsureFreshScript(tabId) {
     try {
       const ans = await chrome.tabs.sendMessage(tabId, { operation: "GET_STATUS" });
       const csv = ans && ans.result ? ans.result.cs_version : null;
-      if (csv && csv === manifestVersion) return;
+      if (csv && (csv === manifestVersion || (csv.startsWith("1.") && manifestVersion.startsWith("1.")))) return;
     } catch (_) {}
     await chrome.tabs.reload(tabId);
     await omaWaitTabDeparted(tabId);
