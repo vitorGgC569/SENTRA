@@ -70,14 +70,21 @@ function omaDismissBlockingOverlay() {
   // Modais (ex. rate-limit "Excesso de solicitações", "Você já carregou este arquivo")
   // interceptam cliques no composer: detecta e dispensa se possível.
   try {
-    const dialogs = [...document.querySelectorAll("[role='dialog'], [role='alertdialog'], div[class*='modal'], div[class*='dialog']")];
+    const dialogs = [...document.querySelectorAll("[role='dialog'], [role='alertdialog'], div[class*='modal'], div[class*='dialog'], div[data-state='open']")];
     for (const d of dialogs) {
       const txt = (d.innerText || "").toLowerCase();
-      if (!/excesso|limite|rate|too many|slow down|aguarde|já carregou|carregou|already uploaded/i.test(txt)) continue;
-      const btns = [...d.querySelectorAll("button")];
-      const ok = btns.find((b) => /entendido|entendi|ok|dismiss|fechar|close/i.test(b.innerText || ""))
+      if (!/excesso|limite|rate|too many|slow down|aguarde|já carregou|carregou|already uploaded|experimente carregar/i.test(txt)) continue;
+      const btns = [...d.querySelectorAll("button, [role='button']")];
+      const ok = btns.find((b) => /entendido|entendi|ok|dismiss|fechar|close/i.test((b.innerText || b.textContent || "").trim()))
         || btns[0];
       if (ok) { ok.click(); return "dismissed-modal"; }
+    }
+    // Fallback: se houver botão "OK" explícito e na tela tiver aviso de duplicata
+    const bodyText = (document.body.innerText || "").slice(0, 5000).toLowerCase();
+    if (/já carregou este arquivo|experimente carregar algo novo/i.test(bodyText)) {
+      const allBtns = [...document.querySelectorAll("button")];
+      const okBtn = allBtns.find((b) => /^(ok|entendi|entendido)$/i.test((b.innerText || "").trim()));
+      if (okBtn) { okBtn.click(); return "dismissed-duplicate-modal"; }
     }
   } catch (_) {}
   return null;
@@ -166,11 +173,15 @@ function omaHasAttachment(box) {
     omaDismissBlockingOverlay();
     const scope = box.closest("form") || (box.parentElement && box.parentElement.parentElement) || document;
     if (scope.querySelectorAll("img").length > 0) return true;
-    const has = [...scope.querySelectorAll("button, [data-testid], [class*='thumbnail'], [class*='preview'], [class*='file']")].some((el) => {
+    if (scope.querySelectorAll("[style*='background-image']").length > 0) return true;
+    const elements = [...scope.querySelectorAll("button, [data-testid], [class*='thumbnail'], [class*='preview'], [class*='file'], [class*='rounded']")];
+    const has = elements.some((el) => {
       const testId = el.getAttribute("data-testid") || "";
       const aria = el.getAttribute("aria-label") || "";
       const cls = String(el.className || "");
-      return /attach|file|image|preview|upload|remover|remove/i.test(testId + " " + aria + " " + cls);
+      const txt = (el.innerText || el.textContent || "").toLowerCase();
+      return /attach|file|image|preview|upload|remover|remove/i.test(testId + " " + aria + " " + cls)
+        || /remover|remove/.test(txt);
     });
     if (has) return true;
   } catch (_) {}

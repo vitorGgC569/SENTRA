@@ -214,8 +214,10 @@ PROPOSED PATCH:
 DETERMINISTIC TEST RESULTS:
 {json.dumps(test_results or {}, indent=2)}
 """
-        images = [p for p in (task.metadata.get("images") or [])
-                  if isinstance(p, str) and p]
+        images = []
+        if self.role == ValidatorRole.REQUIREMENTS:
+            images = [p for p in (task.metadata.get("images") or [])
+                      if isinstance(p, str) and p]
         if images:
             user_prompt += (
                 "\nEVIDENCIA VISUAL ANEXADA "

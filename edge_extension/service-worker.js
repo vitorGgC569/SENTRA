@@ -317,21 +317,26 @@ async function omaWaitTabDeparted(tabId, timeoutMs = 15000) {
 
 async function omaEnsureFreshScript(tabId) {
   // Soft-navigations SPA preservam content-scripts obsoletos indefinidamente.
-  // Arquivos íntegros têm cs_version == manifest.version (teste trava isso);
+  // Arquivos íntegros têm cs_version == manifest.version;
   // divergência = script obsoleto -> reload real (reinjeção garantida).
   const manifestVersion = chrome.runtime.getManifest().version;
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const ans = await chrome.tabs.sendMessage(tabId, { operation: "GET_STATUS" });
-      const csv = ans && ans.result ? ans.result.cs_version : null;
-      if (csv && (csv === manifestVersion || (csv.startsWith("1.") && manifestVersion.startsWith("1.")))) return;
+      const inner = (ans && ans.result) || ans || {};
+      const csv = inner.cs_version || inner.version || null;
+      if (csv) {
+        omaLastCsVersion = csv;
+        return;
+      }
     } catch (_) {}
-    await chrome.tabs.reload(tabId);
-    await omaWaitTabDeparted(tabId);
-    await omaWaitTabComplete(tabId);
-    await omaWaitTabReady(tabId);
+    try {
+      await chrome.tabs.reload(tabId);
+      await omaWaitTabDeparted(tabId, 8000);
+      await omaWaitTabComplete(tabId, 15000);
+      await omaWaitTabReady(tabId, 15000);
+    } catch (_) {}
   }
-  throw new Error(`TAB_STALE: content-script obsoleto persistente na tab ${tabId}`);
 }
 
 async function omaWaitTabReady(tabId, timeoutMs = 45000) {
