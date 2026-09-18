@@ -170,7 +170,8 @@ def reject_unsafe_profile_dir(path: Path | str) -> Path:
     Levanta ValueError com motivo acionavel pelo operador.
     Nao cria nada; apenas valida.
     """
-    candidate = Path(path)
+    expanded = os.path.expandvars(os.path.expanduser(str(path).strip()))
+    candidate = Path(expanded)
     if not candidate.is_absolute():
         candidate = project_root() / candidate
     # Inspeciona cada componente existente sem resolver (lexists enxerga
@@ -213,10 +214,21 @@ def resolve_bot_profile_dir(
     raw = _browser_section(config).get("bot_profile_dir", DEFAULT_BOT_PROFILE_DIR)
     if not isinstance(raw, str) or not raw.strip():
         raise ValueError("browser.bot_profile_dir deve ser uma string nao vazia")
-    candidate = Path(raw.strip())
+    expanded = os.path.expandvars(os.path.expanduser(raw.strip()))
+    candidate = Path(expanded)
     if not candidate.is_absolute():
         candidate = base / candidate
-    resolved = reject_unsafe_profile_dir(candidate)
+    try:
+        resolved = reject_unsafe_profile_dir(candidate)
+    except ValueError as exc:
+        if "onedrive" not in raw.lower() and _is_onedrive_path(candidate.resolve() if candidate.exists() else candidate):
+            local_app_data = os.environ.get("LOCALAPPDATA")
+            resolved = Path(local_app_data) / "SENTRA" / "edge-bot" if local_app_data else Path.home() / ".sentra" / "edge-bot"
+            resolved = resolved.resolve()
+            if _is_onedrive_path(resolved):
+                raise exc
+        else:
+            raise
     resolved.mkdir(parents=True, exist_ok=True)
     if _is_link(resolved):
         raise ValueError(

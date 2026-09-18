@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any, List, Optional
 from playwright.async_api import Page
 from .response_capture import ProgressCallback, ResponseCapture, emit_progress
+
+
+def _extract_conversation_id(url: str) -> Optional[str]:
+    if not url or not isinstance(url, str):
+        return None
+    m = re.search(r"/c/([a-zA-Z0-9-]{1,128})", url)
+    return m.group(1) if m else None
 
 
 class ChatSiteAdapterError(RuntimeError):
@@ -144,11 +152,15 @@ class ChatSiteAdapter:
     async def open_conversation(self, url: str, timeout_s: float = 30.0) -> None:
         """Navega para uma conversa existente; no-op se já estiver nela. Recusa login wall e redirecionamento (identidade incerta)."""
         self._ensure_page_usable()
+        target_id = _extract_conversation_id(url)
         try:
             current = self.page.url or ""
         except Exception:
             current = ""
-        if current.rstrip("/") == (url or "").rstrip("/"):
+        current_id = _extract_conversation_id(current)
+        if (target_id and current_id and target_id == current_id) or (
+            current.split("?")[0].rstrip("/") == (url or "").split("?")[0].rstrip("/")
+        ):
             await self._resolve_composer()
             return
         try:
@@ -166,13 +178,17 @@ class ChatSiteAdapter:
             final = self.page.url or ""
         except Exception:
             final = ""
-        if final.rstrip("/") != (url or "").rstrip("/"):
+        final_id = _extract_conversation_id(final)
+        matches_identity = (target_id and final_id and target_id == final_id) or (
+            final.split("?")[0].rstrip("/") == (url or "").split("?")[0].rstrip("/")
+        )
+        if not matches_identity:
             raise ChatSiteAdapterError(f"Conversa redirecionou para {final!r}; identidade incerta")
         try:
-            url = (self.page.url or "").lower()
+            url_lower = (self.page.url or "").lower()
         except Exception:
-            url = ""
-        if any(m in url for m in ("auth/login", "/login", "auth0", "accounts.google")):
+            url_lower = ""
+        if any(m in url_lower for m in ("auth/login", "/login", "auth0", "accounts.google")):
             raise ChatSiteAdapterError(
                 "Parede de login no chatgpt.com (login exigido / DOM fora da conversa)"
             )

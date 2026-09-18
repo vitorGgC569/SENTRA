@@ -485,19 +485,38 @@ async function omaProcessJob(tabId, job) {
           + "job abortado para não contaminar");
       }
     } else {
-      if (!/^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]{1,128}$/.test(job.conversation_url || "")) {
+      if (!/^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]{1,128}(\/|\?.*)?$/.test(job.conversation_url || "")) {
         throw new Error("CONVERSATION_MISMATCH: continuação exige URL explícita");
       }
-      await chrome.tabs.update(tabId, { url: job.conversation_url });
-      await omaWaitTabDeparted(tabId);
-      await omaWaitTabComplete(tabId);
-      await omaWaitTabReady(tabId);
-      await omaEnsureFreshScript(tabId);
+      const targetConvIdMatch = (job.conversation_url || "").match(/\/c\/([A-Za-z0-9-]{1,128})/);
+      const targetConvId = targetConvIdMatch ? targetConvIdMatch[1] : null;
+      let alreadyOnConv = false;
+      try {
+        const currentTab = await chrome.tabs.get(tabId);
+        const currentConvIdMatch = (currentTab && currentTab.url && currentTab.url.match(/\/c\/([A-Za-z0-9-]{1,128})/));
+        const currentConvId = currentConvIdMatch ? currentConvIdMatch[1] : null;
+        if (targetConvId && currentConvId && targetConvId === currentConvId) {
+          alreadyOnConv = true;
+        }
+      } catch (_) {}
+
+      if (!alreadyOnConv) {
+        await chrome.tabs.update(tabId, { url: job.conversation_url });
+        await omaWaitTabDeparted(tabId);
+        await omaWaitTabComplete(tabId);
+        await omaWaitTabReady(tabId);
+        await omaEnsureFreshScript(tabId);
+      }
       // Conversa existente pode estar hidratando/streamando: só envia com a
       // página estabilizada (sem geração em curso), senão cliques são engolidos.
       await omaWaitSettled(tabId);
       const actual = await omaSendToTab(tabId, { operation: "GET_CONVERSATION_URL" });
-      if (!actual.ok || !actual.result || actual.result.url !== job.conversation_url) {
+      const actualConvId = (actual && actual.result && (actual.result.conversation_id || ((actual.result.url || "").match(/\/c\/([A-Za-z0-9-]{1,128})/) || [])[1])) || null;
+      const urlMatches = actual && actual.result && actual.result.url && (
+        (targetConvId && actualConvId && targetConvId === actualConvId) ||
+        actual.result.url.split("?")[0].replace(/\/$/, "") === job.conversation_url.split("?")[0].replace(/\/$/, "")
+      );
+      if (!actual.ok || !actual.result || !urlMatches) {
         throw new Error("CONVERSATION_MISMATCH: tab não abriu a conversa solicitante");
       }
     }

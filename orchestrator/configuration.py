@@ -34,7 +34,7 @@ def browser_bot_settings(browser_cfg: Dict[str, Any] | None = None) -> Dict[str,
 
     if not isinstance(bot_profile_dir, str) or not bot_profile_dir.strip():
         raise ValueError("browser.bot_profile_dir must be a nonempty path string")
-    profile = bot_profile_dir.strip()
+    profile = os.path.expandvars(os.path.expanduser(bot_profile_dir.strip()))
     if len(profile) > 500:
         raise ValueError("browser.bot_profile_dir must be <= 500 characters")
     if any(c in profile for c in ("\n", "\r", "\x00")):

@@ -188,6 +188,13 @@ class FakePage:
             return FakeLocator(self, count=self.composer_count, kind="composer")
         return FakeLocator(self, count=0)
 
+    async def goto(self, url, **kwargs):
+        self.calls.append(("goto", url))
+        self.url = url
+
+    async def bring_to_front(self):
+        self.calls.append(("bring_to_front",))
+
     # O submit (click/Enter) marca "enviado": o locator de mensagens passa
     # a devolver messages_after_send, simulando o turno novo do chat real.
 
@@ -617,3 +624,56 @@ async def test_browser_provider_never_swallows_cancellation():
     prov = BrowserProvider(pool=Cancelling())
     with pytest.raises(asyncio.CancelledError):
         await prov.execute(_req())
+
+
+def test_extract_conversation_id():
+    from browser.site_adapter import _extract_conversation_id
+
+    assert _extract_conversation_id("https://chatgpt.com/c/3c9e97c9-4444-5555-6666-abcdef123456") == "3c9e97c9-4444-5555-6666-abcdef123456"
+    assert _extract_conversation_id("https://chatgpt.com/c/3c9e97c9-4444-5555-6666-abcdef123456?model=auto") == "3c9e97c9-4444-5555-6666-abcdef123456"
+    assert _extract_conversation_id("https://chatgpt.com/c/3c9e97c9-4444-5555-6666-abcdef123456/") == "3c9e97c9-4444-5555-6666-abcdef123456"
+    assert _extract_conversation_id("https://chatgpt.com/") is None
+    assert _extract_conversation_id("") is None
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_noop_when_already_on_target():
+    page = FakePage(url="https://chatgpt.com/c/target-conv-123")
+    adapter = ChatSiteAdapter(page)
+    await adapter.open_conversation("https://chatgpt.com/c/target-conv-123?model=gpt-4o")
+    # Não deve ter chamado goto, pois já está na conversa desejada
+    goto_calls = [c for c in page.calls if c[0] == "goto"]
+    assert len(goto_calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_navigates_and_preserves_identity_with_params():
+    page = FakePage(url="https://chatgpt.com/")
+    adapter = ChatSiteAdapter(page)
+
+    # Simula o ChatGPT normalizando a URL com query params ao carregar
+    original_goto = page.goto
+    async def goto_with_params(url, **kwargs):
+        await original_goto(url + "?temporary-chat=false", **kwargs)
+    page.goto = goto_with_params
+
+    await adapter.open_conversation("https://chatgpt.com/c/target-conv-456")
+    goto_calls = [c for c in page.calls if c[0] == "goto"]
+    assert len(goto_calls) == 1
+    assert "target-conv-456" in page.url
+
+
+@pytest.mark.asyncio
+async def test_open_conversation_rejects_actual_mismatch():
+    page = FakePage(url="https://chatgpt.com/")
+    adapter = ChatSiteAdapter(page)
+
+    # Simula redirecionamento para outra conversa completamente diferente
+    async def goto_evil(url, **kwargs):
+        page.calls.append(("goto", url))
+        page.url = "https://chatgpt.com/c/different-conv-789"
+    page.goto = goto_evil
+
+    with pytest.raises(ChatSiteAdapterError, match="identidade incerta"):
+        await adapter.open_conversation("https://chatgpt.com/c/target-conv-456")
+

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Optional
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page
@@ -47,11 +48,18 @@ class BrowserSession:
         # Somados aos args base anti-automacao no launch; nunca substituem.
         self.launch_args = list(launch_args) if launch_args else []
         if user_data_dir:
-            self.user_data_dir = Path(user_data_dir)
+            self.user_data_dir = Path(os.path.expandvars(os.path.expanduser(str(user_data_dir))))
         else:
             # Persistent per-role profile under the project so login/session survives restarts.
             # This is the opposite of private/incognito: profile is NEVER ephemeral.
-            self.user_data_dir = DEFAULT_EDGE_PROFILE_ROOT / f"edge-{role}"
+            root = DEFAULT_EDGE_PROFILE_ROOT
+            try:
+                if "onedrive" in str(root.resolve()).lower():
+                    local_app_data = os.environ.get("LOCALAPPDATA")
+                    root = (Path(local_app_data) / "SENTRA" / "profiles") if local_app_data else (Path.home() / ".sentra" / "profiles")
+            except Exception:
+                pass
+            self.user_data_dir = root / f"edge-{role}"
         self._playwright = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
@@ -189,11 +197,29 @@ class BrowserSession:
             await emit_progress(on_progress, "settling")
             self.adapter = ChatSiteAdapter(self.page)
             await emit_progress(on_progress, "ready")
+            try:
+                from .bot_profile import is_logged_in
+                if await is_logged_in(self.page):
+                    await self.persist_auth_state()
+            except Exception:
+                pass
         except Exception as e:
             await self._cleanup_after_failed_init()
             err_msg = str(e).encode('ascii', 'ignore').decode('ascii')
             print(f"[{self.role}] Browser initialization warning: {err_msg}. Browser offline; calls fail fast.")
             self.adapter = None
+
+    async def persist_auth_state(self) -> bool:
+        """Persiste snapshot do estado de autenticação (cookies/localStorage) em disco."""
+        if self.context and self.storage_state_path:
+            try:
+                path = Path(self.storage_state_path)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                await self.context.storage_state(path=str(path))
+                return True
+            except Exception:
+                pass
+        return False
 
     async def ask(
         self,
@@ -216,10 +242,12 @@ class BrowserSession:
                 )
             else:
                 inner = self.adapter.send_and_capture(prompt, timeout_seconds=timeout_seconds)
-            return await asyncio.wait_for(
+            res = await asyncio.wait_for(
                 inner,
                 timeout=timeout_seconds + 10,
             )
+            await self.persist_auth_state()
+            return res
 
         # Sem browser live: falha alta, nunca resposta forjada. O ModelRouter
         # converte em fallback para outro provider / circuit breaker / retry.
@@ -252,11 +280,7 @@ class BrowserSession:
 
             # Persist auth snapshot (backup) while keeping the Edge profile on disk.
             # The profile dir itself is the source of truth for "manter infos do navegador".
-            if self.context and self.storage_state_path:
-                try:
-                    await self.context.storage_state(path=self.storage_state_path)
-                except Exception:
-                    pass
+            await self.persist_auth_state()
             try:
                 if self._using_persistent_context and self.context:
                     await self.context.close()
