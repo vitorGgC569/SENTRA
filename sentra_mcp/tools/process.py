@@ -38,10 +38,11 @@ def register_process_tools(mcp: MCPServer, service: ProcessService) -> None:
         command: str | list[str],
         owner: str,
         timeout: float | None = None,
+        cwd: str | None = None,
     ) -> ResponseEnvelope:
         """Start a persistent managed process without invoking a shell."""
 
-        return _call(lambda: service.start_process(command, owner, timeout))
+        return _call(lambda: service.start_process(command, owner, timeout, cwd))
 
     @mcp.tool()
     def sentra_read_process_output(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -173,7 +174,28 @@ def test_shutdown_terminates_children_and_prevents_new_processes(tmp_path: Path)
         service.start_process([sys.executable, "-c", "print('no')"], "alice")
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group verification")
+def _pid_exists(pid: int) -> bool:
+    if os.name == "nt":
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        text = (result.stdout or "").strip()
+        return bool(text and str(pid) in text and "No tasks" not in text)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    proc_stat = Path(f"/proc/{pid}/stat")
+    if proc_stat.exists():
+        fields = proc_stat.read_text(encoding="utf-8").split()
+        if len(fields) > 2 and fields[2] == "Z":
+            return False
+    return True
+
+
 def test_terminate_session_kills_spawned_process_tree(tmp_path: Path) -> None:
     service = _service(tmp_path)
     code = (
@@ -185,23 +207,17 @@ def test_terminate_session_kills_spawned_process_tree(tmp_path: Path) -> None:
     session_id = str(process["session_id"])
     output = _wait_for_stdout(service, session_id, "alice", "\n")
     child_pid = int(str(output["stdout"]).strip().splitlines()[0])
+    assert _pid_exists(child_pid)
 
     service.terminate_session(session_id, "alice")
 
-    deadline = time.monotonic() + 3.0
+    deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
-        try:
-            os.kill(child_pid, 0)
-        except ProcessLookupError:
+        if not _pid_exists(child_pid):
             break
-        proc_stat = Path(f"/proc/{child_pid}/stat")
-        if proc_stat.exists():
-            fields = proc_stat.read_text(encoding="utf-8").split()
-            if len(fields) > 2 and fields[2] == "Z":
-                break
-        time.sleep(0.02)
+        time.sleep(0.05)
     else:
-        pytest.fail("spawned child survived process-group termination")
+        pytest.fail("spawned child survived process-tree termination")
 
 
 def test_child_environment_is_sanitized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -250,6 +266,35 @@ def test_kill_process_rejects_unmanaged_pid_and_audit_omits_arguments(tmp_path: 
     assert secret not in audit_text
     assert '"action":"process.start"' in audit_text
     assert '"action":"process.kill"' in audit_text
+
+
+def test_process_cwd_is_confined_to_allowed_roots(tmp_path: Path) -> None:
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    child = allowed / "child"
+    child.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    service = ProcessService(
+        MCPConfig(allowed_roots=(allowed,), audit_log=tmp_path / "audit.jsonl")
+    )
+
+    code = "import os; print(os.getcwd(), flush=True)"
+    process = service.start_process(
+        [sys.executable, "-u", "-c", code],
+        "alice",
+        cwd="child",
+    )
+    result = _wait_for_exit(service, str(process["session_id"]), "alice")
+    assert Path(str(result["stdout"]).strip()).resolve() == child.resolve()
+    assert Path(str(process["cwd"])).resolve() == child.resolve()
+
+    with pytest.raises(PermissionError, match="outside configured allowed roots"):
+        service.start_process(
+            [sys.executable, "-c", "print('no')"],
+            "alice",
+            cwd=str(outside),
+        )
 
 
 def test_mcp_process_tools_are_registered(tmp_path: Path) -> None:

@@ -169,9 +169,43 @@ class OmaService:
             return {"run_id": run_id, "format": "markdown", "handoff": text}
 
     def queue_status(self) -> dict[str, Any]:
-        from orchestrator.master_queue import MasterQueue
+        """Read MasterQueue SQLite in read-only mode and never create .oma state."""
+        import sqlite3
 
-        result = MasterQueue(self.workspace).status()
+        queue_root = self.workspace / ".oma" / "master-queue"
+        queue_db = queue_root / "queue.sqlite3"
+        if not queue_db.exists():
+            return {
+                "queue": {
+                    "limits": None,
+                    "jobs": [],
+                    "state": "ABSENT",
+                    "recovery": "RUNNING after process death requires operator reconciliation; never auto-replayed",
+                }
+            }
+        if self._is_link(queue_root) or self._is_link(queue_db) or queue_db.stat().st_nlink > 1:
+            raise PermissionError("queue storage link blocked")
+        uri = queue_db.resolve().as_uri() + "?mode=ro"
+        db = sqlite3.connect(uri, uri=True, timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            rows = list(db.execute("SELECT * FROM jobs ORDER BY created,id"))
+            limits = db.execute("SELECT value FROM settings WHERE key='limits'").fetchone()
+        finally:
+            db.close()
+        result = {
+            "limits": json.loads(limits[0]) if limits else None,
+            "jobs": [
+                {
+                    "id": row["id"],
+                    "state": row["state"],
+                    "spec": json.loads(row["spec"]),
+                    "result": json.loads(row["result"]) if row["result"] else None,
+                }
+                for row in rows
+            ],
+            "recovery": "RUNNING after process death requires operator reconciliation; never auto-replayed",
+        }
         return {"queue": _redact(result)}
 
     def reconcile_status(self, run_id: str) -> dict[str, Any]:

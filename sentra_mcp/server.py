@@ -1,33 +1,23 @@
 """Official MCP SDK wiring for the SENTRA v2 core."""
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import Any
 
 from mcp.server import MCPServer
 
 from .audit import AuditLogger
 from .config import MCPConfig
-from .models import CapabilityMetadata, ResponseEnvelope, SERVER_NAME, SERVER_VERSION
+from .models import ResponseEnvelope, SERVER_NAME, SERVER_VERSION
+from .prompts import register_prompts
+from .resources import capability_document, register_resources
 from .services.filesystem import FilesystemService
+from .services.oma import OmaService
 from .services.process import ProcessService
+from .services.repository import RepositoryService
 from .tools.filesystem import register_filesystem_tools
 from .tools.process import register_process_tools
-
-
-def capability_document(config: MCPConfig) -> dict[str, Any]:
-    """Return public, non-secret capability metadata and configured limits."""
-
-    metadata = CapabilityMetadata().model_dump(mode="json")
-    metadata["security"] = {
-        "allowed_root_count": len(config.allowed_roots),
-        "blocked_command_count": len(config.blocked_commands),
-        "max_read_bytes": config.max_read_bytes,
-        "max_write_bytes": config.max_write_bytes,
-        "max_output_bytes": config.max_output_bytes,
-        "max_processes": config.max_processes,
-        "http_loopback_only": not config.allow_non_loopback,
-    }
-    return metadata
+from .tools.sentra import register_sentra_tools
 
 
 class SentraMCPServer:
@@ -38,11 +28,22 @@ class SentraMCPServer:
         self.audit = AuditLogger(self.config.audit_log)
         self.filesystem = FilesystemService(self.config, self.audit)
         self.processes = ProcessService(self.config, self.audit)
+        self.repository = RepositoryService(self.config, self.audit)
+        self.oma = OmaService(self.config, self.audit)
+
+        @asynccontextmanager
+        async def lifespan(_server: MCPServer):
+            try:
+                yield {}
+            finally:
+                self.processes.shutdown()
+
         self.mcp = MCPServer(
             SERVER_NAME,
             version=SERVER_VERSION,
             description="SENTRA secure local MCP core",
             instructions="Use sentra_health to inspect capabilities and safe runtime limits.",
+            lifespan=lifespan,
         )
         self._register_tools()
 
@@ -64,6 +65,9 @@ class SentraMCPServer:
 
         register_filesystem_tools(self.mcp, self.filesystem)
         register_process_tools(self.mcp, self.processes)
+        register_sentra_tools(self.mcp, self.repository, self.oma)
+        register_resources(self.mcp, self.config, self.repository, self.oma)
+        register_prompts(self.mcp, self.oma)
 
     def run(self, transport: str | None = None) -> None:
         selected = transport or self.config.transport

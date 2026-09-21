@@ -204,6 +204,30 @@ Só GET, só loopback, stdlib, SQLite em `mode=ro`. Um dashboard por porta.
 
 ---
 
+## SENTRA MCP
+
+O SENTRA também pode operar como servidor **MCP v2** para clientes compatíveis.
+Por padrão ele usa `stdio`; opcionalmente, `streamable-http` fica restrito a
+`127.0.0.1`.
+
+```powershell
+python -m pip install -r requirements.txt
+python -B -m sentra_mcp
+# ou:
+python -B -m sentra_mcp --transport streamable-http --host 127.0.0.1 --port 8000
+```
+
+A superfície MCP inclui filesystem seguro, terminal/processos persistentes,
+repository gateway e observabilidade OMA (runs/events/handoff), além de resources
+e prompt operacional. Paths ficam confinados às `allowed_roots`, processos são
+owner-scoped e somente PIDs gerenciados podem ser encerrados por tool. O MCP não
+expõe promoção automática: `CANDIDATE_READY != APPLIED`.
+
+Guia completo: `docs/MCP_SERVER.md` · auditoria comparativa:
+`docs/MCP_AUDIT.md`.
+
+---
+
 ## Testes
 
 ```powershell

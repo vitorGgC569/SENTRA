@@ -11,7 +11,10 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import BinaryIO, Sequence
+
+from workspace.paths import PathAccessError, resolve_workspace_path
 
 from ..audit import AuditLogger
 from ..config import MCPConfig
@@ -28,6 +31,7 @@ class _ProcessRecord:
     argv: tuple[str, ...]
     process: subprocess.Popen[bytes]
     created_at: str
+    cwd: str
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
     retained_bytes: int = 0
@@ -98,6 +102,31 @@ class ProcessService:
         if executable_names & blocked_names:
             raise PermissionError("command is blocked by policy")
         return tuple(parts)
+
+    def _resolve_cwd(self, cwd: str | None) -> Path:
+        roots = tuple(Path(root).resolve() for root in self.config.allowed_roots)
+        if cwd is None:
+            target = roots[0]
+        else:
+            if not isinstance(cwd, str) or not cwd.strip() or "\x00" in cwd:
+                raise ValueError("cwd must be a non-empty path string")
+            candidate = Path(cwd)
+            if candidate.is_absolute():
+                target = None
+                for root in roots:
+                    try:
+                        relative = candidate.relative_to(root)
+                    except ValueError:
+                        continue
+                    target = resolve_workspace_path(root, relative.as_posix() or ".")
+                    break
+                if target is None:
+                    raise PathAccessError("cwd is outside configured allowed roots")
+            else:
+                target = resolve_workspace_path(roots[0], cwd)
+        if not target.is_dir():
+            raise NotADirectoryError("cwd is not a directory")
+        return target
 
     @staticmethod
     def _sanitized_environment() -> dict[str, str]:
@@ -194,11 +223,13 @@ class ProcessService:
         command: str | Sequence[str],
         owner: str,
         timeout: float | None = None,
+        cwd: str | None = None,
     ) -> dict[str, object]:
         """Start a managed process in its own process group and return session metadata."""
 
         normalized_owner = self._require_owner(owner)
         argv = self._parse_command(command)
+        cwd_path = self._resolve_cwd(cwd)
         if timeout is not None and timeout <= 0:
             raise ValueError("timeout must be greater than zero")
 
@@ -220,6 +251,7 @@ class ProcessService:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=self._sanitized_environment(),
+                cwd=str(cwd_path),
                 bufsize=0,
                 shell=False,
                 **popen_kwargs,
@@ -230,6 +262,7 @@ class ProcessService:
                 argv=argv,
                 process=process,
                 created_at=datetime.now(timezone.utc).isoformat(),
+                cwd=str(cwd_path),
                 process_group_id=process.pid if os.name != "nt" else None,
             )
             self._sessions[record.session_id] = record
@@ -252,6 +285,7 @@ class ProcessService:
                 "owner": normalized_owner,
                 "pid": process.pid,
                 "timeout": timeout,
+                "cwd": str(cwd_path),
             },
         )
         return self._record_info(record)
@@ -369,6 +403,7 @@ class ProcessService:
             "pid": record.process.pid,
             "executable": os.path.basename(record.argv[0]),
             "created_at": record.created_at,
+            "cwd": record.cwd,
             "running": returncode is None,
             "returncode": returncode,
             "timed_out": record.timed_out,

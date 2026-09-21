@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -61,19 +63,33 @@ def test_path_escape_absolute_outside_and_private_paths_are_blocked(
         service.read_file(".env")
 
 
-def test_symlink_escape_is_blocked_when_supported(tmp_path: Path) -> None:
+def test_symlink_or_junction_escape_is_blocked(tmp_path: Path) -> None:
     outside_dir = tmp_path.parent / f"{tmp_path.name}-outside"
     outside_dir.mkdir()
     (outside_dir / "secret.txt").write_text("hidden", encoding="utf-8")
     link = tmp_path / "escape"
-    try:
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(outside_dir)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    else:
         link.symlink_to(outside_dir, target_is_directory=True)
-    except (OSError, NotImplementedError):
-        pytest.skip("symlinks are unavailable on this platform")
 
-    service = make_service(tmp_path)
-    with pytest.raises(PathAccessError):
-        service.read_file("escape/secret.txt")
+    try:
+        service = make_service(tmp_path)
+        with pytest.raises(PathAccessError):
+            service.read_file("escape/secret.txt")
+        listing = service.list_directory(".", depth=2)
+        assert "escape/secret.txt" not in {item["path"] for item in listing["entries"]}
+    finally:
+        if link.exists() or link.is_symlink():
+            if os.name == "nt":
+                subprocess.run(["cmd", "/c", "rmdir", str(link)], check=False, capture_output=True)
+            else:
+                link.unlink()
 
 
 def test_read_and_write_limits_are_deterministic(tmp_path: Path) -> None:
