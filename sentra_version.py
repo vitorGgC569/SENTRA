@@ -1,0 +1,5 @@
+"""Single lightweight version source for all SENTRA Commander components."""
+PROTOCOL_VERSION = "2026-07-28"
+SERVER_NAME = "sentra-mcp"
+SERVER_VERSION = "3.0.0"
+CAPABILITY_VERSION = "3"

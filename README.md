@@ -226,6 +226,37 @@ expõe promoção automática: `CANDIDATE_READY != APPLIED`.
 Guia completo: `docs/MCP_SERVER.md` · auditoria comparativa:
 `docs/MCP_AUDIT.md`.
 
+### SENTRA Commander v1
+
+A camada Commander transforma o MCP local em um produto multi-device:
+
+```text
+ChatGPT / Claude / Codex
+          │ OAuth/OIDC
+          ▼
+   SENTRA Cloud MCP
+          │
+          ▼
+     SENTRA Relay
+          │ outbound only
+   ┌──────┼────────┐
+   ▼      ▼        ▼
+  PC   notebook  servidor
+          │
+          ▼
+  SENTRA Remote Agent
+          │
+          └─ MCP local + filesystem + terminal + Git + OMA + browser + sandbox
+```
+
+O Cloud MCP expõe apenas device management e chamadas remotas; filesystem,
+terminal e browser continuam executando no agente local sob `allowed_roots`, ACL
+por device/tool, tokens rotacionáveis/revogáveis e leases que viram `UNCERTAIN`
+em vez de replay automático quando uma execução pode ter começado.
+
+Documentação: `docs/COMMANDER_V1.md` · deploy: `docs/DEPLOYMENT.md` · privacidade:
+`docs/PRIVACY.md` · threat model: `docs/THREAT_MODEL.md`.
+
 ---
 
 ## Testes

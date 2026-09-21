@@ -6,10 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PROTOCOL_VERSION = "2026-07-28"
-SERVER_NAME = "sentra-mcp"
-SERVER_VERSION = "2.0.0"
-CAPABILITY_VERSION = "2"
+from .version import CAPABILITY_VERSION, PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION
 
 
 class ErrorPayload(BaseModel):

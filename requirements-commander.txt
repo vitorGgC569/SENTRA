@@ -1,0 +1,4 @@
+pyinstaller>=6.10
+pystray>=0.19
+pillow>=10.0
+keyring>=25.0

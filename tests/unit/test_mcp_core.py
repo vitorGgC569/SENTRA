@@ -33,8 +33,18 @@ def test_non_loopback_host_requires_explicit_authorization() -> None:
     with pytest.raises(ConfigurationError, match="non-loopback"):
         MCPConfig(host="0.0.0.0")
 
-    authorized = MCPConfig(host="0.0.0.0", allow_non_loopback=True)
+    with pytest.raises(ConfigurationError, match="requires OAuth"):
+        MCPConfig(host="0.0.0.0", allow_non_loopback=True)
+
+    authorized = MCPConfig(
+        host="0.0.0.0",
+        allow_non_loopback=True,
+        oauth_issuer_url="https://auth.example.test/",
+        oauth_resource_url="https://sentra.example.test/mcp",
+        oauth_introspection_url="https://auth.example.test/oauth2/introspect",
+    )
     assert authorized.host == "0.0.0.0"
+    assert authorized.oauth_enabled is True
 
 
 def test_secret_redaction_and_audit_jsonl(tmp_path: Path) -> None:
@@ -62,7 +72,7 @@ def test_response_envelope_has_stable_json() -> None:
     assert encoded == envelope.to_stable_json()
     assert encoded == (
         '{"data":{"a":2,"z":1},"error":null,'
-        '"meta":{"server_name":"sentra-mcp","server_version":"2.0.0"},'
+        '"meta":{"server_name":"sentra-mcp","server_version":"3.0.0"},'
         '"ok":true,"schema_version":"2026-07-28"}'
     )
 

@@ -22,6 +22,9 @@ def capability_document(config: MCPConfig) -> dict[str, Any]:
         "max_output_bytes": config.max_output_bytes,
         "max_processes": config.max_processes,
         "http_loopback_only": not config.allow_non_loopback,
+        "oauth_enabled": config.oauth_enabled,
+        "remote_device_tokens_hashed_at_rest": True,
+        "remote_tool_acl": True,
         "automatic_promotion": False,
         "arbitrary_oma_access": False,
     }
@@ -30,6 +33,12 @@ def capability_document(config: MCPConfig) -> dict[str, Any]:
         "processes",
         "repository",
         "oma_observability",
+        "persistent_search",
+        "telemetry",
+        "documents",
+        "browser_control",
+        "sandbox_quality_gate",
+        "remote_devices",
     ]
     return metadata
 

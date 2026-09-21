@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,14 +13,7 @@ from .errors import ConfigurationError
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_TRANSPORTS = ("stdio", "streamable-http")
 DEFAULT_BLOCKED_COMMANDS = (
-    "rm",
-    "rmdir",
-    "del",
-    "erase",
-    "format",
-    "shutdown",
-    "reboot",
-    "poweroff",
+    "rm", "rmdir", "del", "erase", "format", "shutdown", "reboot", "poweroff",
 )
 
 
@@ -51,6 +45,17 @@ def _positive_int(name: str, value: int) -> int:
     return value
 
 
+def _approved_state(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    approved = data.get("approved") if isinstance(data, dict) else {}
+    return approved if isinstance(approved, dict) else {}
+
+
 @dataclass(frozen=True, slots=True)
 class MCPConfig:
     """Configuration with restrictive local-only defaults."""
@@ -65,19 +70,29 @@ class MCPConfig:
     port: int = 8000
     audit_log: Path = field(default_factory=lambda: PROJECT_ROOT / ".sentra" / "mcp-audit.jsonl")
     transport: str = "stdio"
+    deployment_mode: str = "local"
     allow_non_loopback: bool = False
+    remote_store_path: Path = field(default_factory=lambda: PROJECT_ROOT / ".sentra" / "remote.sqlite3")
+    oauth_issuer_url: str = ""
+    oauth_resource_url: str = ""
+    oauth_introspection_url: str = ""
+    oauth_client_id: str = ""
+    oauth_client_secret: str = ""
+    oauth_required_scopes: tuple[str, ...] = ("sentra:mcp",)
 
     def __post_init__(self) -> None:
         roots = tuple(Path(root).expanduser().resolve() for root in self.allowed_roots)
         if not roots:
             raise ConfigurationError("allowed_roots must contain at least one explicit root")
         object.__setattr__(self, "allowed_roots", roots)
-
-        blocked = tuple(
-            dict.fromkeys(command.strip().casefold() for command in self.blocked_commands if command.strip())
-        )
+        blocked = tuple(dict.fromkeys(
+            command.strip().casefold() for command in self.blocked_commands if command.strip()
+        ))
         object.__setattr__(self, "blocked_commands", blocked)
         object.__setattr__(self, "audit_log", Path(self.audit_log).expanduser().resolve())
+        object.__setattr__(self, "remote_store_path", Path(self.remote_store_path).expanduser().resolve())
+        scopes = tuple(dict.fromkeys(scope.strip() for scope in self.oauth_required_scopes if scope.strip()))
+        object.__setattr__(self, "oauth_required_scopes", scopes or ("sentra:mcp",))
 
         _positive_int("max_read_bytes", self.max_read_bytes)
         _positive_int("max_write_bytes", self.max_write_bytes)
@@ -89,28 +104,58 @@ class MCPConfig:
             raise ConfigurationError(
                 f"unsupported transport {self.transport!r}; expected one of {ALLOWED_TRANSPORTS}"
             )
+        if self.deployment_mode not in {"local", "cloud"}:
+            raise ConfigurationError("deployment_mode must be local or cloud")
         if not self.allow_non_loopback and not _is_loopback(self.host):
-            raise ConfigurationError(
-                "non-loopback HTTP host requires explicit allow_non_loopback authorization"
-            )
+            raise ConfigurationError("non-loopback HTTP host requires explicit allow_non_loopback authorization")
+        if self.deployment_mode == "cloud":
+            if self.transport != "streamable-http":
+                raise ConfigurationError("cloud mode requires streamable-http transport")
+            if not (self.oauth_issuer_url and self.oauth_resource_url and self.oauth_introspection_url):
+                raise ConfigurationError("cloud mode requires OAuth issuer, resource URL and introspection URL")
+        if self.allow_non_loopback and not _is_loopback(self.host):
+            if not (self.oauth_issuer_url and self.oauth_resource_url and self.oauth_introspection_url):
+                raise ConfigurationError("non-loopback MCP requires OAuth issuer, resource URL and introspection URL")
+            if not self.oauth_resource_url.startswith("https://"):
+                raise ConfigurationError("non-loopback OAuth resource URL must use HTTPS")
+            if not self.oauth_issuer_url.startswith("https://"):
+                raise ConfigurationError("non-loopback OAuth issuer must use HTTPS")
+
+    @property
+    def oauth_enabled(self) -> bool:
+        return bool(self.oauth_issuer_url and self.oauth_resource_url and self.oauth_introspection_url)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "MCPConfig":
-        """Build configuration from SENTRA_MCP_* environment variables."""
-
         env = os.environ if environ is None else environ
+        state_path = Path(env.get("SENTRA_MCP_CONFIG_STATE", str(PROJECT_ROOT / ".sentra" / "mcp-config.json")))
+        approved = _approved_state(state_path)
+
         roots_value = env.get("SENTRA_MCP_ALLOWED_ROOTS")
+        approved_roots = approved.get("allowed_roots")
         roots = (
             tuple(Path(item) for item in roots_value.split(os.pathsep) if item.strip())
             if roots_value
+            else tuple(Path(item) for item in approved_roots)
+            if isinstance(approved_roots, list) and approved_roots
             else (PROJECT_ROOT,)
         )
         blocked_value = env.get("SENTRA_MCP_BLOCKED_COMMANDS")
+        approved_blocked = approved.get("blocked_commands")
         blocked = (
             tuple(item.strip() for item in blocked_value.split(",") if item.strip())
             if blocked_value is not None
+            else tuple(str(item) for item in approved_blocked)
+            if isinstance(approved_blocked, list)
             else DEFAULT_BLOCKED_COMMANDS
         )
+        host = env.get("SENTRA_MCP_HOST", str(approved.get("host", "127.0.0.1")))
+        port = int(env.get("SENTRA_MCP_PORT", approved.get("port", 8000)))
+        if "SENTRA_MCP_ALLOW_NON_LOOPBACK" in env:
+            non_loopback = _parse_bool(env.get("SENTRA_MCP_ALLOW_NON_LOOPBACK"))
+        else:
+            non_loopback = bool(approved.get("allow_non_loopback", False))
+
         return cls(
             allowed_roots=roots,
             blocked_commands=blocked,
@@ -118,11 +163,19 @@ class MCPConfig:
             max_write_bytes=int(env.get("SENTRA_MCP_MAX_WRITE_BYTES", 8 * 1024 * 1024)),
             max_output_bytes=int(env.get("SENTRA_MCP_MAX_OUTPUT_BYTES", 2 * 1024 * 1024)),
             max_processes=int(env.get("SENTRA_MCP_MAX_PROCESSES", 4)),
-            host=env.get("SENTRA_MCP_HOST", "127.0.0.1"),
-            port=int(env.get("SENTRA_MCP_PORT", 8000)),
-            audit_log=Path(
-                env.get("SENTRA_MCP_AUDIT_LOG", str(PROJECT_ROOT / ".sentra" / "mcp-audit.jsonl"))
-            ),
+            host=host,
+            port=port,
+            audit_log=Path(env.get("SENTRA_MCP_AUDIT_LOG", str(PROJECT_ROOT / ".sentra" / "mcp-audit.jsonl"))),
             transport=env.get("SENTRA_MCP_TRANSPORT", "stdio"),
-            allow_non_loopback=_parse_bool(env.get("SENTRA_MCP_ALLOW_NON_LOOPBACK")),
+            deployment_mode=env.get("SENTRA_MCP_MODE", "local"),
+            allow_non_loopback=non_loopback,
+            remote_store_path=Path(env.get("SENTRA_REMOTE_STORE", str(PROJECT_ROOT / ".sentra" / "remote.sqlite3"))),
+            oauth_issuer_url=env.get("SENTRA_OAUTH_ISSUER_URL", ""),
+            oauth_resource_url=env.get("SENTRA_OAUTH_RESOURCE_URL", ""),
+            oauth_introspection_url=env.get("SENTRA_OAUTH_INTROSPECTION_URL", ""),
+            oauth_client_id=env.get("SENTRA_OAUTH_CLIENT_ID", ""),
+            oauth_client_secret=env.get("SENTRA_OAUTH_CLIENT_SECRET", ""),
+            oauth_required_scopes=tuple(
+                item for item in env.get("SENTRA_OAUTH_REQUIRED_SCOPES", "sentra:mcp").split() if item
+            ),
         )

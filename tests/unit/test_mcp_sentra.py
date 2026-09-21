@@ -160,7 +160,9 @@ def test_mcp_sentra_tools_are_observational_and_no_promotion_surface(tmp_path: P
                 "sentra_oma_reconcile_status",
             }
             assert expected <= names
-            assert not any("promote" in name or "apply" in name for name in names)
+            assert "sentra_apply_candidate" in names  # sandbox-only candidate application
+            assert not any("promote" in name for name in names)
+            assert not ({"sentra_apply", "sentra_apply_to_workspace", "sentra_promote_candidate"} & names)
 
             health = await client.call_tool("sentra_oma_health", {})
             assert health.is_error is False

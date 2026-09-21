@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import signal
 import sys
 from pathlib import Path
@@ -18,6 +19,21 @@ class CommandRunner:
         self.cwd = Path(cwd).resolve()
         # Profiles are supplied by the local operator, never by model metadata.
         self.profiles = {key: tuple(argv) for key, argv in (profiles or {}).items()}
+        configured_python = os.environ.get("SENTRA_WORKSPACE_PYTHON", "").strip()
+        if configured_python:
+            candidate = Path(configured_python).expanduser()
+            self.python_executable = str(candidate.resolve()) if candidate.exists() else shutil.which(configured_python)
+        elif getattr(sys, "frozen", False):
+            self.python_executable = shutil.which("python") or shutil.which("python3")
+        else:
+            self.python_executable = sys.executable
+
+    def _python(self) -> str:
+        if not self.python_executable:
+            raise PermissionError(
+                "workspace Python runtime unavailable; install Python or set SENTRA_WORKSPACE_PYTHON"
+            )
+        return self.python_executable
 
     def resolve_command(self, command: str) -> List[str]:
         from repository.parser import parse
@@ -38,18 +54,20 @@ class CommandRunner:
             path = resolve_workspace_path(self.cwd, scope)
             if not path.exists():
                 raise ValueError(f"test target missing: {scope}")
-            return [sys.executable, "-m", "pytest", "-q", "--", str(path)]
+            return [self._python(), "-m", "pytest", "-q", "--", str(path)]
         if args:
             raise ValueError(f"{op} accepts no payload")
         if op in self.profiles:
             return list(self.profiles[op])
         if op == "LINT":
-            return [sys.executable, "-I", str(Path(__file__).with_name("syntax_check.py")), str(self.cwd)]
+            if getattr(sys, "frozen", False):
+                return [self._python(), "-m", "compileall", "-q", str(self.cwd)]
+            return [self._python(), "-I", str(Path(__file__).with_name("syntax_check.py")), str(self.cwd)]
         if op == "BUILD":
-            return [sys.executable, "-m", "pytest", "--collect-only", "-q", "--",
+            return [self._python(), "-m", "pytest", "--collect-only", "-q", "--",
                     str(resolve_workspace_path(self.cwd, "tests"))]
         if op == "TYPECHECK":
-            return [sys.executable, "-m", "mypy", "."]
+            return [self._python(), "-m", "mypy", "."]
         raise ValueError(f"operation is not executable: {op}")
 
     @staticmethod

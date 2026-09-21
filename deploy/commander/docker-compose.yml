@@ -1,0 +1,62 @@
+services:
+  cloud-mcp:
+    build:
+      context: ../..
+      dockerfile: deploy/commander/Dockerfile
+    command:
+      - python
+      - -B
+      - -m
+      - sentra_mcp
+      - --mode
+      - cloud
+      - --transport
+      - streamable-http
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --allow-non-loopback
+      - --remote-store
+      - /data/remote.sqlite3
+    environment:
+      SENTRA_OAUTH_ISSUER_URL: ${SENTRA_OAUTH_ISSUER_URL}
+      SENTRA_OAUTH_RESOURCE_URL: ${SENTRA_OAUTH_RESOURCE_URL}
+      SENTRA_OAUTH_INTROSPECTION_URL: ${SENTRA_OAUTH_INTROSPECTION_URL}
+      SENTRA_OAUTH_CLIENT_ID: ${SENTRA_OAUTH_CLIENT_ID}
+      SENTRA_OAUTH_CLIENT_SECRET: ${SENTRA_OAUTH_CLIENT_SECRET}
+      SENTRA_OAUTH_REQUIRED_SCOPES: ${SENTRA_OAUTH_REQUIRED_SCOPES:-sentra:mcp}
+    volumes:
+      - sentra-data:/data
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+  relay:
+    build:
+      context: ../..
+      dockerfile: deploy/commander/Dockerfile
+    command:
+      - python
+      - -B
+      - -m
+      - sentra_remote.relay_main
+      - --store
+      - /data/remote.sqlite3
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8787"
+      - --tls-cert
+      - /certs/fullchain.pem
+      - --tls-key
+      - /certs/privkey.pem
+    volumes:
+      - sentra-data:/data
+      - ${SENTRA_TLS_CERT_DIR}:/certs:ro
+    ports:
+      - "8787:8787"
+    restart: unless-stopped
+
+volumes:
+  sentra-data:

@@ -1,0 +1,177 @@
+name: SENTRA Commander Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "commander-v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  test-and-build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt -r requirements-commander.txt
+
+      - name: Resolve Commander version
+        shell: pwsh
+        run: |
+          $version = (python -c "from sentra_version import SERVER_VERSION; print(SERVER_VERSION)").Trim()
+          if (-not $version) { throw "SERVER_VERSION is empty" }
+          if ($env:GITHUB_REF -like "refs/tags/*") {
+            $expected = "commander-v$version"
+            if ($env:GITHUB_REF_NAME -ne $expected) { throw "Release tag $env:GITHUB_REF_NAME must equal $expected" }
+          }
+          "SENTRA_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Full regression
+        shell: pwsh
+        run: python -B -m pytest tests -q
+
+      - name: Build Windows executables
+        shell: pwsh
+        run: python scripts/commander/build_windows.py --dist dist --work build/commander --spec build/commander-spec --clean-output
+
+      - name: Smoke packaged Windows executables
+        shell: pwsh
+        run: |
+          .\dist\sentra-agent.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "sentra-agent.exe smoke failed" }
+          .\dist\sentra-tray.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "sentra-tray.exe smoke failed" }
+          .\dist\sentra-diagnostics.exe --help | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "sentra-diagnostics.exe smoke failed" }
+          $bundle = Join-Path $env:RUNNER_TEMP "sentra-installer-smoke"
+          $install = Join-Path $env:RUNNER_TEMP "sentra-installed-smoke"
+          Remove-Item -Recurse -Force $bundle,$install -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $bundle | Out-Null
+          Copy-Item dist\sentra-agent.exe,dist\sentra-tray.exe,dist\sentra-diagnostics.exe $bundle
+          Copy-Item installer\windows\install.ps1,installer\windows\uninstall.ps1 $bundle
+          & "$bundle\install.ps1" -InstallDir $install -NoStartup
+          if (-not (Test-Path "$install\sentra-agent.exe")) { throw "installer smoke did not install agent" }
+          & "$bundle\uninstall.ps1" -InstallDir $install -KeepConfig -NoStartupCleanup
+          if (Test-Path $install) { throw "uninstaller smoke left install directory" }
+
+      - name: Optional Authenticode signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_B64: ${{ secrets.WINDOWS_CERTIFICATE_B64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_B64) {
+            Write-Host "No signing certificate configured; binaries remain unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "sentra-signing.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_B64))
+          $securePassword = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $pfxData = Get-PfxData -FilePath $pfx -Password $securePassword
+          $cert = $pfxData.EndEntityCertificates | Select-Object -First 1
+          if (-not $cert) { throw "No end-entity signing certificate found in PFX" }
+          "SENTRA_SIGNER_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $timestamp = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+          foreach ($exe in Get-ChildItem dist\*.exe) {
+            & signtool sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $exe.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Signing failed for $($exe.Name)" }
+          }
+          Remove-Item -Force $pfx
+
+      - name: Build installable bundle
+        shell: pwsh
+        run: |
+          $bundle = "release\sentra-commander"
+          New-Item -ItemType Directory -Force $bundle | Out-Null
+          Copy-Item dist\sentra-agent.exe,dist\sentra-tray.exe,dist\sentra-diagnostics.exe $bundle
+          Copy-Item installer\windows\install.ps1,installer\windows\uninstall.ps1 $bundle
+          Copy-Item docs\COMMANDER_V1.md,docs\PRIVACY.md,docs\THREAT_MODEL.md,docs\DEPLOYMENT.md $bundle -ErrorAction SilentlyContinue
+          Compress-Archive -Path "$bundle\*" -DestinationPath "release\sentra-commander-windows-x64.zip" -Force
+          $hash = (Get-FileHash "release\sentra-commander-windows-x64.zip" -Algorithm SHA256).Hash.ToLower()
+          $tag = $env:GITHUB_REF_NAME
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/sentra-commander-windows-x64.zip"
+          $manifest = [ordered]@{
+            version = $env:SENTRA_VERSION
+            url = $url
+            sha256 = $hash
+            signer_thumbprint = ($env:SENTRA_SIGNER_THUMBPRINT ?? "")
+          }
+          $manifest | ConvertTo-Json | Set-Content -Encoding UTF8 "release\release-manifest.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sentra-commander-windows-x64
+          path: release/*
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $assets = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
+          if ($assets.Count -eq 0) { throw "No release assets were produced" }
+          gh release view $env:GITHUB_REF_NAME 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:GITHUB_REF_NAME @assets --clobber
+          } else {
+            gh release create $env:GITHUB_REF_NAME @assets --generate-notes --title $env:GITHUB_REF_NAME
+          }
+
+  validate-and-publish-registry:
+    runs-on: ubuntu-latest
+    needs: test-and-build-windows
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Render registry manifest
+        env:
+          MCP_REMOTE_URL: ${{ secrets.MCP_REMOTE_URL }}
+        run: |
+          NAME="io.github.${GITHUB_REPOSITORY_OWNER}/sentra-commander"
+          VERSION=$(python -c 'import json; print(json.load(open("server.json", encoding="utf-8"))["version"])')
+          ARGS=(--input server.json --output server.release.json --name "$NAME" --version "$VERSION" --repository-url "https://github.com/${GITHUB_REPOSITORY}")
+          if [ -n "$MCP_REMOTE_URL" ]; then ARGS+=(--remote-url "$MCP_REMOTE_URL"); fi
+          python scripts/commander/render_server_json.py "${ARGS[@]}"
+
+      - name: Install pinned MCP publisher
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          curl -fL "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" -o mcp-publisher.tar.gz
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xf mcp-publisher.tar.gz mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --help >/dev/null
+
+      - name: Validate Registry metadata
+        run: ./mcp-publisher validate server.release.json
+
+      - name: Publish Registry metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          MCP_REMOTE_URL: ${{ secrets.MCP_REMOTE_URL }}
+        run: |
+          if [ -z "$MCP_REMOTE_URL" ]; then
+            echo "MCP_REMOTE_URL is not configured; skipping public Registry publication."
+            exit 0
+          fi
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish server.release.json
