@@ -9,7 +9,9 @@ from .audit import AuditLogger
 from .config import MCPConfig
 from .models import CapabilityMetadata, ResponseEnvelope, SERVER_NAME, SERVER_VERSION
 from .services.filesystem import FilesystemService
+from .services.process import ProcessService
 from .tools.filesystem import register_filesystem_tools
+from .tools.process import register_process_tools
 
 
 def capability_document(config: MCPConfig) -> dict[str, Any]:
@@ -35,6 +37,7 @@ class SentraMCPServer:
         self.config = config or MCPConfig()
         self.audit = AuditLogger(self.config.audit_log)
         self.filesystem = FilesystemService(self.config, self.audit)
+        self.processes = ProcessService(self.config, self.audit)
         self.mcp = MCPServer(
             SERVER_NAME,
             version=SERVER_VERSION,
@@ -60,22 +63,26 @@ class SentraMCPServer:
             )
 
         register_filesystem_tools(self.mcp, self.filesystem)
+        register_process_tools(self.mcp, self.processes)
 
     def run(self, transport: str | None = None) -> None:
         selected = transport or self.config.transport
         if selected not in {"stdio", "streamable-http"}:
             raise ValueError(f"unsupported transport: {selected!r}")
         self.audit.emit("server.start", "ok", {"transport": selected})
-        if selected == "stdio":
-            self.mcp.run(transport="stdio")
-            return
-        self.mcp.run(
-            transport="streamable-http",
-            host=self.config.host,
-            port=self.config.port,
-            stateless_http=True,
-            json_response=True,
-        )
+        try:
+            if selected == "stdio":
+                self.mcp.run(transport="stdio")
+                return
+            self.mcp.run(
+                transport="streamable-http",
+                host=self.config.host,
+                port=self.config.port,
+                stateless_http=True,
+                json_response=True,
+            )
+        finally:
+            self.processes.shutdown()
 
 
 def create_server(config: MCPConfig | None = None) -> MCPServer:
