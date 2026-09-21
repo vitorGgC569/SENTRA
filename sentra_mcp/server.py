@@ -8,6 +8,8 @@ from mcp.server import MCPServer
 from .audit import AuditLogger
 from .config import MCPConfig
 from .models import CapabilityMetadata, ResponseEnvelope, SERVER_NAME, SERVER_VERSION
+from .services.filesystem import FilesystemService
+from .tools.filesystem import register_filesystem_tools
 
 
 def capability_document(config: MCPConfig) -> dict[str, Any]:
@@ -32,6 +34,7 @@ class SentraMCPServer:
     def __init__(self, config: MCPConfig | None = None) -> None:
         self.config = config or MCPConfig()
         self.audit = AuditLogger(self.config.audit_log)
+        self.filesystem = FilesystemService(self.config, self.audit)
         self.mcp = MCPServer(
             SERVER_NAME,
             version=SERVER_VERSION,
@@ -55,6 +58,8 @@ class SentraMCPServer:
                     "capabilities": capability_document(config),
                 }
             )
+
+        register_filesystem_tools(self.mcp, self.filesystem)
 
     def run(self, transport: str | None = None) -> None:
         selected = transport or self.config.transport

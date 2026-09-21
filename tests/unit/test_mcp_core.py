@@ -86,7 +86,8 @@ def test_discovery_list_and_call_tool_in_process(tmp_path: Path) -> None:
         async with Client(runtime.mcp) as client:
             assert client.protocol_version == PROTOCOL_VERSION
             tools = await client.list_tools()
-            assert [tool.name for tool in tools.tools] == ["sentra_health"]
+            tool_names = [tool.name for tool in tools.tools]
+            assert "sentra_health" in tool_names
 
             result = await client.call_tool("sentra_health", {})
             assert result.is_error is False
