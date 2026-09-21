@@ -105,19 +105,29 @@ async def test_e2e_scripted_diversity(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_e2e_local_model_if_available(tmp_path):
     """True live-model E2E. Skipped when no local server is reachable."""
-    import socket
+    import json
+    import urllib.error
+    import urllib.request
 
-    def _port_open(host: str, port: int) -> bool:
+    def _openai_model_base_if_available(port: int) -> str | None:
+        base = f"http://127.0.0.1:{port}/v1"
         try:
-            with socket.create_connection((host, port), timeout=1.5):
-                return True
-        except OSError:
-            return False
+            with urllib.request.urlopen(f"{base}/models", timeout=1.5) as response:
+                if response.status != 200:
+                    return None
+                payload = json.loads(response.read(1024 * 1024))
+        except (OSError, urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+            return None
+        return base
 
     live_requested = os.environ.get("OMA_LIVE_LOCAL") == "1"
-    local_up = _port_open("127.0.0.1", 11434) or _port_open("127.0.0.1", 8000)
-    if not (live_requested or local_up):
-        pytest.skip("No local model server reachable (BLOCKED_EXTERNAL for live-model E2E)")
+    base = _openai_model_base_if_available(11434) or _openai_model_base_if_available(8000)
+    if base is None and not live_requested:
+        pytest.skip("No OpenAI-compatible local model server reachable (BLOCKED_EXTERNAL for live-model E2E)")
+    if base is None:
+        pytest.fail("OMA_LIVE_LOCAL=1 but no OpenAI-compatible /v1/models endpoint is reachable")
 
     import git
     from orchestrator.providers.local_provider import LocalModelProvider
@@ -125,7 +135,6 @@ async def test_e2e_local_model_if_available(tmp_path):
     ws = tmp_path / "ws-live"
     ws.mkdir()
     git.Repo.init(ws)
-    base = "http://127.0.0.1:11434/v1" if _port_open("127.0.0.1", 11434) else "http://127.0.0.1:8000/v1"
     local = LocalModelProvider(base_url=base, model_name="qwen2.5:0.5b-instruct-q4_K_M")
     router = ModelRouter(providers={"primary": local, "master": local},
                          primary_provider_name="primary", fallback_provider_name="master")

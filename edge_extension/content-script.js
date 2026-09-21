@@ -4,7 +4,7 @@
  *      DELETE_CONVERSATION. */
 "use strict";
 
-const OMA_CS_VERSION = "1.6.4";
+const OMA_CS_VERSION = "1.6.5";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -23,6 +23,45 @@ function omaCapBanner() {
     const m = body.match(/(atingiu[^.]{0,80}limite[^.]{0,80}|limite[^.]{0,80}mensagens[^.]{0,80}|upgrade[^.]{0,60}plano[^.]{0,60}|excesso[^.]{0,80}solicita[^.]{0,80})/);
     return m ? m[0].slice(0, 160) : null;
   } catch (_) { return null; }
+}
+
+const OMA_MAX_ADDITIONAL_CHECK_RECOVERIES = 2;
+
+function omaFoldUiText(text) {
+  return String(text || "")
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function omaIsAdditionalChecksMessage(text) {
+  const folded = omaFoldUiText(text);
+  return folded.includes("nossos sistemas estao fazendo verificacoes adicionais antes de responder a esta solicitacao")
+    || folded.includes("our systems are doing additional checks before responding to this request")
+    || folded.includes("our systems are performing additional checks before responding to this request");
+}
+
+async function omaStopGenerationForRecovery(timeoutMs = 6000) {
+  try {
+    const stop = omaQueryFirst(OMA_SELECTORS.stopButton);
+    if (stop && omaIsVisible(stop)) stop.click();
+  } catch (e) {
+    throw new Error(`ADDITIONAL_CHECKS_STOP_FAILED: ${String((e && e.message) || e)}`);
+  }
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try { if (omaGenerationFinished()) return true; } catch (_) {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error("ADDITIONAL_CHECKS_STOP_FAILED: geração não encerrou após clicar em Parar");
+}
+
+async function omaRecoverAdditionalChecks() {
+  await omaStopGenerationForRecovery();
+  await omaSendMessage("Continue", []);
+  return true;
 }
 
 function omaComposerText(box) {

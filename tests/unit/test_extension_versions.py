@@ -30,3 +30,16 @@ def test_node_syntax_if_available():
     for name in ("service-worker.js", "content-script.js", "selectors.js", "observer.js"):
         r = subprocess.run(["node", "--check", str(EXT / name)], capture_output=True)
         assert r.returncode == 0, f"{name}: {r.stderr.decode()[:300]}"
+
+
+
+def test_additional_checks_recovery_contract_present():
+    content = _read("content-script.js")
+    observer = _read("observer.js")
+    assert "omaIsAdditionalChecksMessage" in content
+    assert "omaStopGenerationForRecovery" in content
+    assert 'omaSendMessage("Continue", [])' in content
+    assert "OMA_MAX_ADDITIONAL_CHECK_RECOVERIES = 2" in content
+    assert "omaIsAdditionalChecksMessage(text)" in observer
+    assert "ADDITIONAL_CHECKS_LOOP" in observer
+    assert "omaRecoverAdditionalChecks()" in observer

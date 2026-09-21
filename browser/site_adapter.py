@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import unicodedata
 from typing import Any, List, Optional
 from playwright.async_api import Page
 from .response_capture import ProgressCallback, ResponseCapture, emit_progress
@@ -85,7 +86,9 @@ def classify_adapter_error(exc: BaseException) -> str:
     msg = str(exc).lower()
     if "timed out" in msg or "timeout" in msg:
         return "TIMEOUT"
-    if "vazia" in msg or "incompleta" in msg or "expirada" in msg:
+    if ("vazia" in msg or "incompleta" in msg or "expirada" in msg
+            or "additional_checks" in msg or "verificações adicionais" in msg
+            or "verificacoes adicionais" in msg):
         return "MODEL_ERROR"
     if "closed" in msg or "disconnected" in msg or "sessao" in msg:
         return "NETWORK_ERROR"
@@ -96,6 +99,24 @@ def classify_adapter_error(exc: BaseException) -> str:
 
 def _norm_space(text: str) -> str:
     return " ".join((text or "").split())
+
+
+def _fold_ui_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", _norm_space(text)).casefold()
+    return "".join(ch for ch in normalized if not unicodedata.combining(ch))
+
+
+ADDITIONAL_CHECKS_MARKERS = (
+    "nossos sistemas estao fazendo verificacoes adicionais antes de responder a esta solicitacao",
+    "our systems are doing additional checks before responding to this request",
+    "our systems are performing additional checks before responding to this request",
+)
+MAX_ADDITIONAL_CHECK_RECOVERIES = 2
+
+
+def is_additional_checks_message(text: str) -> bool:
+    folded = _fold_ui_text(text)
+    return any(marker in folded for marker in ADDITIONAL_CHECKS_MARKERS)
 
 
 class ChatSiteAdapter:
@@ -489,6 +510,43 @@ class ChatSiteAdapter:
                 continue
         return ""
 
+    async def _assistant_message_count(self) -> int:
+        for sel in ASSISTANT_SELECTORS:
+            try:
+                return await self.page.locator(sel).count()
+            except Exception:
+                continue
+        return 0
+
+    async def _stop_generation_for_recovery(self, timeout_s: float = 6.0) -> bool:
+        stop = await self._first_ready_button(STOP_SELECTORS)
+        clicked = False
+        if stop is not None:
+            try:
+                await stop.click(timeout=5000)
+                clicked = True
+            except Exception as exc:
+                raise ChatSiteAdapterError(f"ADDITIONAL_CHECKS_STOP_FAILED: {exc}") from exc
+
+        deadline = asyncio.get_running_loop().time() + max(1.0, timeout_s)
+        while asyncio.get_running_loop().time() < deadline:
+            if await self.is_generation_finished():
+                return clicked
+            await asyncio.sleep(0.1)
+        raise ChatSiteAdapterError(
+            "ADDITIONAL_CHECKS_STOP_FAILED: geração não encerrou após clicar em Parar"
+        )
+
+    async def _recover_additional_checks(
+        self,
+        *,
+        on_progress: Optional[ProgressCallback] = None,
+    ) -> None:
+        await emit_progress(on_progress, "recovering")
+        await self._stop_generation_for_recovery()
+        await self.send_prompt("Continue", on_progress=on_progress)
+        await emit_progress(on_progress, "waiting")
+
     async def send_and_capture(
         self,
         prompt: str,
@@ -509,6 +567,28 @@ class ChatSiteAdapter:
             baseline = ""
         await self.send_prompt(prompt, on_progress=on_progress)
 
+        recovery_count = 0
+        last_recovered_message_count = -1
+
+        async def intercept_special_ui(text: str) -> str:
+            nonlocal recovery_count, last_recovered_message_count
+            if not is_additional_checks_message(text):
+                return text
+            message_count = await self._assistant_message_count()
+            # O mesmo aviso permanece no DOM enquanto o novo turno começa;
+            # não dispara novamente até existir outro turno do assistente.
+            if message_count == last_recovered_message_count:
+                return ""
+            if recovery_count >= MAX_ADDITIONAL_CHECK_RECOVERIES:
+                raise ChatSiteAdapterError(
+                    "ADDITIONAL_CHECKS_LOOP: aviso de verificações adicionais repetiu "
+                    f"mais de {MAX_ADDITIONAL_CHECK_RECOVERIES} vezes"
+                )
+            recovery_count += 1
+            last_recovered_message_count = message_count
+            await self._recover_additional_checks(on_progress=on_progress)
+            return ""
+
         response = await ResponseCapture.wait_for_stable_response(
             extract_text_fn=self.extract_last_response,
             is_finished_fn=self.is_generation_finished,
@@ -518,6 +598,7 @@ class ChatSiteAdapter:
             poll_interval_s=poll_interval_s,
             heartbeat_interval_s=heartbeat_interval_s,
             on_progress=on_progress,
+            text_interceptor=intercept_special_ui,
         )
 
         # Check for truncation (missing END_RESULT when required)
@@ -537,6 +618,7 @@ class ChatSiteAdapter:
                     poll_interval_s=poll_interval_s,
                     heartbeat_interval_s=heartbeat_interval_s,
                     on_progress=on_progress,
+                    text_interceptor=intercept_special_ui,
                 )
                 response = response + "\n" + second_part
             except (asyncio.CancelledError, TimeoutError):

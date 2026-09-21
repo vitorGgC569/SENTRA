@@ -11,6 +11,7 @@ from typing import Any, Awaitable, Callable, Optional
 # {"sending", "sent", "waiting", "reading", ...} (fases de espera alinhadas
 # ao relay: waiting/reading); timestamp = time.time(). Síncrono ou async.
 ProgressCallback = Callable[[str, float], Any]
+TextInterceptor = Callable[[str], Any]
 
 
 async def emit_progress(on_progress: Optional[ProgressCallback], phase: str) -> None:
@@ -60,6 +61,7 @@ class ResponseCapture:
         poll_interval_s: float = 1.5,
         heartbeat_interval_s: float = 10.0,
         on_progress: Optional[ProgressCallback] = None,
+        text_interceptor: Optional[TextInterceptor] = None,
         end_marker: str = "END_RESULT",
     ) -> str:
         """Espera orientada a estado como observer.js: stop some E texto estabiliza.
@@ -102,6 +104,16 @@ class ResponseCapture:
                 poll_ok = False
             if not isinstance(text, str):
                 text = ""
+
+            # Interceptor de estados especiais da UI. Diferente das sondagens
+            # best-effort acima, erros daqui propagam: uma recuperação que
+            # falhou não pode ser mascarada como simples timeout silencioso.
+            if text_interceptor is not None:
+                intercepted = text_interceptor(text)
+                if inspect.isawaitable(intercepted):
+                    intercepted = await intercepted
+                if intercepted is not None:
+                    text = intercepted if isinstance(intercepted, str) else str(intercepted)
 
             # Guarda de baseline (observer.js): enquanto o texto for o turno
             # anterior, a geração nova nem começou — nunca conta como estável

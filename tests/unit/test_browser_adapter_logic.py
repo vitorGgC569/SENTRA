@@ -25,6 +25,7 @@ from browser.site_adapter import (
     ChatSiteAdapter,
     ChatSiteAdapterError,
     classify_adapter_error,
+    is_additional_checks_message,
 )
 from orchestrator.providers.base import AgentRequest
 from orchestrator.providers.browser_provider import BrowserProvider, _classify_browser_error
@@ -677,3 +678,140 @@ async def test_open_conversation_rejects_actual_mismatch():
     with pytest.raises(ChatSiteAdapterError, match="identidade incerta"):
         await adapter.open_conversation("https://chatgpt.com/c/target-conv-456")
 
+
+
+
+# ---------------------------------------------------------------------------
+# Recuperação automática do aviso de "verificações adicionais" do ChatGPT
+# ---------------------------------------------------------------------------
+
+ADDITIONAL_CHECKS_PT = (
+    "Nossos sistemas estão fazendo verificações adicionais antes de responder a esta solicitação. "
+    "Você pode tentar novamente com um modelo mais rápido para receber uma resposta mais rápida, "
+    "embora ele possa ter menos capacidade para lidar com solicitações complexas. Saiba mais"
+)
+
+
+def test_detects_additional_checks_message_pt_and_en():
+    assert is_additional_checks_message(ADDITIONAL_CHECKS_PT)
+    assert is_additional_checks_message(
+        "Our systems are performing additional checks before responding to this request. Learn more"
+    )
+    assert not is_additional_checks_message("Resposta normal do modelo.")
+
+
+@pytest.mark.asyncio
+async def test_additional_checks_recovery_stops_then_sends_continue():
+    adapter = _adapter(FakePage())
+    events = []
+
+    async def fake_stop(timeout_s=6.0):
+        events.append("stop")
+        return True
+
+    async def fake_send(prompt, on_progress=None):
+        events.append(("send", prompt))
+
+    adapter._stop_generation_for_recovery = fake_stop  # type: ignore[method-assign]
+    adapter.send_prompt = fake_send  # type: ignore[method-assign]
+
+    await adapter._recover_additional_checks()
+    assert events == ["stop", ("send", "Continue")]
+
+
+@pytest.mark.asyncio
+async def test_send_and_capture_recovers_additional_checks_and_returns_real_answer():
+    adapter = _adapter(FakePage())
+    samples = iter([
+        "turno anterior",
+        ADDITIONAL_CHECKS_PT,
+        ADDITIONAL_CHECKS_PT,
+        "resposta final",
+        "resposta final",
+    ])
+    last = {"value": "resposta final"}
+    sent = []
+    recovered = []
+
+    async def extract():
+        try:
+            last["value"] = next(samples)
+        except StopIteration:
+            pass
+        return last["value"]
+
+    async def send(prompt, on_progress=None):
+        sent.append(prompt)
+
+    async def count():
+        return 2
+
+    async def recover(on_progress=None):
+        recovered.append("Continue")
+
+    async def finished():
+        return True
+
+    adapter.extract_last_response = extract  # type: ignore[method-assign]
+    adapter.send_prompt = send  # type: ignore[method-assign]
+    adapter._assistant_message_count = count  # type: ignore[method-assign]
+    adapter._recover_additional_checks = recover  # type: ignore[method-assign]
+    adapter.is_generation_finished = finished  # type: ignore[method-assign]
+
+    out = await adapter.send_and_capture(
+        "pergunta",
+        timeout_seconds=5,
+        stable_samples=1,
+        poll_interval_s=0.01,
+        heartbeat_interval_s=3600,
+    )
+    assert out == "resposta final"
+    assert sent == ["pergunta"]
+    assert recovered == ["Continue"]
+
+
+@pytest.mark.asyncio
+async def test_additional_checks_recovery_has_loop_guard():
+    adapter = _adapter(FakePage())
+    samples = iter([
+        "turno anterior",
+        ADDITIONAL_CHECKS_PT,
+        ADDITIONAL_CHECKS_PT,
+        ADDITIONAL_CHECKS_PT,
+    ])
+    last = {"value": ADDITIONAL_CHECKS_PT}
+    counts = iter([2, 3, 4])
+
+    async def extract():
+        try:
+            last["value"] = next(samples)
+        except StopIteration:
+            pass
+        return last["value"]
+
+    async def send(prompt, on_progress=None):
+        return None
+
+    async def count():
+        return next(counts, 4)
+
+    async def recover(on_progress=None):
+        return None
+
+    async def finished():
+        return True
+
+    adapter.extract_last_response = extract  # type: ignore[method-assign]
+    adapter.send_prompt = send  # type: ignore[method-assign]
+    adapter._assistant_message_count = count  # type: ignore[method-assign]
+    adapter._recover_additional_checks = recover  # type: ignore[method-assign]
+    adapter.is_generation_finished = finished  # type: ignore[method-assign]
+
+    with pytest.raises(ChatSiteAdapterError, match="ADDITIONAL_CHECKS_LOOP"):
+        await adapter.send_and_capture(
+            "pergunta",
+            timeout_seconds=5,
+            stable_samples=1,
+            poll_interval_s=0.01,
+            heartbeat_interval_s=3600,
+        )
