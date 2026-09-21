@@ -5,3 +5,4 @@ pyyaml>=6.0
 gitpython>=3.1.40
 typing-extensions>=4.9.0
 pytest>=8.0
+mcp>=2,<3
