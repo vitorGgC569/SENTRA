@@ -68,10 +68,12 @@ def _copy_tree(source: Path, destination: Path) -> None:
 
 
 def _start_desktop(install_dir: Path) -> None:
-    desktop = install_dir / "sentra-desktop.exe"
-    if desktop.is_file():
+    human = install_dir / "sentra-human.exe"
+    control = install_dir / "sentra-desktop.exe"
+    target = human if human.is_file() else control
+    if target.is_file():
         subprocess.Popen(
-            [str(desktop)],
+            [str(target)],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

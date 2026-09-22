@@ -79,7 +79,8 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
     source = source.resolve()
     output = output.resolve()
     required = {
-        "sentra-desktop.exe", "sentra-mcp.exe", "sentra-browser-relay.exe",
+        "sentra-desktop.exe", "sentra-human.exe", "sentra-human-worker.exe",
+        "sentra-mcp.exe", "sentra-browser-relay.exe",
         "sentra-agent.exe", "sentra-diagnostics.exe", "sentra-admin.exe",
         "sentra-update-helper.exe", "sentra-oma.exe", "tunnel-client.exe",
     }
@@ -134,6 +135,7 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
     file_ids = _add_tree(db, cab, feature, install, source)
 
     desktop_id = file_ids["sentra-desktop.exe"]
+    human_id = file_ids["sentra-human.exe"]
     root_component = _component_id(Path("."))
     add_data(db, "Registry", [
         (
@@ -150,17 +152,31 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
     sentra_menu = Directory(db, cab, program_menu, ".", "SENTRAMenu", "SENTRA")
     add_data(db, "Shortcut", [
         (
-            "SENTRA_Desktop_Shortcut",
+            "SENTRA_App_Shortcut",
             sentra_menu.logical,
-            "SENTRA Desktop",
+            "SENTRA",
             root_component,
-            f"[#{desktop_id}]",
+            f"[#{human_id}]",
             None,
-            "Open SENTRA Desktop",
+            "Open SENTRA",
             None,
             None,
             None,
             1,
+            install.logical,
+        ),
+        (
+            "SENTRA_Control_Center_Shortcut",
+            sentra_menu.logical,
+            "SENTRA Control Center",
+            root_component,
+            f"[#{desktop_id}]",
+            None,
+            "Open SENTRA Control Center",
+            None,
+            None,
+            None,
+            2,
             install.logical,
         ),
     ])

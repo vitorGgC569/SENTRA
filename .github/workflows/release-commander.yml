@@ -163,6 +163,8 @@ jobs:
             "sentra-update-helper.exe",
             "sentra-oma.exe",
             "sentra-desktop.exe",
+            "sentra-human.exe",
+            "sentra-human-worker.exe",
             "SENTRA-Setup.exe"
           )
           foreach ($name in $executables) {
@@ -188,7 +190,9 @@ jobs:
           )
           $setup = Start-Process -FilePath ".\dist\SENTRA-Setup.exe" -ArgumentList $arguments -PassThru -Wait -NoNewWindow
           if ($setup.ExitCode -ne 0) { throw "real setup installation failed with $($setup.ExitCode)" }
-          if (-not (Test-Path "$install\sentra-desktop.exe")) { throw "desktop not installed" }
+          if (-not (Test-Path "$install\sentra-desktop.exe")) { throw "control center not installed" }
+          if (-not (Test-Path "$install\sentra-human.exe")) { throw "human UI not installed" }
+          if (-not (Test-Path "$install\sentra-human-worker.exe")) { throw "human worker not installed" }
           if (-not (Test-Path "$install\tunnel-client.exe")) { throw "tunnel-client not installed" }
           if (-not (Test-Path "$install\edge_extension\manifest.json")) { throw "Edge extension not installed" }
           if (Get-NetTCPConnection -LocalPort 18000,18765 -State Listen -ErrorAction SilentlyContinue) {

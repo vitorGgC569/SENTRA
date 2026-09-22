@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>SENTRA</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div class="topbar-brand"><span class="mini-mark">S</span><span>SENTRA</span></div>
+      <div class="command-search">
+        <span class="search-icon">⌕</span>
+        <input id="global-search" autocomplete="off" placeholder="Buscar conversas, runs ou atividade">
+        <kbd>Ctrl K</kbd>
+      </div>
+      <div class="topbar-right">
+        <div id="workspace-pill" class="quiet-pill">Nenhum workspace</div>
+        <div id="profile-pill" class="profile-pill">Developer</div>
+      </div>
+    </header>
+
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">S</div>
+        <div class="brand-word">SENTRA</div>
+      </div>
+      <nav id="nav">
+        <button class="nav-item active" data-page="conversations"><span class="nav-icon">◯</span><span>Conversas</span></button>
+        <button class="nav-item" data-page="runs"><span class="nav-icon">▷</span><span>Runs</span></button>
+        <button class="nav-item" data-page="workspaces"><span class="nav-icon">□</span><span>Workspaces</span></button>
+        <button class="nav-item" data-page="agents"><span class="nav-icon">◇</span><span>Agentes</span></button>
+      </nav>
+      <div class="sidebar-spacer"></div>
+      <button id="open-control" class="nav-item control-link"><span class="nav-icon">⚙</span><span>Control Center</span></button>
+      <div class="tagline">Inteligência<br>que constrói.</div>
+    </aside>
+
+    <main id="view" class="view">
+      <div class="loading-state">
+        <div class="loading-ring"></div>
+        <span>Carregando estado real do SENTRA…</span>
+      </div>
+    </main>
+  </div>
+
+  <aside id="drawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <div>
+        <div class="eyebrow">Detalhes reais</div>
+        <h2 id="drawer-title">Execução</h2>
+      </div>
+      <button id="drawer-close" class="icon-button" aria-label="Fechar">×</button>
+    </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
+  <div id="drawer-scrim" class="drawer-scrim"></div>
+
+  <div id="toast" class="toast"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -58,7 +58,8 @@ def _build(
 
 PAYLOAD_NAMES = (
     "sentra-agent.exe", "sentra-mcp.exe", "sentra-browser-relay.exe",
-    "sentra-desktop.exe", "sentra-diagnostics.exe", "sentra-admin.exe",
+    "sentra-desktop.exe", "sentra-human.exe", "sentra-human-worker.exe",
+    "sentra-diagnostics.exe", "sentra-admin.exe",
     "sentra-update-helper.exe", "sentra-oma.exe",
 )
 
@@ -71,6 +72,14 @@ def build_payload(dist: Path, work: Path, spec: Path) -> None:
     _build("sentra-mcp", "mcp_entry.py", dist, work, spec, mcp_payload=True)
     _build("sentra-browser-relay", "browser_relay_entry.py", dist, work, spec)
     _build("sentra-desktop", "desktop_entry.py", dist, work, spec, windowed=True, mcp_payload=True)
+    _build(
+        "sentra-human", "human_entry.py", dist, work, spec, windowed=True,
+        extra=[
+            "--collect-all", "webview",
+            "--add-data", f"{ROOT / 'sentra_remote' / 'human_ui'}{os.pathsep}human_ui",
+        ],
+    )
+    _build("sentra-human-worker", "human_worker_entry.py", dist, work, spec, mcp_payload=True)
     _build("sentra-diagnostics", "diagnostics_entry.py", dist, work, spec)
     _build("sentra-admin", "admin_entry.py", dist, work, spec)
     _build("sentra-update-helper", "update_helper_entry.py", dist, work, spec)
@@ -78,6 +87,19 @@ def build_payload(dist: Path, work: Path, spec: Path) -> None:
         "sentra-oma", "oma_entry.py", dist, work, spec, mcp_payload=True,
         extra=["--add-data", f"{ROOT / 'config.yaml'}{os.pathsep}."],
     )
+
+def build_human(dist: Path, work: Path, spec: Path) -> None:
+    for path in (dist, work, spec):
+        path.mkdir(parents=True, exist_ok=True)
+    _build(
+        "sentra-human", "human_entry.py", dist, work, spec, windowed=True,
+        extra=[
+            "--collect-all", "webview",
+            "--add-data", f"{ROOT / 'sentra_remote' / 'human_ui'}{os.pathsep}human_ui",
+        ],
+    )
+    _build("sentra-human-worker", "human_worker_entry.py", dist, work, spec, mcp_payload=True)
+
 
 def build_installer(dist: Path, work: Path, spec: Path) -> None:
     missing = [name for name in PAYLOAD_NAMES if not (dist / name).is_file()]
@@ -105,7 +127,8 @@ def build(dist: Path, work: Path, spec: Path) -> None:
 
 EXPECTED = (
     "sentra-agent.exe", "sentra-mcp.exe", "sentra-browser-relay.exe",
-    "sentra-desktop.exe", "sentra-diagnostics.exe", "sentra-admin.exe",
+    "sentra-desktop.exe", "sentra-human.exe", "sentra-human-worker.exe",
+    "sentra-diagnostics.exe", "sentra-admin.exe",
     "sentra-update-helper.exe", "sentra-oma.exe", "SENTRA-Setup.exe",
 )
 
@@ -115,7 +138,7 @@ def main() -> int:
     parser.add_argument("--work", default=str(ROOT / "build" / "commander"))
     parser.add_argument("--spec", default=str(ROOT / "build" / "commander-spec"))
     parser.add_argument("--clean-output", action="store_true")
-    parser.add_argument("--phase", choices=("all", "payload", "installer"), default="all")
+    parser.add_argument("--phase", choices=("all", "payload", "human", "installer"), default="all")
     args = parser.parse_args()
     dist = Path(args.dist).resolve()
     work = Path(args.work).resolve()
@@ -129,6 +152,9 @@ def main() -> int:
     elif args.phase == "payload":
         build_payload(dist, work, spec)
         expected = PAYLOAD_NAMES
+    elif args.phase == "human":
+        build_human(dist, work, spec)
+        expected = ("sentra-human.exe", "sentra-human-worker.exe")
     else:
         build_installer(dist, work, spec)
         expected = ("SENTRA-Setup.exe",)

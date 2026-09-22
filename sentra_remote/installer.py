@@ -33,6 +33,7 @@ INSTALL_MARKER = ".sentra-install.json"
 
 PRODUCTS = (
     "sentra-mcp.exe", "sentra-browser-relay.exe", "sentra-desktop.exe",
+    "sentra-human.exe", "sentra-human-worker.exe",
     "sentra-agent.exe", "sentra-diagnostics.exe", "sentra-admin.exe",
     "sentra-update-helper.exe", "sentra-oma.exe",
 )
@@ -223,7 +224,7 @@ def _register_uninstall(install_dir: Path) -> None:
             "DisplayVersion": PRODUCT_VERSION,
             "Publisher": "SENTRA",
             "InstallLocation": str(install_dir),
-            "DisplayIcon": str(install_dir / "sentra-desktop.exe"),
+            "DisplayIcon": str(install_dir / "sentra-human.exe"),
             "UninstallString": f'"{install_dir / "sentra-installer.exe"}" --uninstall',
         }
         for name, value in values.items():
@@ -329,9 +330,12 @@ def install(
     result["doctor"] = runtime.status()
     if stop_after_doctor:
         runtime.stop_all()
-    if launch and not stop_after_doctor and (install_dir / "sentra-desktop.exe").is_file():
+    human = install_dir / "sentra-human.exe"
+    control = install_dir / "sentra-desktop.exe"
+    launch_target = human if human.is_file() else control
+    if launch and not stop_after_doctor and launch_target.is_file():
         subprocess.Popen(
-            [str(install_dir / "sentra-desktop.exe")],
+            [str(launch_target)],
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     return result

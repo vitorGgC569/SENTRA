@@ -535,14 +535,23 @@ def list_tasks(paths: ProductPaths, limit: int = 100) -> list[dict[str, Any]]:
 
 def run_next_task(paths: ProductPaths, settings: ProductSettings) -> dict[str, Any] | None:
     db = _queue_db(paths)
+    db.execute("BEGIN IMMEDIATE")
     row = db.execute(
         "SELECT * FROM tasks WHERE state='QUEUED' ORDER BY created LIMIT 1"
     ).fetchone()
     if row is None:
+        db.commit()
         db.close()
         return None
     now = time.time()
-    db.execute("UPDATE tasks SET state='RUNNING',updated=? WHERE id=?", (now, row["id"]))
+    claimed = db.execute(
+        "UPDATE tasks SET state='RUNNING',updated=? WHERE id=? AND state='QUEUED'",
+        (now, row["id"]),
+    )
+    if claimed.rowcount != 1:
+        db.commit()
+        db.close()
+        return None
     db.commit()
     exe = paths.install_dir / "sentra-oma.exe"
     if exe.is_file():
