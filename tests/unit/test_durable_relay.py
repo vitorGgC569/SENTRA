@@ -252,10 +252,21 @@ def test_browser_action_validation_is_bounded_and_allowlisted() -> None:
             target_worker="TAB-1",
             browser_action="javascript",
         ).validate()
-    with pytest.raises(ValueError, match="target_worker"):
+    # Bootstrap do controller lazy pode ser untargeted; o relay entrega
+    # ao primeiro worker elegível e BrowserControlService fixa TAB-* depois.
+    untargeted = ChatJob(
+        task_id="EDGE",
+        kind="BROWSER_ACTION",
+        browser_action="extract",
+    )
+    untargeted.validate()
+    assert untargeted.new_chat is False
+
+    with pytest.raises(ValueError, match="target_worker max 100 chars"):
         ChatJob(
             task_id="EDGE",
             kind="BROWSER_ACTION",
+            target_worker="T" * 101,
             browser_action="extract",
         ).validate()
 

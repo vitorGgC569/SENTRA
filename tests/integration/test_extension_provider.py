@@ -18,7 +18,10 @@ from orchestrator.providers.extension_provider import BrowserExtensionProvider
 
 @pytest.fixture
 def relay():
-    server = RelayServer(port=18765).start()
+    # Bind an ephemeral loopback port so an aborted prior test process cannot
+    # leave a stale relay/token on a fixed port and contaminate this fixture.
+    server = RelayServer(port=0).start()
+    server.base_url = f"http://127.0.0.1:{server.server.server_address[1]}"
     yield server
     server.stop()
 
@@ -34,7 +37,7 @@ async def test_provider_fast_fail_clear_message_when_no_extension(relay):
     """Caminho real: sem worker jamais visto, falha rápido e claro (TOOL_ERROR),
     sem queimar o timeout inteiro do job."""
     import time as _t
-    provider = BrowserExtensionProvider(relay_base="http://127.0.0.1:18765", token=relay.token)
+    provider = BrowserExtensionProvider(relay_base=relay.base_url, token=relay.token)
     start = _t.time()
     resp = await provider.execute(_agent_request(task_id="T-ext-2", timeout=60))
     elapsed = _t.time() - start
@@ -46,11 +49,42 @@ async def test_provider_fast_fail_clear_message_when_no_extension(relay):
 
 
 @pytest.mark.asyncio
+async def test_lazy_pool_leader_counts_as_connected_before_first_tab(relay):
+    import json
+    import urllib.request
+    from browser.extension_transport import ExtensionTransport
+
+    body = json.dumps({"instance_id": "POOL-integration-lazy"}).encode("utf-8")
+    request = urllib.request.Request(
+        relay.base_url + "/workers/pool-claim",
+        data=body,
+        method="POST",
+        headers={
+            "Authorization": "Bearer " + relay.token,
+            "Content-Type": "application/json",
+        },
+    )
+    with urllib.request.urlopen(request) as response:
+        claimed = json.loads(response.read())
+    assert claimed["leader"] is True
+
+    transport = ExtensionTransport(
+        relay_base=relay.base_url,
+        token=relay.token,
+    )
+    await transport._wait_first_worker(0.1)
+    health = await transport.health()
+    assert health["workers_ever_seen"] == 0
+    assert health["workers_online"] == []
+    assert health["pool"]["active"] is True
+
+
+@pytest.mark.asyncio
 async def test_relay_health_reports_workers(relay):
     import urllib.request, json
-    with urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:18765/jobs/poll?worker=TAB-9", headers={"Authorization": "Bearer " + relay.token})) as r:
+    with urllib.request.urlopen(urllib.request.Request(relay.base_url + "/jobs/poll?worker=TAB-9", headers={"Authorization": "Bearer " + relay.token})) as r:
         json.loads(r.read())
-    with urllib.request.urlopen("http://127.0.0.1:18765/health") as r:
+    with urllib.request.urlopen(relay.base_url + "/health") as r:
         h = json.loads(r.read())
     assert h["workers_ever_seen"] >= 1
     assert "TAB-9" in h["workers_online"]
@@ -81,7 +115,7 @@ def test_provider_conversation_registry_is_bounded():
 
 @pytest.mark.asyncio
 async def test_provider_cancellation_propagates(relay):
-    provider = BrowserExtensionProvider(relay_base="http://127.0.0.1:18765", token=relay.token)
+    provider = BrowserExtensionProvider(relay_base=relay.base_url, token=relay.token)
     task = asyncio.ensure_future(provider.execute(_agent_request(task_id="T-ext-3", timeout=120)))
     await asyncio.sleep(0.5)
     task.cancel()

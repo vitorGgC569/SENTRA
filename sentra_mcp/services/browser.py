@@ -34,7 +34,6 @@ class BrowserControlService:
         self.session_factory = session_factory
         self.sessions: dict[str, dict[str, Any]] = {}
         self.edge_sessions: dict[str, dict[str, Any]] = {}
-        self.research_workers: dict[str, str] = {}
         self.lock = asyncio.Lock()
         self.screenshot_root = config.allowed_roots[0] / ".sentra" / "screenshots"
         self.relay_url = "http://127.0.0.1:8765"
@@ -181,7 +180,7 @@ class BrowserControlService:
 
     def _edge_submit_sync(
         self,
-        worker: str,
+        worker: str | None,
         *,
         kind: str,
         browser_action: str = "",
@@ -195,8 +194,9 @@ class BrowserControlService:
             "timeout_s": max(5, min(int(timeout_s), 120)),
             "new_chat": False,
             "kind": kind,
-            "target_worker": worker,
         }
+        if worker:
+            payload["target_worker"] = worker
         if kind == "BROWSER_ACTION":
             payload["browser_action"] = browser_action
             payload["browser_args"] = dict(browser_args or {})
@@ -231,7 +231,10 @@ class BrowserControlService:
                     )
                 except Exception:
                     pass
-                return decoded if isinstance(decoded, dict) else {"result": decoded}
+                if isinstance(decoded, dict):
+                    decoded.setdefault("worker", result.get("worker") or worker)
+                    return decoded
+                return {"result": decoded, "worker": result.get("worker") or worker}
             raise TimeoutError("Edge browser action timed out")
         except Exception:
             try:
@@ -247,7 +250,7 @@ class BrowserControlService:
 
     async def _edge_action(
         self,
-        worker: str,
+        worker: str | None,
         action: str,
         args: dict[str, Any],
         *,
@@ -261,77 +264,6 @@ class BrowserControlService:
             browser_args=args,
             timeout_s=timeout_s,
         )
-
-    def _chat_task_sync(
-        self,
-        worker: str,
-        prompt: str,
-        *,
-        new_chat: bool,
-        conversation_url: str | None,
-        timeout_s: int,
-    ) -> dict[str, Any]:
-        task_id = "mcp-research-" + uuid.uuid4().hex
-        payload: dict[str, Any] = {
-            "task_id": task_id,
-            "prompt": prompt,
-            "timeout_s": max(10, min(int(timeout_s), 600)),
-            "new_chat": bool(new_chat),
-            "kind": "CHAT_TASK",
-            "target_worker": worker,
-        }
-        if not new_chat:
-            if not conversation_url:
-                raise ValueError("continuing a chat requires conversation_url")
-            payload["conversation_url"] = conversation_url
-        submitted = self._relay_request_sync(
-            "/jobs/submit",
-            method="POST",
-            payload=payload,
-            timeout=5.0,
-        )
-        job_id = str(submitted["job_id"])
-        deadline = time.monotonic() + payload["timeout_s"]
-        try:
-            while time.monotonic() < deadline:
-                remaining = max(0.1, min(20.0, deadline - time.monotonic()))
-                query = urllib.parse.urlencode({"job_id": job_id, "timeout_s": remaining})
-                result = self._relay_request_sync(
-                    "/jobs/wait?" + query,
-                    timeout=remaining + 2,
-                )
-                if result.get("pending"):
-                    continue
-                if result.get("status") != "COMPLETED":
-                    raise RuntimeError(str(result.get("error") or "CHAT_TASK failed"))
-                try:
-                    self._relay_request_sync(
-                        "/jobs/ack",
-                        method="POST",
-                        payload={"job_id": job_id},
-                        timeout=3.0,
-                    )
-                except Exception:
-                    pass
-                return {
-                    "job_id": job_id,
-                    "worker": worker,
-                    "text": str(result.get("result") or ""),
-                    "conversation_url": result.get("conversation_url"),
-                    "conversation_id": result.get("conversation_id"),
-                }
-            raise TimeoutError("CHAT_TASK timed out")
-        except Exception:
-            try:
-                self._relay_request_sync(
-                    "/jobs/cancel",
-                    method="POST",
-                    payload={"job_id": job_id},
-                    timeout=3.0,
-                )
-            except Exception:
-                pass
-            raise
 
 
     def _chat_phase_sync(
@@ -425,31 +357,6 @@ class BrowserControlService:
                 pass
             raise
 
-    async def _acquire_research_worker(self, owner: str) -> str:
-        inventory = await self._edge_worker_inventory()
-        async with self.lock:
-            reserved = {item["worker"] for item in self.edge_sessions.values()}
-            busy = set(self.research_workers)
-            candidates = [
-                item["worker"]
-                for item in inventory
-                if item["worker_state"] == "READY"
-                and item["worker"] not in reserved
-                and item["worker"] not in busy
-            ]
-            if not candidates:
-                raise RuntimeError(
-                    "no READY Edge worker available for a research subagent"
-                )
-            worker = candidates[0]
-            self.research_workers[worker] = owner
-            return worker
-
-    async def _release_research_worker(self, worker: str, owner: str) -> None:
-        async with self.lock:
-            if self.research_workers.get(worker) == owner:
-                self.research_workers.pop(worker, None)
-
     async def chat_start(
         self,
         owner: str,
@@ -512,58 +419,6 @@ class BrowserControlService:
             },
         )
         return result
-
-    async def chat_task(
-        self,
-        owner: str,
-        prompt: str,
-        *,
-        new_chat: bool = True,
-        conversation_url: str | None = None,
-        timeout_s: int = 180,
-    ) -> dict[str, Any]:
-        """Run one robust ChatGPT relay task on a distinct READY worker."""
-        if not prompt or len(prompt) > 200_000:
-            raise ValueError("research prompt must be 1..200000 characters")
-        inventory = await self._edge_worker_inventory()
-        async with self.lock:
-            reserved = {item["worker"] for item in self.edge_sessions.values()}
-            busy = set(self.research_workers)
-            candidates = [
-                item["worker"]
-                for item in inventory
-                if item["worker_state"] == "READY"
-                and item["worker"] not in reserved
-                and item["worker"] not in busy
-            ]
-            if not candidates:
-                raise RuntimeError("no READY Edge worker available for a research subagent")
-            worker = candidates[0]
-            self.research_workers[worker] = owner
-        try:
-            result = await asyncio.to_thread(
-                self._chat_task_sync,
-                worker,
-                prompt,
-                new_chat=new_chat,
-                conversation_url=conversation_url,
-                timeout_s=timeout_s,
-            )
-            self.audit.emit(
-                "research.chat_task",
-                "ok",
-                {
-                    "owner": owner,
-                    "worker": worker,
-                    "new_chat": bool(new_chat),
-                    "conversation_id": result.get("conversation_id"),
-                },
-            )
-            return result
-        finally:
-            async with self.lock:
-                if self.research_workers.get(worker) == owner:
-                    self.research_workers.pop(worker, None)
 
     def _delete_chat_sync(
         self,
@@ -730,8 +585,41 @@ class BrowserControlService:
                 for item in inventory
                 if item["worker_state"] == "READY" and item["worker"] not in reserved
             ]
-            if available:
-                worker = available[0]
+
+            worker = available[0] if available else None
+            result: dict[str, Any] | None = None
+            bootstrap_error: Exception | None = None
+
+            # Lazy principal-Edge bootstrap: when the bridge is healthy but idle
+            # there is deliberately no TAB-* worker yet. Queue one untargeted,
+            # authenticated BROWSER_ACTION so the existing extension adopts its
+            # single inactive ChatGPT tab and returns the concrete worker id.
+            # Never do this while another MCP Edge session is reserved.
+            if worker is None and not self.edge_sessions:
+                try:
+                    result = await self._edge_action(
+                        None,
+                        "navigate",
+                        {"url": url},
+                        timeout_s=30,
+                    )
+                    claimed = result.get("worker")
+                    if not isinstance(claimed, str) or not claimed.startswith("TAB-"):
+                        raise RuntimeError(
+                            "lazy Edge bootstrap returned no TAB-* worker identity"
+                        )
+                    worker = claimed
+                except Exception as exc:
+                    bootstrap_error = exc
+
+            # Another coroutine may have completed a bootstrap while this one
+            # awaited the relay. Never let two owners reserve the same controller.
+            reserved = {item["worker"] for item in self.edge_sessions.values()}
+            if worker is not None and worker in reserved:
+                worker = None
+                bootstrap_error = RuntimeError("principal Edge controller is already reserved")
+
+            if worker is not None:
                 session_id = "edge:" + worker
                 self.edge_sessions[session_id] = {
                     "owner": owner,
@@ -739,34 +627,51 @@ class BrowserControlService:
                     "created": time.time(),
                 }
                 try:
-                    result = await self._edge_action(worker, "navigate", {"url": url})
-                except Exception:
+                    if result is None:
+                        result = await self._edge_action(
+                            worker,
+                            "navigate",
+                            {"url": url},
+                        )
+                except Exception as exc:
                     self.edge_sessions.pop(session_id, None)
-                    if backend == "edge":
-                        raise
-                else:
-                    self.audit.emit(
-                        "browser.open",
-                        "ok",
-                        {"session_id": session_id, "owner": owner, "url": result.get("url", url), "backend": "edge"},
-                    )
-                    return {
+                    raise RuntimeError(
+                        "principal Edge browser action failed; "
+                        "SENTRA will not fall back to Playwright"
+                    ) from exc
+
+                self.audit.emit(
+                    "browser.open",
+                    "ok",
+                    {
                         "session_id": session_id,
                         "owner": owner,
                         "url": result.get("url", url),
                         "backend": "edge",
-                    }
-            else:
-                # ChatGPT must never fall back to a fresh Playwright/Edge profile:
-                # that would lose the user's authenticated principal-browser session
-                # and can silently land on a different/free account. For ChatGPT,
-                # both "auto" and "edge" are principal-Edge-only.
-                states = {item["worker"]: item["worker_state"] for item in inventory}
-                raise RuntimeError(
-                    "principal Edge bridge is required for chatgpt.com; "
-                    "SENTRA will not launch or fall back to a separate browser profile; "
-                    f"worker_states={states}"
+                    },
                 )
+                return {
+                    "session_id": session_id,
+                    "owner": owner,
+                    "url": result.get("url", url),
+                    "backend": "edge",
+                }
+
+            # ChatGPT must never fall back to a fresh Playwright/Edge profile:
+            # that would lose the user's authenticated principal-browser session
+            # and can silently land on a different/free account. For ChatGPT,
+            # both "auto" and "edge" are principal-Edge-only.
+            states = {item["worker"]: item["worker_state"] for item in inventory}
+            detail = (
+                f"; bootstrap_error={str(bootstrap_error)[:300]}"
+                if bootstrap_error is not None
+                else ""
+            )
+            raise RuntimeError(
+                "principal Edge bridge is required for chatgpt.com; "
+                "SENTRA will not launch or fall back to a separate browser profile; "
+                f"worker_states={states}{detail}"
+            )
         elif backend == "edge":
             raise ValueError("Edge backend is restricted to https://chatgpt.com; use Playwright for other sites")
 

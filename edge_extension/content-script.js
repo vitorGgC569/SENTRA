@@ -4,7 +4,7 @@
  *      DELETE_CONVERSATION. */
 "use strict";
 
-const OMA_CS_VERSION = "1.6.16";
+const OMA_CS_VERSION = "1.6.24";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -752,6 +752,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                  is_fresh_chat: !hasConv && nodes.length === 0 && draftEmpty,
                  send_available: sendAvailable, cap_banner: capBanner,
                  additional_checks: additionalChecks,
+                 additional_checks_recovery_attempts: omaAdditionalChecksRecoveryAttempts,
+                 additional_checks_recovery_active: !!omaAdditionalChecksRecoveryPromise,
                  composer_found: composerFound, buttons_sample: buttonsSample,
                  diagnostics: omaComposerDiagnostics() };
       }
@@ -874,8 +876,8 @@ try {
 /*
  * MV3 service workers may sleep between the 1-minute alarm ticks. Controller tabs are
  * long-lived, so use them as the liveness source: a lightweight message wakes
- * the SW, whose listener verifies that the sender tab is extension-owned before
- * polling the relay. This closes the gap where a worker looked online by
+ * the SW, whose listener verifies that the sender tab is the currently adopted
+ * controller before polling the relay. This closes the gap where a worker looked online by
  * heartbeat but could miss a short targeted job deadline.
  */
 const OMA_IDLE_WAKE_INTERVAL_MS = 2000;

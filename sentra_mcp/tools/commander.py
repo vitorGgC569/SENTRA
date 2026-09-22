@@ -642,7 +642,7 @@ def register_commander_tools(
             branches: Annotated[int, Field(ge=1, le=4)] = 3,
             max_depth: Annotated[int, Field(ge=1, le=3)] = 2,
             beam_width: Annotated[int, Field(ge=1, le=3)] = 2,
-            timeout_s: Annotated[int, Field(ge=30, le=600)] = 180,
+            timeout_s: Annotated[int, Field(ge=30, le=600)] = 300,
             session_token: str | None = None,
         ) -> ResponseEnvelope:
             """Start bounded research in temporary independent ChatGPT conversations.

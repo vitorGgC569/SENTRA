@@ -66,20 +66,31 @@ def test_lazy_single_controller_contract():
     options = _read("options.html")
 
     assert "const OMA_POOL = { minTabs: 1, maxTabs: 1 };" in worker
-    assert "OMA_CONTROLLER_IDLE_CLOSE_MS" in worker
     assert 'relayHealth = await omaRelay("/health")' in worker
     assert "const hasWork = queued > 0 || leased > 0 || activeJobs.length > 0;" in worker
     assert "if (!hasWork)" in worker
-    assert "await omaCloseOwnedTabs();" in worker
+    assert "await omaReleaseControllerReferences();" in worker
+    assert "const OMA_CONTROLLER_IDLE_RELEASE_MS = 10000;" in worker
+    assert "Date.now() - omaControllerLastWorkAt >= OMA_CONTROLLER_IDLE_RELEASE_MS" in worker
     assert "await omaEnsureTabs(desiredTabs);" in worker
     assert "máximo 1 tab" in options
     assert 'chrome.tabs.query({ url: ["https://chatgpt.com/*"] })' in worker
     assert "tab.active !== true" in worker
     assert "adopted: true" in worker
-    assert 'chrome.tabs.create({ url: "https://chatgpt.com/", active: false })' in worker
-    assert "created.size >= OMA_POOL.maxTabs" in worker
-    assert "oma_created_tabs" in worker
-    assert "created.has(tabId)" in worker
+    assert "chrome.tabs.create(" not in worker
+    assert "chrome.tabs.remove(" not in worker
+    assert "chrome.windows.create(" not in worker
+    assert "omaCreatedTabIds" not in worker
+    assert "omaRememberCreated" not in worker
+    assert "omaForgetCreated" not in worker
+    assert "omaRememberControllerOrigin" in worker
+    assert "omaRestoreControllerTab" in worker
+    assert "omaRestoreControllerTabs" in worker
+    assert "oma_controller_origins" in worker
+    assert 'omaRelay("/workers/release"' in worker
+    assert "omaReleaseRelayWorker" in worker
+    assert "for (const tabId of referenced) await omaReleaseRelayWorker(tabId);" in worker
+    assert "Never close" in worker or "never close" in worker
 
 
 def test_live_launcher_does_not_open_edge_unless_isolated_test_is_explicit():
@@ -113,16 +124,59 @@ def test_conversation_id_research_protocol_present():
     assert "omaOpenConversationByUrl" in worker
     assert "mode=chat-start" in worker
     assert "mode=chat-collect" in worker
+    probe = worker.split('if (job.kind === "STATUS_PROBE")', 1)[1].split(
+        'if (job.kind === "DELETE_CHAT")', 1
+    )[0]
+    assert "await omaEnsureFreshScript(tabId);" in probe
 
 
-def test_heartbeat_never_creates_tabs_and_personal_tabs_are_not_adopted():
+def test_bfcache_read_only_recovery_is_bounded_and_never_replays_send():
+    worker = _read("service-worker.js")
+
+    helper = worker.split(
+        "async function omaSendReadOnlyToTab", 1
+    )[1].split("async function omaWaitTabComplete", 1)[0]
+    open_conv = worker.split(
+        "async function omaOpenConversationByUrl", 1
+    )[1].split("async function omaWaitConversationIdentity", 1)[0]
+    chat_start = worker.split('if (job.kind === "CHAT_START")', 1)[1].split(
+        'if (job.kind === "CHAT_COLLECT")', 1
+    )[0]
+    freshness = worker.split(
+        "async function omaEnsureFreshScript", 1
+    )[1].split("async function omaWaitTabReady", 1)[0]
+
+    assert "omaIsRecoverableMessageChannelError" in worker
+    assert "back\\/forward cache" in worker
+    assert "maxAttempts = 2" in helper
+    assert "attempts = Math.max(1, Math.min" in helper
+    assert "omaEnsureFreshScript(tabId)" in helper
+    assert "await chrome.tabs.reload(tabId);" in helper
+    assert "message channel is closed" in helper
+    assert "csv === manifestVersion" in freshness
+    assert 'operation: "GET_CONVERSATION_URL"' in open_conv
+    assert "omaSendReadOnlyToTab(" in open_conv
+    assert "4," in open_conv
+    assert 'operation: "WAIT_RESPONSE"' in worker
+    assert 'operation: "SEND_MESSAGE"' in chat_start
+    assert "omaSendReadOnlyToTab" not in chat_start
+
+
+def test_idle_wake_never_creates_tabs_and_only_scheduler_can_adopt():
     observer = _read("observer.js")
     worker = _read("service-worker.js")
 
     heartbeat = worker.split("async function omaHeartbeatWorkers()", 1)[1].split(
         "async function omaFlushOutbox()", 1
     )[0]
+    idle_wake = worker.split('if (request.operation === "OMA_IDLE_WAKE")', 1)[1].split(
+        'if (request.operation === "OMA_LEASE_PING"', 1
+    )[0]
+
     assert "omaEnsureTabs()" not in heartbeat
     assert 'omaSendSwPing("OMA_IDLE_WAKE")' in observer
-    assert "await omaOwnedTabIds()" in worker
-    assert "if (!owned.has(tabId))" in worker
+    assert "await omaOwnedTabIds()" in idle_wake
+    assert "await omaTick();" in idle_wake
+    assert "omaRememberOwned" not in idle_wake
+    assert "chrome.tabs.create(" not in idle_wake
+    assert "void omaTick();" in worker

@@ -1,13 +1,14 @@
-/* service-worker.js (MV3) — coordena um único controller temporário.
+/* service-worker.js (MV3) — coordena uma única aba existente do Edge principal.
  * A fila principal vive no relay/OMA. Research usa conversation_id: envia em
  * um chat, navega para o próximo e coleta depois pelo id. Nenhum pool paralelo.
- * Tabs do usuário nunca são adotadas nem modificadas. */
+ * SENTRA nunca cria nem fecha abas; adota temporariamente uma aba chatgpt.com
+ * já aberta e restaura sua URL original ao liberar o controller. */
 "use strict";
 
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 1, maxTabs: 1 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.6.16";
+const OMA_SW_VERSION = "1.6.24";
 // Budgets MV3 (somente-leitura; a verdade est├í no servidor/Chrome):
 // - native_bridge/job_store.py concede lease de 120s: renovar < 120s ou o relay
 //   marca expirado e nenhum post tardio ├® aceito. Janela folgada de prop├│sito
@@ -25,7 +26,10 @@ const OMA_WAIT_SLICE_MS = 25000;
 const OMA_HB_ALARM = "oma-hb";
 const OMA_ACTIVE_PREFIX = "oma_active_";
 const OMA_UPDATE_CHECK_MS = 30000;
-const OMA_CONTROLLER_IDLE_CLOSE_MS = 15000;
+// Keep the adopted controller briefly after a job so MCP browser sequences
+// (navigate -> extract/click/type) operate on the same document. The tab is
+// still an existing inactive user tab and is restored automatically afterward.
+const OMA_CONTROLLER_IDLE_RELEASE_MS = 10000;
 let omaLastUpdateCheck = 0;
 let omaTickBusy = false;
 let omaControllerLastWorkAt = Date.now();
@@ -46,34 +50,85 @@ async function omaPoolInstanceId() {
   return value;
 }
 
-async function omaCreatedTabIds() {
-  const stored = await chrome.storage.local.get({ oma_created_tabs: [] });
-  return new Set(stored.oma_created_tabs);
+async function omaControllerOrigins() {
+  const stored = await chrome.storage.local.get({ oma_controller_origins: {} });
+  return stored.oma_controller_origins || {};
 }
 
-async function omaRememberCreated(tabId) {
-  const ids = await omaCreatedTabIds();
-  ids.add(tabId);
-  await chrome.storage.local.set({ oma_created_tabs: [...ids] });
-}
-
-async function omaForgetCreated(tabId) {
-  const ids = await omaCreatedTabIds();
-  ids.delete(tabId);
-  await chrome.storage.local.set({ oma_created_tabs: [...ids] });
-}
-
-async function omaCloseOwnedTabs() {
-  // Release adopted references. Close only the one controller tab that SENTRA
-  // itself created in the user's existing Edge profile.
-  const created = await omaCreatedTabIds();
-  for (const tabId of created) {
-    try { await chrome.tabs.remove(tabId); } catch (_) {}
+async function omaRememberControllerOrigin(tab) {
+  if (!tab || typeof tab.id !== "number") return;
+  const url = String(tab.url || "");
+  if (!/^https:\/\/chatgpt\.com\//.test(url)) return;
+  const origins = await omaControllerOrigins();
+  const key = String(tab.id);
+  if (!origins[key]) {
+    origins[key] = url;
+    await chrome.storage.local.set({ oma_controller_origins: origins });
   }
+}
+
+async function omaForgetControllerOrigin(tabId) {
+  const origins = await omaControllerOrigins();
+  const key = String(tabId);
+  if (Object.prototype.hasOwnProperty.call(origins, key)) {
+    delete origins[key];
+    await chrome.storage.local.set({ oma_controller_origins: origins });
+  }
+}
+
+async function omaRestoreControllerTab(tabId) {
+  const origins = await omaControllerOrigins();
+  const key = String(tabId);
+  const origin = origins[key];
+  if (!origin) return;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    const current = String(tab.url || "");
+    if (/^https:\/\/chatgpt\.com\//.test(origin) && current !== origin) {
+      await chrome.tabs.update(tabId, { url: origin });
+    }
+  } catch (_) {
+    // User closed the tab: only clear SENTRA bookkeeping.
+  } finally {
+    await omaForgetControllerOrigin(tabId);
+  }
+}
+
+async function omaRestoreControllerTabs() {
+  const origins = await omaControllerOrigins();
+  for (const key of Object.keys(origins)) {
+    const tabId = Number(key);
+    if (Number.isFinite(tabId)) await omaRestoreControllerTab(tabId);
+  }
+}
+
+async function omaReleaseRelayWorker(tabId) {
+  try {
+    await omaRelay("/workers/release", {
+      method: "POST",
+      body: JSON.stringify({ worker: `TAB-${tabId}` }),
+    });
+  } catch (_) {}
+}
+
+async function omaReleaseControllerReferences() {
+  // Principal-Edge-only invariant: SENTRA never creates or closes browser tabs.
+  // Deregister every local reference immediately so relay inventory cannot show
+  // a released controller as online for the 45s heartbeat grace window.
+  const referenced = new Set([...omaWorkers.keys()]);
+  try {
+    for (const tabId of await omaOwnedTabIds()) referenced.add(tabId);
+  } catch (_) {}
+  for (const tabId of referenced) await omaReleaseRelayWorker(tabId);
+
+  // Restore the adopted tab to the user's original ChatGPT URL, then forget only
+  // SENTRA's controller reference.
+  await omaRestoreControllerTabs();
   omaWorkers.clear();
   omaSubmitFails.clear();
   try {
-    await chrome.storage.local.set({ oma_owned_tabs: [], oma_created_tabs: [] });
+    await chrome.storage.local.set({ oma_owned_tabs: [] });
+    await chrome.storage.local.remove("oma_created_tabs");
   } catch (_) {}
 }
 
@@ -99,7 +154,7 @@ async function omaRelay(path, options = {}) {
 }
 
 async function omaHeartbeatWorkers() {
-  // Heartbeat must never create tabs. Tab creation belongs to the work scheduler.
+  // Heartbeat never creates/adopts tabs; only the work scheduler may adopt one.
   for (const [tabId] of omaWorkers) {
     let status = {};
     try {
@@ -109,6 +164,9 @@ async function omaHeartbeatWorkers() {
       status = {
         send_available: !!r.send_available,
         cap_banner: r.cap_banner || null,
+        additional_checks: r.additional_checks || null,
+        additional_checks_recovery_attempts: Number(r.additional_checks_recovery_attempts || 0),
+        additional_checks_recovery_active: !!r.additional_checks_recovery_active,
         url: r.url || null,
         finished: r.finished !== false,
         composer_found: !!r.composer_found,
@@ -165,23 +223,21 @@ async function omaCheckForUpdates() {
   } catch (_) {}
 }
 
-// tabId -> { state, job_id, task_id } ÔÇö SOMENTE tabs criadas por este worker.
+// tabId -> { state, job_id, task_id } — somente a referência ao controller
+// existente que foi adotado temporariamente pelo worker.
 const omaWorkers = new Map();
 
-// Tabs que falham submit repetidamente degradam (composer travado, overlay
-// persistente): ap├│s 2 SUBMIT_FAILED seguidas a tab ├® fechada e o pool recria.
+// Controllers que falham submit repetidamente degradam (composer travado,
+// overlay persistente). A referência é liberada/restaurada; a tab do usuário
+// nunca é fechada nem recriada pelo SENTRA.
 const omaSubmitFails = new Map();
 
 async function omaRecycleTab(tabId) {
-  // A degraded adopted tab is only released. A controller created by SENTRA may
-  // be closed and recreated, but OMA_POOL.maxTabs=1 guarantees no tab swarm.
-  try {
-    const created = await omaCreatedTabIds();
-    if (created.has(tabId)) {
-      try { await chrome.tabs.remove(tabId); } catch (_) {}
-      await omaForgetCreated(tabId);
-    }
-  } catch (_) {}
+  // Degraded controllers are references to the user's existing tab. Never close
+  // or recreate it; deregister immediately, restore the original URL, then
+  // release only SENTRA's reference.
+  await omaReleaseRelayWorker(tabId);
+  await omaRestoreControllerTab(tabId);
   omaWorkers.delete(tabId);
   omaSubmitFails.delete(tabId);
   await omaForgetOwned(tabId);
@@ -320,7 +376,11 @@ async function omaPostResult(identity, jobRef, payload) {
   await omaFlushOutbox();
 }
 
-chrome.tabs.onRemoved.addListener((tabId) => { omaForgetOwned(tabId); });
+chrome.tabs.onRemoved.addListener((tabId) => {
+  void omaReleaseRelayWorker(tabId);
+  omaForgetOwned(tabId);
+  omaForgetControllerOrigin(tabId);
+});
 
 async function omaEnsureTabs(desiredTabs = OMA_POOL.minTabs) {
   const target = Math.max(
@@ -335,14 +395,14 @@ async function omaEnsureTabs(desiredTabs = OMA_POOL.minTabs) {
       const url = String(tab.url || "");
       if (!/^https:\/\/chatgpt\.com\//.test(url)) {
         await omaForgetOwned(tabId);
-        await omaForgetCreated(tabId);
         continue;
       }
       alive.push(tabId);
-      if (!omaWorkers.has(tabId)) omaWorkers.set(tabId, { state: "IDLE" });
+      if (!omaWorkers.has(tabId)) {
+        omaWorkers.set(tabId, { state: "IDLE", adopted: true });
+      }
     } catch (_) {
       await omaForgetOwned(tabId);
-      await omaForgetCreated(tabId);
     }
   }
 
@@ -350,39 +410,28 @@ async function omaEnsureTabs(desiredTabs = OMA_POOL.minTabs) {
     if (!alive.includes(tabId)) {
       omaWorkers.delete(tabId);
       await omaForgetOwned(tabId);
-      await omaForgetCreated(tabId);
     }
   }
   if (alive.length >= target) return;
 
-  // Prefer an already-open non-active ChatGPT tab in the principal profile.
-  const candidates = await chrome.tabs.query({ url: ["https://chatgpt.com/*"] });
-  const referenced = await omaOwnedTabIds();
-  const suitable = candidates
+  // Principal-Edge-only: adopt exactly one already-open, INACTIVE ChatGPT tab.
+  // Never hijack the user's active ChatGPT tab (which may be this control chat).
+  // If no inactive controller candidate exists, fail closed: SENTRA does not
+  // create a tab and never launches/falls back to another browser/profile.
+  const candidates = (await chrome.tabs.query({ url: ["https://chatgpt.com/*"] }))
     .filter((tab) => (
       typeof tab.id === "number"
-      && !referenced.has(tab.id)
       && tab.active !== true
       && /^https:\/\/chatgpt\.com\//.test(String(tab.url || ""))
     ))
     .sort((a, b) => Number(b.lastAccessed || 0) - Number(a.lastAccessed || 0));
 
-  if (suitable.length) {
-    const tab = suitable[0];
-    await omaRememberOwned(tab.id);
-    omaWorkers.set(tab.id, { state: "IDLE", adopted: true });
-    return;
-  }
+  if (!candidates.length) return;
 
-  // No safe existing tab is available. Create exactly one background controller
-  // tab in the SAME Edge profile. It inherits the user's cookies/account/plan.
-  // This is never a new browser/profile and never scales with subagent count.
-  const created = await omaCreatedTabIds();
-  if (created.size >= OMA_POOL.maxTabs) return;
-  const tab = await chrome.tabs.create({ url: "https://chatgpt.com/", active: false });
+  const tab = candidates[0];
+  await omaRememberControllerOrigin(tab);
   await omaRememberOwned(tab.id);
-  await omaRememberCreated(tab.id);
-  omaWorkers.set(tab.id, { state: "IDLE", created: true });
+  omaWorkers.set(tab.id, { state: "IDLE", adopted: true, original_url: String(tab.url || "") });
 }
 
 async function omaSendToTab(tabId, message) {
@@ -395,6 +444,44 @@ async function omaSendToTab(tabId, message) {
   } catch (e) {
     throw new Error(`TAB_ERROR tab=${tabId}: ${e.message}`);
   }
+}
+
+function omaIsRecoverableMessageChannelError(error) {
+  const message = String((error && error.message) || error || "");
+  return /back\/forward cache|message channel is closed|receiving end does not exist|could not establish connection/i.test(message);
+}
+
+async function omaSendReadOnlyToTab(tabId, message, maxAttempts = 2) {
+  let lastError = null;
+  const attempts = Math.max(1, Math.min(Number(maxAttempts) || 1, 5));
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await omaSendToTab(tabId, message);
+    } catch (error) {
+      lastError = error;
+      if (!omaIsRecoverableMessageChannelError(error) || attempt + 1 >= attempts) {
+        throw error;
+      }
+      // Chromium can expose a completed tab while the previous document's port
+      // is still entering BFCache. Read-only retries are safe; SEND_MESSAGE and
+      // other side effects never use this helper. A BFCache/closed-port race can
+      // still report the correct cs_version briefly, so force a real reload here
+      // instead of trusting version freshness alone.
+      const messageText = String((error && error.message) || error || "");
+      if (/back\/forward cache|message channel is closed/i.test(messageText)) {
+        try {
+          await chrome.tabs.reload(tabId);
+          await omaWaitTabDeparted(tabId, 8000);
+          await omaWaitTabComplete(tabId, 15000);
+        } catch (_) {}
+      } else if (attempt === 0) {
+        try { await omaEnsureFreshScript(tabId); } catch (_) {}
+      }
+      try { await omaWaitTabReady(tabId, 10000); } catch (_) {}
+      await new Promise((r) => setTimeout(r, 350));
+    }
+  }
+  throw lastError || new Error(`TAB_ERROR tab=${tabId}: read-only channel did not recover`);
 }
 
 async function omaWaitTabComplete(tabId, timeoutMs = 60000) {
@@ -462,7 +549,7 @@ async function omaEnsureFreshScript(tabId) {
       const ans = await chrome.tabs.sendMessage(tabId, { operation: "GET_STATUS" });
       const inner = (ans && ans.result) || ans || {};
       const csv = inner.cs_version || inner.version || null;
-      if (csv) {
+      if (csv === manifestVersion) {
         omaLastCsVersion = csv;
         return;
       }
@@ -536,7 +623,11 @@ async function omaOpenConversationByUrl(tabId, conversationUrl) {
     await omaWaitTabReady(tabId);
     await omaEnsureFreshScript(tabId);
   }
-  const actual = await omaSendToTab(tabId, { operation: "GET_CONVERSATION_URL" });
+  const actual = await omaSendReadOnlyToTab(
+    tabId,
+    { operation: "GET_CONVERSATION_URL" },
+    4,
+  );
   const result = (actual && actual.result) || {};
   const actualId = result.conversation_id
     || (((result.url || "").match(/\/c\/([A-Za-z0-9-]{1,128})/) || [])[1] || null);
@@ -574,7 +665,7 @@ async function omaWaitConversationResponse(tabId, identity, job, renew) {
     slices++;
     if (slices % 3 === 1) await omaProgressPhase(tabId, identity, "waiting");
     try {
-      waited = await omaSendToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice });
+      waited = await omaSendReadOnlyToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice });
       const hb = waited && waited.result && waited.result.hb_cs;
       if (typeof hb === "number" && Number.isFinite(hb)) csHb += hb;
       break;
@@ -786,10 +877,13 @@ async function omaProcessJob(tabId, job) {
     return;
   }
 
-  // Read-only probe: do not reload or discard an uncertain submission/draft.
+  // Probe is read-only during normal operation. Immediately after an extension
+  // reload the existing ChatGPT document can retain an orphaned old content
+  // script; repair that one stale-injection case in-place before reading status.
   if (job.kind === "STATUS_PROBE") {
     try {
       await renew();
+      await omaEnsureFreshScript(tabId);
       await omaWaitTabReady(tabId, 20000);
       const st = await omaSendToTab(tabId, { operation: "GET_STATUS" });
       const r = (st && st.result) || {};
@@ -907,7 +1001,11 @@ async function omaProcessJob(tabId, job) {
       // Conversa existente pode estar hidratando/streamando: s├│ envia com a
       // p├ígina estabilizada (sem gera├º├úo em curso), sen├úo cliques s├úo engolidos.
       await omaWaitSettled(tabId);
-      const actual = await omaSendToTab(tabId, { operation: "GET_CONVERSATION_URL" });
+      const actual = await omaSendReadOnlyToTab(
+        tabId,
+        { operation: "GET_CONVERSATION_URL" },
+        4,
+      );
       const actualConvId = (actual && actual.result && (actual.result.conversation_id || ((actual.result.url || "").match(/\/c\/([A-Za-z0-9-]{1,128})/) || [])[1])) || null;
       const urlMatches = actual && actual.result && actual.result.url && (
         (targetConvId && actualConvId && targetConvId === actualConvId) ||
@@ -1167,14 +1265,13 @@ async function omaTick() {
     try { leader = await omaClaimPoolLeadership(); }
     catch (_) { return; }
     if (!leader) {
-      await omaCloseOwnedTabs();
+      await omaReleaseControllerReferences();
       return;
     }
     await omaFlushOutbox();
 
-    // Lazy controller: no queued/leased work means no SENTRA-owned ChatGPT tab.
-    // The service worker can inspect relay health without a tab; only create the
-    // single controller when there is actual work to execute.
+    // Lazy controller: no queued/leased work means no adopted controller
+    // reference. The user's ChatGPT tab itself is never closed or created.
     let relayHealth = {};
     try { relayHealth = await omaRelay("/health"); } catch (_) { return; }
     const queued = Number(relayHealth.queued || 0);
@@ -1184,9 +1281,9 @@ async function omaTick() {
     if (!hasWork) {
       if (
         omaWorkers.size > 0
-        && Date.now() - omaControllerLastWorkAt >= OMA_CONTROLLER_IDLE_CLOSE_MS
+        && Date.now() - omaControllerLastWorkAt >= OMA_CONTROLLER_IDLE_RELEASE_MS
       ) {
-        await omaCloseOwnedTabs();
+        await omaReleaseControllerReferences();
       }
       return;
     }
@@ -1225,15 +1322,10 @@ async function omaTick() {
 console.log(`[OMA Bridge] service worker ${OMA_SW_VERSION} ativo`);
 
 async function omaStartupCleanup() {
-  // Close only stale controller tabs created by SENTRA itself. Never close an
-  // adopted user tab. Then clear controller references and stale active records.
-  try {
-    const created = await omaCreatedTabIds();
-    for (const tabId of created) {
-      try { await chrome.tabs.remove(tabId); } catch (_) {}
-    }
-    await chrome.storage.local.set({ oma_owned_tabs: [], oma_created_tabs: [] });
-  } catch (_) {}
+  // Principal-Edge-only: never close browser tabs. Deregister + restore any
+  // adopted tab left behind by a previous SW lifecycle, then clear stale SENTRA
+  // bookkeeping. release_worker is best-effort if the relay is still offline.
+  try { await omaReleaseControllerReferences(); } catch (_) {}
   try { omaWorkers.clear(); } catch (_) {}
   try {
     const stored = await chrome.storage.local.get(null);
@@ -1280,16 +1372,26 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   (async () => {
     if (request.operation === "OMA_IDLE_WAKE") {
       if (typeof tabId !== "number") return { ok: false, ignored: true };
+
+      // Any existing ChatGPT tab may wake the lazy scheduler. It does not become
+      // a controller merely by pinging: omaTick() adopts a tab only when relay
+      // work exists. This avoids the MV3 deadlock where no owned tab existed yet.
+      const senderUrl = String((sender && sender.tab && sender.tab.url) || "");
+      if (!/^https:\/\/chatgpt\.com\//.test(senderUrl)) {
+        return { ok: true, ignored: true };
+      }
+
       const owned = await omaOwnedTabIds();
-      if (!owned.has(tabId)) return { ok: true, ignored: true };
-      try {
-        await omaRelay("/workers/heartbeat", {
-          method: "POST",
-          body: JSON.stringify({ worker: `TAB-${tabId}` }),
-        });
-      } catch (_) {}
+      if (owned.has(tabId)) {
+        try {
+          await omaRelay("/workers/heartbeat", {
+            method: "POST",
+            body: JSON.stringify({ worker: `TAB-${tabId}` }),
+          });
+        } catch (_) {}
+      }
       await omaTick();
-      return { ok: true, idle_wake: true };
+      return { ok: true, idle_wake: true, owned: owned.has(tabId) };
     }
     if (request.operation === "OMA_LEASE_PING" && typeof tabId === "number") {
       try { await omaRenewActive(tabId); } catch (_) {}
@@ -1302,5 +1404,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     .catch((e) => { try { sendResponse({ ok: false, error: String((e && e.message) || e) }); } catch (_) {} });
   return true;
 });
+// Bootstrap immediately after extension reload; subsequent wake-ups come from
+// alarms and OMA_IDLE_WAKE pings from existing ChatGPT tabs.
+void omaTick();
 setInterval(omaTick, OMA_POLL_MS);
 

@@ -10,7 +10,7 @@ uma no composer via clipboard real ANTES do texto e confirma quantas anexaram
 (`images_attached` no resultado; 0 com imagens enviadas = paste falhou, job
 FAILED honesto, nada enviado). Nunca executa "paste" sem antes escrever o
 próprio conteúdo (jamais toca no clipboard do usuário). Após atualizar os
-arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.6.13).
+arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.6.24).
 
 Anti-morte-silenciosa MV3: WAIT fatiado em 25s (cada fatia renova o lease),
 job ativo persistido em storage (restart retoma sem reenviar), a tab pinga o
@@ -29,11 +29,12 @@ SW a cada ~10s (mensagem acorda SW suspenso) e o worker carrega telemetria
 2. Edge → `edge://extensions` → modo desenvolvedor → "Carregar sem compactação"
    → pasta `edge_extension/`.
 3. Nas opções da extensão, cole o token de `.oma/relay-token`, marque Ativar e salve.
-   A extensão usa o Edge/perfil em que foi instalada. Não abre outro navegador.
-   Quando há trabalho no relay, cria no máximo uma tab controladora em segundo plano;
-   research dispara chats sequencialmente, guarda `conversation_id` e coleta as
-   respostas depois pelo ID. Sem trabalho, a tab controladora é fechada automaticamente.
-   Tabs pessoais nunca são adotadas nem modificadas.
+   A extensão usa exclusivamente o Edge/perfil em que foi instalada. Não abre outro
+   navegador e não cria nem fecha tabs. Quando há trabalho no relay, adota temporariamente
+   uma aba `chatgpt.com` já aberta e inativa como controller único, guarda sua URL
+   original, alterna os chats por `conversation_id` e restaura essa URL quando libera o
+   controller. A aba ativa do usuário nunca é sequestrada. Se não houver uma aba ChatGPT
+   inativa no perfil principal, o SENTRA falha fechado.
 4. OMA submete jobs via `BrowserExtensionProvider` (relay_base padrão
    `http://127.0.0.1:8765`) ou `scripts/run_extension_swarm.py`.
 5. Confira `python -B main.py --doctor`. Para roundtrip real no PowerShell,
@@ -43,11 +44,11 @@ SW a cada ~10s (mensagem acorda SW suspenso) e o worker carrega telemetria
 Novas instalações começam desativadas. Tokens não vão para prompts; jobs possuem
 lease, expiração e correlação por tarefa/worker. Resultados aguardam ACK e sobrevivem
 ao restart do relay. Falhas de entrega incertas não são automaticamente reenviadas.
-A versão 1.6.13 usa controller lazy único, `CHAT_START/CHAT_COLLECT` por
+A versão 1.6.24 usa controller lazy único, `CHAT_START/CHAT_COLLECT` por
 `conversation_id` e recovery limitado de avisos transitórios “additional checks”.
 
-Controller: existe no máximo uma tab SENTRA-owned. O paralelismo de research
-é lógico, não visual: `CHAT_START` envia em uma conversa e retorna o
-`conversation_id`; a geração continua no servidor enquanto o controller navega
-para outros chats; `CHAT_COLLECT` volta depois pelo ID. Isso evita uma tab por
-subagente e reduz o consumo de memória do Edge.
+Controller: existe no máximo uma referência SENTRA a uma aba ChatGPT já aberta.
+O paralelismo de research é lógico, não visual: `CHAT_START` envia em uma conversa
+e retorna o `conversation_id`; a geração continua no servidor enquanto o controller
+navega para outros chats; `CHAT_COLLECT` volta depois pelo ID. O SENTRA nunca cria
+uma tab por subagente e nunca fecha a aba adotada.

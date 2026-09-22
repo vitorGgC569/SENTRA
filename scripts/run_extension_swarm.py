@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Swarm REAL via extensão: N conversas criadas por um pool de poucas tabs.
+"""Swarm REAL via extensão: N conversas lógicas por um controller adotado.
 
-Caminho: OMA TabPool -> BrowserExtensionProvider -> relay local
-      -> Edge Extension (tabs reais) -> conversas reais.
+Caminho: OMA -> BrowserExtensionProvider -> relay local
+      -> Edge Extension (1 tab ChatGPT existente/inativa) -> conversas por ID.
 
 Exige (sem fallback, sem simulação):
   OMA_LIVE_EXTENSION=1

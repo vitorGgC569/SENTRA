@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "OMA Browser Bridge",
-  "version": "1.6.16",
+  "version": "1.6.24",
   "description": "Atuador do OMA: executa operações primitivas de conversa em tabs reais e reporta ao relay local. Não decide nada.",
   "permissions": ["tabs", "storage", "alarms"],
   "options_page": "options.html",

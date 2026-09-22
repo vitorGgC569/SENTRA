@@ -106,8 +106,8 @@ python -B main.py --relay   # anote o token em .oma/relay-token
 No **Edge principal já logado**: `edge://extensions` → modo desenvolvedor →
 **Carregar sem compactação** → pasta `edge_extension/` → Detalhes →
 Opções → cole o token → **Ativar** → salve. Não é necessário abrir outro
-perfil/navegador. A extensão mantém **zero tabs próprias quando ociosa** e cria,
-sob demanda, **no máximo 1 tab controladora**. Research inicia chats em série,
+perfil/navegador. A extensão mantém **zero tabs próprias sempre** e, sob demanda, adota
+temporariamente **no máximo 1 aba `chatgpt.com` já existente e inativa**. Research inicia chats em série,
 guarda seus `conversation_id` e coleta as respostas depois por ID, portanto
 paralelismo lógico não exige uma tab por subagente. Recarregue a extensão após
 qualquer update. Um relay por porta (sonde `/health` antes — dual-bind = 2 filas invisíveis).

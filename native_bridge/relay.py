@@ -79,6 +79,15 @@ class RelayState(JobStore):
                 if time.time() - t <= self.WORKER_ONLINE_WINDOW_S
             ]
 
+    def release_worker(self, worker=""):
+        if not isinstance(worker, str) or not worker.startswith("TAB-"):
+            raise ValueError("invalid worker identity")
+        with self.lock:
+            # Keep the key so workers_ever_seen remains monotonic for diagnostics,
+            # but make the worker immediately offline and clear cached UI status.
+            self._last_poll[worker] = 0.0
+            self._worker_status.pop(worker, None)
+
     def workers_ever_seen(self):
         with self.lock:
             return len(self._last_poll)
@@ -180,6 +189,10 @@ def make_handler(state, token):
                 if self.path == "/workers/pool-claim":
                     instance_id = str(data.get("instance_id") or "")
                     return self._send({"ok": True, **state.claim_pool(instance_id)})
+                if self.path == "/workers/release":
+                    worker = str(data.get("worker") or "")
+                    state.release_worker(worker)
+                    return self._send({"ok": True, "released": True})
                 if self.path == "/jobs/submit":
                     allowed = {"task_id", "prompt", "timeout_s", "new_chat", "conversation_url", "kind", "images", "target_worker", "browser_action", "browser_args"}
                     if set(data) - allowed:

@@ -46,16 +46,24 @@ class ExtensionTransport:
         return await asyncio.to_thread(_get, f"{self.base}/health", 10.0, self.token)
 
     async def _wait_first_worker(self, budget_s: float) -> None:
-        """Falha rápido e claro quando nenhuma extensão existe (em vez de queimar
-        o timeout inteiro do job). Workers já vistos (mesmo ocupados) seguem o
-        fluxo normal de espera. budget nunca excede o timeout do job."""
+        """Falha rápido quando não há extensão nem pool líder conectado.
+
+        No controller lazy, logo após restart pode haver pool líder ativo antes
+        do primeiro TAB-* existir. Esse pool é prova suficiente de que a extensão
+        está conectada e pode adotar uma aba assim que o job entrar na fila.
+        """
         start = asyncio.get_running_loop().time()
         while True:
             try:
                 h = await self.health()
             except Exception:
                 return  # relay com problema: deixa o fluxo normal classificar
-            if h.get("workers_ever_seen", 1) > 0 or h.get("workers_online"):
+            pool = h.get("pool") if isinstance(h.get("pool"), dict) else {}
+            if (
+                h.get("workers_ever_seen", 1) > 0
+                or h.get("workers_online")
+                or (pool.get("active") is True and bool(pool.get("owner")))
+            ):
                 return
             if asyncio.get_running_loop().time() - start >= budget_s:
                 raise RuntimeError(

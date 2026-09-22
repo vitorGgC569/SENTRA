@@ -109,8 +109,10 @@ class ChatJob:
             encoded_args = str(self.browser_args)
             if len(encoded_args) > 200000:
                 raise ValueError("browser_args too large")
-            if not self.target_worker or len(self.target_worker) > 100:
-                raise ValueError("BROWSER_ACTION requires target_worker")
+            # The first browser action may be untargeted so it can wake the
+            # lazy principal-Edge controller. Once BrowserControlService learns
+            # the TAB-* identity it reserves that worker and targets every
+            # subsequent action explicitly.
         elif not isinstance(self.prompt, str) or not self.prompt or len(self.prompt) > 20000:
             raise ValueError("prompt required (max 20000 chars)")
         if type(self.new_chat) is not bool or type(self.timeout_s) is not int or not (5 <= self.timeout_s <= 900):

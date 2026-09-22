@@ -64,12 +64,12 @@ Browser: open/tabs/navigate/extract/screenshot/click/type/close. Browser navigat
 blocks private, loopback, link-local, multicast, unspecified and reserved IP ranges.
 For ChatGPT research the Edge extension runs in the user's installed Edge profile.
 ChatGPT URLs never fall back to a separate Playwright/Edge profile when the principal
-bridge is unavailable; they fail closed instead. The bridge keeps zero controller references while idle. When work exists it prefers
-one already-open non-active ChatGPT tab from the principal profile; if none is safe,
-it creates exactly one background controller tab in that same profile. It never opens
-another Edge/profile, never allocates one tab per subagent, and never closes an adopted
-user tab
-when work is queued. Branches use `CHAT_START` / `CHAT_COLLECT` with
+bridge is unavailable; they fail closed instead. The bridge keeps zero controller
+references while idle. When work exists it adopts exactly one already-open, non-active
+ChatGPT tab from the principal profile. If no safe existing ChatGPT tab is available,
+it fails closed: it never creates or closes a browser tab, never opens another Edge/profile,
+and never allocates one tab per subagent. The adopted tab's original URL is restored when
+the controller is released. Branches use `CHAT_START` / `CHAT_COLLECT` with
 `conversation_id`, so multiple server-side generations do not require multiple
 browser tabs. The content script also performs a bounded `Stop -> Continue`
 recovery when ChatGPT displays its transient “additional checks” system notice.

@@ -53,11 +53,13 @@
   recebe injeção fresca; `GET_STATUS` reporta `cs_version` para detectar desvio.
 - **Regra:** nunca opere tab "herdada" sem navegar primeiro (ou sem checar versão).
 
-### 1.6 Pool adotava a tab ativa do usuário
-- **Sintoma (quase-incidente):** worker poderia navegar a conversa atual do usuário.
-- **Correção:** `oma_owned_tabs` em `chrome.storage.local`; pool cria tabs próprias
-  em 2º plano e **nunca** adota tabs existentes (`edge_extension/service-worker.js`).
-- **Regra:** atuador jamais toca estado do usuário; opera só no que criou.
+### 1.6 Controller não pode sequestrar a tab ativa nem criar tabs próprias
+- **Sintoma (quase-incidente):** um controller podia navegar a conversa ativa do usuário;
+  versões intermediárias evitaram isso criando tabs próprias em 2º plano.
+- **Correção atual:** `oma_owned_tabs` referencia no máximo **uma aba ChatGPT já existente
+  e inativa**. O bridge guarda a URL original, alterna chats por `conversation_id`,
+  restaura a URL ao liberar e **nunca chama `chrome.tabs.create/remove`**.
+- **Regra:** a aba ativa nunca é adotada; sem aba inativa segura, falhe fechado.
 
 ### 1.7 Envelope `{ok, result}` — ler campo no nível errado
 - **Sintoma:** telemetria `cs=unknown` com tudo funcionando.

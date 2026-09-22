@@ -64,10 +64,12 @@ No Edge, com sua conta logada no site de chat:
 2. Detalhes da extensão → **Opções da extensão** → cole o conteúdo de
    `.oma/relay-token` no campo Token → marque **Ativar** → salve.
    (Token é segredo: nunca cole em chat nenhum.)
-3. A extensão cria **duas tabs próprias** e começa o polling em
-   `http://127.0.0.1:8765`. Ela **não** adota suas tabs pessoais.
+3. A extensão faz polling em `http://127.0.0.1:8765` sem criar tabs.
+   Quando existe trabalho, ela adota temporariamente **uma aba `chatgpt.com`
+   já existente e inativa**, guarda a URL original e alterna chats por
+   `conversation_id`. A aba ativa nunca é adotada; sem candidata segura, falha fechado.
 4. Recarregue a extensão (`edge://extensions` → recarregar) sempre que
-   atualizar os arquivos dela. Versão atual: `1.5.2` (paste via file-input/clipboard/drop + anti-morte-silenciosa + telemetria por job)
+   atualizar os arquivos dela. Versão atual: `1.6.23`
    (`edge_extension/manifest.json`); doctor recusa se divergir.
 
 ```powershell

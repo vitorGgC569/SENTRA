@@ -83,6 +83,50 @@ def test_relay_submit_poll_result_wait_roundtrip():
         server.stop()
 
 
+def test_worker_release_removes_online_status_without_forgetting_seen_count():
+    import json as _json
+    import urllib.request as _url
+    from native_bridge.relay import RelayServer
+
+    server = RelayServer(port=18780).start()
+    try:
+        base = "http://127.0.0.1:18780"
+        auth = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + server.token,
+        }
+
+        def post(path, payload):
+            req = _url.Request(
+                base + path,
+                data=_json.dumps(payload).encode(),
+                headers=dict(auth),
+            )
+            return _json.loads(_url.urlopen(req).read())
+
+        for worker in ("TAB-1", "TAB-2"):
+            req = _url.Request(
+                base + f"/jobs/poll?worker={worker}",
+                headers={"Authorization": "Bearer " + server.token},
+            )
+            with _url.urlopen(req) as response:
+                _json.loads(response.read())
+
+        with _url.urlopen(base + "/health") as response:
+            before = _json.loads(response.read())
+        assert set(before["workers_online"]) == {"TAB-1", "TAB-2"}
+        assert before["workers_ever_seen"] == 2
+
+        assert post("/workers/release", {"worker": "TAB-1"})["released"] is True
+
+        with _url.urlopen(base + "/health") as response:
+            after = _json.loads(response.read())
+        assert after["workers_online"] == ["TAB-2"]
+        assert after["workers_ever_seen"] == 2
+    finally:
+        server.stop()
+
+
 def test_chat_start_and_collect_protocol_contract():
     start = ChatJob(
         task_id="T-start",
@@ -114,6 +158,31 @@ def test_chat_start_and_collect_protocol_contract():
             kind="CHAT_COLLECT",
             conversation_url="https://chatgpt.com/c/abc-123",
         ).validate()
+
+
+def test_browser_action_can_bootstrap_without_target_worker():
+    from native_bridge.protocol import ChatJob
+
+    job = ChatJob(
+        task_id="T-browser-bootstrap",
+        kind="BROWSER_ACTION",
+        new_chat=False,
+        browser_action="navigate",
+        browser_args={"url": "https://chatgpt.com/"},
+    )
+    job.validate()
+    assert job.target_worker == ""
+
+    targeted = ChatJob(
+        task_id="T-browser-targeted",
+        kind="BROWSER_ACTION",
+        new_chat=False,
+        browser_action="extract",
+        browser_args={"selector": "body"},
+        target_worker="TAB-123",
+    )
+    targeted.validate()
+    assert targeted.target_worker == "TAB-123"
 
 
 def test_probe_kind_validates_and_queues():

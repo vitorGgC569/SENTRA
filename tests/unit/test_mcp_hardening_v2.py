@@ -364,10 +364,12 @@ def test_structured_documents_cover_research_formats(tmp_path: Path) -> None:
 
 
 class _FakeBrowser:
-    def __init__(self, *, slow: bool = False) -> None:
+    def __init__(self, *, slow: bool = False, collect_failures: int = 0) -> None:
         self.counter = 0
         self.deleted: list[str] = []
         self.slow = slow
+        self.collect_failures = collect_failures
+        self.collect_attempts = 0
         self._prompts: dict[str, str] = {}
 
     async def chat_start(
@@ -394,6 +396,13 @@ class _FakeBrowser:
         *,
         timeout_s: int,
     ) -> dict:
+        self.collect_attempts += 1
+        if self.collect_failures > 0:
+            self.collect_failures -= 1
+            raise RuntimeError(
+                "TAB_ERROR: The page keeping the extension port is moved into "
+                "back/forward cache, so the message channel is closed."
+            )
         if self.slow:
             await asyncio.sleep(10)
         conversation_id = conversation_url.rstrip("/").split("/")[-1]
@@ -463,6 +472,36 @@ def test_research_parallel_and_mcts_are_bounded_and_clean_temporary_chats(
         assert any(node["kind"] == "judge" for node in result["nodes"])
         with pytest.raises(PermissionError):
             service.status(mcts["run_id"], "mcp:B")
+        await service.close()
+
+    asyncio.run(probe())
+
+
+def test_research_collect_retries_transient_bfcache_without_restarting_chat(
+    tmp_path: Path,
+) -> None:
+    async def probe() -> None:
+        config = _config(tmp_path)
+        browser = _FakeBrowser(collect_failures=1)
+        service = ResearchService(
+            config,
+            AuditLogger(config.audit_log),
+            browser,
+            db_path=tmp_path / ".sentra" / "research-bfcache.sqlite3",
+        )
+        run = await service.start(
+            "retry read-only collection",
+            "mcp:A",
+            strategy="single",
+            temporary=True,
+            timeout_s=30,
+        )
+        done = await service.wait(run["run_id"], "mcp:A", 5)
+        assert done["state"] == "COMPLETED"
+        assert browser.counter == 1
+        assert browser.collect_attempts == 2
+        assert done["result"]["conversations_created"] == 1
+        assert done["result"]["cleanup"][0]["deleted"] is True
         await service.close()
 
     asyncio.run(probe())
@@ -584,6 +623,60 @@ def test_edge_bridge_idle_is_visible_without_controller_tabs(
     asyncio.run(probe())
 
 
+def test_chatgpt_edge_open_bootstraps_lazy_controller_without_playwright(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def probe() -> None:
+        config = _config(tmp_path)
+        playwright_calls = []
+        edge_calls = []
+
+        def forbidden_factory(**kwargs):
+            playwright_calls.append(kwargs)
+            raise AssertionError("Playwright must not be created for chatgpt.com")
+
+        service = BrowserControlService(
+            config,
+            AuditLogger(config.audit_log),
+            session_factory=forbidden_factory,
+        )
+
+        async def no_workers():
+            return []
+
+        async def allow_url(url: str):
+            return url
+
+        async def edge_action(worker, action, args, *, timeout_s=20):
+            edge_calls.append((worker, action, dict(args), timeout_s))
+            assert worker is None
+            return {
+                "url": "https://chatgpt.com/",
+                "worker": "TAB-42",
+            }
+
+        monkeypatch.setattr(service, "_edge_worker_inventory", no_workers)
+        monkeypatch.setattr(service, "_validate_url", allow_url)
+        monkeypatch.setattr(service, "_edge_action", edge_action)
+
+        opened = await service.open(
+            "mcp:A",
+            "https://chatgpt.com/",
+            backend="auto",
+        )
+        assert opened["session_id"] == "edge:TAB-42"
+        assert opened["backend"] == "edge"
+        assert service.edge_sessions["edge:TAB-42"]["worker"] == "TAB-42"
+        assert edge_calls == [
+            (None, "navigate", {"url": "https://chatgpt.com/"}, 30)
+        ]
+        assert playwright_calls == []
+        await service.shutdown()
+
+    asyncio.run(probe())
+
+
 def test_chatgpt_auto_backend_never_falls_back_to_playwright(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -608,8 +701,13 @@ def test_chatgpt_auto_backend_never_falls_back_to_playwright(
         async def allow_url(url: str):
             return url
 
+        async def bootstrap_fails(worker, action, args, *, timeout_s=20):
+            assert worker is None
+            raise RuntimeError("no inactive principal ChatGPT tab")
+
         monkeypatch.setattr(service, "_edge_worker_inventory", no_workers)
         monkeypatch.setattr(service, "_validate_url", allow_url)
+        monkeypatch.setattr(service, "_edge_action", bootstrap_fails)
 
         with pytest.raises(RuntimeError, match="principal Edge bridge is required"):
             await service.open(

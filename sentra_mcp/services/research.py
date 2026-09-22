@@ -166,7 +166,9 @@ class ResearchService:
         availability_timeout_s: float = 60.0,
     ) -> dict[str, Any]:
         deadline = time.monotonic() + availability_timeout_s
+        attempt = 0
         while True:
+            attempt += 1
             try:
                 return await self.browser.chat_collect(
                     owner,
@@ -174,12 +176,22 @@ class ResearchService:
                     timeout_s=timeout_s,
                 )
             except RuntimeError as exc:
-                if (
-                    "no READY Edge worker" not in str(exc)
-                    or time.monotonic() >= deadline
-                ):
+                message = str(exc)
+                lowered = message.casefold()
+                transient = (
+                    "no READY Edge worker" in message
+                    or "back/forward cache" in lowered
+                    or "message channel is closed" in lowered
+                    or "receiving end does not exist" in lowered
+                    or "could not establish connection" in lowered
+                    or "content-script não respondeu" in lowered
+                    or "content-script nao respondeu" in lowered
+                )
+                if not transient or time.monotonic() >= deadline:
                     raise
-                await asyncio.sleep(0.25)
+                # CHAT_COLLECT is read-only/idempotent by explicit conversation URL.
+                # Retrying it cannot resend a prompt or duplicate a generation.
+                await asyncio.sleep(min(1.0, 0.25 * attempt))
 
     async def _chat_retry(
         self,
@@ -632,7 +644,7 @@ class ResearchService:
         branches: int = 3,
         max_depth: int = 2,
         beam_width: int = 2,
-        timeout_s: int = 180,
+        timeout_s: int = 300,
     ) -> dict[str, Any]:
         if self.closed:
             raise RuntimeError("research service is shut down")
