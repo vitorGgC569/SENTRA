@@ -945,7 +945,10 @@ class BrowserControlService:
 
     async def close(self, session_id: str, owner: str) -> dict[str, Any]:
         if session_id.startswith("edge:"):
-            self._owned_edge(session_id, owner)
+            item = self._owned_edge(session_id, owner)
+            # A principal-Edge session owns only a controller reference, never
+            # the user's tab. Close therefore means explicit release + restore.
+            await self._edge_action(item["worker"], "close", {}, timeout_s=20)
             self.edge_sessions.pop(session_id, None)
             self.audit.emit("browser.close", "ok", {"session_id": session_id, "owner": owner, "backend": "edge"})
             return {"session_id": session_id, "backend": "edge", "closed": True, "tab_preserved": True}
@@ -973,4 +976,12 @@ class BrowserControlService:
             except Exception:
                 pass
             self.sessions.pop(session_id, None)
-        self.edge_sessions.clear()
+
+        # Best-effort explicit release of every principal-Edge controller.
+        # Shutdown must not leave a user tab adopted until the failsafe expires.
+        for session_id, item in list(self.edge_sessions.items()):
+            try:
+                await self._edge_action(item["worker"], "close", {}, timeout_s=20)
+            except Exception:
+                pass
+            self.edge_sessions.pop(session_id, None)

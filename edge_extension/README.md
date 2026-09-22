@@ -10,7 +10,7 @@ uma no composer via clipboard real ANTES do texto e confirma quantas anexaram
 (`images_attached` no resultado; 0 com imagens enviadas = paste falhou, job
 FAILED honesto, nada enviado). Nunca executa "paste" sem antes escrever o
 próprio conteúdo (jamais toca no clipboard do usuário). Após atualizar os
-arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.6.24).
+arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.6.26).
 
 Anti-morte-silenciosa MV3: WAIT fatiado em 25s (cada fatia renova o lease),
 job ativo persistido em storage (restart retoma sem reenviar), a tab pinga o
@@ -44,8 +44,9 @@ SW a cada ~10s (mensagem acorda SW suspenso) e o worker carrega telemetria
 Novas instalações começam desativadas. Tokens não vão para prompts; jobs possuem
 lease, expiração e correlação por tarefa/worker. Resultados aguardam ACK e sobrevivem
 ao restart do relay. Falhas de entrega incertas não são automaticamente reenviadas.
-A versão 1.6.24 usa controller lazy único, `CHAT_START/CHAT_COLLECT` por
-`conversation_id` e recovery limitado de avisos transitórios “additional checks”.
+A versão 1.6.26 usa controller lazy único, `CHAT_START/CHAT_COLLECT` por
+`conversation_id`, lifecycle explícito de `browser_close/shutdown` e recovery
+limitado de avisos transitórios “additional checks”.
 
 Controller: existe no máximo uma referência SENTRA a uma aba ChatGPT já aberta.
 O paralelismo de research é lógico, não visual: `CHAT_START` envia em uma conversa

@@ -70,8 +70,13 @@ def test_lazy_single_controller_contract():
     assert "const hasWork = queued > 0 || leased > 0 || activeJobs.length > 0;" in worker
     assert "if (!hasWork)" in worker
     assert "await omaReleaseControllerReferences();" in worker
-    assert "const OMA_CONTROLLER_IDLE_RELEASE_MS = 10000;" in worker
+    assert "const OMA_CONTROLLER_IDLE_RELEASE_MS = 300000;" in worker
     assert "Date.now() - omaControllerLastWorkAt >= OMA_CONTROLLER_IDLE_RELEASE_MS" in worker
+    browser_actions = worker.split('if (job.kind === "BROWSER_ACTION")', 1)[1].split(
+        'if (job.kind === "STATUS_PROBE")', 1
+    )[0]
+    assert "releaseAfter = true;" in browser_actions
+    assert "await omaReleaseControllerReferences();" in browser_actions
     assert "await omaEnsureTabs(desiredTabs);" in worker
     assert "máximo 1 tab" in options
     assert 'chrome.tabs.query({ url: ["https://chatgpt.com/*"] })' in worker

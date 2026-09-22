@@ -8,7 +8,7 @@
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 1, maxTabs: 1 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.6.24";
+const OMA_SW_VERSION = "1.6.26";
 // Budgets MV3 (somente-leitura; a verdade est├í no servidor/Chrome):
 // - native_bridge/job_store.py concede lease de 120s: renovar < 120s ou o relay
 //   marca expirado e nenhum post tardio ├® aceito. Janela folgada de prop├│sito
@@ -26,10 +26,10 @@ const OMA_WAIT_SLICE_MS = 25000;
 const OMA_HB_ALARM = "oma-hb";
 const OMA_ACTIVE_PREFIX = "oma_active_";
 const OMA_UPDATE_CHECK_MS = 30000;
-// Keep the adopted controller briefly after a job so MCP browser sequences
-// (navigate -> extract/click/type) operate on the same document. The tab is
-// still an existing inactive user tab and is restored automatically afterward.
-const OMA_CONTROLLER_IDLE_RELEASE_MS = 10000;
+// Keep the adopted controller stable for an MCP browser session. Normal
+// release is explicit via BROWSER_ACTION close/browser shutdown; this timeout is
+// only a crash/abandonment failsafe. The user's tab is restored, never closed.
+const OMA_CONTROLLER_IDLE_RELEASE_MS = 300000;
 let omaLastUpdateCheck = 0;
 let omaTickBusy = false;
 let omaControllerLastWorkAt = Date.now();
@@ -812,6 +812,7 @@ async function omaProcessJob(tabId, job) {
   }
 
   if (job.kind === "BROWSER_ACTION") {
+    let releaseAfter = false;
     try {
       await renew();
       const action = job.browser_action || "";
@@ -851,7 +852,8 @@ async function omaProcessJob(tabId, job) {
         });
         result = (reply && reply.result) || {};
       } else if (action === "close") {
-        result = { closed: true, tab_preserved: true };
+        result = { closed: true, tab_preserved: true, controller_released: true };
+        releaseAfter = true;
       } else {
         throw new Error("unsupported BROWSER_ACTION");
       }
@@ -862,6 +864,9 @@ async function omaProcessJob(tabId, job) {
         result: JSON.stringify(result),
         worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION} action=${action}`,
       });
+      if (releaseAfter) {
+        try { await omaReleaseControllerReferences(); } catch (_) {}
+      }
     } catch (e) {
       await postResult({
         job_id: job.job_id,

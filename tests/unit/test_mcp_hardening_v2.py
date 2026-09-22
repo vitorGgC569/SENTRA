@@ -650,10 +650,18 @@ def test_chatgpt_edge_open_bootstraps_lazy_controller_without_playwright(
 
         async def edge_action(worker, action, args, *, timeout_s=20):
             edge_calls.append((worker, action, dict(args), timeout_s))
-            assert worker is None
+            if action == "navigate":
+                assert worker is None
+                return {
+                    "url": "https://chatgpt.com/",
+                    "worker": "TAB-42",
+                }
+            assert action == "close"
+            assert worker == "TAB-42"
             return {
-                "url": "https://chatgpt.com/",
-                "worker": "TAB-42",
+                "closed": True,
+                "tab_preserved": True,
+                "controller_released": True,
             }
 
         monkeypatch.setattr(service, "_edge_worker_inventory", no_workers)
@@ -673,6 +681,61 @@ def test_chatgpt_edge_open_bootstraps_lazy_controller_without_playwright(
         ]
         assert playwright_calls == []
         await service.shutdown()
+        assert edge_calls == [
+            (None, "navigate", {"url": "https://chatgpt.com/"}, 30),
+            ("TAB-42", "close", {}, 20),
+        ]
+        assert service.edge_sessions == {}
+
+    asyncio.run(probe())
+
+
+def test_edge_close_and_shutdown_release_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def probe() -> None:
+        config = _config(tmp_path)
+        service = BrowserControlService(config, AuditLogger(config.audit_log))
+        calls = []
+
+        async def edge_action(worker, action, args, *, timeout_s=20):
+            calls.append((worker, action, dict(args), timeout_s))
+            assert action == "close"
+            return {
+                "closed": True,
+                "tab_preserved": True,
+                "controller_released": True,
+                "worker": worker,
+            }
+
+        monkeypatch.setattr(service, "_edge_action", edge_action)
+
+        service.edge_sessions["edge:TAB-41"] = {
+            "owner": "mcp:A",
+            "worker": "TAB-41",
+            "created": 1.0,
+        }
+        closed = await service.close("edge:TAB-41", "mcp:A")
+        assert closed == {
+            "session_id": "edge:TAB-41",
+            "backend": "edge",
+            "closed": True,
+            "tab_preserved": True,
+        }
+        assert "edge:TAB-41" not in service.edge_sessions
+
+        service.edge_sessions["edge:TAB-42"] = {
+            "owner": "mcp:A",
+            "worker": "TAB-42",
+            "created": 2.0,
+        }
+        await service.shutdown()
+        assert service.edge_sessions == {}
+        assert calls == [
+            ("TAB-41", "close", {}, 20),
+            ("TAB-42", "close", {}, 20),
+        ]
 
     asyncio.run(probe())
 
