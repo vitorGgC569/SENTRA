@@ -58,7 +58,7 @@ class ResearchService:
         self.audit = audit
         self.browser = browser
         self.db_path = Path(
-            db_path or (config.allowed_roots[0] / ".sentra" / "research.sqlite3")
+            db_path or (config.state_root / "research.sqlite3")
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)

@@ -5,6 +5,7 @@ import asyncio
 import base64
 import ipaddress
 import json
+import os
 import socket
 import time
 import urllib.error
@@ -35,9 +36,30 @@ class BrowserControlService:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.edge_sessions: dict[str, dict[str, Any]] = {}
         self.lock = asyncio.Lock()
-        self.screenshot_root = config.allowed_roots[0] / ".sentra" / "screenshots"
-        self.relay_url = "http://127.0.0.1:8765"
-        self.relay_token_path = config.allowed_roots[0] / ".oma" / "relay-token"
+        self.screenshot_root = config.state_root / "screenshots"
+        self.relay_url = self._configured_relay_url()
+        self.relay_token_path = config.state_root / "browser" / "relay-token"
+
+    @staticmethod
+    def _configured_relay_url() -> str:
+        raw = os.environ.get("SENTRA_EDGE_RELAY_URL", "http://127.0.0.1:8765").strip()
+        parsed = urlparse(raw)
+        if parsed.scheme != "http" or not parsed.hostname or parsed.username or parsed.password:
+            raise ValueError("SENTRA_EDGE_RELAY_URL must be a loopback http URL")
+        try:
+            ip = ipaddress.ip_address(parsed.hostname)
+            loopback = ip.is_loopback
+        except ValueError:
+            loopback = parsed.hostname.casefold() == "localhost"
+        if not loopback:
+            raise ValueError("SENTRA_EDGE_RELAY_URL must target loopback")
+        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+            raise ValueError("SENTRA_EDGE_RELAY_URL must not include path/query/fragment")
+        port = parsed.port or 80
+        if not 1 <= port <= 65535:
+            raise ValueError("SENTRA_EDGE_RELAY_URL has an invalid port")
+        host = "[::1]" if parsed.hostname == "::1" else parsed.hostname
+        return f"http://{host}:{port}"
 
     @staticmethod
     def _validate_selector(selector: str) -> str:

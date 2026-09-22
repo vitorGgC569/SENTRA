@@ -118,10 +118,17 @@ def prepare_update(
             raise ValueError("signed update contains no executable")
         for executable in executables:
             verify_authenticode(executable, thumbprint)
-    installer = extract / "install.ps1"
+    setup = extract / "SENTRA-Setup.exe"
+    legacy = extract / "install.ps1"
+    installer = setup if setup.is_file() else legacy
     if not installer.is_file():
-        raise ValueError("update package is missing install.ps1")
-    return {"version": manifest["version"], "package_root": str(extract), "installer": str(installer)}
+        raise ValueError("update package is missing SENTRA-Setup.exe/install.ps1")
+    return {
+        "version": manifest["version"],
+        "package_root": str(extract),
+        "installer": str(installer),
+        "installer_kind": "exe" if installer.suffix.lower() == ".exe" else "powershell",
+    }
 
 
 def apply_prepared_update(
@@ -135,17 +142,62 @@ def apply_prepared_update(
     installer = Path(str(prepared["installer"]))
     if not installer.is_file():
         raise FileNotFoundError("prepared update installer missing")
-    command = [
-        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", str(installer),
-        "-InstallDir", str(install_dir),
-        "-Upgrade",
-        "-WaitPid", str(os.getpid()),
-    ]
-    if manifest_url:
-        command += ["-UpdateManifestUrl", manifest_url]
-    if auto_update:
-        command.append("-AutoUpdate")
-    if allow_unsigned_updates:
-        command.append("-AllowUnsignedUpdates")
-    return subprocess.Popen(command, cwd=installer.parent, text=True)
+    install_dir = Path(install_dir).expanduser().resolve()
+
+    if str(prepared.get("installer_kind") or "") != "exe":
+        command = [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(installer),
+            "-InstallDir", str(install_dir),
+            "-Upgrade",
+            "-WaitPid", str(os.getpid()),
+        ]
+        if manifest_url:
+            command += ["-UpdateManifestUrl", manifest_url]
+        if auto_update:
+            command.append("-AutoUpdate")
+        if allow_unsigned_updates:
+            command.append("-AllowUnsignedUpdates")
+        return subprocess.Popen(command, cwd=installer.parent, text=True)
+
+    package_root = Path(str(prepared.get("package_root") or installer.parent))
+    helper = package_root / "sentra-update-helper.exe"
+    if not helper.is_file():
+        raise FileNotFoundError("update package is missing sentra-update-helper.exe")
+    return subprocess.Popen(
+        [
+            str(helper), "apply",
+            "--installer", str(installer),
+            "--install-dir", str(install_dir),
+            "--parent-pid", str(os.getpid()),
+            "--version", str(prepared.get("version") or ""),
+            "--manifest-url", manifest_url,
+        ],
+        cwd=helper.parent,
+        text=True,
+    )
+
+def _ps_literal(value: str | Path) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _update_state_path() -> Path:
+    return Path.home() / ".sentra" / "update-state.json"
+
+def rollback_previous_update(install_dir: Path) -> subprocess.Popen[str]:
+    install_dir = Path(install_dir).expanduser().resolve()
+    installed_helper = install_dir / "sentra-update-helper.exe"
+    if not installed_helper.is_file():
+        raise FileNotFoundError("installed update helper is missing")
+    temp_root = Path(tempfile.mkdtemp(prefix="sentra-rollback-helper-"))
+    helper = temp_root / "sentra-update-helper.exe"
+    shutil.copy2(installed_helper, helper)
+    return subprocess.Popen(
+        [
+            str(helper), "rollback",
+            "--install-dir", str(install_dir),
+            "--parent-pid", str(os.getpid()),
+        ],
+        cwd=temp_root,
+        text=True,
+    )

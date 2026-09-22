@@ -16,6 +16,24 @@ Consenso entre modelos não é prova de correção — teste verde + quorum é.
 > [`docs/OMA_Orquestrador_Multiagente.md`](docs/OMA_Orquestrador_Multiagente.md)
 > (especificação).
 
+## SENTRA Desktop v1
+
+O caminho recomendado para usuários Windows é o **SENTRA Desktop**. Releases
+estáveis publicam um Setup `.exe` e um MSI per-user, ambos Authenticode-signed,
+além de SHA-256, CycloneDX SBOM e pacote de atualização verificável.
+
+A aplicação fornece tray + painel operacional para MCP, Secure Tunnel, Edge,
+Docker, Git e Remote Agent; profiles Safe/Developer/Full; workspaces com
+permissões read/write/execute; jobs/fila OMA; auditoria, diff, snapshots e
+rollback; onboarding do Secure MCP Tunnel sem PowerShell.
+
+Comece em [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Arquitetura:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Segurança:
+[`SECURITY.md`](SECURITY.md). Processo de publicação:
+[`docs/RELEASE.md`](docs/RELEASE.md).
+
+O fluxo CLI abaixo continua suportado para desenvolvimento do próprio SENTRA.
+
 ---
 
 ## Como funciona

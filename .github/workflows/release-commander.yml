@@ -1,17 +1,17 @@
-name: SENTRA Commander Release
+name: SENTRA Desktop Release
 
 on:
   workflow_dispatch:
   push:
     tags:
-      - "commander-v*"
+      - "v*"
 
 permissions:
   contents: write
   id-token: write
 
 jobs:
-  test-and-build-windows:
+  windows-release:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -20,20 +20,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install build dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-commander.txt
 
-      - name: Resolve Commander version
+      - name: Resolve Desktop version
         shell: pwsh
         run: |
-          $version = (python -c "from sentra_version import SERVER_VERSION; print(SERVER_VERSION)").Trim()
-          if (-not $version) { throw "SERVER_VERSION is empty" }
+          $version = (python -c "from sentra_version import PRODUCT_VERSION; print(PRODUCT_VERSION)").Trim()
+          if (-not $version) { throw "PRODUCT_VERSION is empty" }
           if ($env:GITHUB_REF -like "refs/tags/*") {
-            $expected = "commander-v$version"
-            if ($env:GITHUB_REF_NAME -ne $expected) { throw "Release tag $env:GITHUB_REF_NAME must equal $expected" }
+            $expected = "v$version"
+            if ($env:GITHUB_REF_NAME -ne $expected) {
+              throw "Release tag $env:GITHUB_REF_NAME must equal $expected"
+            }
           }
           "SENTRA_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
@@ -41,137 +43,195 @@ jobs:
         shell: pwsh
         run: python -B -m pytest tests -q
 
-      - name: Build Windows executables
+      - name: Build signed-payload candidates
         shell: pwsh
-        run: python scripts/commander/build_windows.py --dist dist --work build/commander --spec build/commander-spec --clean-output
+        run: python scripts/commander/build_windows.py --dist dist --work build/commander --spec build/commander-spec --clean-output --phase payload
 
-      - name: Smoke packaged Windows executables
-        shell: pwsh
-        run: |
-          .\dist\sentra-agent.exe --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "sentra-agent.exe smoke failed" }
-          .\dist\sentra-tray.exe --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "sentra-tray.exe smoke failed" }
-          .\dist\sentra-diagnostics.exe --help | Out-Null
-          if ($LASTEXITCODE -ne 0) { throw "sentra-diagnostics.exe smoke failed" }
-          $bundle = Join-Path $env:RUNNER_TEMP "sentra-installer-smoke"
-          $install = Join-Path $env:RUNNER_TEMP "sentra-installed-smoke"
-          Remove-Item -Recurse -Force $bundle,$install -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force $bundle | Out-Null
-          Copy-Item dist\sentra-agent.exe,dist\sentra-tray.exe,dist\sentra-diagnostics.exe $bundle
-          Copy-Item installer\windows\install.ps1,installer\windows\uninstall.ps1 $bundle
-          & "$bundle\install.ps1" -InstallDir $install -NoStartup
-          if (-not (Test-Path "$install\sentra-agent.exe")) { throw "installer smoke did not install agent" }
-          & "$bundle\uninstall.ps1" -InstallDir $install -KeepConfig -NoStartupCleanup
-          if (Test-Path $install) { throw "uninstaller smoke left install directory" }
-
-      - name: Optional Authenticode signing
+      - name: Require Authenticode certificate for stable tags
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_B64: ${{ secrets.WINDOWS_CERTIFICATE_B64 }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE_B64) { throw "Stable release requires WINDOWS_CERTIFICATE_B64" }
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) { throw "Stable release requires WINDOWS_CERTIFICATE_PASSWORD" }
+
+      - name: Prepare signing certificate
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_B64: ${{ secrets.WINDOWS_CERTIFICATE_B64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
           if (-not $env:WINDOWS_CERTIFICATE_B64) {
-            Write-Host "No signing certificate configured; binaries remain unsigned."
+            Write-Host "Unsigned workflow_dispatch build; it cannot become a stable release."
             exit 0
           }
           $pfx = Join-Path $env:RUNNER_TEMP "sentra-signing.pfx"
           [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_B64))
-          $securePassword = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $pfxData = Get-PfxData -FilePath $pfx -Password $securePassword
+          $secure = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $pfxData = Get-PfxData -FilePath $pfx -Password $secure
           $cert = $pfxData.EndEntityCertificates | Select-Object -First 1
-          if (-not $cert) { throw "No end-entity signing certificate found in PFX" }
+          if (-not $cert) { throw "No end-entity certificate in PFX" }
+          "SENTRA_PFX=$pfx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "SENTRA_SIGNER_THUMBPRINT=$($cert.Thumbprint)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Sign payload executables
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if (-not $env:SENTRA_PFX) { exit 0 }
           $timestamp = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
           foreach ($exe in Get-ChildItem dist\*.exe) {
-            & signtool sign /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $exe.FullName
+            & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $exe.FullName
             if ($LASTEXITCODE -ne 0) { throw "Signing failed for $($exe.Name)" }
           }
-          Remove-Item -Force $pfx
 
-      - name: Build installable bundle
+      - name: Build Setup with signed payload
+        shell: pwsh
+        run: python scripts/commander/build_windows.py --dist dist --work build/commander --spec build/commander-spec --phase installer
+      - name: Sign Setup
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if (-not $env:SENTRA_PFX) { exit 0 }
+          $timestamp = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+          & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 dist\SENTRA-Setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "Setup signing failed" }
+
+      - name: Download pinned OpenAI tunnel-client
         shell: pwsh
         run: |
-          $bundle = "release\sentra-commander"
-          New-Item -ItemType Directory -Force $bundle | Out-Null
-          Copy-Item dist\sentra-agent.exe,dist\sentra-tray.exe,dist\sentra-diagnostics.exe $bundle
-          Copy-Item installer\windows\install.ps1,installer\windows\uninstall.ps1 $bundle
-          Copy-Item docs\COMMANDER_V1.md,docs\PRIVACY.md,docs\THREAT_MODEL.md,docs\DEPLOYMENT.md $bundle -ErrorAction SilentlyContinue
-          Compress-Archive -Path "$bundle\*" -DestinationPath "release\sentra-commander-windows-x64.zip" -Force
-          $hash = (Get-FileHash "release\sentra-commander-windows-x64.zip" -Algorithm SHA256).Hash.ToLower()
-          $tag = $env:GITHUB_REF_NAME
-          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/sentra-commander-windows-x64.zip"
-          $manifest = [ordered]@{
-            version = $env:SENTRA_VERSION
-            url = $url
-            sha256 = $hash
-            signer_thumbprint = ($env:SENTRA_SIGNER_THUMBPRINT ?? "")
+          $url = "https://github.com/openai/tunnel-client/releases/download/v0.0.14/tunnel-client-v0.0.14-windows-amd64.zip"
+          $archive = Join-Path $env:RUNNER_TEMP "tunnel-client-v0.0.14-windows-amd64.zip"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $expected = "784ab8da7b5a88f0109f1fd8aaf0a1c86067430b896dddf307ef7e3cc49fa1a5"
+          $actual = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          if ($actual -ne $expected) { throw "OpenAI tunnel-client SHA-256 mismatch" }
+          "SENTRA_TUNNEL_ARCHIVE=$archive" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create EXE, MSI, update package and SBOM
+        shell: pwsh
+        run: |
+          python scripts/commander/release_assets.py --dist dist --release release --tunnel-archive $env:SENTRA_TUNNEL_ARCHIVE
+      - name: Sign MSI
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          if (-not $env:SENTRA_PFX) { exit 0 }
+          $timestamp = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
+          $msi = Get-ChildItem release\SENTRA-Desktop-*-x64.msi | Select-Object -First 1
+          & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $msi.FullName
+          if ($LASTEXITCODE -ne 0) { throw "MSI signing failed" }
+
+      - name: Finalize hashes and signed update manifest
+        shell: pwsh
+        run: |
+          python scripts/commander/release_assets.py --release release --finalize-only --signer-thumbprint "$env:SENTRA_SIGNER_THUMBPRINT"
+
+      - name: Verify stable Authenticode signatures
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $targets = @(
+            (Get-ChildItem dist\*.exe),
+            (Get-ChildItem release\SENTRA-Setup-*.exe),
+            (Get-ChildItem release\SENTRA-Desktop-*-x64.msi)
+          )
+          foreach ($file in $targets) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            if ($signature.Status -ne "Valid") { throw "Invalid signature: $($file.Name)" }
+            if ($signature.SignerCertificate.Thumbprint -ne $env:SENTRA_SIGNER_THUMBPRINT) {
+              throw "Unexpected signer: $($file.Name)"
+            }
           }
-          $manifest | ConvertTo-Json | Set-Content -Encoding UTF8 "release\release-manifest.json"
+      - name: Packaged executable smoke
+        shell: pwsh
+        run: |
+          $executables = @(
+            "sentra-agent.exe",
+            "sentra-mcp.exe",
+            "sentra-browser-relay.exe",
+            "sentra-diagnostics.exe",
+            "sentra-admin.exe",
+            "sentra-update-helper.exe",
+            "sentra-oma.exe",
+            "sentra-desktop.exe",
+            "SENTRA-Setup.exe"
+          )
+          foreach ($name in $executables) {
+            $process = Start-Process -FilePath (Join-Path "dist" $name) -ArgumentList "--help" -PassThru -Wait -NoNewWindow
+            if ($process.ExitCode -ne 0) { throw "$name smoke failed with $($process.ExitCode)" }
+          }
+
+      - name: Real Setup install/uninstall roundtrip
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "sentra-install-smoke"
+          $install = Join-Path $root "Commander"
+          $state = Join-Path $root "state"
+          Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force $root | Out-Null
+          $arguments = @(
+            "--silent", "--install-dir", $install,
+            "--state-dir", $state,
+            "--tunnel-archive", $env:SENTRA_TUNNEL_ARCHIVE,
+            "--no-git", "--no-launch", "--no-system-registration",
+            "--mcp-port", "18000", "--relay-port", "18765",
+            "--stop-after-doctor"
+          )
+          $setup = Start-Process -FilePath ".\dist\SENTRA-Setup.exe" -ArgumentList $arguments -PassThru -Wait -NoNewWindow
+          if ($setup.ExitCode -ne 0) { throw "real setup installation failed with $($setup.ExitCode)" }
+          if (-not (Test-Path "$install\sentra-desktop.exe")) { throw "desktop not installed" }
+          if (-not (Test-Path "$install\tunnel-client.exe")) { throw "tunnel-client not installed" }
+          if (-not (Test-Path "$install\edge_extension\manifest.json")) { throw "Edge extension not installed" }
+          if (Get-NetTCPConnection -LocalPort 18000,18765 -State Listen -ErrorAction SilentlyContinue) {
+            throw "stop-after-doctor left test services running"
+          }
+          $uninstallArgs = @(
+            "--uninstall", "--install-dir", $install,
+            "--state-dir", $state, "--no-system-registration"
+          )
+          $uninstall = Start-Process -FilePath "$install\sentra-installer.exe" -ArgumentList $uninstallArgs -PassThru -Wait -NoNewWindow
+          if ($uninstall.ExitCode -ne 0) { throw "uninstall failed with $($uninstall.ExitCode)" }
+          for ($i = 0; $i -lt 20 -and (Test-Path $install); $i++) { Start-Sleep -Milliseconds 250 }
+          if (Test-Path $install) { throw "install directory remained after uninstall" }
+          if (Test-Path $state) { throw "state directory remained after uninstall" }
+      - name: Verify release checksums
+        shell: pwsh
+        run: |
+          foreach ($line in Get-Content release\SHA256SUMS.txt) {
+            if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw "Malformed checksum line: $line" }
+            $expected = $Matches[1]
+            $file = Join-Path "release" $Matches[2]
+            $actual = (Get-FileHash $file -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $expected) { throw "Checksum mismatch for $file" }
+          }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sentra-commander-windows-x64
-          path: release/*
+          name: sentra-desktop-windows-x64
+          path: |
+            release/SENTRA-Setup-*.exe
+            release/SENTRA-Desktop-*-x64.msi
+            release/SENTRA-Desktop-*-update.zip
+            release/SENTRA-Desktop-*.cdx.json
+            release/SHA256SUMS.txt
+            release/release-manifest.json
 
-      - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create immutable GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $assets = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
-          if ($assets.Count -eq 0) { throw "No release assets were produced" }
           gh release view $env:GITHUB_REF_NAME 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $env:GITHUB_REF_NAME @assets --clobber
-          } else {
-            gh release create $env:GITHUB_REF_NAME @assets --generate-notes --title $env:GITHUB_REF_NAME
-          }
-
-  validate-and-publish-registry:
-    runs-on: ubuntu-latest
-    needs: test-and-build-windows
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-
-      - name: Render registry manifest
-        env:
-          MCP_REMOTE_URL: ${{ secrets.MCP_REMOTE_URL }}
-        run: |
-          NAME="io.github.${GITHUB_REPOSITORY_OWNER}/sentra-commander"
-          VERSION=$(python -c 'import json; print(json.load(open("server.json", encoding="utf-8"))["version"])')
-          ARGS=(--input server.json --output server.release.json --name "$NAME" --version "$VERSION" --repository-url "https://github.com/${GITHUB_REPOSITORY}")
-          if [ -n "$MCP_REMOTE_URL" ]; then ARGS+=(--remote-url "$MCP_REMOTE_URL"); fi
-          python scripts/commander/render_server_json.py "${ARGS[@]}"
-
-      - name: Install pinned MCP publisher
-        env:
-          MCP_PUBLISHER_VERSION: v1.8.1
-          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
-        run: |
-          curl -fL "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" -o mcp-publisher.tar.gz
-          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
-          tar xf mcp-publisher.tar.gz mcp-publisher
-          chmod +x mcp-publisher
-          ./mcp-publisher --help >/dev/null
-
-      - name: Validate Registry metadata
-        run: ./mcp-publisher validate server.release.json
-
-      - name: Publish Registry metadata
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          MCP_REMOTE_URL: ${{ secrets.MCP_REMOTE_URL }}
-        run: |
-          if [ -z "$MCP_REMOTE_URL" ]; then
-            echo "MCP_REMOTE_URL is not configured; skipping public Registry publication."
-            exit 0
-          fi
-          ./mcp-publisher login github-oidc
-          ./mcp-publisher publish server.release.json
+          if ($LASTEXITCODE -eq 0) { throw "Release $env:GITHUB_REF_NAME already exists; stable releases are immutable" }
+          $assets = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
+          gh release create $env:GITHUB_REF_NAME @assets --generate-notes --title "SENTRA Desktop $env:SENTRA_VERSION"

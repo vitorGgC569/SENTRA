@@ -1,0 +1,62 @@
+name: SENTRA MCP Registry
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "commander-v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate-and-publish-registry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate MCP tag
+        if: startsWith(github.ref, 'refs/tags/commander-v')
+        run: |
+          VERSION=$(python -c 'from sentra_version import SERVER_VERSION; print(SERVER_VERSION)')
+          test "$GITHUB_REF_NAME" = "commander-v$VERSION"
+
+      - name: Render registry manifest
+        env:
+          MCP_REMOTE_URL: ${{ secrets.MCP_REMOTE_URL }}
+        run: |
+          NAME="io.github.${GITHUB_REPOSITORY_OWNER}/sentra-commander"
+          VERSION=$(python -c 'import json; print(json.load(open("server.json", encoding="utf-8"))["version"])')
+          ARGS=(--input server.json --output server.release.json --name "$NAME" --version "$VERSION" --repository-url "https://github.com/${GITHUB_REPOSITORY}")
+          if [ -n "$MCP_REMOTE_URL" ]; then ARGS+=(--remote-url "$MCP_REMOTE_URL"); fi
+          python scripts/commander/render_server_json.py "${ARGS[@]}"
+      - name: Install pinned MCP publisher
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          curl -fL "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz" -o mcp-publisher.tar.gz
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum -c -
+          tar xf mcp-publisher.tar.gz mcp-publisher
+          chmod +x mcp-publisher
+          ./mcp-publisher --help >/dev/null
+
+      - name: Validate Registry metadata
+        run: ./mcp-publisher validate server.release.json
+
+      - name: Publish Registry metadata
+        if: startsWith(github.ref, 'refs/tags/commander-v')
+        env:
+          MCP_REMOTE_URL: ${{ secrets.MCP_REMOTE_URL }}
+        run: |
+          if [ -z "$MCP_REMOTE_URL" ]; then
+            echo "MCP_REMOTE_URL is not configured; skipping public Registry publication."
+            exit 0
+          fi
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish server.release.json

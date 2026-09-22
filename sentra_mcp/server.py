@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import replace
+import os
 from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.auth.settings import AuthSettings
 from pydantic import AnyHttpUrl
+from starlette.responses import JSONResponse
 
 from sentra_remote.auth import IntrospectionSettings, IntrospectionTokenVerifier
 from sentra_remote.gateway import RemoteGatewayService
@@ -36,6 +38,7 @@ from .tools.filesystem import register_filesystem_tools
 from .tools.process import register_process_tools
 from .tools.remote import register_remote_tools
 from .tools.sentra import register_sentra_tools
+from .tool_policy import ToolPolicyProxy
 
 
 class SentraMCPServer:
@@ -61,7 +64,7 @@ class SentraMCPServer:
         self.runtime_config = RuntimeConfigService(
             self._effective_config,
             self._apply_safe_config,
-            state_path=self.config.allowed_roots[0] / ".sentra" / "mcp-config.json",
+            state_path=self.config.state_root / "mcp-config.json",
         )
 
         verifier = None
@@ -107,6 +110,17 @@ class SentraMCPServer:
             token_verifier=verifier,
             auth=auth,
         )
+        instance_id = os.environ.get("SENTRA_INSTANCE_ID", "").strip()
+
+        @self.mcp.custom_route("/healthz", methods=["GET"], include_in_schema=False)
+        async def healthz(_request):
+            return JSONResponse({
+                "ok": True,
+                "service": "sentra-mcp",
+                "server_version": SERVER_VERSION,
+                "instance_id": instance_id,
+            })
+
         self._register_tools()
 
     def _effective_config(self) -> dict[str, Any]:
@@ -133,6 +147,8 @@ class SentraMCPServer:
             "oauth_issuer_url": self.config.oauth_issuer_url or None,
             "oauth_resource_url": self.config.oauth_resource_url or None,
             "remote_store": str(self.config.remote_store_path),
+            "state_root": str(self.config.state_root),
+            "tool_allowlist": list(self.config.tool_allowlist),
         }
 
     def _apply_safe_config(self, changes: dict[str, Any]) -> dict[str, Any]:
@@ -165,25 +181,26 @@ class SentraMCPServer:
                 },
             })
 
+        tool_server = ToolPolicyProxy(self.mcp, self.config.tool_allowlist)
         if self.config.deployment_mode == "cloud":
-            register_remote_tools(self.mcp, self.remote)
+            register_remote_tools(tool_server, self.remote)
             return
 
         surfaces = self.config.enabled_surfaces
         if "core" in surfaces:
-            register_filesystem_tools(self.mcp, self.filesystem)
-            register_process_tools(self.mcp, self.processes)
+            register_filesystem_tools(tool_server, self.filesystem)
+            register_process_tools(tool_server, self.processes)
         if {"developer", "oma"} & surfaces:
             register_sentra_tools(
-                self.mcp,
+                tool_server,
                 self.repository,
                 self.oma,
                 surfaces=surfaces,
             )
         if "remote" in surfaces:
-            register_remote_tools(self.mcp, self.remote)
+            register_remote_tools(tool_server, self.remote)
         register_commander_tools(
-            self.mcp,
+            tool_server,
             search=self.search,
             runtime_config=self.runtime_config,
             telemetry=self.telemetry,

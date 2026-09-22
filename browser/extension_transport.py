@@ -37,7 +37,12 @@ class ExtensionTransport:
         if parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost"}:
             raise ValueError("relay must use loopback HTTP")
         self.base = relay_base.rstrip("/")
-        token_file = Path(__file__).resolve().parents[1] / ".oma" / "relay-token"
+        configured_token_file = os.environ.get("SENTRA_EDGE_RELAY_TOKEN_PATH", "").strip()
+        token_file = (
+            Path(configured_token_file).expanduser().resolve()
+            if configured_token_file
+            else Path(__file__).resolve().parents[1] / ".oma" / "relay-token"
+        )
         self.token = token if token is not None else os.environ.get("OMA_RELAY_TOKEN", "")
         if not self.token and token_file.is_file():
             self.token = token_file.read_text(encoding="utf-8").strip()

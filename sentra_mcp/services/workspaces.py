@@ -76,7 +76,7 @@ class WorkspaceRegistry:
         self.audit = audit
         self.clock = clock
         self.state_path = Path(
-            state_path or (config.allowed_roots[0] / ".sentra" / "workspaces.json")
+            state_path or (config.state_root / "workspaces.json")
         )
         self._lock = threading.RLock()
         self._cached_mtime_ns: int | None = None

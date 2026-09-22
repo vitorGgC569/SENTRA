@@ -31,3 +31,5 @@ node_modules/
 # Local build artifacts.
 /build/
 /dist/
+/dist-v1/
+/release-v1/

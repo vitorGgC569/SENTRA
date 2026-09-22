@@ -29,7 +29,7 @@ class JobService:
         self.config = config
         self.audit = audit
         self.repository = repository
-        self.db_path = Path(db_path or (config.allowed_roots[0] / ".sentra" / "jobs.sqlite3"))
+        self.db_path = Path(db_path or (config.state_root / "jobs.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row

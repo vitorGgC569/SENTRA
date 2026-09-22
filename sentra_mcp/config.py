@@ -86,6 +86,8 @@ class MCPConfig:
     tool_surfaces: tuple[str, ...] = DEFAULT_TOOL_SURFACES
     allow_non_loopback: bool = False
     remote_store_path: Path = field(default_factory=lambda: PROJECT_ROOT / ".sentra" / "remote.sqlite3")
+    state_root: Path | None = None
+    tool_allowlist: tuple[str, ...] = ()
 
     oauth_issuer_url: str = ""
     oauth_resource_url: str = ""
@@ -106,6 +108,13 @@ class MCPConfig:
         object.__setattr__(self, "blocked_commands", blocked)
         object.__setattr__(self, "audit_log", Path(self.audit_log).expanduser().resolve())
         object.__setattr__(self, "remote_store_path", Path(self.remote_store_path).expanduser().resolve())
+        state_root = Path(self.state_root).expanduser() if self.state_root is not None else roots[0] / ".sentra"
+        object.__setattr__(self, "state_root", state_root.resolve())
+        object.__setattr__(
+            self,
+            "tool_allowlist",
+            tuple(dict.fromkeys(str(item).strip() for item in self.tool_allowlist if str(item).strip())),
+        )
 
         scopes = tuple(dict.fromkeys(scope.strip() for scope in self.oauth_required_scopes if scope.strip()))
         object.__setattr__(self, "oauth_required_scopes", scopes or ("sentra:mcp",))
@@ -204,10 +213,13 @@ class MCPConfig:
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "MCPConfig":
         env = os.environ if environ is None else environ
+        default_state_root = Path(
+            env.get("SENTRA_STATE_DIR", str(PROJECT_ROOT / ".sentra"))
+        )
         state_path = Path(
             env.get(
                 "SENTRA_MCP_CONFIG_STATE",
-                str(PROJECT_ROOT / ".sentra" / "mcp-config.json"),
+                str(default_state_root / "mcp-config.json"),
             )
         )
         approved = _approved_state(state_path)
@@ -239,6 +251,9 @@ class MCPConfig:
         else:
             non_loopback = bool(approved.get("allow_non_loopback", False))
 
+        state_value = env.get("SENTRA_STATE_DIR")
+        state_root = Path(state_value) if state_value else roots[0] / ".sentra"
+
         return cls(
             allowed_roots=roots,
             blocked_commands=blocked,
@@ -260,7 +275,7 @@ class MCPConfig:
             audit_log=Path(
                 env.get(
                     "SENTRA_MCP_AUDIT_LOG",
-                    str(PROJECT_ROOT / ".sentra" / "mcp-audit.jsonl"),
+                    str(state_root / "mcp-audit.jsonl"),
                 )
             ),
             transport=env.get("SENTRA_MCP_TRANSPORT", "stdio"),
@@ -277,8 +292,14 @@ class MCPConfig:
             remote_store_path=Path(
                 env.get(
                     "SENTRA_REMOTE_STORE",
-                    str(PROJECT_ROOT / ".sentra" / "remote.sqlite3"),
+                    str(state_root / "remote.sqlite3"),
                 )
+            ),
+            state_root=state_root,
+            tool_allowlist=tuple(
+                item.strip()
+                for item in env.get("SENTRA_MCP_TOOL_ALLOWLIST", "").split(",")
+                if item.strip()
             ),
             oauth_issuer_url=env.get("SENTRA_OAUTH_ISSUER_URL", ""),
             oauth_resource_url=env.get("SENTRA_OAUTH_RESOURCE_URL", ""),

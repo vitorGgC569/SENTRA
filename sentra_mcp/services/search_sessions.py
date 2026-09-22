@@ -29,7 +29,7 @@ class SearchSessionService:
         self.config = config
         self.audit = audit
         self.workspaces = workspaces
-        self.db_path = Path(db_path or (config.allowed_roots[0] / ".sentra" / "searches.sqlite3"))
+        self.db_path = Path(db_path or (config.state_root / "searches.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row

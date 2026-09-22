@@ -62,12 +62,16 @@ def test_registry_renderer_adds_repository_and_remote(tmp_path: Path) -> None:
 
 
 def test_release_and_compose_yaml_parse_and_cloud_mode() -> None:
-    workflow = yaml.safe_load(
+    desktop_workflow = yaml.safe_load(
         (PROJECT_ROOT / ".github" / "workflows" / "release-commander.yml").read_text(encoding="utf-8")
     )
-    assert isinstance(workflow, dict)
-    assert "jobs" in workflow
-    assert {"test-and-build-windows", "validate-and-publish-registry"} <= set(workflow["jobs"])
+    registry_workflow = yaml.safe_load(
+        (PROJECT_ROOT / ".github" / "workflows" / "release-mcp-registry.yml").read_text(encoding="utf-8")
+    )
+    assert isinstance(desktop_workflow, dict)
+    assert "windows-release" in desktop_workflow["jobs"]
+    assert isinstance(registry_workflow, dict)
+    assert "validate-and-publish-registry" in registry_workflow["jobs"]
 
     compose = yaml.safe_load(
         (PROJECT_ROOT / "deploy" / "commander" / "docker-compose.yml").read_text(encoding="utf-8")
@@ -319,7 +323,12 @@ def test_release_workflow_uses_clean_declared_build_surface() -> None:
     assert "python -m pip install -r requirements.txt -r requirements-commander.txt" in workflow
     assert "python -B -m pytest tests -q" in workflow
     assert "python scripts/commander/build_windows.py" in workflow
-    assert "mcp-publisher validate server.release.json" in workflow
+    assert "scripts/commander/release_assets.py" in workflow
+    assert "SENTRA-Setup-" in workflow
+    assert "SENTRA-Desktop-*-x64.msi" in workflow
+    assert "SENTRA_SIGNER_THUMBPRINT" in workflow
+    assert "Stable release requires WINDOWS_CERTIFICATE_B64" in workflow
+    assert "784ab8da7b5a88f0109f1fd8aaf0a1c86067430b896dddf307ef7e3cc49fa1a5" in workflow
     assert "WINDOWS_CERTIFICATE_B64" in workflow
     assert '"--collect-all", "playwright"' in builder
     assert '"--hidden-import", "pyarrow.parquet"' in builder
