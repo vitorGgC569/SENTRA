@@ -18,10 +18,13 @@ from workspace.paths import PathAccessError, resolve_workspace_path
 
 from ..audit import AuditLogger
 from ..config import MCPConfig
+from .process_sandbox import DockerProcessSandbox, PreparedProcess
+from .workspaces import WorkspaceRegistry
 
 _SENSITIVE_ENV_PARTS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "COOKIE")
 _SENSITIVE_PYTHON_ENV = {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"}
 _TERMINATE_GRACE_SECONDS = 0.5
+_MODE_LEVEL = {"sandbox": 0, "workspace": 1, "unrestricted": 2}
 
 
 @dataclass(slots=True)
@@ -29,15 +32,26 @@ class _ProcessRecord:
     session_id: str
     owner: str
     argv: tuple[str, ...]
+    launch_argv: tuple[str, ...]
     process: subprocess.Popen[bytes]
     created_at: str
     cwd: str
+    mode: str
+    workspace: str
+    workspace_alias: str
+    container_name: str | None = None
+    image_id: str | None = None
+    source_readonly: bool = False
+    network: str = "host"
+    snapshot: object | None = None
+    sandbox_backend: DockerProcessSandbox | None = None
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
     retained_bytes: int = 0
     output_truncated: bool = False
     timed_out: bool = False
     tree_closed: bool = False
+    resources_closed: bool = False
     process_group_id: int | None = None
     readers: list[threading.Thread] = field(default_factory=list)
     timer: threading.Timer | None = None
@@ -45,15 +59,24 @@ class _ProcessRecord:
 
 
 class ProcessService:
-    """Manage persistent child processes without depending on the MCP SDK."""
+    """Manage persistent host or Docker-isolated child processes."""
 
-    def __init__(self, config: MCPConfig, audit: AuditLogger | None = None) -> None:
+    def __init__(
+        self,
+        config: MCPConfig,
+        audit: AuditLogger | None = None,
+        workspaces: WorkspaceRegistry | None = None,
+    ) -> None:
         self.config = config
         self.audit = audit
+        self.workspaces = workspaces
         self._lock = threading.RLock()
         self._sessions: dict[str, _ProcessRecord] = {}
         self._pids: dict[int, _ProcessRecord] = {}
         self._closed = False
+
+    def update_config(self, config: MCPConfig) -> None:
+        self.config = config
 
     @staticmethod
     def _require_owner(owner: str) -> str:
@@ -82,7 +105,9 @@ class ProcessService:
                 raise ValueError("command could not be tokenized") from exc
             if os.name == "nt":
                 parts = [
-                    part[1:-1] if len(part) >= 2 and part[0] == part[-1] == '"' else part
+                    part[1:-1]
+                    if len(part) >= 2 and part[0] == part[-1] == '"'
+                    else part
                     for part in parts
                 ]
         else:
@@ -103,27 +128,56 @@ class ProcessService:
             raise PermissionError("command is blocked by policy")
         return tuple(parts)
 
-    def _resolve_cwd(self, cwd: str | None) -> Path:
-        roots = tuple(Path(root).resolve() for root in self.config.allowed_roots)
+    def _select_mode(self, requested: str | None) -> str:
+        mode = (requested or self.config.process_mode).strip().lower()
+        if mode not in _MODE_LEVEL:
+            raise ValueError("mode must be sandbox, workspace or unrestricted")
+        ceiling = self.config.process_mode
+        if _MODE_LEVEL[mode] > _MODE_LEVEL[ceiling]:
+            raise PermissionError(
+                f"process mode '{mode}' exceeds configured privilege ceiling '{ceiling}'"
+            )
+        return mode
+
+    def _legacy_workspace(self) -> dict[str, object]:
+        root = Path(self.config.allowed_roots[0]).resolve()
+        return {
+            "id": "root:0",
+            "alias": "sentra",
+            "path": str(root),
+            "permissions": ["execute", "read", "write"],
+        }
+
+    def _resolve_workspace(
+        self,
+        workspace: str | None,
+        owner: str,
+    ) -> dict[str, object]:
+        if self.workspaces is None:
+            if workspace not in (None, "", "root:0", "sentra", str(self.config.allowed_roots[0])):
+                raise PermissionError("workspace is not allowlisted")
+            return self._legacy_workspace()
+        return self.workspaces.resolve(workspace, owner, "execute")
+
+    @staticmethod
+    def _resolve_cwd_in_workspace(
+        root: Path,
+        cwd: str | None,
+    ) -> Path:
         if cwd is None:
-            target = roots[0]
+            target = root
         else:
             if not isinstance(cwd, str) or not cwd.strip() or "\x00" in cwd:
                 raise ValueError("cwd must be a non-empty path string")
             candidate = Path(cwd)
             if candidate.is_absolute():
-                target = None
-                for root in roots:
-                    try:
-                        relative = candidate.relative_to(root)
-                    except ValueError:
-                        continue
-                    target = resolve_workspace_path(root, relative.as_posix() or ".")
-                    break
-                if target is None:
-                    raise PathAccessError("cwd is outside configured allowed roots")
+                try:
+                    relative = candidate.resolve().relative_to(root)
+                except ValueError as exc:
+                    raise PathAccessError("cwd is outside selected workspace") from exc
+                target = resolve_workspace_path(root, relative.as_posix() or ".")
             else:
-                target = resolve_workspace_path(roots[0], cwd)
+                target = resolve_workspace_path(root, cwd)
         if not target.is_dir():
             raise NotADirectoryError("cwd is not a directory")
         return target
@@ -140,13 +194,64 @@ class ProcessService:
             clean[key] = value
         return clean
 
+    def _sandbox_backend(self, image: str | None = None) -> DockerProcessSandbox:
+        return DockerProcessSandbox(
+            image=image or self.config.process_sandbox_image,
+            cpus=self.config.process_sandbox_cpus,
+            memory_mb=self.config.process_sandbox_memory_mb,
+            pids_limit=self.config.process_sandbox_pids,
+        )
+
+    def sandbox_status(self, image: str | None = None) -> dict[str, object]:
+        backend = self._sandbox_backend(image)
+        status = backend.status()
+        status.update({
+            "configured_mode": self.config.process_mode,
+            "image": image or self.config.process_sandbox_image,
+            "privilege_order": ["sandbox", "workspace", "unrestricted"],
+        })
+        return status
+
+    def _prepare_process(
+        self,
+        argv: tuple[str, ...],
+        owner: str,
+        *,
+        cwd: str | None,
+        workspace: str | None,
+        mode: str,
+        image: str | None,
+    ) -> tuple[PreparedProcess, dict[str, object]]:
+        view = self._resolve_workspace(workspace, owner)
+        root = Path(str(view["path"])).resolve()
+        cwd_path = self._resolve_cwd_in_workspace(root, cwd)
+
+        if mode == "unrestricted":
+            prepared = PreparedProcess(
+                argv=argv,
+                host_cwd=cwd_path,
+                mode="unrestricted",
+                source_readonly=False,
+                network="host",
+            )
+        else:
+            backend = self._sandbox_backend(image)
+            writable = "write" in set(view.get("permissions") or [])
+            prepared = backend.prepare(
+                argv,
+                workspace_root=root,
+                cwd=cwd_path,
+                writable=writable,
+                copy_on_write=(mode == "sandbox"),
+            )
+        return prepared, view
+
     def _audit(self, action: str, outcome: str, details: dict[str, object]) -> None:
         if self.audit is None:
             return
         try:
             self.audit.emit(action, outcome, details)
         except OSError:
-            # Audit I/O must not strand an already-created child process.
             pass
 
     def _active_count_locked(self) -> int:
@@ -179,14 +284,28 @@ class ProcessService:
             except OSError:
                 pass
 
+    def _cleanup_record_resources(self, record: _ProcessRecord) -> None:
+        with record.termination_lock:
+            if record.resources_closed:
+                return
+            if record.sandbox_backend is not None:
+                record.sandbox_backend.cleanup_container(record.container_name)
+            snapshot = record.snapshot
+            if snapshot is not None:
+                try:
+                    snapshot.close()
+                except Exception:
+                    pass
+            record.resources_closed = True
+
     def _watch(self, record: _ProcessRecord) -> None:
         record.process.wait()
         with self._lock:
             if record.timer is not None:
                 record.timer.cancel()
-        if os.name != "nt":
-            # A child must not outlive its managed session as an untracked orphan.
+        if os.name != "nt" and record.mode == "unrestricted":
             self._terminate_tree(record)
+        self._cleanup_record_resources(record)
 
     def _start_background_workers(self, record: _ProcessRecord, timeout: float | None) -> None:
         assert record.process.stdout is not None
@@ -224,71 +343,110 @@ class ProcessService:
         owner: str,
         timeout: float | None = None,
         cwd: str | None = None,
+        *,
+        workspace: str | None = None,
+        mode: str | None = None,
+        image: str | None = None,
     ) -> dict[str, object]:
-        """Start a managed process in its own process group and return session metadata."""
-
+        """Start a managed process at or below the configured privilege ceiling."""
         normalized_owner = self._require_owner(owner)
         argv = self._parse_command(command)
-        cwd_path = self._resolve_cwd(cwd)
+        selected_mode = self._select_mode(mode)
         if timeout is not None and timeout <= 0:
             raise ValueError("timeout must be greater than zero")
 
-        popen_kwargs: dict[str, object] = {}
-        if os.name == "nt":
-            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            popen_kwargs["start_new_session"] = True
-
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("process service is shut down")
-            if self._active_count_locked() >= self.config.max_processes:
-                raise RuntimeError("maximum managed process count reached")
-
-            process = subprocess.Popen(
-                list(argv),
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=self._sanitized_environment(),
-                cwd=str(cwd_path),
-                bufsize=0,
-                shell=False,
-                **popen_kwargs,
-            )
-            record = _ProcessRecord(
-                session_id=str(uuid.uuid4()),
-                owner=normalized_owner,
-                argv=argv,
-                process=process,
-                created_at=datetime.now(timezone.utc).isoformat(),
-                cwd=str(cwd_path),
-                process_group_id=process.pid if os.name != "nt" else None,
-            )
-            self._sessions[record.session_id] = record
-            self._pids[process.pid] = record
-
+        prepared: PreparedProcess | None = None
         try:
-            self._start_background_workers(record, timeout)
-        except Exception:
-            self._terminate_tree(record)
-            with self._lock:
-                self._sessions.pop(record.session_id, None)
-                self._pids.pop(process.pid, None)
-            raise
+            prepared, view = self._prepare_process(
+                argv,
+                normalized_owner,
+                cwd=cwd,
+                workspace=workspace,
+                mode=selected_mode,
+                image=image,
+            )
 
-        self._audit(
-            "process.start",
-            "ok",
-            {
-                "session_id": record.session_id,
-                "owner": normalized_owner,
-                "pid": process.pid,
-                "timeout": timeout,
-                "cwd": str(cwd_path),
-            },
-        )
-        return self._record_info(record)
+            popen_kwargs: dict[str, object] = {}
+            if os.name == "nt":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["start_new_session"] = True
+
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("process service is shut down")
+                if self._active_count_locked() >= self.config.max_processes:
+                    raise RuntimeError("maximum managed process count reached")
+
+                process = subprocess.Popen(
+                    list(prepared.argv),
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=self._sanitized_environment(),
+                    cwd=str(prepared.host_cwd),
+                    bufsize=0,
+                    shell=False,
+                    **popen_kwargs,
+                )
+                record = _ProcessRecord(
+                    session_id=str(uuid.uuid4()),
+                    owner=normalized_owner,
+                    argv=argv,
+                    launch_argv=prepared.argv,
+                    process=process,
+                    created_at=datetime.now(timezone.utc).isoformat(),
+                    cwd=str(self._resolve_cwd_in_workspace(Path(str(view["path"])).resolve(), cwd)),
+                    mode=selected_mode,
+                    workspace=str(view["id"]),
+                    workspace_alias=str(view["alias"]),
+                    container_name=prepared.container_name,
+                    image_id=prepared.image_id,
+                    source_readonly=prepared.source_readonly,
+                    network=prepared.network,
+                    snapshot=prepared.snapshot,
+                    sandbox_backend=self._sandbox_backend(image) if selected_mode != "unrestricted" else None,
+                    process_group_id=process.pid if os.name != "nt" else None,
+                )
+                self._sessions[record.session_id] = record
+                self._pids[process.pid] = record
+
+            try:
+                self._start_background_workers(record, timeout)
+            except Exception:
+                self._terminate_tree(record)
+                self._cleanup_record_resources(record)
+                with self._lock:
+                    self._sessions.pop(record.session_id, None)
+                    self._pids.pop(process.pid, None)
+                raise
+
+            self._audit(
+                "process.start",
+                "ok",
+                {
+                    "session_id": record.session_id,
+                    "owner": normalized_owner,
+                    "pid": process.pid,
+                    "timeout": timeout,
+                    "cwd": record.cwd,
+                    "mode": selected_mode,
+                    "workspace": record.workspace,
+                    "workspace_alias": record.workspace_alias,
+                    "container_name": record.container_name,
+                    "image_id": record.image_id,
+                    "network": record.network,
+                    "source_readonly": record.source_readonly,
+                },
+            )
+            return self._record_info(record)
+        except Exception:
+            if prepared is not None and prepared.snapshot is not None:
+                try:
+                    prepared.snapshot.close()
+                except Exception:
+                    pass
+            raise
 
     def _owned_session(self, session_id: str, owner: str) -> _ProcessRecord:
         normalized_owner = self._require_owner(owner)
@@ -323,8 +481,6 @@ class ProcessService:
         offset: int = 0,
         length: int = 65536,
     ) -> dict[str, object]:
-        """Read bounded stdout and stderr slices from an owned session."""
-
         if offset < 0:
             raise ValueError("offset must be non-negative")
         if length <= 0:
@@ -332,26 +488,26 @@ class ProcessService:
         record = self._owned_session(session_id, owner)
         self._join_readers_if_complete(record)
         bounded_length = min(length, self.config.max_output_bytes)
-
         with self._lock:
             stdout_slice = bytes(record.stdout[offset : offset + bounded_length])
             stderr_slice = bytes(record.stderr[offset : offset + bounded_length])
             info = self._record_info_locked(record)
-            info.update(
-                {
-                    "offset": offset,
-                    "length": bounded_length,
-                    "stdout": stdout_slice.decode("utf-8", errors="replace"),
-                    "stderr": stderr_slice.decode("utf-8", errors="replace"),
-                    "stdout_bytes": len(record.stdout),
-                    "stderr_bytes": len(record.stderr),
-                }
-            )
+            info.update({
+                "offset": offset,
+                "length": bounded_length,
+                "stdout": stdout_slice.decode("utf-8", errors="replace"),
+                "stderr": stderr_slice.decode("utf-8", errors="replace"),
+                "stdout_bytes": len(record.stdout),
+                "stderr_bytes": len(record.stderr),
+            })
             return info
 
-    def interact_with_process(self, session_id: str, owner: str, stdin: str) -> dict[str, object]:
-        """Write UTF-8 input to a running owned process."""
-
+    def interact_with_process(
+        self,
+        session_id: str,
+        owner: str,
+        stdin: str,
+    ) -> dict[str, object]:
         record = self._owned_session(session_id, owner)
         if "\x00" in stdin:
             raise ValueError("stdin contains a null byte")
@@ -369,7 +525,6 @@ class ProcessService:
                 stream.flush()
             except (BrokenPipeError, OSError) as exc:
                 raise RuntimeError("process stdin is closed") from exc
-
         self._audit(
             "process.interact",
             "ok",
@@ -386,13 +541,13 @@ class ProcessService:
         normalized_owner = self._require_owner(owner)
         with self._lock:
             records = [
-                record for record in self._sessions.values() if record.owner == normalized_owner
+                record
+                for record in self._sessions.values()
+                if record.owner == normalized_owner
             ]
             return [self._record_info_locked(record) for record in records]
 
     def list_processes(self, owner: str) -> list[dict[str, object]]:
-        """List only processes owned by the caller."""
-
         return self.list_sessions(owner)
 
     def _record_info_locked(self, record: _ProcessRecord) -> dict[str, object]:
@@ -408,6 +563,13 @@ class ProcessService:
             "returncode": returncode,
             "timed_out": record.timed_out,
             "output_truncated": record.output_truncated,
+            "mode": record.mode,
+            "workspace": record.workspace,
+            "workspace_alias": record.workspace_alias,
+            "container_name": record.container_name,
+            "image_id": record.image_id,
+            "network": record.network,
+            "source_readonly": record.source_readonly,
         }
 
     def _record_info(self, record: _ProcessRecord) -> dict[str, object]:
@@ -421,97 +583,110 @@ class ProcessService:
                 return
             record.timed_out = True
         self._terminate_tree(record)
+        self._cleanup_record_resources(record)
         self._audit(
             "process.timeout",
             "ok",
-            {"session_id": session_id, "owner": record.owner, "pid": record.process.pid},
+            {
+                "session_id": session_id,
+                "owner": record.owner,
+                "pid": record.process.pid,
+            },
         )
 
     @staticmethod
-    def _terminate_tree(record: _ProcessRecord) -> None:
-        process = record.process
-        with record.termination_lock:
-            if os.name == "nt":
-                if process.poll() is not None:
-                    return
-                try:
-                    subprocess.run(
-                        ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        check=False,
-                        timeout=5,
-                        shell=False,
-                    )
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                try:
-                    process.wait(timeout=_TERMINATE_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+    def _kill_host_tree(process: subprocess.Popen[bytes], pgid: int | None) -> None:
+        if os.name == "nt":
+            if process.poll() is not None:
                 return
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    timeout=5,
+                    shell=False,
+                )
+            except subprocess.TimeoutExpired:
+                process.kill()
+            try:
+                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            return
 
+        if pgid is None:
+            return
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        if process.poll() is None:
+            try:
+                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                pass
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if process.poll() is None:
+            try:
+                process.wait(timeout=_TERMINATE_GRACE_SECONDS)
+            except subprocess.TimeoutExpired:
+                process.kill()
+
+    def _terminate_tree(self, record: _ProcessRecord) -> None:
+        with record.termination_lock:
             if record.tree_closed:
                 return
-            pgid = record.process_group_id
-            if pgid is None:
-                record.tree_closed = True
-                return
-            try:
-                os.killpg(pgid, signal.SIGTERM)
-            except ProcessLookupError:
-                record.tree_closed = True
-                return
-            if process.poll() is None:
-                try:
-                    process.wait(timeout=_TERMINATE_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    pass
-            try:
-                os.killpg(pgid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            if record.sandbox_backend is not None:
+                record.sandbox_backend.cleanup_container(record.container_name)
+            self._kill_host_tree(record.process, record.process_group_id)
             record.tree_closed = True
-            if process.poll() is None:
-                try:
-                    process.wait(timeout=_TERMINATE_GRACE_SECONDS)
-                except subprocess.TimeoutExpired:
-                    process.kill()
 
     def terminate_session(self, session_id: str, owner: str) -> dict[str, object]:
         record = self._owned_session(session_id, owner)
         self._terminate_tree(record)
         self._join_readers_if_complete(record)
+        self._cleanup_record_resources(record)
         self._audit(
             "process.terminate",
             "ok",
-            {"session_id": session_id, "owner": record.owner, "pid": record.process.pid},
+            {
+                "session_id": session_id,
+                "owner": record.owner,
+                "pid": record.process.pid,
+            },
         )
         return self._record_info(record)
 
     def kill_process(self, pid: int, owner: str) -> dict[str, object]:
-        """Kill only a PID that is registered by this service and owned by the caller."""
-
         record = self._owned_pid(pid, owner)
         self._terminate_tree(record)
         self._join_readers_if_complete(record)
+        self._cleanup_record_resources(record)
         self._audit(
             "process.kill",
             "ok",
-            {"session_id": record.session_id, "owner": record.owner, "pid": pid},
+            {
+                "session_id": record.session_id,
+                "owner": record.owner,
+                "pid": pid,
+            },
         )
         return self._record_info(record)
 
     def cleanup(self) -> None:
-        """Terminate every still-running managed child, regardless of owner."""
-
         with self._lock:
             records = list(self._sessions.values())
         for record in records:
             was_running = record.process.poll() is None
             self._terminate_tree(record)
+            self._cleanup_record_resources(record)
             if was_running:
                 self._audit(
                     "process.cleanup",
@@ -522,11 +697,10 @@ class ProcessService:
                         "pid": record.process.pid,
                     },
                 )
-            if record.timer is not None:
-                record.timer.cancel()
-            self._join_readers_if_complete(record)
 
     def shutdown(self) -> None:
         with self._lock:
+            if self._closed:
+                return
             self._closed = True
         self.cleanup()

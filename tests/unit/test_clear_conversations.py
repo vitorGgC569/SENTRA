@@ -112,11 +112,11 @@ async def test_relay_delete_chat_roundtrip():
 
     async def worker():
         for _ in range(200):
-            response = await asyncio.to_thread(_get, base + "/jobs/poll?worker=TEST-DEL-WORKER", 5, server.token)
+            response = await asyncio.to_thread(_get, base + "/jobs/poll?worker=TAB-DEL-WORKER", 5, server.token)
             job = response.get("job")
             if job:
                 assert job["kind"] == "DELETE_CHAT"
-                payload = {"job_id": job["job_id"], "worker": "TEST-DEL-WORKER", "lease_token": job["lease_token"]}
+                payload = {"job_id": job["job_id"], "worker": "TAB-DEL-WORKER", "lease_token": job["lease_token"]}
                 await asyncio.to_thread(_post, base + "/jobs/lease", payload, 5, server.token)
                 await asyncio.to_thread(_post, base + "/jobs/result", {
                     **payload,

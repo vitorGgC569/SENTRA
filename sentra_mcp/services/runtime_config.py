@@ -21,6 +21,10 @@ PRIVILEGED_FIELDS = {
     "port",
     "allow_non_loopback",
 }
+# These privileged fields can be activated in a running MCP only *after*
+# local approval has already persisted them. Network-listener changes still
+# require a process restart.
+LIVE_APPROVED_FIELDS = {"allowed_roots", "blocked_commands"}
 
 
 class RuntimeConfigService:
@@ -39,6 +43,7 @@ class RuntimeConfigService:
         effective = self.get_effective()
         effective["safe_runtime_fields"] = sorted(SAFE_FIELDS)
         effective["privileged_fields"] = sorted(PRIVILEGED_FIELDS)
+        effective["live_approved_fields"] = sorted(LIVE_APPROVED_FIELDS)
         effective["approval_boundary"] = "local_cli_only"
         return effective
 
@@ -57,7 +62,10 @@ class RuntimeConfigService:
 
     def _save(self, data: dict[str, Any]) -> None:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.state_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def update(self, changes: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(changes, dict) or not changes:
@@ -95,6 +103,49 @@ class RuntimeConfigService:
             }
         return result
 
+    def request_allowed_root(self, path: str) -> dict[str, Any]:
+        """Request additive access to one directory without replacing existing roots."""
+        if not isinstance(path, str) or not path.strip() or "\x00" in path:
+            raise ValueError("path must be a non-empty absolute directory path")
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError("allowed-root requests require an absolute path")
+        try:
+            root = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise FileNotFoundError("requested root does not exist") from exc
+        if not root.is_dir():
+            raise NotADirectoryError("requested root is not a directory")
+
+        effective = self.get_effective()
+        current_raw = effective.get("allowed_roots") or []
+        current = [Path(item).expanduser().resolve() for item in current_raw]
+        if root in current:
+            return {
+                "requested_root": str(root),
+                "already_allowed": True,
+                "approval_required": None,
+                "allowed_roots": [str(item) for item in current],
+            }
+
+        contains_existing = [
+            str(item)
+            for item in current
+            if item != root and item.is_relative_to(root)
+        ]
+        merged = [str(item) for item in current] + [str(root)]
+        result = self.update({"allowed_roots": merged})
+        result.update({
+            "requested_root": str(root),
+            "already_allowed": False,
+            "contains_existing_roots": contains_existing,
+            "activation": (
+                "After local approval, call sentra_reload_approved_config "
+                "or restart the MCP server."
+            ),
+        })
+        return result
+
     def list_pending(self) -> dict[str, Any]:
         return {"pending": self._load()["pending"]}
 
@@ -103,12 +154,19 @@ class RuntimeConfigService:
         item = data["pending"].pop(request_id, None)
         if item is None:
             raise FileNotFoundError("pending config request not found")
+        changes = item["changes"]
+        fields = set(changes)
+        restart_fields = sorted(fields - LIVE_APPROVED_FIELDS)
+        reload_fields = sorted(fields & LIVE_APPROVED_FIELDS)
         approved = {
-            "changes": item["changes"],
+            "changes": changes,
             "approved": time.time(),
-            "restart_required": True,
+            "restart_required": bool(restart_fields),
+            "restart_required_fields": restart_fields,
+            "reload_required": bool(reload_fields),
+            "reload_supported_fields": reload_fields,
         }
-        data["approved"].update(item["changes"])
+        data["approved"].update(changes)
         data.setdefault("history", []).append({"request_id": request_id, **approved})
         self._save(data)
         return approved
@@ -128,3 +186,20 @@ class RuntimeConfigService:
 
     def approved_overrides(self) -> dict[str, Any]:
         return dict(self._load().get("approved") or {})
+
+    def reload_approved(self) -> dict[str, Any]:
+        """Activate locally approved live fields without granting new privileges."""
+        approved = self.approved_overrides()
+        live = {
+            key: value
+            for key, value in approved.items()
+            if key in LIVE_APPROVED_FIELDS
+        }
+        restart_fields = sorted(set(approved) - LIVE_APPROVED_FIELDS)
+        applied = self.apply_safe(live) if live else {}
+        return {
+            "applied": applied,
+            "live_fields": sorted(live),
+            "restart_required": bool(restart_fields),
+            "restart_required_fields": restart_fields,
+        }

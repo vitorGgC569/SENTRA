@@ -40,18 +40,44 @@ Parity wrappers include remote read/write, process start/output/stdin, repositor
 status and OMA status.
 
 Persistent search: sentra_start_search, sentra_get_search_results,
-sentra_list_searches, sentra_stop_search.
+sentra_search_wait, sentra_list_searches, sentra_stop_search.
+
+Conversation identity: sentra_session_open creates a signed opaque application
+session for stateful IDs when using stateless MCP 2026-07-28 HTTP. Process,
+search, browser, sandbox, job and research IDs are isolated by that session.
 
 Operational tools: sentra_get_config, sentra_update_config, sentra_pending_config,
 sentra_usage_stats, sentra_recent_tool_calls, sentra_audit_query.
 
-Documents: sentra_document_info, sentra_write_pdf.
+Documents: sentra_document_info, sentra_read_document (PDF/DOCX/CSV/Parquet/
+JSONL/ipynb), sentra_write_pdf.
+
+Async engineering jobs: sentra_test_start and sentra_job_start/status/wait/
+result/cancel/list. Workspaces support read/write/execute grants, aliases,
+session/TTL/permanent lifetime and locally approved removal.
+
+Research: sentra_research_start/status/wait/result/cancel with single,
+parallel and bounded MCTS-inspired beam-search strategies. Temporary chats are
+deleted after completion/cancellation.
 
 Browser: open/tabs/navigate/extract/screenshot/click/type/close. Browser navigation
 blocks private, loopback, link-local, multicast, unspecified and reserved IP ranges.
+For ChatGPT research the Edge extension runs in the user's installed Edge profile.
+ChatGPT URLs never fall back to a separate Playwright/Edge profile when the principal
+bridge is unavailable; they fail closed instead. The bridge keeps zero controller references while idle. When work exists it prefers
+one already-open non-active ChatGPT tab from the principal profile; if none is safe,
+it creates exactly one background controller tab in that same profile. It never opens
+another Edge/profile, never allocates one tab per subagent, and never closes an adopted
+user tab
+when work is queued. Branches use `CHAT_START` / `CHAT_COLLECT` with
+`conversation_id`, so multiple server-side generations do not require multiple
+browser tabs. The content script also performs a bounded `Stop -> Continue`
+recovery when ChatGPT displays its transient “additional checks” system notice.
 
 Engineering: create workspace/sandbox, apply candidate, verify candidate,
-get evidence, rollback, close sandbox and run quality gate.
+get evidence, rollback, close sandbox and run quality gate. Process execution
+defaults to the Docker-backed `workspace` mode and fails closed when Docker is
+unavailable; `unrestricted` host execution must be explicitly authorized.
 
 ## Local use today
 
@@ -65,7 +91,7 @@ or local HTTP:
 
 Remote agent development:
 
-    python -m sentra_remote --config ~/.sentra/agent.json pair --relay https://relay.example --code CODE
+    python -m sentra_remote --config ~/.sentra/agent.json pair --relay https://relay.example --code CODE --process-mode workspace
     python -m sentra_remote --config ~/.sentra/agent.json run
 
 ## Windows release

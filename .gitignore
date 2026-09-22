@@ -27,3 +27,7 @@ node_modules/
 *.log
 *.lock
 **/runs/
+
+# Local build artifacts.
+/build/
+/dist/

@@ -10,7 +10,7 @@ _FIND_RE = re.compile(r"^\s*(\[\[[A-Z_]+(?:\|[^\r\n]*)?\]\])\s*$", re.MULTILINE)
 
 # Allowlist: qualquer outra operação vira UNKNOWN_OPERATION (nunca executa shell)
 ALLOWLIST = {
-    "R", "S", "T", "SYM", "PATCH", "W", "TEST", "LINT", "TYPECHECK", "BUILD",
+    "R", "S", "T", "SYM", "PATCH", "W", "TEST", "LINT", "TYPECHECK", "BUILD", "BENCH",
     "DIFF", "STATUS", "BRANCH", "CHECKPOINT", "ROLLBACK", "NEXT", "RART",
     "GIT_DIFF", "GIT_STATUS",
 }

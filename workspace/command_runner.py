@@ -41,7 +41,7 @@ class CommandRunner:
             raise ValueError("command must be a compact directive")
         directive = parse(command)
         if directive is None or not directive.known:
-            raise ValueError("unregistered command; use [[TEST|target]], [[LINT]], [[TYPECHECK]] or [[BUILD]]")
+            raise ValueError("unregistered command; use [[TEST|target]], [[LINT]], [[TYPECHECK]], [[BUILD]] or [[BENCH]]")
         op, args = directive.operation, directive.args
         if op == "TEST":
             if len(args) > 1:
@@ -68,6 +68,10 @@ class CommandRunner:
                     str(resolve_workspace_path(self.cwd, "tests"))]
         if op == "TYPECHECK":
             return [self._python(), "-m", "mypy", "."]
+        if op == "BENCH":
+            if "BENCH" in self.profiles:
+                return list(self.profiles["BENCH"])
+            raise PermissionError("BENCH requires an operator-owned BENCH execution profile")
         raise ValueError(f"operation is not executable: {op}")
 
     @staticmethod

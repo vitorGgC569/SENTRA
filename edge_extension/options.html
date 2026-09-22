@@ -4,7 +4,7 @@
 <p>Inicie <code>python main.py --relay</code>. Copie o token do arquivo indicado no terminal.</p>
 <p>O token fica neste navegador; não cole em chats nem o versione.</p>
 <form id="pair"><label>Token local <input id="token" type="password" required minlength="32" autocomplete="off"></label>
-<p><label><input id="enabled" type="checkbox"> Ativar o pool de duas tabs próprias</label></p>
+<p><label><input id="enabled" type="checkbox"> Ativar controlador temporário do SENTRA (máximo 1 tab)</label></p>
 <button type="submit">Salvar e verificar relay</button></form><p id="status" role="status"></p>
-<p>Desmarcar interrompe novas entregas. Para cancelar trabalho em andamento, cancele a run na CLI.</p>
+<p>O controlador só abre quando há trabalho, alterna chats por conversation_id e fecha quando a fila fica ociosa. Desmarcar interrompe novas entregas.</p>
 <script src="options.js"></script></body></html>

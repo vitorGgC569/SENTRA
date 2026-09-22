@@ -46,6 +46,7 @@ def test_cloud_relay_agent_local_mcp_roundtrip(tmp_path: Path) -> None:
             name="E2E PC",
             allowed_roots=[str(root)],
             audit_log=str(tmp_path / "agent-audit.jsonl"),
+            process_mode="unrestricted",
         )
         runtime = AgentRuntime(config, tmp_path / "agent.json")
         gateway = RemoteGatewayService(store, poll_interval_s=0.02)

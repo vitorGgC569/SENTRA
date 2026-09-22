@@ -14,7 +14,6 @@ DEFAULT_EXCLUDES = (
     "torchaudio",
     "scipy",
     "pandas",
-    "pyarrow",
     "numba",
     "sklearn",
     "matplotlib",
@@ -54,7 +53,10 @@ def build(dist: Path, work: Path, spec: Path) -> None:
         dist, work, spec,
     )
     # Playwright ships a Node driver and package data that are required for browser tools.
-    agent[0:0] = ["--collect-all", "playwright"]
+    agent[0:0] = [
+        "--collect-all", "playwright",
+        "--hidden-import", "pyarrow.parquet",
+    ]
     _run_pyinstaller(agent)
 
     tray = _common(

@@ -21,13 +21,16 @@ from .resources import capability_document, register_resources
 from .services.browser import BrowserControlService
 from .services.documents import DocumentService
 from .services.filesystem import FilesystemService
+from .services.jobs import JobService
 from .services.oma import OmaService
 from .services.process import ProcessService
 from .services.repository import RepositoryService
+from .services.research import ResearchService
 from .services.runtime_config import RuntimeConfigService
 from .services.search_sessions import SearchSessionService
 from .services.telemetry import TelemetryService
 from .services.workspace_ops import WorkspaceOpsService
+from .services.workspaces import WorkspaceRegistry
 from .tools.commander import register_commander_tools
 from .tools.filesystem import register_filesystem_tools
 from .tools.process import register_process_tools
@@ -41,15 +44,18 @@ class SentraMCPServer:
     def __init__(self, config: MCPConfig | None = None) -> None:
         self.config = config or MCPConfig()
         self.audit = AuditLogger(self.config.audit_log)
-        self.filesystem = FilesystemService(self.config, self.audit)
-        self.processes = ProcessService(self.config, self.audit)
-        self.repository = RepositoryService(self.config, self.audit)
+        self.workspaces = WorkspaceRegistry(self.config, self.audit)
+        self.filesystem = FilesystemService(self.config, self.audit, self.workspaces)
+        self.processes = ProcessService(self.config, self.audit, self.workspaces)
+        self.repository = RepositoryService(self.config, self.audit, self.workspaces)
         self.oma = OmaService(self.config, self.audit)
-        self.search = SearchSessionService(self.config, self.audit)
+        self.search = SearchSessionService(self.config, self.audit, self.workspaces)
         self.telemetry = TelemetryService(self.config)
         self.documents = DocumentService(self.filesystem, self.audit)
         self.browser = BrowserControlService(self.config, self.audit)
         self.workspace_ops = WorkspaceOpsService(self.filesystem, self.audit)
+        self.jobs = JobService(self.config, self.audit, self.repository)
+        self.research = ResearchService(self.config, self.audit, self.browser)
         self.remote_store = RemoteStore(self.config.remote_store_path)
         self.remote = RemoteGatewayService(self.remote_store)
         self.runtime_config = RuntimeConfigService(
@@ -81,8 +87,10 @@ class SentraMCPServer:
             try:
                 yield {}
             finally:
+                await self.research.close()
                 await self.browser.shutdown()
                 self.workspace_ops.shutdown()
+                self.jobs.close()
                 self.search.close()
                 self.processes.shutdown()
                 self.remote_store.close()
@@ -109,10 +117,17 @@ class SentraMCPServer:
             "max_write_bytes": self.config.max_write_bytes,
             "max_output_bytes": self.config.max_output_bytes,
             "max_processes": self.config.max_processes,
+            "process_mode": self.config.process_mode,
+            "process_sandbox_image": self.config.process_sandbox_image,
+            "process_sandbox_cpus": self.config.process_sandbox_cpus,
+            "process_sandbox_memory_mb": self.config.process_sandbox_memory_mb,
+            "process_sandbox_pids": self.config.process_sandbox_pids,
             "host": self.config.host,
             "port": self.config.port,
             "transport": self.config.transport,
             "deployment_mode": self.config.deployment_mode,
+            "tool_surfaces": list(self.config.tool_surfaces),
+            "enabled_surfaces": sorted(self.config.enabled_surfaces),
             "allow_non_loopback": self.config.allow_non_loopback,
             "oauth_enabled": self.config.oauth_enabled,
             "oauth_issuer_url": self.config.oauth_issuer_url or None,
@@ -122,12 +137,18 @@ class SentraMCPServer:
 
     def _apply_safe_config(self, changes: dict[str, Any]) -> dict[str, Any]:
         self.config = replace(self.config, **changes)
-        self.filesystem.max_read_bytes = self.config.max_read_bytes
-        self.filesystem.max_write_bytes = self.config.max_write_bytes
-        self.processes.config = self.config
-        self.search.config = self.config
+        self.workspaces.update_config(self.config)
+        self.filesystem.update_config(self.config)
+        self.processes.update_config(self.config)
+        self.repository.update_config(self.config)
+        self.search.update_config(self.config)
+        self.jobs.update_config(self.config)
         self.browser.config = self.config
+        self.research.update_config(self.config)
         self.telemetry.config = self.config
+        # OMA intentionally remains bound to the primary SENTRA workspace.
+        # Extra roots are project grants, not alternate OMA state directories.
+        self.oma.max_read_bytes = self.config.max_read_bytes
         return {key: getattr(self.config, key) for key in changes}
 
     def _register_tools(self) -> None:
@@ -148,9 +169,19 @@ class SentraMCPServer:
             register_remote_tools(self.mcp, self.remote)
             return
 
-        register_filesystem_tools(self.mcp, self.filesystem)
-        register_process_tools(self.mcp, self.processes)
-        register_sentra_tools(self.mcp, self.repository, self.oma)
+        surfaces = self.config.enabled_surfaces
+        if "core" in surfaces:
+            register_filesystem_tools(self.mcp, self.filesystem)
+            register_process_tools(self.mcp, self.processes)
+        if {"developer", "oma"} & surfaces:
+            register_sentra_tools(
+                self.mcp,
+                self.repository,
+                self.oma,
+                surfaces=surfaces,
+            )
+        if "remote" in surfaces:
+            register_remote_tools(self.mcp, self.remote)
         register_commander_tools(
             self.mcp,
             search=self.search,
@@ -159,10 +190,14 @@ class SentraMCPServer:
             documents=self.documents,
             browser=self.browser,
             workspace_ops=self.workspace_ops,
-            remote=self.remote,
+            workspaces=self.workspaces,
+            jobs=self.jobs,
+            research=self.research,
+            surfaces=surfaces - {"remote"},
         )
-        register_resources(self.mcp, self.config, self.repository, self.oma)
-        register_prompts(self.mcp, self.oma)
+        register_resources(self.mcp, self.config, self.repository, self.oma, self.browser)
+        if "oma" in surfaces:
+            register_prompts(self.mcp, self.oma)
 
     def run(self, transport: str | None = None) -> None:
         selected = transport or self.config.transport
@@ -180,7 +215,10 @@ class SentraMCPServer:
                 transport="streamable-http",
                 host=self.config.host,
                 port=self.config.port,
-                stateless_http=True,
+                # Local HTTP keeps MCP sessions so owner-scoped tools can derive
+                # identity without a manual owner argument. Cloud remains stateless
+                # because OAuth subject/device policy is already the identity boundary.
+                stateless_http=self.config.deployment_mode == "cloud",
                 json_response=True,
             )
         finally:

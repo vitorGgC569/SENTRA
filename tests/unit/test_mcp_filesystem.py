@@ -266,3 +266,44 @@ def test_register_filesystem_tools_can_be_used_independently(tmp_path: Path) -> 
             assert "sentra_read_file" in {tool.name for tool in tools.tools}
 
     asyncio.run(probe())
+
+
+
+def test_delete_path_is_safe_for_files_directories_and_root(tmp_path: Path) -> None:
+    service = make_service(tmp_path)
+    (tmp_path / "file.txt").write_text("x", encoding="utf-8")
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    (nested / "child.txt").write_text("x", encoding="utf-8")
+
+    deleted = service.delete_path("file.txt")
+    assert deleted["type"] == "file"
+    assert not (tmp_path / "file.txt").exists()
+
+    with pytest.raises(IsADirectoryError, match="recursive=true"):
+        service.delete_path("nested")
+    with pytest.raises(PermissionError, match="confirm_directory=true"):
+        service.delete_path("nested", recursive=True)
+    assert nested.exists()
+
+    deleted_dir = service.delete_path("nested", recursive=True, confirm_directory=True)
+    assert deleted_dir["type"] == "directory"
+    assert not nested.exists()
+
+    with pytest.raises(PermissionError, match="allowed root"):
+        service.delete_path(".", recursive=True, confirm_directory=True)
+
+
+def test_filesystem_schema_exposes_enums_units_and_delete(tmp_path: Path) -> None:
+    async def probe() -> None:
+        runtime = SentraMCPServer(MCPConfig(allowed_roots=(tmp_path,), audit_log=tmp_path / "audit.jsonl"))
+        async with Client(runtime.mcp) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            assert "sentra_delete_path" in tools
+            write_mode = tools["sentra_write_file"].input_schema["properties"]["mode"]
+            assert set(write_mode["enum"]) == {"rewrite", "append"}
+            search_type = tools["sentra_search"].input_schema["properties"]["search_type"]
+            assert set(search_type["enum"]) == {"names", "content"}
+            offset = tools["sentra_read_file"].input_schema["properties"]["offset"]
+            assert "line" in offset["description"].lower()
+    asyncio.run(probe())

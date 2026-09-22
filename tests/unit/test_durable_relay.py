@@ -218,3 +218,44 @@ def test_worker_telemetry_match_and_url_canonicalization():
     assert stored["conversation_url"] == conv_url
     store.close()
 
+
+
+
+def test_targeted_browser_action_is_delivered_only_to_target_worker() -> None:
+    store = JobStore()
+    generic = store.submit(ChatJob(task_id="GEN", prompt="generic"))
+    targeted = store.submit(ChatJob(
+        task_id="EDGE",
+        kind="BROWSER_ACTION",
+        target_worker="TAB-22",
+        browser_action="extract",
+        browser_args={"selector": "body"},
+    ))
+
+    edge = store.poll("TAB-22")
+    assert edge is not None
+    assert edge["job_id"] == targeted
+    assert edge["kind"] == "BROWSER_ACTION"
+    assert edge["target_worker"] == "TAB-22"
+
+    other = store.poll("TAB-11")
+    assert other is not None
+    assert other["job_id"] == generic
+    store.close()
+
+
+def test_browser_action_validation_is_bounded_and_allowlisted() -> None:
+    with pytest.raises(ValueError, match="invalid browser_action"):
+        ChatJob(
+            task_id="EDGE",
+            kind="BROWSER_ACTION",
+            target_worker="TAB-1",
+            browser_action="javascript",
+        ).validate()
+    with pytest.raises(ValueError, match="target_worker"):
+        ChatJob(
+            task_id="EDGE",
+            kind="BROWSER_ACTION",
+            browser_action="extract",
+        ).validate()
+

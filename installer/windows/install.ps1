@@ -4,6 +4,8 @@ param(
   [string]$PairingCode = "",
   [string]$DeviceName = $env:COMPUTERNAME,
   [string[]]$AllowedRoot = @(),
+  [ValidateSet("sandbox","workspace","unrestricted")]
+  [string]$ProcessMode = "workspace",
   [string]$UpdateManifestUrl = "",
   [switch]$AutoUpdate,
   [switch]$AllowUnsignedUpdates,
@@ -42,6 +44,7 @@ if ($PairingCode) {
   if (-not $RelayUrl) { throw "RelayUrl is required when PairingCode is supplied" }
   $pairArgs = @("--config",$ConfigPath,"pair","--relay",$RelayUrl,"--code",$PairingCode,"--name",$DeviceName)
   foreach ($root in $AllowedRoot) { $pairArgs += @("--allowed-root",$root) }
+  $pairArgs += @("--process-mode",$ProcessMode)
   & (Join-Path $InstallDir "sentra-agent.exe") @pairArgs
   if ($LASTEXITCODE -ne 0) { throw "Device pairing failed" }
 }

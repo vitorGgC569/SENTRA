@@ -24,8 +24,17 @@ class WorkspaceOpsService:
         self.audit = audit
         self.sandboxes: dict[str, dict[str, Any]] = {}
 
-    def create_workspace(self, path: str) -> dict[str, Any]:
-        return self.filesystem.create_directory(path)
+    def create_workspace(
+        self,
+        path: str,
+        owner: str,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
+        return self.filesystem.create_directory(
+            path,
+            workspace=workspace,
+            owner=owner,
+        )
 
     def _owned(self, sandbox_id: str, owner: str) -> dict[str, Any]:
         item = self.sandboxes.get(sandbox_id)
@@ -35,10 +44,20 @@ class WorkspaceOpsService:
             raise PermissionError("sandbox belongs to another owner")
         return item
 
-    def create_sandbox(self, source_path: str, owner: str) -> dict[str, Any]:
+    def create_sandbox(
+        self,
+        source_path: str,
+        owner: str,
+        workspace: str | None = None,
+    ) -> dict[str, Any]:
         if not owner.strip():
             raise ValueError("owner is required")
-        _, source, rel = self.filesystem._resolve(source_path)
+        _, source, rel, view = self.filesystem._resolve_access(
+            source_path,
+            workspace=workspace,
+            owner=owner,
+            permission="read",
+        )
         if not source.is_dir():
             raise NotADirectoryError("sandbox source must be a directory")
         sandbox = WorkspaceSandbox(source)
@@ -47,11 +66,32 @@ class WorkspaceOpsService:
             "owner": owner,
             "sandbox": sandbox,
             "source": rel,
+            "workspace": view["id"],
+            "workspace_id": view["workspace_id"],
+            "workspace_alias": view["alias"],
             "created": time.time(),
             "last_evidence": None,
         }
-        self.audit.emit("sandbox.create", "ok", {"sandbox_id": sandbox_id, "owner": owner, "source": rel})
-        return {"sandbox_id": sandbox_id, "owner": owner, "source": rel, "base_hash": sandbox.base_hash}
+        self.audit.emit(
+            "sandbox.create",
+            "ok",
+            {
+                "sandbox_id": sandbox_id,
+                "owner": owner,
+                "source": rel,
+                "workspace": view["id"],
+                "workspace_alias": view["alias"],
+            },
+        )
+        return {
+            "sandbox_id": sandbox_id,
+            "owner": owner,
+            "source": rel,
+            "workspace": view["id"],
+            "workspace_id": view["workspace_id"],
+            "workspace_alias": view["alias"],
+            "base_hash": sandbox.base_hash,
+        }
 
     def apply_candidate(self, sandbox_id: str, owner: str, patch: str) -> dict[str, Any]:
         item = self._owned(sandbox_id, owner)

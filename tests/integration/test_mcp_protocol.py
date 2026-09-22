@@ -35,6 +35,10 @@ def test_real_stdio_client_filesystem_process_sentra_resources_and_prompts(tmp_p
                 str(tmp_path),
                 "--audit-log",
                 str(tmp_path / ".sentra" / "audit.jsonl"),
+                "--surface",
+                "all",
+                "--process-mode",
+                "unrestricted",
             ],
             cwd=PROJECT_ROOT,
         )
@@ -148,6 +152,8 @@ def test_real_streamable_http_client_on_loopback(tmp_path: Path) -> None:
         str(tmp_path),
         "--audit-log",
         str(tmp_path / ".sentra" / "http-audit.jsonl"),
+        "--surface",
+        "all",
     ]
     process = subprocess.Popen(
         command,

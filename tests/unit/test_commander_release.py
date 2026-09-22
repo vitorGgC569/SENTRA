@@ -322,6 +322,8 @@ def test_release_workflow_uses_clean_declared_build_surface() -> None:
     assert "mcp-publisher validate server.release.json" in workflow
     assert "WINDOWS_CERTIFICATE_B64" in workflow
     assert '"--collect-all", "playwright"' in builder
+    assert '"--hidden-import", "pyarrow.parquet"' in builder
+    assert "collect-all pyarrow" not in builder
     assert "collect-all mcp" not in builder
-    for module in ("torch", "scipy", "pandas", "pyarrow", "sklearn", "pygame"):
+    for module in ("torch", "scipy", "pandas", "sklearn", "pygame"):
         assert f'"{module}"' in builder

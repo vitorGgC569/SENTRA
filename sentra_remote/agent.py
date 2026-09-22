@@ -126,6 +126,7 @@ class AgentRuntime:
             allowed_roots=tuple(Path(item) for item in config.allowed_roots),
             audit_log=audit_path,
             remote_store_path=audit_path.with_name("agent-remote.sqlite3"),
+            process_mode=config.process_mode,
         )
         self.server = SentraMCPServer(mcp_config)
         self.client = Client(self.server.mcp)
@@ -138,6 +139,7 @@ class AgentRuntime:
             "platform": platform.platform(),
             "hostname": platform.node(),
             "mcp": "2026-07-28",
+            "process_mode": self.config.process_mode,
         }
 
     async def _heartbeat_loop(self) -> None:
@@ -239,7 +241,14 @@ class AgentRuntime:
                 self.server.processes.shutdown()
 
 
-def pair_agent(relay_url: str, pairing_code: str, name: str, config_path: Path, roots: list[str]) -> AgentConfig:
+def pair_agent(
+    relay_url: str,
+    pairing_code: str,
+    name: str,
+    config_path: Path,
+    roots: list[str],
+    process_mode: str = "workspace",
+) -> AgentConfig:
     base = _safe_relay_url(relay_url)
     body = json.dumps({"pairing_code": pairing_code, "name": name}).encode("utf-8")
     req = urllib.request.Request(
@@ -257,6 +266,7 @@ def pair_agent(relay_url: str, pairing_code: str, name: str, config_path: Path, 
         name=name,
         allowed_roots=roots or [str(Path.cwd())],
         audit_log=str(Path.home() / ".sentra" / "agent-audit.jsonl"),
+        process_mode=process_mode,
     )
     config.save(config_path)
     return config
@@ -271,12 +281,25 @@ def main(argv: list[str] | None = None) -> int:
     pair.add_argument("--code", required=True)
     pair.add_argument("--name", default=platform.node() or "SENTRA Device")
     pair.add_argument("--allowed-root", action="append", default=[])
+    pair.add_argument(
+        "--process-mode",
+        choices=("sandbox", "workspace", "unrestricted"),
+        default="workspace",
+        help="Local process privilege ceiling for this remote device.",
+    )
     sub.add_parser("run")
     rotate = sub.add_parser("rotate-token")
     args = parser.parse_args(argv)
     path = Path(args.config).expanduser()
     if args.command == "pair":
-        config = pair_agent(args.relay, args.code, args.name, path, args.allowed_root)
+        config = pair_agent(
+            args.relay,
+            args.code,
+            args.name,
+            path,
+            args.allowed_root,
+            args.process_mode,
+        )
         print(json.dumps({"device_id": config.device_id, "name": config.name}))
         return 0
     config = AgentConfig.load(path)

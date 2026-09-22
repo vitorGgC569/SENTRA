@@ -183,7 +183,7 @@ class CommandRegistry:
     def __init__(self):
         self.handlers: Dict[str, Any] = {
             "R": ReadCommand(), "S": SearchCommand(), "T": TreeCommand(), "SYM": SymbolCommand(),
-            **{op: ExecutionCommand() for op in ("TEST", "LINT", "TYPECHECK", "BUILD")},
+            **{op: ExecutionCommand() for op in ("TEST", "LINT", "TYPECHECK", "BUILD", "BENCH")},
         }
 
     def register(self, op: str, handler: Any) -> None:

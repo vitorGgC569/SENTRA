@@ -59,6 +59,8 @@ def test_real_streamable_http_client_on_loopback(tmp_path: Path) -> None:
         str(tmp_path),
         "--audit-log",
         str(audit),
+        "--surface",
+        "all",
     ]
     process = subprocess.Popen(
         command,

@@ -1,10 +1,15 @@
-"""Controlled Playwright browser sessions exposed through SENTRA MCP."""
+"""Unified controlled browser sessions over Playwright and the SENTRA Edge relay."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import ipaddress
+import json
 import socket
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Callable
@@ -28,8 +33,12 @@ class BrowserControlService:
         self.audit = audit
         self.session_factory = session_factory
         self.sessions: dict[str, dict[str, Any]] = {}
+        self.edge_sessions: dict[str, dict[str, Any]] = {}
+        self.research_workers: dict[str, str] = {}
         self.lock = asyncio.Lock()
         self.screenshot_root = config.allowed_roots[0] / ".sentra" / "screenshots"
+        self.relay_url = "http://127.0.0.1:8765"
+        self.relay_token_path = config.allowed_roots[0] / ".oma" / "relay-token"
 
     @staticmethod
     def _validate_selector(selector: str) -> str:
@@ -44,17 +53,38 @@ class BrowserControlService:
             raise ValueError("browser URL must be absolute http/https")
         host = parsed.hostname
         try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80))}
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(
+                    host,
+                    parsed.port or (443 if parsed.scheme == "https" else 80),
+                )
+            }
         except OSError as exc:
             raise ValueError("browser hostname could not be resolved") from exc
         for address in addresses:
             ip = ipaddress.ip_address(address)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_unspecified or ip.is_reserved:
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_multicast
+                or ip.is_unspecified
+                or ip.is_reserved
+            ):
                 raise PermissionError("browser navigation to private/local networks is blocked")
         return url
 
     async def _validate_url(self, url: str) -> str:
         return await asyncio.to_thread(self._validate_url_sync, url)
+
+    @staticmethod
+    def _is_chatgpt_url(url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+        return parsed.scheme == "https" and parsed.hostname == "chatgpt.com"
 
     async def _install_network_guard(self, session: BrowserSession) -> None:
         if session.context is None:
@@ -70,7 +100,7 @@ class BrowserControlService:
 
         await session.context.route("**/*", guard)
 
-    def _owned(self, session_id: str, owner: str) -> dict[str, Any]:
+    def _owned_playwright(self, session_id: str, owner: str) -> dict[str, Any]:
         item = self.sessions.get(session_id)
         if item is None:
             raise FileNotFoundError("browser session not found")
@@ -78,10 +108,668 @@ class BrowserControlService:
             raise PermissionError("browser session belongs to another owner")
         return item
 
-    async def open(self, owner: str, url: str = "https://chatgpt.com", *, headless: bool = False, cdp_url: str | None = None) -> dict[str, Any]:
+    def _owned_edge(self, session_id: str, owner: str) -> dict[str, Any]:
+        item = self.edge_sessions.get(session_id)
+        if item is None:
+            raise FileNotFoundError("Edge browser session not found or not reserved")
+        if item["owner"] != owner:
+            raise PermissionError("Edge browser session belongs to another owner")
+        return item
+
+    def _relay_token(self) -> str:
+        try:
+            token = self.relay_token_path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise RuntimeError("Edge relay token is unavailable; start SENTRA relay first") from exc
+        if len(token) < 32:
+            raise RuntimeError("Edge relay token is invalid")
+        return token
+
+    def _relay_request_sync(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        payload: dict[str, Any] | None = None,
+        authenticated: bool = True,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        headers = {"Accept": "application/json"}
+        if authenticated:
+            headers["Authorization"] = "Bearer " + self._relay_token()
+        data = None
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(
+            self.relay_url + path,
+            data=data,
+            method=method,
+            headers=headers,
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                raw = response.read(1024 * 1024)
+                return json.loads(raw or b"{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                detail = json.loads(exc.read(65536)).get("error", str(exc))
+            except Exception:
+                detail = str(exc)
+            raise RuntimeError(f"Edge relay HTTP {exc.code}: {detail}") from exc
+        except OSError as exc:
+            raise RuntimeError("Edge relay is unavailable") from exc
+
+    async def _edge_health(self) -> dict[str, Any]:
+        try:
+            return await asyncio.to_thread(
+                self._relay_request_sync,
+                "/health",
+                authenticated=False,
+                timeout=2.0,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)[:500]}
+
+    async def _edge_workers(self) -> list[str]:
+        health = await self._edge_health()
+        return [
+            str(worker)
+            for worker in health.get("workers_online", [])
+            if isinstance(worker, str) and worker.startswith("TAB-")
+        ]
+
+    def _edge_submit_sync(
+        self,
+        worker: str,
+        *,
+        kind: str,
+        browser_action: str = "",
+        browser_args: dict[str, Any] | None = None,
+        timeout_s: int = 20,
+    ) -> dict[str, Any]:
+        task_id = "mcp-browser-" + uuid.uuid4().hex
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "prompt": "",
+            "timeout_s": max(5, min(int(timeout_s), 120)),
+            "new_chat": False,
+            "kind": kind,
+            "target_worker": worker,
+        }
+        if kind == "BROWSER_ACTION":
+            payload["browser_action"] = browser_action
+            payload["browser_args"] = dict(browser_args or {})
+        submitted = self._relay_request_sync(
+            "/jobs/submit",
+            method="POST",
+            payload=payload,
+            timeout=5.0,
+        )
+        job_id = str(submitted["job_id"])
+        deadline = time.monotonic() + max(5, min(timeout_s, 120))
+        try:
+            while time.monotonic() < deadline:
+                remaining = max(0.1, min(20.0, deadline - time.monotonic()))
+                query = urllib.parse.urlencode({"job_id": job_id, "timeout_s": remaining})
+                result = self._relay_request_sync(
+                    "/jobs/wait?" + query,
+                    timeout=remaining + 2,
+                )
+                if result.get("pending"):
+                    continue
+                if result.get("status") != "COMPLETED":
+                    raise RuntimeError(str(result.get("error") or "Edge browser action failed"))
+                raw = result.get("result") or "{}"
+                decoded = json.loads(raw) if isinstance(raw, str) else raw
+                try:
+                    self._relay_request_sync(
+                        "/jobs/ack",
+                        method="POST",
+                        payload={"job_id": job_id},
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
+                return decoded if isinstance(decoded, dict) else {"result": decoded}
+            raise TimeoutError("Edge browser action timed out")
+        except Exception:
+            try:
+                self._relay_request_sync(
+                    "/jobs/cancel",
+                    method="POST",
+                    payload={"job_id": job_id},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+            raise
+
+    async def _edge_action(
+        self,
+        worker: str,
+        action: str,
+        args: dict[str, Any],
+        *,
+        timeout_s: int = 20,
+    ) -> dict[str, Any]:
+        return await asyncio.to_thread(
+            self._edge_submit_sync,
+            worker,
+            kind="BROWSER_ACTION",
+            browser_action=action,
+            browser_args=args,
+            timeout_s=timeout_s,
+        )
+
+    def _chat_task_sync(
+        self,
+        worker: str,
+        prompt: str,
+        *,
+        new_chat: bool,
+        conversation_url: str | None,
+        timeout_s: int,
+    ) -> dict[str, Any]:
+        task_id = "mcp-research-" + uuid.uuid4().hex
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "prompt": prompt,
+            "timeout_s": max(10, min(int(timeout_s), 600)),
+            "new_chat": bool(new_chat),
+            "kind": "CHAT_TASK",
+            "target_worker": worker,
+        }
+        if not new_chat:
+            if not conversation_url:
+                raise ValueError("continuing a chat requires conversation_url")
+            payload["conversation_url"] = conversation_url
+        submitted = self._relay_request_sync(
+            "/jobs/submit",
+            method="POST",
+            payload=payload,
+            timeout=5.0,
+        )
+        job_id = str(submitted["job_id"])
+        deadline = time.monotonic() + payload["timeout_s"]
+        try:
+            while time.monotonic() < deadline:
+                remaining = max(0.1, min(20.0, deadline - time.monotonic()))
+                query = urllib.parse.urlencode({"job_id": job_id, "timeout_s": remaining})
+                result = self._relay_request_sync(
+                    "/jobs/wait?" + query,
+                    timeout=remaining + 2,
+                )
+                if result.get("pending"):
+                    continue
+                if result.get("status") != "COMPLETED":
+                    raise RuntimeError(str(result.get("error") or "CHAT_TASK failed"))
+                try:
+                    self._relay_request_sync(
+                        "/jobs/ack",
+                        method="POST",
+                        payload={"job_id": job_id},
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
+                return {
+                    "job_id": job_id,
+                    "worker": worker,
+                    "text": str(result.get("result") or ""),
+                    "conversation_url": result.get("conversation_url"),
+                    "conversation_id": result.get("conversation_id"),
+                }
+            raise TimeoutError("CHAT_TASK timed out")
+        except Exception:
+            try:
+                self._relay_request_sync(
+                    "/jobs/cancel",
+                    method="POST",
+                    payload={"job_id": job_id},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+            raise
+
+
+    def _chat_phase_sync(
+        self,
+        worker: str | None,
+        *,
+        kind: str,
+        prompt: str = "",
+        conversation_url: str | None = None,
+        timeout_s: int = 180,
+    ) -> dict[str, Any]:
+        task_id = "mcp-research-" + uuid.uuid4().hex
+        payload: dict[str, Any] = {
+            "task_id": task_id,
+            "prompt": prompt,
+            "timeout_s": max(10, min(int(timeout_s), 600)),
+            "new_chat": kind == "CHAT_START",
+            "kind": kind,
+        }
+        if worker:
+            payload["target_worker"] = worker
+        if conversation_url:
+            payload["conversation_url"] = conversation_url
+        submitted = self._relay_request_sync(
+            "/jobs/submit",
+            method="POST",
+            payload=payload,
+            timeout=5.0,
+        )
+        job_id = str(submitted["job_id"])
+        deadline = time.monotonic() + payload["timeout_s"]
+        try:
+            while time.monotonic() < deadline:
+                remaining = max(0.1, min(20.0, deadline - time.monotonic()))
+                query = urllib.parse.urlencode(
+                    {"job_id": job_id, "timeout_s": remaining}
+                )
+                result = self._relay_request_sync(
+                    "/jobs/wait?" + query,
+                    timeout=remaining + 2,
+                )
+                if result.get("pending"):
+                    continue
+                if result.get("status") != "COMPLETED":
+                    raise RuntimeError(
+                        str(result.get("error") or f"{kind} failed")
+                    )
+                try:
+                    self._relay_request_sync(
+                        "/jobs/ack",
+                        method="POST",
+                        payload={"job_id": job_id},
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
+                raw = result.get("result")
+                decoded: dict[str, Any] = {}
+                if kind == "CHAT_START" and isinstance(raw, str) and raw:
+                    try:
+                        value = json.loads(raw)
+                    except json.JSONDecodeError:
+                        value = {}
+                    if isinstance(value, dict):
+                        decoded = value
+                return {
+                    "job_id": job_id,
+                    "worker": result.get("worker") or worker,
+                    "text": "" if kind == "CHAT_START" else str(raw or ""),
+                    "conversation_url": (
+                        result.get("conversation_url")
+                        or decoded.get("conversation_url")
+                        or conversation_url
+                    ),
+                    "conversation_id": (
+                        result.get("conversation_id")
+                        or decoded.get("conversation_id")
+                    ),
+                    **({"started": bool(decoded.get("started"))} if kind == "CHAT_START" else {}),
+                }
+            raise TimeoutError(f"{kind} timed out")
+        except Exception:
+            try:
+                self._relay_request_sync(
+                    "/jobs/cancel",
+                    method="POST",
+                    payload={"job_id": job_id},
+                    timeout=3.0,
+                )
+            except Exception:
+                pass
+            raise
+
+    async def _acquire_research_worker(self, owner: str) -> str:
+        inventory = await self._edge_worker_inventory()
+        async with self.lock:
+            reserved = {item["worker"] for item in self.edge_sessions.values()}
+            busy = set(self.research_workers)
+            candidates = [
+                item["worker"]
+                for item in inventory
+                if item["worker_state"] == "READY"
+                and item["worker"] not in reserved
+                and item["worker"] not in busy
+            ]
+            if not candidates:
+                raise RuntimeError(
+                    "no READY Edge worker available for a research subagent"
+                )
+            worker = candidates[0]
+            self.research_workers[worker] = owner
+            return worker
+
+    async def _release_research_worker(self, worker: str, owner: str) -> None:
+        async with self.lock:
+            if self.research_workers.get(worker) == owner:
+                self.research_workers.pop(worker, None)
+
+    async def chat_start(
+        self,
+        owner: str,
+        prompt: str,
+        *,
+        timeout_s: int = 90,
+    ) -> dict[str, Any]:
+        """Start a fresh ChatGPT conversation and return its id without waiting.
+
+        A single READY Edge controller tab can start many conversations
+        sequentially; generations continue server-side and are collected later
+        by conversation id/URL.
+        """
+        if not prompt or len(prompt) > 200_000:
+            raise ValueError("research prompt must be 1..200000 characters")
+        result = await asyncio.to_thread(
+            self._chat_phase_sync,
+            None,
+            kind="CHAT_START",
+            prompt=prompt,
+            timeout_s=timeout_s,
+        )
+        if not result.get("conversation_id") or not result.get("conversation_url"):
+            raise RuntimeError("CHAT_START returned no conversation identity")
+        self.audit.emit(
+            "research.chat_start",
+            "ok",
+            {
+                "owner": owner,
+                "worker": result.get("worker"),
+                "conversation_id": result.get("conversation_id"),
+            },
+        )
+        return result
+
+    async def chat_collect(
+        self,
+        owner: str,
+        conversation_url: str,
+        *,
+        timeout_s: int = 180,
+    ) -> dict[str, Any]:
+        """Collect one server-side generation by conversation id/URL."""
+        if not self._is_chatgpt_url(conversation_url):
+            raise ValueError("conversation_url must target https://chatgpt.com")
+        result = await asyncio.to_thread(
+            self._chat_phase_sync,
+            None,
+            kind="CHAT_COLLECT",
+            conversation_url=conversation_url,
+            timeout_s=timeout_s,
+        )
+        self.audit.emit(
+            "research.chat_collect",
+            "ok",
+            {
+                "owner": owner,
+                "worker": result.get("worker"),
+                "conversation_id": result.get("conversation_id"),
+            },
+        )
+        return result
+
+    async def chat_task(
+        self,
+        owner: str,
+        prompt: str,
+        *,
+        new_chat: bool = True,
+        conversation_url: str | None = None,
+        timeout_s: int = 180,
+    ) -> dict[str, Any]:
+        """Run one robust ChatGPT relay task on a distinct READY worker."""
+        if not prompt or len(prompt) > 200_000:
+            raise ValueError("research prompt must be 1..200000 characters")
+        inventory = await self._edge_worker_inventory()
+        async with self.lock:
+            reserved = {item["worker"] for item in self.edge_sessions.values()}
+            busy = set(self.research_workers)
+            candidates = [
+                item["worker"]
+                for item in inventory
+                if item["worker_state"] == "READY"
+                and item["worker"] not in reserved
+                and item["worker"] not in busy
+            ]
+            if not candidates:
+                raise RuntimeError("no READY Edge worker available for a research subagent")
+            worker = candidates[0]
+            self.research_workers[worker] = owner
+        try:
+            result = await asyncio.to_thread(
+                self._chat_task_sync,
+                worker,
+                prompt,
+                new_chat=new_chat,
+                conversation_url=conversation_url,
+                timeout_s=timeout_s,
+            )
+            self.audit.emit(
+                "research.chat_task",
+                "ok",
+                {
+                    "owner": owner,
+                    "worker": worker,
+                    "new_chat": bool(new_chat),
+                    "conversation_id": result.get("conversation_id"),
+                },
+            )
+            return result
+        finally:
+            async with self.lock:
+                if self.research_workers.get(worker) == owner:
+                    self.research_workers.pop(worker, None)
+
+    def _delete_chat_sync(
+        self,
+        worker: str | None,
+        conversation_url: str,
+        timeout_s: int = 30,
+    ) -> dict[str, Any]:
+        task_id = "mcp-delete-chat-" + uuid.uuid4().hex
+        payload = {
+            "task_id": task_id,
+            "prompt": "",
+            "timeout_s": max(10, min(int(timeout_s), 120)),
+            "new_chat": False,
+            "conversation_url": conversation_url,
+            "kind": "DELETE_CHAT",
+        }
+        if worker:
+            payload["target_worker"] = worker
+        submitted = self._relay_request_sync(
+            "/jobs/submit", method="POST", payload=payload, timeout=5.0
+        )
+        job_id = str(submitted["job_id"])
+        deadline = time.monotonic() + payload["timeout_s"]
+        while time.monotonic() < deadline:
+            remaining = max(0.1, min(10.0, deadline - time.monotonic()))
+            query = urllib.parse.urlencode({"job_id": job_id, "timeout_s": remaining})
+            result = self._relay_request_sync(
+                "/jobs/wait?" + query, timeout=remaining + 2
+            )
+            if result.get("pending"):
+                continue
+            if result.get("status") != "COMPLETED":
+                raise RuntimeError(str(result.get("error") or "DELETE_CHAT failed"))
+            try:
+                self._relay_request_sync(
+                    "/jobs/ack", method="POST", payload={"job_id": job_id}, timeout=3.0
+                )
+            except Exception:
+                pass
+            raw = result.get("result")
+            if isinstance(raw, str):
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    return {"result": raw}
+            return raw if isinstance(raw, dict) else {"deleted": True}
+        raise TimeoutError("DELETE_CHAT timed out")
+
+    async def delete_chat(
+        self,
+        owner: str,
+        conversation_url: str,
+        *,
+        timeout_s: int = 30,
+    ) -> dict[str, Any]:
+        """Delete a temporary ChatGPT conversation through the lazy controller."""
+        return await asyncio.to_thread(
+            self._delete_chat_sync,
+            None,
+            conversation_url,
+            timeout_s,
+        )
+
+    def _edge_cached_status_sync(self, worker: str) -> dict[str, Any]:
+        query = urllib.parse.urlencode({"worker": worker})
+        return self._relay_request_sync(
+            "/workers/status?" + query,
+            timeout=3.0,
+        )
+
+    async def _edge_worker_status(self, worker: str) -> dict[str, Any]:
+        """Classify a relay worker from heartbeat-cached tab status."""
+        try:
+            cached = await asyncio.to_thread(
+                self._edge_cached_status_sync,
+                worker,
+            )
+        except Exception as exc:
+            return {
+                "worker": worker,
+                "worker_state": "UNHEALTHY",
+                "usable": False,
+                "url": None,
+                "status": {},
+                "error": str(exc)[:500],
+            }
+
+        if not cached.get("online"):
+            return {
+                "worker": worker,
+                "worker_state": "STALE",
+                "usable": False,
+                "url": None,
+                "status": cached.get("status") or {},
+                "last_seen": cached.get("last_seen"),
+            }
+
+        status = cached.get("status")
+        if not isinstance(status, dict):
+            status = {}
+        url = status.get("url")
+        diagnostics = status.get("diagnostics") or {}
+        composer = diagnostics.get("composer") if isinstance(diagnostics, dict) else None
+        composer_found = bool(
+            status.get("composer_found")
+            or (
+                isinstance(composer, dict)
+                and composer.get("visible")
+                and composer.get("editable")
+                and not composer.get("disabled")
+            )
+        )
+        ready = bool(
+            isinstance(url, str)
+            and self._is_chatgpt_url(url)
+            and composer_found
+            and not status.get("error")
+        )
+        unhealthy = bool(status.get("error"))
+        return {
+            "worker": worker,
+            "worker_state": (
+                "READY" if ready else "UNHEALTHY" if unhealthy else "CONNECTED"
+            ),
+            "usable": ready,
+            "url": url,
+            "status": status,
+            "last_seen": cached.get("last_seen"),
+            **(
+                {"error": str(status.get("error"))[:500]}
+                if unhealthy
+                else {}
+            ),
+        }
+
+    async def _edge_worker_inventory(self) -> list[dict[str, Any]]:
+        workers = await self._edge_workers()
+        if not workers:
+            return []
+        return list(await asyncio.gather(
+            *(self._edge_worker_status(worker) for worker in workers)
+        ))
+
+    async def open(
+        self,
+        owner: str,
+        url: str = "https://chatgpt.com",
+        *,
+        backend: str = "auto",
+        headless: bool = False,
+        cdp_url: str | None = None,
+    ) -> dict[str, Any]:
         if not owner.strip():
             raise ValueError("owner is required")
+        if backend not in {"auto", "playwright", "edge"}:
+            raise ValueError("backend must be auto, playwright or edge")
         await self._validate_url(url)
+
+        if backend in {"auto", "edge"} and self._is_chatgpt_url(url):
+            inventory = await self._edge_worker_inventory()
+            reserved = {item["worker"] for item in self.edge_sessions.values()}
+            available = [
+                item["worker"]
+                for item in inventory
+                if item["worker_state"] == "READY" and item["worker"] not in reserved
+            ]
+            if available:
+                worker = available[0]
+                session_id = "edge:" + worker
+                self.edge_sessions[session_id] = {
+                    "owner": owner,
+                    "worker": worker,
+                    "created": time.time(),
+                }
+                try:
+                    result = await self._edge_action(worker, "navigate", {"url": url})
+                except Exception:
+                    self.edge_sessions.pop(session_id, None)
+                    if backend == "edge":
+                        raise
+                else:
+                    self.audit.emit(
+                        "browser.open",
+                        "ok",
+                        {"session_id": session_id, "owner": owner, "url": result.get("url", url), "backend": "edge"},
+                    )
+                    return {
+                        "session_id": session_id,
+                        "owner": owner,
+                        "url": result.get("url", url),
+                        "backend": "edge",
+                    }
+            else:
+                # ChatGPT must never fall back to a fresh Playwright/Edge profile:
+                # that would lose the user's authenticated principal-browser session
+                # and can silently land on a different/free account. For ChatGPT,
+                # both "auto" and "edge" are principal-Edge-only.
+                states = {item["worker"]: item["worker_state"] for item in inventory}
+                raise RuntimeError(
+                    "principal Edge bridge is required for chatgpt.com; "
+                    "SENTRA will not launch or fall back to a separate browser profile; "
+                    f"worker_states={states}"
+                )
+        elif backend == "edge":
+            raise ValueError("Edge backend is restricted to https://chatgpt.com; use Playwright for other sites")
+
         if cdp_url:
             parsed_cdp = urlparse(cdp_url)
             if parsed_cdp.scheme not in {"http", "https", "ws", "wss"} or not parsed_cdp.hostname:
@@ -92,9 +780,10 @@ class BrowserControlService:
                 raise ValueError("CDP hostname could not be resolved") from exc
             if not cdp_ip.is_loopback:
                 raise PermissionError("CDP attachment is restricted to loopback")
-        session_id = str(uuid.uuid4())
+
+        session_id = "playwright:" + str(uuid.uuid4())
         session = self.session_factory(
-            role=f"mcp-{session_id[:8]}",
+            role=f"mcp-{session_id[-8:]}",
             headless=headless,
             cdp_url=cdp_url,
             target_url="about:blank",
@@ -115,77 +804,229 @@ class BrowserControlService:
                 "session": session,
                 "created": time.time(),
             }
-        self.audit.emit("browser.open", "ok", {"session_id": session_id, "owner": owner, "url": url})
-        return {"session_id": session_id, "owner": owner, "url": session.page.url if session.page else url}
+        self.audit.emit(
+            "browser.open",
+            "ok",
+            {"session_id": session_id, "owner": owner, "url": session.page.url, "backend": "playwright"},
+        )
+        return {
+            "session_id": session_id,
+            "owner": owner,
+            "url": session.page.url,
+            "backend": "playwright",
+        }
 
     async def tabs(self, owner: str) -> dict[str, Any]:
-        result = []
+        result: list[dict[str, Any]] = []
         for session_id, item in list(self.sessions.items()):
             if item["owner"] != owner:
                 continue
             session = item["session"]
             result.append({
                 "session_id": session_id,
+                "backend": "playwright",
                 "url": session.page.url if session.page and not session.page.is_closed() else "",
                 "live": session.is_live,
+                "reserved": True,
                 "created": item["created"],
             })
-        return {"tabs": result}
+
+        edge_health = await self._edge_health()
+        inventory = await self._edge_worker_inventory()
+        by_worker = {item["worker"]: (sid, item) for sid, item in self.edge_sessions.items()}
+        for worker_info in inventory:
+            worker = worker_info["worker"]
+            sid_item = by_worker.get(worker)
+            reserved_by_caller = bool(sid_item and sid_item[1]["owner"] == owner)
+            result.append({
+                "session_id": sid_item[0] if reserved_by_caller else "edge:" + worker,
+                "backend": "edge",
+                "worker": worker,
+                "url": worker_info.get("url"),
+                "live": worker_info["worker_state"] in {"CONNECTED", "READY"},
+                "worker_state": worker_info["worker_state"],
+                "usable": worker_info["usable"],
+                "reserved": sid_item is not None,
+                "reserved_by_caller": reserved_by_caller,
+                "capabilities": ["navigate", "extract", "click", "type"],
+                "status": worker_info.get("status") or {},
+                **({"error": worker_info["error"]} if worker_info.get("error") else {}),
+            })
+        pool = edge_health.get("pool") if isinstance(edge_health, dict) else {}
+        if not isinstance(pool, dict):
+            pool = {}
+        workers_online = [
+            str(worker)
+            for worker in edge_health.get("workers_online", [])
+            if isinstance(worker, str) and worker.startswith("TAB-")
+        ] if isinstance(edge_health, dict) else []
+        if edge_health.get("ok") is False:
+            bridge_state = "UNHEALTHY"
+        elif workers_online:
+            bridge_state = "CONNECTED"
+        elif pool.get("active"):
+            bridge_state = "IDLE"
+        else:
+            bridge_state = "DISCONNECTED"
+        return {
+            "tabs": result,
+            "edge_bridge": {
+                "state": bridge_state,
+                "lazy_controller": True,
+                "controller_tabs": len(workers_online),
+                "max_controller_tabs": 1,
+                "pool_active": bool(pool.get("active")),
+                "workers_online": workers_online,
+                **(
+                    {"error": edge_health.get("error")}
+                    if edge_health.get("error")
+                    else {}
+                ),
+            },
+        }
 
     async def navigate(self, session_id: str, owner: str, url: str) -> dict[str, Any]:
-        item = self._owned(session_id, owner)
         await self._validate_url(url)
+        if session_id.startswith("edge:"):
+            item = self._owned_edge(session_id, owner)
+            if not self._is_chatgpt_url(url):
+                raise ValueError("Edge backend is restricted to https://chatgpt.com")
+            result = await self._edge_action(item["worker"], "navigate", {"url": url})
+            self.audit.emit("browser.navigate", "ok", {"session_id": session_id, "owner": owner, "url": result.get("url", url), "backend": "edge"})
+            return {"session_id": session_id, "backend": "edge", **result}
+
+        item = self._owned_playwright(session_id, owner)
         page = item["session"].page
         if page is None:
             raise RuntimeError("browser page unavailable")
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        self.audit.emit("browser.navigate", "ok", {"session_id": session_id, "owner": owner, "url": page.url})
-        return {"session_id": session_id, "url": page.url}
+        self.audit.emit("browser.navigate", "ok", {"session_id": session_id, "owner": owner, "url": page.url, "backend": "playwright"})
+        return {"session_id": session_id, "backend": "playwright", "url": page.url}
 
     async def extract(self, session_id: str, owner: str, selector: str = "body", max_chars: int = 200000) -> dict[str, Any]:
-        item = self._owned(session_id, owner)
         selector = self._validate_selector(selector)
         if not 1 <= max_chars <= 1_000_000:
             raise ValueError("max_chars must be between 1 and 1000000")
+        if session_id.startswith("edge:"):
+            item = self._owned_edge(session_id, owner)
+            result = await self._edge_action(
+                item["worker"],
+                "extract",
+                {"selector": selector, "max_chars": max_chars},
+            )
+            return {"backend": "edge", **result}
+
+        item = self._owned_playwright(session_id, owner)
         page = item["session"].page
         if page is None:
             raise RuntimeError("browser page unavailable")
         text = await page.locator(selector).first.inner_text(timeout=30000)
         truncated = len(text) > max_chars
-        return {"text": text[:max_chars], "truncated": truncated, "url": page.url}
+        return {"backend": "playwright", "text": text[:max_chars], "truncated": truncated, "url": page.url}
 
-    async def screenshot(self, session_id: str, owner: str, *, full_page: bool = True) -> dict[str, Any]:
-        item = self._owned(session_id, owner)
+    def _write_screenshot_bytes(
+        self,
+        session_id: str,
+        payload: bytes,
+        suffix: str,
+        mime_type: str,
+        url: str | None,
+        *,
+        include_base64: bool,
+        full_page: bool,
+        backend: str,
+    ) -> dict[str, Any]:
+        if len(payload) > self.config.max_read_bytes:
+            raise ValueError("screenshot exceeds configured read limit")
+        self.screenshot_root.mkdir(parents=True, exist_ok=True)
+        safe_id = session_id.replace(":", "-").replace("/", "-")
+        target = self.screenshot_root / f"{safe_id}-{int(time.time()*1000)}{suffix}"
+        target.write_bytes(payload)
+        result: dict[str, Any] = {
+            "path": str(target),
+            "resource_uri": f"sentra://screenshot/{target.name}",
+            "bytes": len(payload),
+            "mime_type": mime_type,
+            "url": url,
+            "full_page": full_page,
+            "backend": backend,
+        }
+        if include_base64:
+            result["image_base64"] = base64.b64encode(payload).decode("ascii")
+        return result
+
+    async def screenshot(
+        self,
+        session_id: str,
+        owner: str,
+        *,
+        full_page: bool = True,
+        include_base64: bool = False,
+    ) -> dict[str, Any]:
+        if session_id.startswith("edge:"):
+            self._owned_edge(session_id, owner)
+            raise RuntimeError(
+                "Edge relay screenshot is intentionally unsupported without invasive browser permissions; "
+                "open the page with backend='playwright' for screenshots"
+            )
+
+        item = self._owned_playwright(session_id, owner)
         page = item["session"].page
         if page is None:
             raise RuntimeError("browser page unavailable")
-        self.screenshot_root.mkdir(parents=True, exist_ok=True)
-        target = self.screenshot_root / f"{session_id}-{int(time.time()*1000)}.png"
-        await page.screenshot(path=str(target), full_page=bool(full_page))
-        size = target.stat().st_size
-        if size > self.config.max_read_bytes:
-            target.unlink(missing_ok=True)
-            raise ValueError("screenshot exceeds configured read limit")
-        import base64
-        encoded = base64.b64encode(target.read_bytes()).decode("ascii")
-        self.audit.emit("browser.screenshot", "ok", {"session_id": session_id, "owner": owner, "bytes": size})
-        return {"path": str(target), "bytes": size, "mime_type": "image/png", "image_base64": encoded, "url": page.url}
+        payload = await page.screenshot(full_page=bool(full_page))
+        saved = self._write_screenshot_bytes(
+            session_id,
+            payload,
+            ".png",
+            "image/png",
+            page.url,
+            include_base64=include_base64,
+            full_page=bool(full_page),
+            backend="playwright",
+        )
+        self.audit.emit("browser.screenshot", "ok", {"session_id": session_id, "owner": owner, "bytes": len(payload), "backend": "playwright"})
+        return saved
 
     async def click(self, session_id: str, owner: str, selector: str) -> dict[str, Any]:
-        item = self._owned(session_id, owner)
         selector = self._validate_selector(selector)
+        if session_id.startswith("edge:"):
+            item = self._owned_edge(session_id, owner)
+            result = await self._edge_action(item["worker"], "click", {"selector": selector})
+            self.audit.emit("browser.click", "ok", {"session_id": session_id, "owner": owner, "selector": selector, "backend": "edge"})
+            return {"session_id": session_id, "backend": "edge", **result}
+
+        item = self._owned_playwright(session_id, owner)
         page = item["session"].page
         if page is None:
             raise RuntimeError("browser page unavailable")
         await page.locator(selector).first.click(timeout=30000)
-        self.audit.emit("browser.click", "ok", {"session_id": session_id, "owner": owner, "selector": selector})
-        return {"session_id": session_id, "url": page.url}
+        self.audit.emit("browser.click", "ok", {"session_id": session_id, "owner": owner, "selector": selector, "backend": "playwright"})
+        return {"session_id": session_id, "backend": "playwright", "url": page.url}
 
-    async def type_text(self, session_id: str, owner: str, selector: str, text: str, *, clear: bool = False) -> dict[str, Any]:
-        item = self._owned(session_id, owner)
+    async def type_text(
+        self,
+        session_id: str,
+        owner: str,
+        selector: str,
+        text: str,
+        *,
+        clear: bool = False,
+    ) -> dict[str, Any]:
         selector = self._validate_selector(selector)
         if len(text.encode("utf-8")) > self.config.max_write_bytes:
             raise ValueError("browser input exceeds write limit")
+        if session_id.startswith("edge:"):
+            item = self._owned_edge(session_id, owner)
+            result = await self._edge_action(
+                item["worker"],
+                "type",
+                {"selector": selector, "text": text, "clear": bool(clear)},
+            )
+            self.audit.emit("browser.type", "ok", {"session_id": session_id, "owner": owner, "bytes": len(text.encode("utf-8")), "backend": "edge"})
+            return {"session_id": session_id, "backend": "edge", **result}
+
+        item = self._owned_playwright(session_id, owner)
         page = item["session"].page
         if page is None:
             raise RuntimeError("browser page unavailable")
@@ -194,15 +1035,31 @@ class BrowserControlService:
             await locator.fill(text, timeout=30000)
         else:
             await locator.type(text, timeout=30000)
-        self.audit.emit("browser.type", "ok", {"session_id": session_id, "owner": owner, "bytes": len(text.encode("utf-8"))})
-        return {"session_id": session_id, "url": page.url}
+        self.audit.emit("browser.type", "ok", {"session_id": session_id, "owner": owner, "bytes": len(text.encode("utf-8")), "backend": "playwright"})
+        return {"session_id": session_id, "backend": "playwright", "url": page.url}
 
     async def close(self, session_id: str, owner: str) -> dict[str, Any]:
-        item = self._owned(session_id, owner)
+        if session_id.startswith("edge:"):
+            self._owned_edge(session_id, owner)
+            self.edge_sessions.pop(session_id, None)
+            self.audit.emit("browser.close", "ok", {"session_id": session_id, "owner": owner, "backend": "edge"})
+            return {"session_id": session_id, "backend": "edge", "closed": True, "tab_preserved": True}
+
+        item = self._owned_playwright(session_id, owner)
         await item["session"].close()
         self.sessions.pop(session_id, None)
-        self.audit.emit("browser.close", "ok", {"session_id": session_id, "owner": owner})
-        return {"session_id": session_id, "closed": True}
+        self.audit.emit("browser.close", "ok", {"session_id": session_id, "owner": owner, "backend": "playwright"})
+        return {"session_id": session_id, "backend": "playwright", "closed": True}
+
+    def read_screenshot(self, name: str) -> bytes:
+        if not name or Path(name).name != name or not name.lower().endswith((".png", ".jpg", ".jpeg")):
+            raise FileNotFoundError("invalid screenshot resource")
+        target = self.screenshot_root / name
+        if not target.is_file():
+            raise FileNotFoundError("screenshot not found")
+        if target.stat().st_size > self.config.max_read_bytes:
+            raise ValueError("screenshot exceeds configured read limit")
+        return target.read_bytes()
 
     async def shutdown(self) -> None:
         for session_id, item in list(self.sessions.items()):
@@ -211,3 +1068,4 @@ class BrowserControlService:
             except Exception:
                 pass
             self.sessions.pop(session_id, None)
+        self.edge_sessions.clear()

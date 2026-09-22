@@ -2,6 +2,7 @@
 "use strict";
 
 let omaStableWaitPings = 0;
+const OMA_IDLE_WAKE_MS = 15000;
 
 function omaSendSwPing(operation) {
   try {
@@ -9,6 +10,14 @@ function omaSendSwPing(operation) {
     if (p && typeof p.catch === "function") p.catch(() => {});
   } catch (_) {}
 }
+
+// MV3 service workers are suspended while idle. Content scripts remain alive,
+ // so owned tabs periodically wake the worker. The service worker itself verifies
+ // sender.tab.id against oma_owned_tabs before polling; personal ChatGPT tabs are
+ // therefore harmless even though this content script is injected there too.
+ try {
+   setInterval(() => omaSendSwPing("OMA_IDLE_WAKE"), OMA_IDLE_WAKE_MS);
+ } catch (_) {}
 
 function omaGenerationFinished() {
   const stop = omaQueryFirst(OMA_SELECTORS.stopButton);
@@ -33,6 +42,7 @@ function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null)
     let sampleBusy = false;
     let recoveryCount = 0;
     let lastRecoveredMessageCount = -1;
+    let recoveryPending = null;
     omaStableWaitPings = 0;
 
     const finish = (ok, value) => {
@@ -45,9 +55,41 @@ function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null)
     };
 
     const recoverSpecialUi = async (text, count) => {
-      if (typeof omaIsAdditionalChecksMessage !== "function" ||
-          !omaIsAdditionalChecksMessage(text)) return false;
-      if (count === lastRecoveredMessageCount) return true;
+      const banner = (
+        typeof omaFindAdditionalChecksBannerText === "function"
+          ? omaFindAdditionalChecksBannerText()
+          : null
+      );
+      const detectedText = (
+        typeof omaIsAdditionalChecksMessage === "function"
+        && omaIsAdditionalChecksMessage(text)
+      ) ? text : banner;
+      if (!detectedText) {
+        // A new non-warning assistant response proves the recovered turn moved on.
+        if (recoveryPending && count > recoveryPending.count) recoveryPending = null;
+        return false;
+      }
+
+      const signature = (
+        typeof omaFoldUiText === "function"
+          ? omaFoldUiText(detectedText)
+          : String(detectedText).toLowerCase()
+      ).slice(0, 240);
+
+      // After sending Continue the previous warning remains visible until the
+      // next assistant turn appears. Do not immediately stop the new generation
+      // and send Continue again. Retry only if the same warning is still the
+      // terminal state after a grace period.
+      if (
+        recoveryPending
+        && recoveryPending.signature === signature
+        && count <= recoveryPending.count
+      ) {
+        let finished = true;
+        try { finished = omaGenerationFinished(); } catch (_) {}
+        if (!finished || Date.now() - recoveryPending.at < 12000) return true;
+      }
+
       if (typeof OMA_MAX_ADDITIONAL_CHECK_RECOVERIES !== "number" ||
           recoveryCount >= OMA_MAX_ADDITIONAL_CHECK_RECOVERIES) {
         finish(false, new Error(
@@ -58,6 +100,7 @@ function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null)
 
       recoveryCount++;
       lastRecoveredMessageCount = count;
+      recoveryPending = { signature, count, at: Date.now() };
       previousHash = null;
       stableCount = 0;
       lastText = "";

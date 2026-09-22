@@ -83,6 +83,39 @@ def test_relay_submit_poll_result_wait_roundtrip():
         server.stop()
 
 
+def test_chat_start_and_collect_protocol_contract():
+    start = ChatJob(
+        task_id="T-start",
+        prompt="research this",
+        kind="CHAT_START",
+        new_chat=False,
+    )
+    start.validate()
+    assert start.new_chat is True
+    assert start.conversation_url is None
+
+    collect = ChatJob(
+        task_id="T-collect",
+        prompt="",
+        kind="CHAT_COLLECT",
+        new_chat=True,
+        conversation_url="https://chatgpt.com/c/abc-123",
+    )
+    collect.validate()
+    assert collect.new_chat is False
+    assert collect.conversation_url == "https://chatgpt.com/c/abc-123"
+
+    with pytest.raises(ValueError, match="requires conversation_url"):
+        ChatJob(task_id="T-collect", prompt="", kind="CHAT_COLLECT").validate()
+    with pytest.raises(ValueError, match="does not accept prompt"):
+        ChatJob(
+            task_id="T-collect",
+            prompt="must not send",
+            kind="CHAT_COLLECT",
+            conversation_url="https://chatgpt.com/c/abc-123",
+        ).validate()
+
+
 def test_probe_kind_validates_and_queues():
     import urllib.request as _url
     import urllib.error as _ue

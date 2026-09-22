@@ -25,7 +25,8 @@ OPS_TO_EXTENSION = {"CREATE_CHAT", "SEND_MESSAGE", "WAIT_RESPONSE", "READ_RESPON
 # STATUS_PROBE só lê o DOM (envio disponível? banner de cap?) — nunca envia
 # mensagem, nunca consome quota. É a forma segura de vigiar rate-limit.
 # DELETE_CHAT instrui a exclusão remota de conversas para manter a conta limpa.
-JOB_TYPES = {"CHAT_TASK", "STATUS_PROBE", "DELETE_CHAT"}
+JOB_TYPES = {"CHAT_TASK", "CHAT_START", "CHAT_COLLECT", "STATUS_PROBE", "DELETE_CHAT", "BROWSER_ACTION"}
+BROWSER_ACTIONS = {"navigate", "extract", "click", "type", "close"}
 
 
 # Visual evidence attachments: screenshots travel as data URLs inside the job
@@ -64,6 +65,9 @@ class ChatJob:
     created_at: float = field(default_factory=time.time)
     kind: str = "CHAT_TASK"
     images: List[str] = field(default_factory=list)
+    target_worker: str = ""
+    browser_action: str = ""
+    browser_args: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         if not isinstance(self.task_id, str) or not 1 <= len(self.task_id) <= 128:
@@ -81,10 +85,32 @@ class ChatJob:
             self.new_chat = False
             if self.prompt and len(self.prompt) > 20000:
                 raise ValueError("prompt max 20000 chars")
+        elif self.kind == "CHAT_START":
+            self.new_chat = True
+            self.conversation_url = None
+            if not isinstance(self.prompt, str) or not self.prompt or len(self.prompt) > 20000:
+                raise ValueError("CHAT_START requires prompt (max 20000 chars)")
+        elif self.kind == "CHAT_COLLECT":
+            self.new_chat = False
+            if self.prompt:
+                raise ValueError("CHAT_COLLECT does not accept prompt")
+            if not self.conversation_url:
+                raise ValueError("CHAT_COLLECT requires conversation_url")
         elif self.kind == "DELETE_CHAT":
             self.new_chat = False
             if not self.conversation_url and not self.prompt:
                 raise ValueError("conversation_url or prompt (conversation_id) required for DELETE_CHAT")
+        elif self.kind == "BROWSER_ACTION":
+            self.new_chat = False
+            if self.browser_action not in BROWSER_ACTIONS:
+                raise ValueError("invalid browser_action")
+            if not isinstance(self.browser_args, dict):
+                raise ValueError("browser_args must be an object")
+            encoded_args = str(self.browser_args)
+            if len(encoded_args) > 200000:
+                raise ValueError("browser_args too large")
+            if not self.target_worker or len(self.target_worker) > 100:
+                raise ValueError("BROWSER_ACTION requires target_worker")
         elif not isinstance(self.prompt, str) or not self.prompt or len(self.prompt) > 20000:
             raise ValueError("prompt required (max 20000 chars)")
         if type(self.new_chat) is not bool or type(self.timeout_s) is not int or not (5 <= self.timeout_s <= 900):
@@ -95,9 +121,12 @@ class ChatJob:
                 self.conversation_url = f"https://chatgpt.com/c/{m.group(1)}"
             elif not re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
                 raise ValueError("invalid conversation URL")
-        if self.kind not in {"STATUS_PROBE", "DELETE_CHAT"} and not self.new_chat and not self.conversation_url:
+        if self.target_worker and len(self.target_worker) > 100:
+            raise ValueError("target_worker max 100 chars")
+        passive_kinds = {"STATUS_PROBE", "CHAT_COLLECT", "DELETE_CHAT", "BROWSER_ACTION"}
+        if self.kind not in passive_kinds and not self.new_chat and not self.conversation_url:
             raise ValueError("continuation requires an explicit conversation URL")
-        if self.kind not in {"STATUS_PROBE", "DELETE_CHAT"} and self.new_chat and self.conversation_url:
+        if self.kind not in passive_kinds and self.new_chat and self.conversation_url:
             raise ValueError("new chat cannot target an existing conversation")
 
     def to_dict(self) -> Dict[str, Any]:

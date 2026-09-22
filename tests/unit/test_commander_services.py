@@ -36,19 +36,25 @@ def test_persistent_search_pages_and_stops(tmp_path: Path) -> None:
     (tmp_path / "b.py").write_text("value = 'alpha'\n", encoding="utf-8")
     service = SearchSessionService(config, audit, db_path=tmp_path / ".sentra" / "search.sqlite3")
     try:
-        started = service.start(".", "alpha", search_type="content", max_results=10)
+        started = service.start(
+            ".",
+            "alpha",
+            owner="test-session",
+            search_type="content",
+            max_results=10,
+        )
         sid = started["search_id"]
         deadline = time.monotonic() + 5
         page = {}
         while time.monotonic() < deadline:
-            page = service.get_results(sid, 0, 10)
+            page = service.get_results(sid, "test-session", 0, 10)
             if page["state"] != "RUNNING":
                 break
             time.sleep(0.02)
         assert page["state"] == "COMPLETED"
         assert page["matches"] == 3
         assert {item["path"] for item in page["results"]} == {"a.txt", "b.py"}
-        assert service.list_searches()["searches"][0]["id"] == sid
+        assert service.list_searches("test-session")["searches"][0]["id"] == sid
     finally:
         service.close()
 
@@ -68,7 +74,8 @@ def test_runtime_config_safe_apply_and_privileged_offline_approval(tmp_path: Pat
     request_id = result["approval_required"]["request_id"]
     assert pending[request_id]["status"] == "PENDING"
     approved = service.approve_local(request_id)
-    assert approved["restart_required"] is True
+    assert approved["restart_required"] is False
+    assert approved["reload_required"] is True
     assert service.approved_overrides()["allowed_roots"] == [str(tmp_path)]
 
 
@@ -197,3 +204,213 @@ def test_updater_rejects_zip_slip(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unsafe path"):
         _safe_extract(archive, target)
     assert not (tmp_path / "outside.txt").exists()
+
+
+
+def test_search_wait_screenshot_resource_and_tool_surfaces(tmp_path: Path) -> None:
+    import asyncio
+    from mcp import Client
+    from sentra_mcp.server import SentraMCPServer
+
+    async def probe() -> None:
+        config = MCPConfig(
+            allowed_roots=(tmp_path,),
+            audit_log=tmp_path / ".sentra" / "audit.jsonl",
+            remote_store_path=tmp_path / ".sentra" / "remote.sqlite3",
+            tool_surfaces=("core", "developer"),
+        )
+        runtime = SentraMCPServer(config)
+        (tmp_path / "needle.txt").write_text("search-wait-token\n", encoding="utf-8")
+        async with Client(runtime.mcp) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            assert "sentra_search_wait" in tools
+            assert "sentra_repo_status" in tools
+            assert "sentra_browser_open" not in tools
+            assert "sentra_list_devices" not in tools
+            assert "sentra_usage_stats" not in tools
+            assert "sentra_oma_health" not in tools
+            assert "sentra_test_start" in tools
+            assert "sentra_job_wait" in tools
+            assert "sentra_request_workspace" in tools
+            assert "sentra_read_document" in tools
+            assert len(tools) < 60
+
+            started = await client.call_tool("sentra_start_search", {
+                "path": ".",
+                "pattern": "search-wait-token",
+                "search_type": "content",
+                "max_results": 10,
+            })
+            sid = started.structured_content["data"]["search_id"]
+            waited = await client.call_tool("sentra_search_wait", {
+                "search_id": sid,
+                "timeout_s": 5,
+                "length": 10,
+            })
+            page = waited.structured_content["data"]
+            assert page["state"] == "COMPLETED"
+            assert page["timed_out"] is False
+            assert page["matches"] == 1
+            assert page["next_poll_after_ms"] is None
+
+            saved = runtime.browser._write_screenshot_bytes(
+                "playwright:test",
+                b"fake-png-bytes",
+                ".png",
+                "image/png",
+                "https://example.com/",
+                include_base64=False,
+                full_page=True,
+                backend="playwright",
+            )
+            assert "image_base64" not in saved
+            assert saved["resource_uri"].startswith("sentra://screenshot/")
+            resource = await client.read_resource(saved["resource_uri"])
+            assert resource.contents
+        await runtime.browser.shutdown()
+        runtime.search.close()
+        runtime.processes.shutdown()
+        runtime.remote_store.close()
+
+    asyncio.run(probe())
+
+
+def test_default_surface_is_core_developer_browser_and_browser_owner_is_optional(tmp_path: Path) -> None:
+    import asyncio
+    from mcp import Client
+    from sentra_mcp.server import SentraMCPServer
+
+    async def probe() -> None:
+        runtime = SentraMCPServer(_config(tmp_path))
+        async with Client(runtime.mcp) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            assert "sentra_browser_open" in tools
+            assert "sentra_research_start" in tools
+            assert "sentra_usage_stats" not in tools
+            assert "sentra_list_devices" not in tools
+            assert "sentra_oma_health" not in tools
+            assert len(tools) < 75
+            schema = tools["sentra_browser_open"].input_schema
+            assert "owner" in schema["properties"]
+            assert "owner" not in schema.get("required", [])
+            backend = schema["properties"]["backend"]
+            assert set(backend["enum"]) == {"auto", "playwright", "edge"}
+            shot = tools["sentra_browser_screenshot"].input_schema["properties"]
+            assert shot["include_base64"]["default"] is False
+        await runtime.browser.shutdown()
+        runtime.search.close()
+        runtime.processes.shutdown()
+        runtime.remote_store.close()
+
+    asyncio.run(probe())
+
+
+
+def test_allowed_root_request_is_additive_and_live_reload_requires_local_approval(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary.mkdir()
+    secondary.mkdir()
+    effective = {"allowed_roots": [str(primary)]}
+    applied: list[dict] = []
+
+    def apply(changes: dict) -> dict:
+        applied.append(dict(changes))
+        effective.update(changes)
+        return dict(changes)
+
+    service = RuntimeConfigService(
+        lambda: dict(effective),
+        apply,
+        state_path=primary / ".sentra" / "config.json",
+    )
+
+    requested = service.request_allowed_root(str(secondary))
+    assert requested["already_allowed"] is False
+    assert requested["approval_required"]["request_id"]
+    assert effective["allowed_roots"] == [str(primary)]
+
+    request_id = requested["approval_required"]["request_id"]
+    approved = service.approve_local(request_id)
+    assert approved["reload_required"] is True
+    assert approved["restart_required"] is False
+    assert effective["allowed_roots"] == [str(primary)]
+
+    reloaded = service.reload_approved()
+    assert reloaded["restart_required"] is False
+    assert effective["allowed_roots"] == [
+        str(primary.resolve()),
+        str(secondary.resolve()),
+    ]
+    assert applied[-1]["allowed_roots"] == effective["allowed_roots"]
+
+    duplicate = service.request_allowed_root(str(secondary))
+    assert duplicate["already_allowed"] is True
+    assert duplicate["approval_required"] is None
+
+
+def test_allowed_root_request_rejects_relative_and_missing_paths(tmp_path: Path) -> None:
+    service = RuntimeConfigService(
+        lambda: {"allowed_roots": [str(tmp_path)]},
+        lambda changes: dict(changes),
+        state_path=tmp_path / "config.json",
+    )
+    with pytest.raises(ValueError, match="absolute"):
+        service.request_allowed_root("relative/project")
+    with pytest.raises(FileNotFoundError):
+        service.request_allowed_root(str(tmp_path / "missing"))
+
+
+def test_server_live_reload_approved_root_updates_filesystem_and_repository(tmp_path: Path) -> None:
+    import asyncio
+    from mcp import Client
+    from sentra_mcp.server import SentraMCPServer
+
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary.mkdir()
+    secondary.mkdir()
+    (secondary / "outside-project.txt").write_text("secondary-root\n", encoding="utf-8")
+
+    async def probe() -> None:
+        runtime = SentraMCPServer(MCPConfig(
+            allowed_roots=(primary,),
+            audit_log=primary / ".sentra" / "audit.jsonl",
+            remote_store_path=primary / ".sentra" / "remote.sqlite3",
+        ))
+        try:
+            async with Client(runtime.mcp) as client:
+                denied = await client.call_tool("sentra_read_file", {
+                    "path": str(secondary / "outside-project.txt"),
+                })
+                assert denied.structured_content["ok"] is False
+
+                request = await client.call_tool("sentra_request_allowed_root", {
+                    "path": str(secondary),
+                })
+                request_data = request.structured_content["data"]
+                request_id = request_data["approval_required"]["request_id"]
+
+                approved = runtime.workspaces.approve_local(request_id)
+                assert approved["status"] == "APPROVED"
+
+                allowed = await client.call_tool("sentra_read_file", {
+                    "path": str(secondary / "outside-project.txt"),
+                })
+                assert allowed.structured_content["ok"] is True
+                assert "secondary-root" in allowed.structured_content["data"]["content"]
+
+                listed = await client.call_tool("sentra_repo_workspaces", {})
+                workspaces = listed.structured_content["data"]["workspaces"]
+                assert [Path(item["path"]) for item in workspaces] == [
+                    primary.resolve(),
+                    secondary.resolve(),
+                ]
+                assert workspaces[1]["id"] == "root:1"
+        finally:
+            await runtime.browser.shutdown()
+            runtime.search.close()
+            runtime.processes.shutdown()
+            runtime.remote_store.close()
+
+    asyncio.run(probe())

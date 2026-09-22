@@ -73,3 +73,113 @@ async def test_operational_demo_and_promotion_stay_in_docker(tmp_path):
     evidence = json.loads((tmp_path/'runs'/'docker-e2e'/'promotion-tests.json').read_text())
     assert evidence['verification_scope'] == 'docker_restricted_candidate'
     assert all(item['execution_backend']=='docker' for item in evidence['results'])
+
+
+@pytest.mark.asyncio
+async def test_process_service_blocks_windows_host_and_sandbox_is_copy_on_write(tmp_path):
+    import json
+    import time
+    from sentra_mcp.audit import AuditLogger
+    from sentra_mcp.config import MCPConfig
+    from sentra_mcp.services.process import ProcessService
+    from sentra_mcp.services.workspaces import WorkspaceRegistry
+
+    (tmp_path / "seed.txt").write_text("seed\n", encoding="utf-8")
+    config = MCPConfig(
+        allowed_roots=(tmp_path,),
+        audit_log=tmp_path / ".sentra" / "audit.jsonl",
+        remote_store_path=tmp_path / ".sentra" / "remote.sqlite3",
+        process_mode="workspace",
+    )
+    audit = AuditLogger(config.audit_log)
+    registry = WorkspaceRegistry(
+        config,
+        audit,
+        state_path=tmp_path / ".sentra" / "workspaces.json",
+    )
+    service = ProcessService(config, audit, registry)
+    probe = r"""
+import json, os, pathlib, socket
+paths=[
+ r"C:\\Windows\\win.ini",
+ "/mnt/c/Windows/win.ini",
+ "/host_mnt/c/Windows/win.ini",
+ "/run/desktop/mnt/host/c/Windows/win.ini",
+ "/var/run/docker.sock",
+]
+result={}
+for raw in paths:
+    p=pathlib.Path(raw)
+    try:
+        p.read_bytes()
+        result[raw]=True
+    except Exception:
+        result[raw]=False
+result["sensitive_env"]=[k for k in os.environ if any(x in k.upper() for x in ("TOKEN","SECRET","PASSWORD","API_KEY","COOKIE"))]
+try:
+    socket.create_connection(("1.1.1.1",443),timeout=1).close()
+    result["network"]=True
+except Exception:
+    result["network"]=False
+pathlib.Path("marker.txt").write_text("inside\n")
+print(json.dumps(result, sort_keys=True))
+"""
+
+    async def run(mode: str):
+        started = service.start_process(
+            ["python", "-c", probe],
+            "mcp:test",
+            workspace="sentra",
+            mode=mode,
+            timeout=20,
+        )
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            data = service.read_process_output(
+                started["session_id"],
+                "mcp:test",
+                0,
+                200000,
+            )
+            if not data["running"]:
+                return started, data
+            await asyncio.sleep(0.05)
+        pytest.fail("process sandbox probe timed out")
+
+    try:
+        workspace_start, workspace_out = await run("workspace")
+        assert workspace_start["network"] == "none"
+        workspace_payload = json.loads(workspace_out["stdout"])
+        assert not any(
+            workspace_payload[path]
+            for path in (
+                r"C:\\Windows\\win.ini",
+                "/mnt/c/Windows/win.ini",
+                "/host_mnt/c/Windows/win.ini",
+                "/run/desktop/mnt/host/c/Windows/win.ini",
+                "/var/run/docker.sock",
+            )
+        )
+        assert workspace_payload["network"] is False
+        assert workspace_payload["sensitive_env"] == []
+        assert (tmp_path / "marker.txt").read_text(encoding="utf-8") == "inside\n"
+        (tmp_path / "marker.txt").unlink()
+
+        sandbox_start, sandbox_out = await run("sandbox")
+        assert sandbox_start["network"] == "none"
+        sandbox_payload = json.loads(sandbox_out["stdout"])
+        assert not any(
+            sandbox_payload[path]
+            for path in (
+                r"C:\\Windows\\win.ini",
+                "/mnt/c/Windows/win.ini",
+                "/host_mnt/c/Windows/win.ini",
+                "/run/desktop/mnt/host/c/Windows/win.ini",
+                "/var/run/docker.sock",
+            )
+        )
+        assert sandbox_payload["network"] is False
+        assert sandbox_payload["sensitive_env"] == []
+        assert not (tmp_path / "marker.txt").exists()
+    finally:
+        service.shutdown()

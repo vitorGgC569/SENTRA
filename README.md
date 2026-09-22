@@ -35,8 +35,8 @@ flowchart LR
     QG -->|aprovado| HO[handoff + candidate.patch]
     ENG --> PROV[BrowserExtensionProvider]
     PROV --> REL[relay :8765<br/>SQLite + leases]
-    REL --> EXT[edge_extension<br/>tabs próprias]
-    EXT --> EDGE([Edge real<br/>chats com contexto])
+    REL --> EXT[edge_extension<br/>controller temporário]
+    EXT --> EDGE([Edge principal<br/>chats por conversation_id])
 ```
 
 Cada tarefa do DAG percorre o ciclo:
@@ -103,11 +103,14 @@ não inteligência nem Edge.
 python -B main.py --relay   # anote o token em .oma/relay-token
 ```
 
-No Edge logado: `edge://extensions` → modo desenvolvedor →
+No **Edge principal já logado**: `edge://extensions` → modo desenvolvedor →
 **Carregar sem compactação** → pasta `edge_extension/` → Detalhes →
-Opções → cole o token → **Ativar** → salve. A extensão cria 2 tabs próprias
-e fala com `http://127.0.0.1:8765`. Recarregue-a após qualquer update.
-Um relay por porta (sonde `/health` antes — dual-bind = 2 filas invisíveis).
+Opções → cole o token → **Ativar** → salve. Não é necessário abrir outro
+perfil/navegador. A extensão mantém **zero tabs próprias quando ociosa** e cria,
+sob demanda, **no máximo 1 tab controladora**. Research inicia chats em série,
+guarda seus `conversation_id` e coleta as respostas depois por ID, portanto
+paralelismo lógico não exige uma tab por subagente. Recarregue a extensão após
+qualquer update. Um relay por porta (sonde `/health` antes — dual-bind = 2 filas invisíveis).
 
 ### 4. Doctor (diagnóstico, zero custo)
 
@@ -217,11 +220,16 @@ python -B -m sentra_mcp
 python -B -m sentra_mcp --transport streamable-http --host 127.0.0.1 --port 8000
 ```
 
-A superfície MCP inclui filesystem seguro, terminal/processos persistentes,
-repository gateway e observabilidade OMA (runs/events/handoff), além de resources
-e prompt operacional. Paths ficam confinados às `allowed_roots`, processos são
-owner-scoped e somente PIDs gerenciados podem ser encerrados por tool. O MCP não
-expõe promoção automática: `CANDIDATE_READY != APPLIED`.
+A superfície padrão é `core + developer + browser`; OMA/remote/admin são
+opt-in. Ela inclui filesystem/workspaces com permissões, processos Docker
+persistentes, repository gateway, jobs assíncronos, documentos estruturados,
+browser Edge/Playwright e research single/parallel/MCTS-inspired. Em `chatgpt.com`,
+o modo `auto` exige o bridge do Edge principal e nunca abre/faz fallback para um
+perfil separado sem login/plano. Em HTTP MCP
+2026-07-28, `sentra_session_open` cria a sessão opaca usada para isolar IDs
+persistentes entre conversas. O default de processo é `workspace` em Docker e
+falha fechado se o isolamento não estiver disponível. O MCP não expõe promoção
+automática: `CANDIDATE_READY != APPLIED`.
 
 Guia completo: `docs/MCP_SERVER.md` · auditoria comparativa:
 `docs/MCP_AUDIT.md`.
@@ -284,9 +292,9 @@ casadas + `workers_online`.
 | `orchestrator/agents/` | Planner, executor, críticos, reparo, revisor |
 | `orchestrator/verification.py`, `quality_gate.py` | Testes no candidato, critérios |
 | `orchestrator/conversation_pool.py` | 5 assentos fixos, pacing, reconciliação |
-| `orchestrator/providers/`, `browser/` | Adaptadores + pool de tabs reais |
+| `orchestrator/providers/`, `browser/` | Adaptadores + browser/controller por conversation_id |
 | `native_bridge/` | Relay autenticado, protocolo, SQLite |
-| `edge_extension/` | MV3: tabs próprias, envio, leitura (só primitivas) |
+| `edge_extension/` | MV3: controller temporário, envio/coleta por conversation_id, recovery de UI |
 | `repository/`, `workspace/` | Gateway de diretivas, patches, snapshots, sandbox |
 | `dashboard/` | Console somente-leitura |
 | `self_improvement/`, `research/` | Ciclo de melhoria, verificadores de apoio |

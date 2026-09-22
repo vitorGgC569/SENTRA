@@ -17,6 +17,7 @@ class AgentConfig:
     name: str
     allowed_roots: list[str]
     audit_log: str
+    process_mode: str = "workspace"
 
     @classmethod
     def load(cls, path: Path) -> "AgentConfig":

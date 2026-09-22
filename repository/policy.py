@@ -39,16 +39,16 @@ ROLE_PERMISSIONS: Dict[str, Set[str]] = {
     "read_only": {"R", "S", "T", "SYM", "STATUS", "DIFF", "GIT_STATUS", "GIT_DIFF", "NEXT", "RART"},
     "planner": {"R", "S", "T", "SYM", "STATUS", "DIFF", "GIT_STATUS", "GIT_DIFF", "NEXT", "RART"},
     "executor": {"R", "S", "T", "SYM", "PATCH", "TEST", "DIFF", "STATUS", "BRANCH",
-                 "CHECKPOINT", "NEXT", "RART", "GIT_STATUS", "GIT_DIFF", "LINT", "BUILD", "TYPECHECK"},
+                 "CHECKPOINT", "NEXT", "RART", "GIT_STATUS", "GIT_DIFF", "LINT", "BUILD", "TYPECHECK", "BENCH"},
     "validator": {"R", "S", "T", "SYM", "TEST", "DIFF", "STATUS", "NEXT", "RART",
-                  "GIT_STATUS", "GIT_DIFF", "LINT", "TYPECHECK"},
+                  "GIT_STATUS", "GIT_DIFF", "LINT", "TYPECHECK", "BUILD", "BENCH"},
     "critic": {"R", "S", "T", "SYM", "TEST", "DIFF", "STATUS", "NEXT", "RART",
                "GIT_STATUS", "GIT_DIFF", "LINT", "TYPECHECK"},
     "repair": {"R", "S", "T", "SYM", "PATCH", "TEST", "DIFF", "STATUS", "CHECKPOINT",
                "ROLLBACK", "NEXT", "RART", "GIT_STATUS", "GIT_DIFF", "LINT"},
     "master": {"R", "S", "T", "SYM", "PATCH", "W", "TEST", "DIFF", "STATUS", "BRANCH",
                "CHECKPOINT", "ROLLBACK", "NEXT", "RART", "GIT_STATUS", "GIT_DIFF",
-               "LINT", "BUILD", "TYPECHECK"},
+               "LINT", "BUILD", "TYPECHECK", "BENCH"},
     "judge": {"R", "S", "T", "SYM", "STATUS", "DIFF", "NEXT", "RART"},
 }
 
@@ -73,7 +73,7 @@ class PolicyEngine:
             raise PolicyDenied(f"role '{role}' not authorized for '{directive.operation}'")
         if session is not None:
             writes = {"PATCH", "W", "BRANCH", "CHECKPOINT", "ROLLBACK"}
-            runs = {"TEST", "LINT", "TYPECHECK", "BUILD"}
+            runs = {"TEST", "LINT", "TYPECHECK", "BUILD", "BENCH"}
             permission = (session.write_permissions if directive.operation in writes else
                           session.run_permissions if directive.operation in runs else session.read_permissions)
             if not permission:

@@ -1,4 +1,4 @@
-"""Persistent asynchronous search sessions for large workspaces."""
+"""Persistent asynchronous search sessions for approved workspaces."""
 from __future__ import annotations
 
 import json
@@ -10,16 +10,25 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from workspace.paths import PathAccessError, iter_workspace_files, resolve_workspace_path
+from workspace.paths import iter_workspace_files, resolve_workspace_path
 
 from ..audit import AuditLogger
 from ..config import MCPConfig
+from .workspaces import WorkspaceRegistry
 
 
 class SearchSessionService:
-    def __init__(self, config: MCPConfig, audit: AuditLogger, *, db_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        config: MCPConfig,
+        audit: AuditLogger,
+        workspaces: WorkspaceRegistry | None = None,
+        *,
+        db_path: Path | None = None,
+    ) -> None:
         self.config = config
         self.audit = audit
+        self.workspaces = workspaces
         self.db_path = Path(db_path or (config.allowed_roots[0] / ".sentra" / "searches.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
@@ -31,7 +40,11 @@ class SearchSessionService:
             """
             CREATE TABLE IF NOT EXISTS searches(
                 id TEXT PRIMARY KEY,
-                root_index INTEGER NOT NULL,
+                root_index INTEGER NOT NULL DEFAULT 0,
+                owner TEXT NOT NULL DEFAULT 'legacy',
+                workspace_id TEXT NOT NULL DEFAULT '',
+                workspace_alias TEXT NOT NULL DEFAULT '',
+                workspace_path TEXT NOT NULL DEFAULT '',
                 scope TEXT NOT NULL,
                 pattern TEXT NOT NULL,
                 search_type TEXT NOT NULL,
@@ -55,10 +68,26 @@ class SearchSessionService:
             );
             """
         )
+        columns = {str(row[1]) for row in self.db.execute("PRAGMA table_info(searches)").fetchall()}
+        migrations = {
+            "owner": "TEXT NOT NULL DEFAULT 'legacy'",
+            "workspace_id": "TEXT NOT NULL DEFAULT ''",
+            "workspace_alias": "TEXT NOT NULL DEFAULT ''",
+            "workspace_path": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, ddl in migrations.items():
+            if name not in columns:
+                self.db.execute(f"ALTER TABLE searches ADD COLUMN {name} {ddl}")
         self.db.execute(
-            "UPDATE searches SET state='INTERRUPTED',error='server restarted during search' WHERE state='RUNNING'"
+            "UPDATE searches SET state='INTERRUPTED',error='server restarted during search' "
+            "WHERE state IN ('RUNNING','CANCELLING')"
         )
         self.db.commit()
+
+    def update_config(self, config: MCPConfig) -> None:
+        self.config = config
+        if self.workspaces is not None:
+            self.workspaces.update_config(config)
 
     def close(self) -> None:
         for event in list(self.stops.values()):
@@ -68,26 +97,58 @@ class SearchSessionService:
         with self.lock:
             self.db.close()
 
-    def _resolve_root(self, path: str) -> tuple[int, Path, str]:
+    def _workspace(
+        self,
+        path: str,
+        workspace: str | None,
+        owner: str,
+    ) -> tuple[int, Path, str, dict[str, Any]]:
         candidate = Path(path)
-        roots = tuple(Path(root).resolve() for root in self.config.allowed_roots)
+        if self.workspaces is not None:
+            if workspace:
+                view = self.workspaces.resolve(workspace, owner, "read")
+            elif candidate.is_absolute():
+                view = self.workspaces.resolve_path(candidate, owner, "read")
+            else:
+                view = self.workspaces.resolve(None, owner, "read")
+            root = Path(view["path"]).resolve()
+            index = int(str(view["id"]).split(":", 1)[1])
+        else:
+            roots = tuple(Path(root).resolve() for root in self.config.allowed_roots)
+            if candidate.is_absolute():
+                selected = next(
+                    (
+                        (idx, root)
+                        for idx, root in enumerate(roots)
+                        if candidate.resolve() == root or root in candidate.resolve().parents
+                    ),
+                    None,
+                )
+                if selected is None:
+                    raise PermissionError("search path is outside configured roots")
+                index, root = selected
+            else:
+                index, root = 0, roots[0]
+            view = {
+                "id": f"root:{index}",
+                "workspace_id": f"config:{index}",
+                "alias": "sentra" if index == 0 else root.name,
+                "path": str(root),
+            }
         if candidate.is_absolute():
-            for index, root in enumerate(roots):
-                try:
-                    rel = candidate.resolve().relative_to(root)
-                except ValueError:
-                    continue
-                checked = resolve_workspace_path(root, rel.as_posix() or ".")
-                return index, root, checked.relative_to(root).as_posix() or "."
-            raise PathAccessError("search path is outside configured roots")
-        checked = resolve_workspace_path(roots[0], path)
-        return 0, roots[0], checked.relative_to(roots[0]).as_posix() or "."
+            rel = candidate.resolve().relative_to(root).as_posix() or "."
+        else:
+            rel = path
+        checked = resolve_workspace_path(root, rel)
+        return index, root, checked.relative_to(root).as_posix() or ".", view
 
     def start(
         self,
         path: str,
         pattern: str,
         *,
+        owner: str,
+        workspace: str | None = None,
         search_type: str = "names",
         literal: bool = True,
         ignore_case: bool = True,
@@ -95,6 +156,8 @@ class SearchSessionService:
         max_results: int = 10000,
         max_files: int = 100000,
     ) -> dict[str, Any]:
+        if not owner.strip():
+            raise ValueError("owner is required")
         if search_type not in {"names", "content"}:
             raise ValueError("search_type must be names or content")
         if not pattern or len(pattern) > 4096:
@@ -107,16 +170,33 @@ class SearchSessionService:
             raise ValueError("max_files must be between 1 and 500000")
         if not literal:
             re.compile(pattern)
-        root_index, root, scope = self._resolve_root(path)
+
+        root_index, root, scope, view = self._workspace(path, workspace, owner)
         search_id = str(uuid.uuid4())
         now = time.time()
         with self.lock:
             self.db.execute(
-                "INSERT INTO searches(id,root_index,scope,pattern,search_type,literal,ignore_case,context,"
-                "max_results,max_files,state,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,'RUNNING',?,?)",
+                "INSERT INTO searches("
+                "id,root_index,owner,workspace_id,workspace_alias,workspace_path,scope,pattern,"
+                "search_type,literal,ignore_case,context,max_results,max_files,state,created,updated"
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'RUNNING',?,?)",
                 (
-                    search_id, root_index, scope, pattern, search_type, int(literal), int(ignore_case),
-                    context, max_results, max_files, now, now,
+                    search_id,
+                    root_index,
+                    owner,
+                    view["workspace_id"],
+                    view["alias"],
+                    str(root),
+                    scope,
+                    pattern,
+                    search_type,
+                    int(literal),
+                    int(ignore_case),
+                    context,
+                    max_results,
+                    max_files,
+                    now,
+                    now,
                 ),
             )
             self.db.commit()
@@ -124,26 +204,44 @@ class SearchSessionService:
         self.stops[search_id] = stop
         thread = threading.Thread(
             target=self._worker,
-            args=(search_id, root, scope, pattern, search_type, literal, ignore_case, context, max_results, max_files, stop),
+            args=(
+                search_id, root, scope, pattern, search_type, literal,
+                ignore_case, context, max_results, max_files, stop,
+            ),
             name=f"sentra-search-{search_id[:8]}",
             daemon=True,
         )
         self.threads[search_id] = thread
         thread.start()
-        self.audit.emit("search.start", "ok", {"search_id": search_id, "scope": scope, "type": search_type})
-        return {"search_id": search_id, "state": "RUNNING"}
+        self.audit.emit("search.start", "ok", {
+            "search_id": search_id,
+            "scope": scope,
+            "type": search_type,
+            "owner": owner,
+            "workspace": view["id"],
+            "workspace_alias": view["alias"],
+        })
+        return {
+            "search_id": search_id,
+            "state": "RUNNING",
+            "workspace": view["id"],
+            "workspace_id": view["workspace_id"],
+            "workspace_alias": view["alias"],
+        }
 
     def _append(self, search_id: str, payload: dict[str, Any]) -> None:
         with self.lock:
             seq = self.db.execute(
-                "SELECT COALESCE(MAX(seq),-1)+1 FROM search_results WHERE search_id=?", (search_id,)
+                "SELECT COALESCE(MAX(seq),-1)+1 FROM search_results WHERE search_id=?",
+                (search_id,),
             ).fetchone()[0]
             self.db.execute(
                 "INSERT INTO search_results(search_id,seq,payload) VALUES(?,?,?)",
                 (search_id, seq, json.dumps(payload, ensure_ascii=False)),
             )
             self.db.execute(
-                "UPDATE searches SET matches=matches+1,updated=? WHERE id=?", (time.time(), search_id)
+                "UPDATE searches SET matches=matches+1,updated=? WHERE id=?",
+                (time.time(), search_id),
             )
             self.db.commit()
 
@@ -151,8 +249,7 @@ class SearchSessionService:
     def _matches(text: str, pattern: str, literal: bool, ignore_case: bool) -> bool:
         if literal:
             return pattern.casefold() in text.casefold() if ignore_case else pattern in text
-        flags = re.IGNORECASE if ignore_case else 0
-        return re.search(pattern, text, flags) is not None
+        return re.search(pattern, text, re.IGNORECASE if ignore_case else 0) is not None
 
     def _worker(
         self,
@@ -192,11 +289,17 @@ class SearchSessionService:
                         continue
                     for idx, line in enumerate(lines):
                         if self._matches(line, pattern, literal, ignore_case):
-                            item: dict[str, Any] = {"path": rel, "line": idx + 1, "text": line}
+                            item: dict[str, Any] = {
+                                "path": rel,
+                                "line": idx + 1,
+                                "text": line,
+                            }
                             if context:
-                                lo, hi = max(0, idx - context), min(len(lines), idx + context + 1)
+                                lo = max(0, idx - context)
+                                hi = min(len(lines), idx + context + 1)
                                 item["context"] = [
-                                    {"line": pos + 1, "text": lines[pos]} for pos in range(lo, hi)
+                                    {"line": pos + 1, "text": lines[pos]}
+                                    for pos in range(lo, hi)
                                 ]
                             self._append(search_id, item)
                             matches += 1
@@ -224,17 +327,33 @@ class SearchSessionService:
             self.stops.pop(search_id, None)
             self.threads.pop(search_id, None)
 
-    def _row(self, search_id: str) -> sqlite3.Row:
+    def _owned_row(self, search_id: str, owner: str) -> sqlite3.Row:
         row = self.db.execute("SELECT * FROM searches WHERE id=?", (search_id,)).fetchone()
         if row is None:
             raise FileNotFoundError("search session not found")
+        if row["owner"] not in {owner, "legacy"}:
+            raise PermissionError("search session belongs to another MCP session")
         return row
 
-    def get_results(self, search_id: str, offset: int = 0, length: int = 100) -> dict[str, Any]:
+    @staticmethod
+    def _meta(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "workspace_id": row["workspace_id"],
+            "workspace_alias": row["workspace_alias"],
+            "workspace_path": row["workspace_path"],
+        }
+
+    def get_results(
+        self,
+        search_id: str,
+        owner: str,
+        offset: int = 0,
+        length: int = 100,
+    ) -> dict[str, Any]:
         if offset < 0 or not 1 <= length <= 1000:
             raise ValueError("invalid result page")
         with self.lock:
-            row = self._row(search_id)
+            row = self._owned_row(search_id, owner)
             results = self.db.execute(
                 "SELECT payload FROM search_results WHERE search_id=? AND seq>=? ORDER BY seq LIMIT ?",
                 (search_id, offset, length),
@@ -249,29 +368,34 @@ class SearchSessionService:
                 "offset": offset,
                 "returned": len(payloads),
                 "next_offset": offset + len(payloads),
+                "next_poll_after_ms": 100 if row["state"] in {"RUNNING", "CANCELLING"} else None,
                 "results": payloads,
+                **self._meta(row),
             }
 
-    def list_searches(self, limit: int = 100) -> dict[str, Any]:
+    def list_searches(self, owner: str, limit: int = 100) -> dict[str, Any]:
         if not 1 <= limit <= 1000:
             raise ValueError("limit must be 1..1000")
         with self.lock:
             rows = self.db.execute(
-                "SELECT id,scope,pattern,search_type,state,files_scanned,matches,error,created,updated "
-                "FROM searches ORDER BY created DESC LIMIT ?", (limit,)
+                "SELECT id,owner,workspace_id,workspace_alias,workspace_path,scope,pattern,"
+                "search_type,state,files_scanned,matches,error,created,updated "
+                "FROM searches WHERE owner IN (?, 'legacy') ORDER BY created DESC LIMIT ?",
+                (owner, limit),
             ).fetchall()
             return {"searches": [dict(row) for row in rows]}
 
-    def stop(self, search_id: str) -> dict[str, Any]:
+    def stop(self, search_id: str, owner: str) -> dict[str, Any]:
         with self.lock:
-            row = self._row(search_id)
+            row = self._owned_row(search_id, owner)
             if row["state"] != "RUNNING":
                 return {"search_id": search_id, "state": row["state"]}
             event = self.stops.get(search_id)
             if event:
                 event.set()
             self.db.execute(
-                "UPDATE searches SET state='CANCELLING',updated=? WHERE id=?", (time.time(), search_id)
+                "UPDATE searches SET state='CANCELLING',updated=? WHERE id=?",
+                (time.time(), search_id),
             )
             self.db.commit()
             return {"search_id": search_id, "state": "CANCELLING"}

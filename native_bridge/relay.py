@@ -15,12 +15,16 @@ from .job_store import JobStore
 
 
 class RelayState(JobStore):
-    WORKER_ONLINE_WINDOW_S = 15.0
+    WORKER_ONLINE_WINDOW_S = 45.0
+    POOL_LEASE_WINDOW_S = 45.0
 
     def __init__(self, extension_dir=None, db_path=":memory:"):
         super().__init__(db_path)
         self.extension_dir = extension_dir
         self._last_poll = {}
+        self._worker_status = {}
+        self._pool_owner = None
+        self._pool_seen = 0.0
         self.started_at = time.time()
 
     def extension_version(self):
@@ -35,19 +39,83 @@ class RelayState(JobStore):
         except (OSError, ValueError):
             return {"version": None, "error": "extension manifest unavailable"}
 
-    def poll(self, worker=""):
-        job = super().poll(worker)
+    def mark_worker(self, worker="", status=None):
+        if not isinstance(worker, str) or not worker.startswith("TAB-"):
+            raise ValueError("invalid worker identity")
+        if status is not None and not isinstance(status, dict):
+            raise ValueError("worker status must be an object")
         with self.lock:
             self._last_poll[worker] = time.time()
+            if isinstance(status, dict):
+                self._worker_status[worker] = status
+
+    def worker_status(self, worker):
+        if not isinstance(worker, str) or not worker.startswith("TAB-"):
+            raise ValueError("invalid worker identity")
+        with self.lock:
+            last_seen = self._last_poll.get(worker)
+            status = dict(self._worker_status.get(worker) or {})
+        online = bool(
+            last_seen is not None
+            and time.time() - last_seen <= self.WORKER_ONLINE_WINDOW_S
+        )
+        return {
+            "worker": worker,
+            "online": online,
+            "last_seen": last_seen,
+            "status": status,
+        }
+
+    def poll(self, worker=""):
+        job = super().poll(worker)
+        if worker:
+            self.mark_worker(worker)
         return job
 
     def workers_online(self):
         with self.lock:
-            return [w for w, t in self._last_poll.items() if time.time()-t <= self.WORKER_ONLINE_WINDOW_S]
+            return [
+                w for w, t in self._last_poll.items()
+                if time.time() - t <= self.WORKER_ONLINE_WINDOW_S
+            ]
 
     def workers_ever_seen(self):
         with self.lock:
             return len(self._last_poll)
+
+    def claim_pool(self, instance_id: str) -> dict:
+        if not isinstance(instance_id, str) or not instance_id.startswith("POOL-") or len(instance_id) > 120:
+            raise ValueError("invalid pool instance identity")
+        now = time.time()
+        with self.lock:
+            expired = (
+                self._pool_owner is None
+                or now - self._pool_seen > self.POOL_LEASE_WINDOW_S
+            )
+            if expired or self._pool_owner == instance_id:
+                self._pool_owner = instance_id
+                self._pool_seen = now
+                leader = True
+            else:
+                leader = False
+            return {
+                "leader": leader,
+                "owner": self._pool_owner,
+                "lease_window_s": self.POOL_LEASE_WINDOW_S,
+            }
+
+    def pool_status(self) -> dict:
+        now = time.time()
+        with self.lock:
+            active = (
+                self._pool_owner is not None
+                and now - self._pool_seen <= self.POOL_LEASE_WINDOW_S
+            )
+            return {
+                "active": active,
+                "owner": self._pool_owner if active else None,
+                "lease_window_s": self.POOL_LEASE_WINDOW_S,
+            }
 
     def wait(self, job_id, timeout_s):
         deadline = time.monotonic() + max(0, min(timeout_s, 25))
@@ -104,8 +172,16 @@ def make_handler(state, token):
                 data = json.loads(self.rfile.read(length))
                 if not isinstance(data, dict):
                     raise ValueError("JSON object required")
+                if self.path == "/workers/heartbeat":
+                    worker = str(data.get("worker") or "")
+                    status = data.get("status")
+                    state.mark_worker(worker, status)
+                    return self._send({"ok": True})
+                if self.path == "/workers/pool-claim":
+                    instance_id = str(data.get("instance_id") or "")
+                    return self._send({"ok": True, **state.claim_pool(instance_id)})
                 if self.path == "/jobs/submit":
-                    allowed = {"task_id", "prompt", "timeout_s", "new_chat", "conversation_url", "kind", "images"}
+                    allowed = {"task_id", "prompt", "timeout_s", "new_chat", "conversation_url", "kind", "images", "target_worker", "browser_action", "browser_args"}
                     if set(data) - allowed:
                         raise ValueError("unknown job fields")
                     return self._send({"job_id": state.submit(ChatJob(**data))})
@@ -133,6 +209,7 @@ def make_handler(state, token):
                 return self._send({"ok": True, "authentication": "bearer",
                                    **state.counts(), "workers_online": state.workers_online(),
                                    "workers_ever_seen": state.workers_ever_seen(),
+                                   "pool": state.pool_status(),
                                    "uptime_s": round(time.time()-state.started_at, 1)})
             if parsed.path == "/extension/version":
                 return self._send(state.extension_version())
@@ -142,6 +219,9 @@ def make_handler(state, token):
             try:
                 if parsed.path == "/auth/check":
                     return self._send({"ok": True})
+                if parsed.path == "/workers/status":
+                    worker = (qs.get("worker") or [""])[0]
+                    return self._send(state.worker_status(worker))
                 if parsed.path == "/jobs/poll":
                     return self._send({"job": state.poll((qs.get("worker") or [""])[0])})
                 if parsed.path == "/jobs/wait":

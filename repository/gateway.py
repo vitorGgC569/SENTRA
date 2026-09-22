@@ -141,7 +141,7 @@ class CommandGateway:
             if directive.operation in {"PATCH", "W", "ROLLBACK"}:
                 session.transaction_id = None
             ctx = CommandContext(session, agent_id, task_id, gateway=self)
-            timeout = 605 if directive.operation in {"TEST", "BUILD", "LINT", "TYPECHECK"} else 60
+            timeout = 605 if directive.operation in {"TEST", "BUILD", "LINT", "TYPECHECK", "BENCH"} else 60
             result = await asyncio.wait_for(handler.execute(directive, ctx), timeout)
             if result.startswith("CACHE_HIT"):
                 self.cache_hits += 1

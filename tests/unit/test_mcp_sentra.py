@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 import subprocess
 from pathlib import Path
@@ -136,7 +137,7 @@ def test_oma_run_observability_is_confined_and_redacted(tmp_path: Path) -> None:
 
 
 def test_mcp_sentra_tools_are_observational_and_no_promotion_surface(tmp_path: Path) -> None:
-    config = _fixture_repo(tmp_path)
+    config = replace(_fixture_repo(tmp_path), tool_surfaces=("all",))
 
     async def probe() -> None:
         runtime = SentraMCPServer(config)
@@ -144,6 +145,7 @@ def test_mcp_sentra_tools_are_observational_and_no_promotion_surface(tmp_path: P
             result = await client.list_tools()
             names = {tool.name for tool in result.tools}
             expected = {
+                "sentra_repo_workspaces",
                 "sentra_repo_read",
                 "sentra_repo_search",
                 "sentra_repo_tree",
@@ -167,5 +169,73 @@ def test_mcp_sentra_tools_are_observational_and_no_promotion_surface(tmp_path: P
             health = await client.call_tool("sentra_oma_health", {})
             assert health.is_error is False
             assert health.structured_content["data"]["automatic_promotion"] is False
+
+    asyncio.run(probe())
+
+
+def test_repository_adapter_can_select_multiple_allowlisted_workspaces(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    for root, marker in ((first, "first"), (second, "second")):
+        _git(root, "init")
+        _git(root, "config", "user.email", "sentra@example.invalid")
+        _git(root, "config", "user.name", "SENTRA Tests")
+        (root / "marker.txt").write_text(marker + "\n", encoding="utf-8")
+        _git(root, "add", ".")
+        _git(root, "commit", "-m", "baseline")
+
+    config = MCPConfig(
+        allowed_roots=(first, second),
+        audit_log=tmp_path / "audit.jsonl",
+    )
+    service = RepositoryService(config, AuditLogger(config.audit_log))
+
+    async def probe() -> None:
+        workspaces = service.list_workspaces()["workspaces"]
+        assert [item["id"] for item in workspaces] == ["root:0", "root:1"]
+        assert workspaces[0]["default"] is True
+        assert workspaces[1]["git_repo"] is True
+
+        default_read = await service.read("marker.txt", 1, 5)
+        assert "first" in default_read["result"]
+        assert default_read["workspace"] == "root:0"
+        assert default_read["workspace_id"] == "config:0"
+
+        second_read = await service.read("marker.txt", 1, 5, "root:1")
+        assert "second" in second_read["result"]
+        assert second_read["workspace"] == "root:1"
+        assert second_read["workspace_id"] == "config:1"
+        assert Path(second_read["workspace_path"]) == second.resolve()
+
+        by_path = await service.status(str(second.resolve()))
+        assert by_path["workspace"] == "root:1"
+        assert by_path["workspace_id"] == "config:1"
+        assert by_path["result"] == "CLEAN"
+
+        with pytest.raises(PermissionError):
+            await service.status(str(tmp_path / "not-allowlisted"))
+
+    asyncio.run(probe())
+
+
+def test_mcp_repo_tools_expose_optional_workspace_selector(tmp_path: Path) -> None:
+    config = _fixture_repo(tmp_path)
+
+    async def probe() -> None:
+        runtime = SentraMCPServer(config)
+        async with Client(runtime.mcp) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            assert "sentra_repo_workspaces" in tools
+            status_schema = tools["sentra_repo_status"].input_schema
+            assert "workspace" in status_schema["properties"]
+            assert "workspace" not in status_schema.get("required", [])
+
+            listed = await client.call_tool("sentra_repo_workspaces", {})
+            workspaces = listed.structured_content["data"]["workspaces"]
+            assert workspaces[0]["id"] == "root:0"
+            assert Path(workspaces[0]["path"]) == tmp_path.resolve()
 
     asyncio.run(probe())

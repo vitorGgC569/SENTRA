@@ -1,15 +1,16 @@
-"""Cloud-safe remote device MCP tools only."""
+"""Cloud-safe remote device MCP tools."""
 from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
 
 from mcp.server import MCPServer
-from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.mcpserver.context import Context
 
 from sentra_remote.gateway import RemoteGatewayService
 
 from ..errors import sanitize_error
+from ..identity import authorization_principal
 from ..models import ResponseEnvelope
 
 
@@ -32,67 +33,72 @@ def _sync(fn: Callable[[], dict[str, Any]]) -> ResponseEnvelope:
         return _failure(exc)
 
 
-def _identity(required_scope: str | None = None) -> tuple[str, list[str]]:
-    token = get_access_token()
-    if token is None:
-        return "local-operator", ["sentra:admin", "sentra:devices:read", "sentra:devices:write", "sentra:execute"]
-    scopes = list(token.scopes or [])
-    if required_scope and required_scope not in scopes and "sentra:admin" not in scopes:
-        raise PermissionError(f"OAuth scope required: {required_scope}")
-    subject = token.subject or token.client_id
-    if not subject:
-        raise PermissionError("authenticated caller has no subject")
-    return str(subject), scopes
-
-
 def register_remote_tools(mcp: MCPServer, remote: RemoteGatewayService) -> None:
     @mcp.tool()
-    def sentra_pair_device(name: str, platform: str, allowed_tools: list[str], ttl_s: int = 300) -> ResponseEnvelope:
+    def sentra_pair_device(
+        name: str,
+        platform: str,
+        allowed_tools: list[str],
+        ctx: Context,
+        ttl_s: int = 300,
+    ) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:devices:write")
-            return remote.start_pairing(subject, name, platform, allowed_tools, ttl_s)
+            principal, _, _ = authorization_principal(ctx, "sentra:devices:write")
+            return remote.start_pairing(principal, name, platform, allowed_tools, ttl_s)
         return _sync(op)
 
     @mcp.tool()
-    def sentra_list_devices() -> ResponseEnvelope:
+    def sentra_list_devices(ctx: Context) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:devices:read")
-            return remote.list_devices(subject)
+            principal, _, _ = authorization_principal(ctx, "sentra:devices:read")
+            return remote.list_devices(principal)
         return _sync(op)
 
     @mcp.tool()
-    def sentra_ping(device_id: str) -> ResponseEnvelope:
+    def sentra_ping(device_id: str, ctx: Context) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:devices:read")
-            return remote.ping(subject, device_id)
+            principal, _, _ = authorization_principal(ctx, "sentra:devices:read")
+            return remote.ping(principal, device_id)
         return _sync(op)
 
     @mcp.tool()
-    def sentra_who_am_i() -> ResponseEnvelope:
+    def sentra_who_am_i(ctx: Context) -> ResponseEnvelope:
         def op():
-            subject, scopes = _identity()
-            return remote.who_am_i(subject, scopes)
+            principal, scopes, owner = authorization_principal(ctx)
+            data = remote.who_am_i(principal, scopes)
+            data["principal"] = principal
+            data["session_owner"] = owner
+            data["subject"] = principal
+            return data
         return _sync(op)
 
     @mcp.tool()
-    def sentra_set_device_tools(device_id: str, allowed_tools: list[str]) -> ResponseEnvelope:
+    def sentra_set_device_tools(
+        device_id: str,
+        allowed_tools: list[str],
+        ctx: Context,
+    ) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:devices:write")
-            return remote.set_permissions(subject, device_id, allowed_tools)
+            principal, _, _ = authorization_principal(ctx, "sentra:devices:write")
+            return remote.set_permissions(principal, device_id, allowed_tools)
         return _sync(op)
 
     @mcp.tool()
-    def sentra_disconnect_device(device_id: str) -> ResponseEnvelope:
+    def sentra_disconnect_device(device_id: str, ctx: Context) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:devices:write")
-            return remote.disconnect(subject, device_id)
+            principal, _, _ = authorization_principal(ctx, "sentra:devices:write")
+            return remote.disconnect(principal, device_id)
         return _sync(op)
 
     @mcp.tool()
-    def sentra_shutdown_remote(device_id: str, timeout_s: int = 30) -> ResponseEnvelope:
+    def sentra_shutdown_remote(
+        device_id: str,
+        ctx: Context,
+        timeout_s: int = 30,
+    ) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:devices:write")
-            return remote.shutdown_agent(subject, device_id, timeout_s=timeout_s)
+            principal, _, _ = authorization_principal(ctx, "sentra:devices:write")
+            return remote.shutdown_agent(principal, device_id, timeout_s=timeout_s)
         return _sync(op)
 
     @mcp.tool()
@@ -100,70 +106,144 @@ def register_remote_tools(mcp: MCPServer, remote: RemoteGatewayService) -> None:
         device_id: str,
         tool: str,
         arguments: dict[str, Any],
+        ctx: Context,
         timeout_s: int = 180,
         wait_s: float | None = None,
     ) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:execute")
-            return remote.invoke(subject, device_id, tool, arguments, timeout_s=timeout_s, wait_s=wait_s)
+            principal, _, _ = authorization_principal(ctx, "sentra:execute")
+            return remote.invoke(
+                principal,
+                device_id,
+                tool,
+                arguments,
+                timeout_s=timeout_s,
+                wait_s=wait_s,
+            )
         return _sync(op)
 
     @mcp.tool()
-    def sentra_remote_result(job_id: str) -> ResponseEnvelope:
+    def sentra_remote_result(job_id: str, ctx: Context) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:execute")
-            return remote.result(subject, job_id)
+            principal, _, _ = authorization_principal(ctx, "sentra:execute")
+            return remote.result(principal, job_id)
         return _sync(op)
 
     @mcp.tool()
-    def sentra_remote_cancel(job_id: str) -> ResponseEnvelope:
+    def sentra_remote_cancel(job_id: str, ctx: Context) -> ResponseEnvelope:
         def op():
-            subject, _ = _identity("sentra:execute")
-            return remote.cancel(subject, job_id)
+            principal, _, _ = authorization_principal(ctx, "sentra:execute")
+            return remote.cancel(principal, job_id)
         return _sync(op)
 
     @mcp.tool()
-    def sentra_remote_read_file(device_id: str, path: str, offset: int = 0, length: int | None = None) -> ResponseEnvelope:
-        return sentra_remote_call(device_id, "sentra_read_file", {"path": path, "offset": offset, "length": length})
+    def sentra_remote_read_file(
+        device_id: str,
+        path: str,
+        ctx: Context,
+        offset: int = 0,
+        length: int | None = None,
+        workspace: str | None = None,
+    ) -> ResponseEnvelope:
+        return sentra_remote_call(
+            device_id,
+            "sentra_read_file",
+            {"path": path, "offset": offset, "length": length, "workspace": workspace},
+            ctx,
+        )
 
     @mcp.tool()
-    def sentra_remote_write_file(device_id: str, path: str, content: str, mode: str = "rewrite") -> ResponseEnvelope:
-        return sentra_remote_call(device_id, "sentra_write_file", {"path": path, "content": content, "mode": mode})
+    def sentra_remote_write_file(
+        device_id: str,
+        path: str,
+        content: str,
+        ctx: Context,
+        mode: str = "rewrite",
+        workspace: str | None = None,
+    ) -> ResponseEnvelope:
+        return sentra_remote_call(
+            device_id,
+            "sentra_write_file",
+            {"path": path, "content": content, "mode": mode, "workspace": workspace},
+            ctx,
+        )
 
     @mcp.tool()
     def sentra_remote_start_process(
         device_id: str,
         command: str | list[str],
-        owner: str,
+        ctx: Context,
         timeout: float | None = None,
         cwd: str | None = None,
+        workspace: str | None = None,
+        mode: str | None = None,
+        image: str | None = None,
     ) -> ResponseEnvelope:
-        return sentra_remote_call(device_id, "sentra_start_process", {
-            "command": command, "owner": owner, "timeout": timeout, "cwd": cwd,
-        })
+        return sentra_remote_call(
+            device_id,
+            "sentra_start_process",
+            {
+                "command": command,
+                "timeout": timeout,
+                "cwd": cwd,
+                "workspace": workspace,
+                "mode": mode,
+                "image": image,
+            },
+            ctx,
+        )
 
     @mcp.tool()
     def sentra_remote_read_process_output(
         device_id: str,
         session_id: str,
-        owner: str,
+        ctx: Context,
         offset: int = 0,
         length: int = 65536,
     ) -> ResponseEnvelope:
-        return sentra_remote_call(device_id, "sentra_read_process_output", {
-            "session_id": session_id, "owner": owner, "offset": offset, "length": length,
-        })
+        return sentra_remote_call(
+            device_id,
+            "sentra_read_process_output",
+            {"session_id": session_id, "offset": offset, "length": length},
+            ctx,
+        )
 
     @mcp.tool()
-    def sentra_remote_interact_process(device_id: str, session_id: str, owner: str, stdin: str) -> ResponseEnvelope:
-        return sentra_remote_call(device_id, "sentra_interact_process", {
-            "session_id": session_id, "owner": owner, "stdin": stdin,
-        })
+    def sentra_remote_interact_process(
+        device_id: str,
+        session_id: str,
+        stdin: str,
+        ctx: Context,
+    ) -> ResponseEnvelope:
+        return sentra_remote_call(
+            device_id,
+            "sentra_interact_process",
+            {"session_id": session_id, "stdin": stdin},
+            ctx,
+        )
 
     @mcp.tool()
-    def sentra_remote_repo_status(device_id: str) -> ResponseEnvelope:
-        return sentra_remote_call(device_id, "sentra_repo_status", {})
+    def sentra_remote_repo_status(
+        device_id: str,
+        ctx: Context,
+        workspace: str | None = None,
+    ) -> ResponseEnvelope:
+        return sentra_remote_call(
+            device_id,
+            "sentra_repo_status",
+            {"workspace": workspace},
+            ctx,
+        )
 
     @mcp.tool()
-    def sentra_remote_oma_status(device_id: str, run_id: str) -> ResponseEnvelope:
-        return sentra_remote_call(device_id, "sentra_oma_status", {"run_id": run_id})
+    def sentra_remote_oma_status(
+        device_id: str,
+        run_id: str,
+        ctx: Context,
+    ) -> ResponseEnvelope:
+        return sentra_remote_call(
+            device_id,
+            "sentra_oma_status",
+            {"run_id": run_id},
+            ctx,
+        )

@@ -31,6 +31,7 @@ def collect(config_path: Path) -> dict[str, Any]:
         "relay_url": config.relay_url,
         "allowed_roots": list(config.allowed_roots),
         "audit_log": config.audit_log,
+        "process_mode": config.process_mode,
         "token_present": bool(config.device_token),
     }
     try:

@@ -7,3 +7,5 @@ typing-extensions>=4.9.0
 pytest>=8.0
 mcp>=2,<3
 keyring>=25.0
+pypdf>=5.0
+pyarrow>=18.0

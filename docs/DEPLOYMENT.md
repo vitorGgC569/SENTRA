@@ -46,15 +46,17 @@ proxy or provide a TLS server certificate directly. Agents must use HTTPS except
 From an authenticated MCP client call sentra_pair_device with a minimal allowlist.
 On the device run:
 
-    sentra-agent.exe pair --relay https://relay.example.com --code XXXX-XXXX-XXXX --name "Office PC" --allowed-root C:\work
+    sentra-agent.exe pair --relay https://relay.example.com --code XXXX-XXXX-XXXX --name "Office PC" --allowed-root C:\work --process-mode workspace
 
 The pairing code is one-use and short-lived. The device stores its returned credential locally.
 
 ## 5. Windows install/startup
 
 Use installer/windows/install.ps1 from a release bundle. It copies signed executables under
-%LOCALAPPDATA%\SENTRA\Commander, optionally pairs the device, registers a logon Scheduled Task
-with restart settings, and falls back to the Startup folder.
+%LOCALAPPDATA%\SENTRA\Commander, optionally pairs the device, persists the
+selected process privilege ceiling (`sandbox|workspace|unrestricted`, default
+`workspace`), registers a logon Scheduled Task with restart settings, and
+falls back to the Startup folder.
 
 ## 6. Updates
 
@@ -84,3 +86,13 @@ These are deployment credentials/infrastructure, not values that should be commi
 The repository includes a Dockerfile, Compose definition and `.dockerignore`. `docker compose config`
 is part of the release validation. A real image build additionally requires a running Docker engine;
 production images should be built by CI or a controlled build host rather than relying on a developer desktop daemon.
+
+
+## 9. MCP 2026-07-28 conversation identity
+
+The 2026-07-28 Streamable HTTP wire is single-exchange and does not provide a
+cross-request `Mcp-Session-Id`. Clients that use SENTRA stateful resources
+must call `sentra_session_open` once per conversation and pass the returned
+signed `session_token` to process/search/browser/sandbox/job/research calls.
+The token is bound to the authenticated OAuth subject when OAuth is enabled,
+has an expiry, survives HTTP reconnects, and must not be logged or committed.

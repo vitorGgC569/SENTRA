@@ -17,9 +17,10 @@ from sentra_mcp.services.process import ProcessService
 
 
 def _service(tmp_path: Path, **overrides: object) -> ProcessService:
+    options = {"process_mode": "unrestricted", **overrides}
     config = MCPConfig(
         audit_log=tmp_path / "audit.jsonl",
-        **overrides,
+        **options,
     )
     return ProcessService(config)
 
@@ -247,7 +248,7 @@ def test_child_environment_is_sanitized(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_kill_process_rejects_unmanaged_pid_and_audit_omits_arguments(tmp_path: Path) -> None:
     audit_path = tmp_path / "audit.jsonl"
-    config = MCPConfig(audit_log=audit_path)
+    config = MCPConfig(audit_log=audit_path, process_mode="unrestricted")
     runtime = SentraMCPServer(config)
     service = runtime.processes
 
@@ -276,7 +277,11 @@ def test_process_cwd_is_confined_to_allowed_roots(tmp_path: Path) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
     service = ProcessService(
-        MCPConfig(allowed_roots=(allowed,), audit_log=tmp_path / "audit.jsonl")
+        MCPConfig(
+            allowed_roots=(allowed,),
+            audit_log=tmp_path / "audit.jsonl",
+            process_mode="unrestricted",
+        )
     )
 
     code = "import os; print(os.getcwd(), flush=True)"
@@ -289,7 +294,7 @@ def test_process_cwd_is_confined_to_allowed_roots(tmp_path: Path) -> None:
     assert Path(str(result["stdout"]).strip()).resolve() == child.resolve()
     assert Path(str(process["cwd"])).resolve() == child.resolve()
 
-    with pytest.raises(PermissionError, match="outside configured allowed roots"):
+    with pytest.raises(PermissionError, match="outside selected workspace"):
         service.start_process(
             [sys.executable, "-c", "print('no')"],
             "alice",
@@ -314,4 +319,44 @@ def test_mcp_process_tools_are_registered(tmp_path: Path) -> None:
             } <= names
         runtime.processes.shutdown()
 
+    asyncio.run(probe())
+
+
+
+def test_mcp_process_owner_is_automatic_and_schema_documents_bytes(tmp_path: Path) -> None:
+    async def probe() -> None:
+        runtime = SentraMCPServer(MCPConfig(
+            allowed_roots=(tmp_path,),
+            audit_log=tmp_path / "audit.jsonl",
+            remote_store_path=tmp_path / "remote.sqlite3",
+            process_mode="unrestricted",
+        ))
+        async with Client(runtime.mcp) as client:
+            tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            start_schema = tools["sentra_start_process"].input_schema
+            assert "owner" in start_schema["properties"]
+            assert "owner" not in start_schema.get("required", [])
+            read_schema = tools["sentra_read_process_output"].input_schema["properties"]
+            assert "byte" in read_schema["offset"]["description"].lower()
+
+            started = await client.call_tool("sentra_start_process", {
+                "command": [sys.executable, "-u", "-c", "print('AUTO_OWNER')"],
+                "timeout": 5,
+            })
+            assert started.is_error is False
+            sid = started.structured_content["data"]["session_id"]
+            deadline = time.monotonic() + 5
+            latest = None
+            while time.monotonic() < deadline:
+                latest = await client.call_tool("sentra_read_process_output", {
+                    "session_id": sid,
+                    "offset": 0,
+                    "length": 4096,
+                })
+                if "AUTO_OWNER" in latest.structured_content["data"]["stdout"]:
+                    break
+                await asyncio.sleep(0.02)
+            assert latest is not None
+            assert "AUTO_OWNER" in latest.structured_content["data"]["stdout"]
+        runtime.processes.shutdown()
     asyncio.run(probe())

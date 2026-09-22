@@ -11,10 +11,10 @@ async def test_transport_pairs_submits_correlates_receives_and_acks():
     transport = ExtensionTransport(base, token=server.token)
     async def worker():
         for _ in range(200):
-            response = await asyncio.to_thread(_get, base+"/jobs/poll?worker=TEST-WORKER",5,server.token)
+            response = await asyncio.to_thread(_get, base+"/jobs/poll?worker=TAB-TEST-WORKER",5,server.token)
             job = response["job"]
             if job:
-                payload = {"job_id":job["job_id"],"worker":"TEST-WORKER","lease_token":job["lease_token"]}
+                payload = {"job_id":job["job_id"],"worker":"TAB-TEST-WORKER","lease_token":job["lease_token"]}
                 await asyncio.to_thread(_post,base+"/jobs/lease",payload,5,server.token)
                 await asyncio.to_thread(_post,base+"/jobs/result",{
                     **payload,"task_id":job["task_id"],"status":"COMPLETED","result":"scripted worker reply",
@@ -23,6 +23,14 @@ async def test_transport_pairs_submits_correlates_receives_and_acks():
             await asyncio.sleep(.01)
         raise AssertionError("transport never submitted a job")
     try:
+        # Pair/register the real worker identity before submission. The transport
+        # intentionally fails fast when no extension worker has ever connected.
+        await asyncio.to_thread(
+            _get,
+            base + "/jobs/poll?worker=TAB-TEST-WORKER",
+            5,
+            server.token,
+        )
         work = asyncio.create_task(worker())
         response = await transport.submit_chat("T-HTTP","integration test",timeout_s=10)
         jid = await work

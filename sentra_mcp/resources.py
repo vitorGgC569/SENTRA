@@ -8,6 +8,7 @@ from mcp.server import MCPServer
 
 from .config import MCPConfig
 from .models import CapabilityMetadata
+from .services.browser import BrowserControlService
 from .services.oma import OmaService
 from .services.repository import RepositoryService
 
@@ -27,6 +28,11 @@ def capability_document(config: MCPConfig) -> dict[str, Any]:
         "remote_tool_acl": True,
         "automatic_promotion": False,
         "arbitrary_oma_access": False,
+    }
+    metadata["tool_surfaces"] = {
+        "configured": list(config.tool_surfaces),
+        "enabled": sorted(config.enabled_surfaces),
+        "available": ["core", "developer", "browser", "oma", "remote", "admin"],
     }
     metadata["tool_families"] = [
         "filesystem",
@@ -48,6 +54,7 @@ def register_resources(
     config: MCPConfig,
     repository: RepositoryService,
     oma: OmaService,
+    browser: BrowserControlService | None = None,
 ) -> None:
     @mcp.resource(
         "sentra://capabilities",
@@ -72,6 +79,16 @@ def register_resources(
             "oma": oma.health(),
         }
         return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+    if browser is not None:
+        @mcp.resource(
+            "sentra://screenshot/{name}",
+            name="SENTRA browser screenshot",
+            description="Bounded screenshot artifact created by sentra_browser_screenshot.",
+            mime_type="application/octet-stream",
+        )
+        def sentra_screenshot(name: str) -> bytes:
+            return browser.read_screenshot(name)
 
     @mcp.resource(
         "sentra://run/{run_id}/summary",

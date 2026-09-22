@@ -167,10 +167,25 @@ class JobStore:
             self._expire()
             if self.db.execute("SELECT id FROM jobs WHERE state='LEASED' AND worker=?", (worker,)).fetchone():
                 return None
-            row = self.db.execute(
+            rows = self.db.execute(
                 "SELECT id,payload,deadline,created,requeues,phase FROM jobs "
-                "WHERE state='QUEUED' ORDER BY updated LIMIT 1").fetchone()
-            if not row:
+                "WHERE state='QUEUED' ORDER BY updated LIMIT 256").fetchall()
+            row = None
+            fallback = None
+            for candidate in rows:
+                try:
+                    payload = json.loads(candidate[1])
+                except ValueError:
+                    payload = {}
+                target = str(payload.get("target_worker") or "")
+                if target and _workers_match(target, worker):
+                    row = candidate
+                    break
+                if not target and fallback is None:
+                    fallback = candidate
+            if row is None:
+                row = fallback
+            if row is None:
                 return None
             jid, raw, deadline, created, requeues, phase = row
             lease = secrets.token_urlsafe(32)

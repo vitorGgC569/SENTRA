@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Sequence
 
-from .config import ALLOWED_TRANSPORTS, MCPConfig
+from .config import ALLOWED_PROCESS_MODES, ALLOWED_TOOL_SURFACES, ALLOWED_TRANSPORTS, MCPConfig
 from .errors import ConfigurationError, sanitize_error
 from .server import SentraMCPServer
 
@@ -16,6 +16,13 @@ def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description="SENTRA Commander MCP server")
     cli.add_argument("--transport", choices=ALLOWED_TRANSPORTS)
     cli.add_argument("--mode", choices=("local", "cloud"), dest="deployment_mode")
+    cli.add_argument(
+        "--surface",
+        action="append",
+        choices=ALLOWED_TOOL_SURFACES,
+        dest="tool_surfaces",
+        help="Tool surface to expose; repeat to combine. Defaults to core+developer+browser.",
+    )
     cli.add_argument("--host")
     cli.add_argument("--port", type=int)
     cli.add_argument("--allowed-root", action="append", dest="allowed_roots")
@@ -24,6 +31,11 @@ def parser() -> argparse.ArgumentParser:
     cli.add_argument("--max-write-bytes", type=int)
     cli.add_argument("--max-output-bytes", type=int)
     cli.add_argument("--max-processes", type=int)
+    cli.add_argument("--process-mode", choices=ALLOWED_PROCESS_MODES)
+    cli.add_argument("--sandbox-image")
+    cli.add_argument("--sandbox-cpus", type=float)
+    cli.add_argument("--sandbox-memory-mb", type=int)
+    cli.add_argument("--sandbox-pids", type=int)
     cli.add_argument("--audit-log")
     cli.add_argument("--remote-store")
     cli.add_argument("--oauth-issuer-url")
@@ -41,13 +53,23 @@ def config_from_args(args: argparse.Namespace, base: MCPConfig | None = None) ->
     overrides: dict[str, object] = {}
     for name in (
         "transport", "deployment_mode", "host", "port", "max_read_bytes", "max_write_bytes",
-        "max_output_bytes", "max_processes", "oauth_issuer_url",
+        "max_output_bytes", "max_processes", "process_mode", "oauth_issuer_url",
         "oauth_resource_url", "oauth_introspection_url", "oauth_client_id",
         "oauth_client_secret",
     ):
         value = getattr(args, name)
         if value is not None:
             overrides[name] = value
+    if args.tool_surfaces is not None:
+        overrides["tool_surfaces"] = tuple(args.tool_surfaces)
+    if args.sandbox_image is not None:
+        overrides["process_sandbox_image"] = args.sandbox_image
+    if args.sandbox_cpus is not None:
+        overrides["process_sandbox_cpus"] = args.sandbox_cpus
+    if args.sandbox_memory_mb is not None:
+        overrides["process_sandbox_memory_mb"] = args.sandbox_memory_mb
+    if args.sandbox_pids is not None:
+        overrides["process_sandbox_pids"] = args.sandbox_pids
     if args.allowed_roots is not None:
         overrides["allowed_roots"] = tuple(Path(value) for value in args.allowed_roots)
     if args.blocked_commands is not None:

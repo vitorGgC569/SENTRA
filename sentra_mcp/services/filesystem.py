@@ -6,51 +6,144 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from workspace.paths import (
-    PathAccessError,
-    iter_workspace_files,
-    resolve_workspace_path,
-)
+from workspace.paths import PathAccessError, iter_workspace_files, resolve_workspace_path
 
 from ..audit import AuditLogger
 from ..config import MCPConfig
 from ..errors import sanitize_error
+from .workspaces import WorkspaceRegistry
 
 MAX_LIST_DEPTH = 8
 MAX_SEARCH_RESULTS = 1000
 
 
 class FilesystemService:
-    """Filesystem service constrained to configured SENTRA workspace roots."""
+    """Filesystem service constrained to approved workspace grants."""
 
-    def __init__(self, config: MCPConfig, audit: AuditLogger) -> None:
-        self.allowed_roots = tuple(config.allowed_roots)
+    def __init__(
+        self,
+        config: MCPConfig,
+        audit: AuditLogger,
+        workspaces: WorkspaceRegistry | None = None,
+    ) -> None:
+        self.config = config
+        self.allowed_roots = tuple(config.allowed_roots)  # legacy/introspection
         self.max_read_bytes = config.max_read_bytes
         self.max_write_bytes = config.max_write_bytes
         self.audit = audit
+        self.workspaces = workspaces
 
-    def _select_root(self, raw: str) -> tuple[int, Path, str]:
+    def update_config(self, config: MCPConfig) -> None:
+        self.config = config
+        self.allowed_roots = tuple(config.allowed_roots)
+        self.max_read_bytes = config.max_read_bytes
+        self.max_write_bytes = config.max_write_bytes
+
+    def _legacy_workspace(
+        self,
+        raw: str,
+        permission: str,
+    ) -> tuple[int, Path, dict[str, Any]]:
+        candidate = Path(raw)
+        roots = tuple(Path(root).resolve() for root in self.allowed_roots)
+        if not candidate.is_absolute():
+            index, root = 0, roots[0]
+        else:
+            match = None
+            for idx, root in enumerate(roots):
+                try:
+                    candidate.resolve().relative_to(root)
+                except ValueError:
+                    continue
+                match = (idx, root)
+                break
+            if match is None:
+                raise PathAccessError("absolute path is outside configured allowed roots")
+            index, root = match
+        return index, root, {
+            "id": f"root:{index}",
+            "workspace_id": f"config:{index}",
+            "alias": "sentra" if index == 0 else root.name,
+            "path": str(root),
+            "permissions": ["execute", "read", "write"],
+        }
+
+    def _select_workspace(
+        self,
+        raw: str,
+        *,
+        workspace: str | None,
+        owner: str | None,
+        permission: str,
+    ) -> tuple[int, Path, dict[str, Any]]:
+        if self.workspaces is None:
+            return self._legacy_workspace(raw, permission)
+        if workspace is not None and str(workspace).strip():
+            view = self.workspaces.resolve(workspace, owner, permission)
+        else:
+            candidate = Path(raw)
+            if candidate.is_absolute():
+                try:
+                    view = self.workspaces.resolve_path(candidate, owner, permission)
+                except PermissionError as exc:
+                    raise PathAccessError(str(exc)) from exc
+            else:
+                view = self.workspaces.resolve(None, owner, permission)
+        return int(str(view["id"]).split(":", 1)[1]), Path(view["path"]).resolve(), view
+
+    def _resolve_access(
+        self,
+        raw: str,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
+        permission: str = "read",
+    ) -> tuple[int, Path, str, dict[str, Any]]:
         if not isinstance(raw, str) or not raw:
             raise PathAccessError("workspace path must be a non-empty string")
+        index, root, view = self._select_workspace(
+            raw,
+            workspace=workspace,
+            owner=owner,
+            permission=permission,
+        )
         candidate = Path(raw)
-        if not candidate.is_absolute():
-            return 0, self.allowed_roots[0], raw
-        for index, root in enumerate(self.allowed_roots):
+        if candidate.is_absolute():
             try:
-                relative = candidate.relative_to(root)
-            except ValueError:
-                continue
-            return index, root, relative.as_posix() or "."
-        raise PathAccessError("absolute path is outside configured allowed roots")
-
-    def _resolve(self, raw: str) -> tuple[int, Path, str]:
-        root_index, root, relative = self._select_root(raw)
+                relative_path = candidate.resolve().relative_to(root)
+            except ValueError as exc:
+                raise PathAccessError("absolute path is outside selected workspace") from exc
+            relative = relative_path.as_posix() or "."
+        else:
+            relative = raw
         target = resolve_workspace_path(root, relative)
-        return root_index, target, relative
+        rel = target.relative_to(root).as_posix() or "."
+        return index, target, rel, view
 
-    def _relative(self, root_index: int, target: Path) -> str:
-        relative = target.relative_to(self.allowed_roots[root_index])
-        return relative.as_posix() or "."
+    # Kept for internal/backward compatibility with services created before the
+    # workspace registry. New callers should pass workspace/owner explicitly.
+    def _resolve(
+        self,
+        raw: str,
+        workspace: str | None = None,
+        owner: str | None = None,
+        permission: str = "read",
+    ) -> tuple[int, Path, str]:
+        index, target, relative, _ = self._resolve_access(
+            raw,
+            workspace=workspace,
+            owner=owner,
+            permission=permission,
+        )
+        return index, target, relative
+
+    @staticmethod
+    def _workspace_fields(view: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "workspace": view["id"],
+            "workspace_id": view["workspace_id"],
+            "workspace_alias": view["alias"],
+        }
 
     def _read_text(
         self,
@@ -79,25 +172,29 @@ class FilesystemService:
                 selected.append(raw_line)
                 selected_lines += 1
         content = b"".join(selected).decode("utf-8")
-        # MCP text responses are platform-neutral: normalize CRLF/CR to LF while
-        # leaving the underlying file bytes untouched.
         content = content.replace("\r\n", "\n").replace("\r", "\n")
         return content, selected_lines
 
-    def list_directory(self, path: str = ".", depth: int = 2) -> dict[str, Any]:
+    def list_directory(
+        self,
+        path: str = ".",
+        depth: int = 2,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
+    ) -> dict[str, Any]:
         if depth < 1 or depth > MAX_LIST_DEPTH:
             raise ValueError(f"depth must be between 1 and {MAX_LIST_DEPTH}")
-        root_index, base, _ = self._resolve(path)
+        _, base, relative, view = self._resolve_access(
+            path, workspace=workspace, owner=owner, permission="read"
+        )
         if not base.is_dir():
             raise NotADirectoryError("path is not a directory")
-        root = self.allowed_roots[root_index]
+        root = Path(view["path"]).resolve()
         entries: list[dict[str, Any]] = []
 
         def visit(directory: Path, level: int) -> None:
-            for child in sorted(
-                directory.iterdir(),
-                key=lambda item: item.name.casefold(),
-            ):
+            for child in sorted(directory.iterdir(), key=lambda item: item.name.casefold()):
                 lexical_relative = child.relative_to(root).as_posix()
                 try:
                     checked = resolve_workspace_path(root, lexical_relative)
@@ -121,9 +218,10 @@ class FilesystemService:
 
         visit(base, 1)
         return {
-            "path": self._relative(root_index, base),
+            "path": relative,
             "depth": depth,
             "entries": entries,
+            **self._workspace_fields(view),
         }
 
     def read_file(
@@ -131,14 +229,20 @@ class FilesystemService:
         path: str,
         offset: int = 0,
         length: int | None = None,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
     ) -> dict[str, Any]:
-        root_index, target, _ = self._resolve(path)
+        _, target, relative, view = self._resolve_access(
+            path, workspace=workspace, owner=owner, permission="read"
+        )
         content, line_count = self._read_text(target, offset, length)
         return {
-            "path": self._relative(root_index, target),
+            "path": relative,
             "offset": offset,
             "line_count": line_count,
             "content": content,
+            **self._workspace_fields(view),
         }
 
     def read_multiple_files(
@@ -146,38 +250,43 @@ class FilesystemService:
         paths: list[str],
         offset: int = 0,
         length: int | None = None,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
     ) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         for path in paths:
             try:
-                results.append({"ok": True, **self.read_file(path, offset, length)})
+                results.append({
+                    "ok": True,
+                    **self.read_file(
+                        path, offset, length, workspace=workspace, owner=owner
+                    ),
+                })
             except Exception as exc:
-                results.append(
-                    {
-                        "ok": False,
-                        "path": path,
-                        "error": sanitize_error(exc),
-                    }
-                )
+                results.append({"ok": False, "path": path, "error": sanitize_error(exc)})
         return {"results": results}
 
-    def file_info(self, path: str) -> dict[str, Any]:
-        root_index, target, _ = self._resolve(path)
+    def file_info(
+        self,
+        path: str,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        _, target, relative, view = self._resolve_access(
+            path, workspace=workspace, owner=owner, permission="read"
+        )
         if not target.exists():
             raise FileNotFoundError("path does not exist")
         stat = target.stat()
         result: dict[str, Any] = {
-            "path": self._relative(root_index, target),
-            "type": (
-                "directory"
-                if target.is_dir()
-                else "file"
-                if target.is_file()
-                else "other"
-            ),
+            "path": relative,
+            "type": "directory" if target.is_dir() else "file" if target.is_file() else "other",
             "size": stat.st_size,
             "created_ns": stat.st_ctime_ns,
             "modified_ns": stat.st_mtime_ns,
+            **self._workspace_fields(view),
         }
         if target.is_file() and stat.st_size <= self.max_read_bytes:
             try:
@@ -197,6 +306,9 @@ class FilesystemService:
         ignore_case: bool = True,
         max_results: int = 100,
         context: int = 0,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
     ) -> dict[str, Any]:
         if search_type not in {"names", "content"}:
             raise ValueError("search_type must be 'names' or 'content'")
@@ -206,8 +318,10 @@ class FilesystemService:
             raise ValueError("context must be zero or greater")
         flags = re.IGNORECASE if ignore_case else 0
         matcher = re.compile(re.escape(pattern) if literal else pattern, flags)
-        root_index, base, _ = self._resolve(path)
-        root = self.allowed_roots[root_index]
+        _, base, _, view = self._resolve_access(
+            path, workspace=workspace, owner=owner, permission="read"
+        )
+        root = Path(view["path"]).resolve()
         scope = base.relative_to(root).as_posix() or "."
         results: list[dict[str, Any]] = []
         for file_path in iter_workspace_files(root, scope):
@@ -244,22 +358,33 @@ class FilesystemService:
                         ]
                     results.append(item)
                     if len(results) >= max_results:
-                        return {"results": results, "max_results": max_results}
+                        return {
+                            "results": results,
+                            "max_results": max_results,
+                            **self._workspace_fields(view),
+                        }
             if len(results) >= max_results:
                 break
-        return {"results": results, "max_results": max_results}
+        return {
+            "results": results,
+            "max_results": max_results,
+            **self._workspace_fields(view),
+        }
 
-    def _audit_mutation(
-        self,
-        action: str,
-        outcome: str,
-        details: dict[str, Any],
-    ) -> None:
+    def _audit_mutation(self, action: str, outcome: str, details: dict[str, Any]) -> None:
         self.audit.emit(f"filesystem.{action}", outcome, details)
 
-    def create_directory(self, path: str) -> dict[str, Any]:
-        root_index, target, _ = self._resolve(path)
-        details = {"root_index": root_index, "path": self._relative(root_index, target)}
+    def create_directory(
+        self,
+        path: str,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        _, target, relative, view = self._resolve_access(
+            path, workspace=workspace, owner=owner, permission="write"
+        )
+        details = {"path": relative, **self._workspace_fields(view)}
         try:
             target.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -268,14 +393,25 @@ class FilesystemService:
         self._audit_mutation("create_directory", "ok", details)
         return details
 
-    def move_file(self, source: str, destination: str) -> dict[str, Any]:
-        source_root, source_path, _ = self._resolve(source)
-        destination_root, destination_path, _ = self._resolve(destination)
+    def move_file(
+        self,
+        source: str,
+        destination: str,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        _, source_path, source_rel, source_view = self._resolve_access(
+            source, workspace=workspace, owner=owner, permission="write"
+        )
+        _, destination_path, destination_rel, destination_view = self._resolve_access(
+            destination, workspace=workspace, owner=owner, permission="write"
+        )
         details = {
-            "source_root_index": source_root,
-            "source": self._relative(source_root, source_path),
-            "destination_root_index": destination_root,
-            "destination": self._relative(destination_root, destination_path),
+            "source": source_rel,
+            "destination": destination_rel,
+            "source_workspace": source_view["id"],
+            "destination_workspace": destination_view["id"],
         }
         try:
             if not source_path.exists():
@@ -293,38 +429,78 @@ class FilesystemService:
         self._audit_mutation("move_file", "ok", details)
         return details
 
+    def delete_path(
+        self,
+        path: str,
+        *,
+        recursive: bool = False,
+        confirm_directory: bool = False,
+        workspace: str | None = None,
+        owner: str | None = None,
+    ) -> dict[str, Any]:
+        _, target, relative, view = self._resolve_access(
+            path, workspace=workspace, owner=owner, permission="write"
+        )
+        root = Path(view["path"]).resolve()
+        details = {
+            "path": relative,
+            "recursive": bool(recursive),
+            "confirm_directory": bool(confirm_directory),
+            **self._workspace_fields(view),
+        }
+        try:
+            if target == root:
+                raise PermissionError("deleting an allowed root is forbidden")
+            if not target.exists():
+                raise FileNotFoundError("path does not exist")
+            if target.is_dir():
+                if not recursive:
+                    raise IsADirectoryError("directory deletion requires recursive=true")
+                if not confirm_directory:
+                    raise PermissionError("directory deletion requires confirm_directory=true")
+                shutil.rmtree(target)
+                details["type"] = "directory"
+            else:
+                target.unlink()
+                details["type"] = "file"
+        except Exception:
+            self._audit_mutation("delete_path", "failed", details)
+            raise
+        self._audit_mutation("delete_path", "ok", details)
+        return details
+
     def write_file(
         self,
         path: str,
         content: str,
         mode: str = "rewrite",
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
     ) -> dict[str, Any]:
         if mode not in {"rewrite", "append"}:
             raise ValueError("mode must be 'rewrite' or 'append'")
         payload = content.encode("utf-8")
         if len(payload) > self.max_write_bytes:
             raise ValueError("write exceeds configured byte limit")
-        root_index, target, _ = self._resolve(path)
+        _, target, relative, view = self._resolve_access(
+            path, workspace=workspace, owner=owner, permission="write"
+        )
         details = {
-            "root_index": root_index,
-            "path": self._relative(root_index, target),
+            "path": relative,
             "mode": mode,
             "bytes": len(payload),
+            **self._workspace_fields(view),
         }
         try:
             if target.exists() and not target.is_file():
                 raise IsADirectoryError("path is not a file")
             if not target.parent.is_dir():
                 raise FileNotFoundError("parent directory does not exist")
-            existing_size = (
-                target.stat().st_size
-                if mode == "append" and target.exists()
-                else 0
-            )
+            existing_size = target.stat().st_size if mode == "append" and target.exists() else 0
             if existing_size + len(payload) > self.max_write_bytes:
                 raise ValueError("resulting file exceeds configured byte limit")
-            open_mode = "w" if mode == "rewrite" else "a"
-            with target.open(open_mode, encoding="utf-8", newline="") as handle:
+            with target.open("w" if mode == "rewrite" else "a", encoding="utf-8", newline="") as handle:
                 handle.write(content)
         except Exception:
             self._audit_mutation("write_file", "failed", details)
@@ -338,31 +514,34 @@ class FilesystemService:
         old: str,
         new: str,
         expected_replacements: int = 1,
+        *,
+        workspace: str | None = None,
+        owner: str | None = None,
     ) -> dict[str, Any]:
         if not old:
             raise ValueError("old text must not be empty")
         if expected_replacements < 1:
             raise ValueError("expected_replacements must be greater than zero")
-        root_index, target, _ = self._resolve(path)
+        _, target, relative, view = self._resolve_access(
+            path, workspace=workspace, owner=owner, permission="write"
+        )
         details = {
-            "root_index": root_index,
-            "path": self._relative(root_index, target),
+            "path": relative,
             "expected_replacements": expected_replacements,
+            **self._workspace_fields(view),
         }
         try:
             if not target.is_file():
                 raise FileNotFoundError("file does not exist")
             if target.stat().st_size > self.max_read_bytes:
                 raise ValueError("read exceeds configured byte limit")
-            raw = target.read_bytes()
-            text = raw.decode("utf-8")
+            text = target.read_bytes().decode("utf-8")
             matches = text.count(old)
             if expected_replacements == 1 and matches > 1:
                 raise ValueError(f"ambiguous replacement: found {matches} matches")
             if matches != expected_replacements:
                 raise ValueError(
-                    "replacement count mismatch: "
-                    f"expected {expected_replacements}, found {matches}"
+                    f"replacement count mismatch: expected {expected_replacements}, found {matches}"
                 )
             updated = text.replace(old, new, expected_replacements)
             payload = updated.encode("utf-8")

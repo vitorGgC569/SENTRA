@@ -79,6 +79,10 @@ def test_real_stdio_client_filesystem_process_oma_resources_and_cleanup(tmp_path
             str(tmp_path),
             "--audit-log",
             str(audit),
+            "--surface",
+            "all",
+            "--process-mode",
+            "unrestricted",
         ],
         cwd=PROJECT_ROOT,
     )
