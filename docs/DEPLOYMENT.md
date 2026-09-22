@@ -96,3 +96,11 @@ must call `sentra_session_open` once per conversation and pass the returned
 signed `session_token` to process/search/browser/sandbox/job/research calls.
 The token is bound to the authenticated OAuth subject when OAuth is enabled,
 has an expiry, survives HTTP reconnects, and must not be logged or committed.
+
+## 10. Private local MCP through OpenAI Secure MCP Tunnel
+
+When SENTRA runs on a developer machine or private network, do not expose the local authless MCP listener publicly. Keep it on loopback and use OpenAI Secure MCP Tunnel for outbound-only connectivity.
+
+The end-to-end setup, including Platform roles, Restricted Runtime API key, tunnel/workspace association, Windows DPAPI storage, `doctor`, `/healthz`, `/readyz`, ChatGPT connection and smoke test, is documented in `docs/SECURE_MCP_TUNNEL.md`.
+
+Local tunnel profiles, Runtime API keys, DPAPI blobs, downloaded tunnel-client binaries and generated logs belong under `.sentra/` and must remain outside Git.

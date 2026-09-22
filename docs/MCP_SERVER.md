@@ -245,7 +245,9 @@ Documentação OpenAI atual: https://developers.openai.com/docs/extend/mcp
 
 O ChatGPT Web não conecta diretamente a um processo MCP local. Para um servidor local/privado, use o Secure MCP Tunnel da OpenAI; para um servidor público, use um endpoint MCP remoto protegido.
 
-Não exponha o modo HTTP authless do SENTRA diretamente na internet.
+O passo a passo público para criar o túnel e a Runtime API key na OpenAI Platform, armazenar o segredo localmente com DPAPI, associar o workspace, executar `doctor`, validar `/healthz`/`/readyz` e fazer o primeiro smoke está em `docs/SECURE_MCP_TUNNEL.md`.
+
+Não exponha o modo HTTP authless do SENTRA diretamente na internet e nunca versione a API key, o perfil local do tunnel-client ou arquivos DPAPI.
 
 Referências:
 - https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt

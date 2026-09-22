@@ -231,8 +231,9 @@ persistentes entre conversas. O default de processo é `workspace` em Docker e
 falha fechado se o isolamento não estiver disponível. O MCP não expõe promoção
 automática: `CANDIDATE_READY != APPLIED`.
 
-Guia completo: `docs/MCP_SERVER.md` · auditoria comparativa:
-`docs/MCP_AUDIT.md`.
+Guia completo: `docs/MCP_SERVER.md` · configuração do **Secure MCP Tunnel**
+e da Runtime API key sem expor credenciais: `docs/SECURE_MCP_TUNNEL.md` · auditoria
+comparativa: `docs/MCP_AUDIT.md`.
 
 ### SENTRA Commander v1
 
