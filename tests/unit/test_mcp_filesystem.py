@@ -299,7 +299,11 @@ def test_filesystem_schema_exposes_enums_units_and_delete(tmp_path: Path) -> Non
         runtime = SentraMCPServer(MCPConfig(allowed_roots=(tmp_path,), audit_log=tmp_path / "audit.jsonl"))
         async with Client(runtime.mcp) as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+            assert "sentra_session_open" in tools
             assert "sentra_delete_path" in tools
+            read_props = tools["sentra_read_file"].input_schema["properties"]
+            assert "session_token" in read_props
+            assert "workspace" in read_props
             write_mode = tools["sentra_write_file"].input_schema["properties"]["mode"]
             assert set(write_mode["enum"]) == {"rewrite", "append"}
             search_type = tools["sentra_search"].input_schema["properties"]["search_type"]

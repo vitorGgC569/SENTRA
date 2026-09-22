@@ -335,6 +335,7 @@ def test_mcp_process_owner_is_automatic_and_schema_documents_bytes(tmp_path: Pat
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
             start_schema = tools["sentra_start_process"].input_schema
             assert "owner" in start_schema["properties"]
+            assert "session_token" in start_schema["properties"]
             assert "owner" not in start_schema.get("required", [])
             read_schema = tools["sentra_read_process_output"].input_schema["properties"]
             assert "byte" in read_schema["offset"]["description"].lower()

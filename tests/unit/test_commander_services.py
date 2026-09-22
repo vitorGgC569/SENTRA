@@ -292,7 +292,10 @@ def test_default_surface_is_core_developer_browser_and_browser_owner_is_optional
             assert len(tools) < 75
             schema = tools["sentra_browser_open"].input_schema
             assert "owner" in schema["properties"]
+            assert "session_token" in schema["properties"]
             assert "owner" not in schema.get("required", [])
+            assert "session_token" in tools["sentra_browser_tabs"].input_schema["properties"]
+            assert "session_token" in tools["sentra_create_sandbox"].input_schema["properties"]
             backend = schema["properties"]["backend"]
             assert set(backend["enum"]) == {"auto", "playwright", "edge"}
             shot = tools["sentra_browser_screenshot"].input_schema["properties"]
