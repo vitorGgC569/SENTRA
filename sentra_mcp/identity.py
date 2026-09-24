@@ -15,6 +15,8 @@ from typing import Any
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.mcpserver.context import Context
 
+from .errors import SentraSemanticError
+
 _OWNER_RE = re.compile(r"^[A-Za-z0-9_.:@/-]{1,120}$")
 _SESSION_TOKEN_RE = re.compile(r"^st1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)$")
 _SESSION_SECRET_PATH = Path(
@@ -291,9 +293,13 @@ def resolve_owner(
     if session_token:
         base = verify_conversation_session(ctx, session_token)
     elif require_session and _is_modern_stateless_http(ctx):
-        raise PermissionError(
+        raise SentraSemanticError(
+            "SESSION_REQUIRED",
             "conversation session required on MCP 2026-07-28 HTTP; "
-            "call sentra_session_open once in this conversation and pass session_token"
+            "call sentra_session_open once in this conversation and pass session_token",
+            category="session",
+            retryable=False,
+            details={"required_action": "sentra_session_open"},
         )
     else:
         base, _ = request_identity(ctx)

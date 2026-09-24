@@ -33,9 +33,26 @@ class RelayState(JobStore):
             return {"version": None}
         try:
             manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-            files = {name: {"sha": hashlib.sha256((root/name).read_bytes()).hexdigest()[:12]}
-                     for name in ("service-worker.js", "content-script.js", "selectors.js", "observer.js")}
-            return {"version": manifest["version"], "files": files}
+            files = {
+                name: {
+                    "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()
+                }
+                for name in (
+                    "service-worker.js",
+                    "content-script.js",
+                    "selectors.js",
+                    "observer.js",
+                )
+            }
+            source_hash = hashlib.sha256(
+                json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            return {
+                "version": manifest["version"],
+                "build_id": manifest.get("sentra_build_id"),
+                "source_hash": source_hash,
+                "files": files,
+            }
         except (OSError, ValueError):
             return {"version": None, "error": "extension manifest unavailable"}
 
@@ -194,7 +211,12 @@ def make_handler(state, token):
                     state.release_worker(worker)
                     return self._send({"ok": True, "released": True})
                 if self.path == "/jobs/submit":
-                    allowed = {"task_id", "prompt", "timeout_s", "new_chat", "conversation_url", "kind", "images", "target_worker", "browser_action", "browser_args"}
+                    allowed = {
+                        "task_id", "prompt", "timeout_s", "new_chat",
+                        "conversation_url", "kind", "images", "target_worker",
+                        "browser_action", "browser_args", "project_id",
+                        "project_url", "chat_title",
+                    }
                     if set(data) - allowed:
                         raise ValueError("unknown job fields")
                     return self._send({"job_id": state.submit(ChatJob(**data))})

@@ -14,7 +14,7 @@ class PathAccessError(PermissionError):
 EXCLUDED_DIRS = frozenset({
     ".git", ".venv", "venv", "__pycache__", ".pytest_cache", "node_modules",
     "auxiliares", "runs", "browser_profiles", ".edge-profile", ".ssh", ".aws",
-    ".azure", ".gnupg", ".codex", ".claude", ".docker", ".oma",
+    ".azure", ".gnupg", ".codex", ".claude", ".docker", ".oma", ".sentra",
 })
 SECRET_NAMES = frozenset({"auth.json", "credentials.json", "credentials", "cookies.json",
                           "storage_state.json", "id_rsa", "id_ed25519", ".netrc"})

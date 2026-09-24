@@ -20,6 +20,7 @@ from browser.session import BrowserSession
 
 from ..audit import AuditLogger
 from ..config import MCPConfig
+from ..errors import SentraSemanticError
 
 
 class BrowserControlService:
@@ -511,6 +512,13 @@ class BrowserControlService:
             timeout=3.0,
         )
 
+    def _edge_expected_identity_sync(self) -> dict[str, Any]:
+        return self._relay_request_sync(
+            "/extension/version",
+            authenticated=False,
+            timeout=3.0,
+        )
+
     async def _edge_worker_status(self, worker: str) -> dict[str, Any]:
         """Classify a relay worker from heartbeat-cached tab status."""
         try:
@@ -541,7 +549,76 @@ class BrowserControlService:
         status = cached.get("status")
         if not isinstance(status, dict):
             status = {}
+        try:
+            expected = await asyncio.to_thread(self._edge_expected_identity_sync)
+        except Exception as exc:
+            expected = {"error": str(exc)[:500]}
+
+        expected_version = expected.get("version")
+        expected_build = expected.get("build_id")
+        expected_source_hash = expected.get("source_hash")
+        actual_versions = {
+            "sw_version": status.get("sw_version"),
+            "cs_version": status.get("cs_version"),
+            "sw_build_id": status.get("sw_build_id"),
+            "cs_build_id": status.get("cs_build_id"),
+            "sw_source_hash": status.get("sw_source_hash"),
+            "cs_source_hash": status.get("cs_source_hash"),
+        }
+        # Heartbeats from legacy/unit-test workers may omit identity entirely.
+        # Classify their UI readiness independently here; contract enforcement is
+        # performed by capability_manifest/open before any side effect.
+        identity_present = any(value is not None for value in actual_versions.values())
+        stale_reasons: list[str] = []
+        if identity_present and expected_version:
+            if actual_versions["sw_version"] != expected_version:
+                stale_reasons.append("service-worker version")
+            if actual_versions["cs_version"] != expected_version:
+                stale_reasons.append("content-script version")
+        if identity_present and expected_build:
+            if actual_versions["sw_build_id"] != expected_build:
+                stale_reasons.append("service-worker build")
+            if actual_versions["cs_build_id"] != expected_build:
+                stale_reasons.append("content-script build")
+        if identity_present and expected_source_hash:
+            if actual_versions["sw_source_hash"] != expected_source_hash:
+                stale_reasons.append("service-worker source hash")
+            if actual_versions["cs_source_hash"] != expected_source_hash:
+                stale_reasons.append("content-script source hash")
+        if stale_reasons:
+            return {
+                "worker": worker,
+                "worker_state": "STALE",
+                "usable": False,
+                "url": status.get("url"),
+                "status": status,
+                "last_seen": cached.get("last_seen"),
+                "error_code": "PLUGIN_STALE",
+                "error": "PLUGIN_STALE: " + ", ".join(stale_reasons),
+                "plugin_identity": {
+                    "expected": expected,
+                    "actual": actual_versions,
+                    "verified": False,
+                },
+            }
+
         url = status.get("url")
+        if isinstance(url, str) and url and not self._is_chatgpt_url(url):
+            return {
+                "worker": worker,
+                "worker_state": "CONNECTED",
+                "usable": False,
+                "url": url,
+                "status": status,
+                "last_seen": cached.get("last_seen"),
+                "error_code": "SESSION_WRONG_PLACE",
+                "error": "SESSION_WRONG_PLACE: controller is not on chatgpt.com",
+                "plugin_identity": {
+                    "expected": expected,
+                    "actual": actual_versions,
+                    "verified": True,
+                },
+            }
         diagnostics = status.get("diagnostics") or {}
         composer = diagnostics.get("composer") if isinstance(diagnostics, dict) else None
         composer_found = bool(
@@ -569,6 +646,25 @@ class BrowserControlService:
             "url": url,
             "status": status,
             "last_seen": cached.get("last_seen"),
+            "plugin_identity": {
+                "expected": expected,
+                "actual": actual_versions,
+                "verified": bool(
+                    identity_present
+                    and (not expected_version or actual_versions["sw_version"] == expected_version)
+                    and (not expected_version or actual_versions["cs_version"] == expected_version)
+                    and (not expected_build or actual_versions["sw_build_id"] == expected_build)
+                    and (not expected_build or actual_versions["cs_build_id"] == expected_build)
+                    and (
+                        not expected_source_hash
+                        or actual_versions["sw_source_hash"] == expected_source_hash
+                    )
+                    and (
+                        not expected_source_hash
+                        or actual_versions["cs_source_hash"] == expected_source_hash
+                    )
+                ),
+            },
             **(
                 {"error": str(status.get("error"))[:500]}
                 if unhealthy
@@ -584,6 +680,85 @@ class BrowserControlService:
             *(self._edge_worker_status(worker) for worker in workers)
         ))
 
+    async def capability_manifest(self) -> dict[str, Any]:
+        """Negotiated target/plugin capabilities and mandatory build identity."""
+        try:
+            expected = await asyncio.to_thread(self._edge_expected_identity_sync)
+        except Exception as exc:
+            expected = {"error": str(exc)[:500]}
+        health = await self._edge_health()
+        inventory = await self._edge_worker_inventory()
+        pool = health.get("pool") if isinstance(health, dict) else {}
+        pool = pool if isinstance(pool, dict) else {}
+        stale = [item for item in inventory if item.get("error_code") == "PLUGIN_STALE"]
+        wrong_place = [
+            item for item in inventory
+            if item.get("error_code") == "SESSION_WRONG_PLACE"
+        ]
+        verified = [
+            item for item in inventory
+            if (item.get("plugin_identity") or {}).get("verified") is True
+        ]
+        identity_required = bool(
+            expected.get("version")
+            or expected.get("build_id")
+            or expected.get("source_hash")
+        )
+        unverified_online = [
+            item for item in inventory
+            if identity_required
+            and item.get("worker_state") in {"READY", "CONNECTED"}
+            and (item.get("plugin_identity") or {}).get("verified") is not True
+        ]
+        compatibility_error = None
+        compatibility_message = None
+        if stale:
+            compatibility_error = "PLUGIN_STALE"
+            compatibility_message = str(stale[0].get("error") or "loaded plugin build is stale")
+        elif unverified_online:
+            compatibility_error = "PLUGIN_STALE"
+            compatibility_message = (
+                "PLUGIN_STALE: loaded Edge worker did not publish the required build identity"
+            )
+        elif wrong_place:
+            compatibility_error = "SESSION_WRONG_PLACE"
+            compatibility_message = str(
+                wrong_place[0].get("error") or "controller is on the wrong target"
+            )
+        available = bool(pool.get("active") or inventory) and compatibility_error is None
+        return {
+            "target": "edge",
+            "available": available,
+            "readiness": (
+                "SESSION_READY"
+                if any(item.get("worker_state") == "READY" for item in inventory)
+                else "PLUGIN_HANDSHAKE"
+                if verified
+                else "TRANSPORT_CONNECTED"
+                if pool.get("active")
+                else "UNKNOWN"
+            ),
+            "expected_plugin_identity": expected,
+            "plugin_identity_verified": bool(verified),
+            "workers": inventory,
+            "pool": pool,
+            "capabilities": {
+                "navigate": True,
+                "extract": True,
+                "click": True,
+                "type": True,
+                "screenshot": "viewport",
+                "chat_start": True,
+                "chat_collect": True,
+                "delete_chat": True,
+                "max_controller_tabs": 1,
+                "principal_edge_only": True,
+                "silent_invasive_fallback": False,
+            },
+            "compatibility_error": compatibility_error,
+            "compatibility_message": compatibility_message,
+        }
+
     async def open(
         self,
         owner: str,
@@ -592,6 +767,7 @@ class BrowserControlService:
         backend: str = "auto",
         headless: bool = False,
         cdp_url: str | None = None,
+        allow_invasive_fallback: bool = False,
     ) -> dict[str, Any]:
         if not owner.strip():
             raise ValueError("owner is required")
@@ -601,6 +777,62 @@ class BrowserControlService:
 
         if backend in {"auto", "edge"} and self._is_chatgpt_url(url):
             inventory = await self._edge_worker_inventory()
+
+            # A browser session can outlive its connector owner when the client
+            # disconnects after browser_open. If the relay no longer considers
+            # that TAB-* worker online, the reservation is orphaned and must not
+            # block the next lazy-controller bootstrap.
+            online_workers = {
+                item.get("worker")
+                for item in inventory
+                if isinstance(item.get("worker"), str)
+            }
+            for stale_session_id, stale_session in list(self.edge_sessions.items()):
+                if stale_session.get("worker") in online_workers:
+                    continue
+                self.edge_sessions.pop(stale_session_id, None)
+                self.audit.emit(
+                    "browser.session.reclaim",
+                    "ok",
+                    {
+                        "session_id": stale_session_id,
+                        "reason": "worker_offline",
+                    },
+                )
+
+            expected_identity = {}
+            try:
+                expected_identity = await asyncio.to_thread(
+                    self._edge_expected_identity_sync
+                )
+            except Exception:
+                expected_identity = {}
+            identity_required = bool(
+                expected_identity.get("version")
+                or expected_identity.get("build_id")
+                or expected_identity.get("source_hash")
+            )
+            unverified_worker = next(
+                (
+                    item for item in inventory
+                    if identity_required
+                    and item.get("worker_state") in {"READY", "CONNECTED"}
+                    and (item.get("plugin_identity") or {}).get("verified") is not True
+                ),
+                None,
+            )
+            if unverified_worker is not None:
+                raise SentraSemanticError(
+                    "PLUGIN_STALE",
+                    "principal Edge plugin did not publish the required SENTRA build identity",
+                    category="compatibility",
+                    retryable=True,
+                    details={
+                        "worker": unverified_worker.get("worker"),
+                        "expected": expected_identity,
+                        "actual": (unverified_worker.get("plugin_identity") or {}).get("actual"),
+                    },
+                )
             reserved = {item["worker"] for item in self.edge_sessions.values()}
             available = [
                 item["worker"]
@@ -683,16 +915,51 @@ class BrowserControlService:
             # that would lose the user's authenticated principal-browser session
             # and can silently land on a different/free account. For ChatGPT,
             # both "auto" and "edge" are principal-Edge-only.
+            plugin_stale = next(
+                (item for item in inventory if item.get("error_code") == "PLUGIN_STALE"),
+                None,
+            )
+            wrong_place = next(
+                (item for item in inventory if item.get("error_code") == "SESSION_WRONG_PLACE"),
+                None,
+            )
+            if plugin_stale is not None:
+                raise SentraSemanticError(
+                    "PLUGIN_STALE",
+                    "principal Edge plugin build does not match the SENTRA relay build",
+                    category="compatibility",
+                    retryable=True,
+                    details={
+                        "worker": plugin_stale.get("worker"),
+                        "identity": plugin_stale.get("plugin_identity"),
+                    },
+                )
+            if wrong_place is not None:
+                raise SentraSemanticError(
+                    "SESSION_WRONG_PLACE",
+                    "principal Edge controller is on the wrong target",
+                    category="readiness",
+                    retryable=True,
+                    details={"worker": wrong_place.get("worker"), "url": wrong_place.get("url")},
+                )
             states = {item["worker"]: item["worker_state"] for item in inventory}
             detail = (
                 f"; bootstrap_error={str(bootstrap_error)[:300]}"
                 if bootstrap_error is not None
                 else ""
             )
-            raise RuntimeError(
-                "principal Edge bridge is required for chatgpt.com; "
-                "SENTRA will not launch or fall back to a separate browser profile; "
-                f"worker_states={states}{detail}"
+            raise SentraSemanticError(
+                "CAPABILITY_MISSING",
+                "principal Edge bridge is required for chatgpt.com but is not ready",
+                category="readiness",
+                retryable=True,
+                details={
+                    "required": "principal-edge-controller",
+                    "worker_states": states,
+                    "bootstrap_error": str(bootstrap_error)[:300]
+                    if bootstrap_error is not None else None,
+                    "fallback_policy": "fail_closed",
+                },
             )
         elif backend == "edge":
             raise ValueError("Edge backend is restricted to https://chatgpt.com; use Playwright for other sites")
@@ -709,13 +976,16 @@ class BrowserControlService:
                 raise PermissionError("CDP attachment is restricted to loopback")
 
         session_id = "playwright:" + str(uuid.uuid4())
-        session = self.session_factory(
-            role=f"mcp-{session_id[-8:]}",
-            headless=headless,
-            cdp_url=cdp_url,
-            target_url="about:blank",
-            storage_state_path=None,
-        )
+        session_kwargs: dict[str, Any] = {
+            "role": f"mcp-{session_id[-8:]}",
+            "headless": headless,
+            "cdp_url": cdp_url,
+            "target_url": "about:blank",
+            "storage_state_path": None,
+        }
+        if allow_invasive_fallback:
+            session_kwargs["allow_invasive_fallback"] = True
+        session = self.session_factory(**session_kwargs)
         await session.initialize("about:blank")
         if not session.is_live:
             await session.close()
@@ -775,7 +1045,7 @@ class BrowserControlService:
                 "usable": worker_info["usable"],
                 "reserved": sid_item is not None,
                 "reserved_by_caller": reserved_by_caller,
-                "capabilities": ["navigate", "extract", "click", "type"],
+                "capabilities": ["navigate", "extract", "click", "type", "screenshot"],
                 "status": worker_info.get("status") or {},
                 **({"error": worker_info["error"]} if worker_info.get("error") else {}),
             })
@@ -797,6 +1067,14 @@ class BrowserControlService:
             bridge_state = "DISCONNECTED"
         return {
             "tabs": result,
+            "items": result,
+            "page": {
+                "offset": 0,
+                "limit": len(result),
+                "returned": len(result),
+                "total": len(result),
+                "next_offset": None,
+            },
             "edge_bridge": {
                 "state": bridge_state,
                 "lazy_controller": True,
@@ -891,11 +1169,55 @@ class BrowserControlService:
         include_base64: bool = False,
     ) -> dict[str, Any]:
         if session_id.startswith("edge:"):
-            self._owned_edge(session_id, owner)
-            raise RuntimeError(
-                "Edge relay screenshot is intentionally unsupported without invasive browser permissions; "
-                "open the page with backend='playwright' for screenshots"
+            item = self._owned_edge(session_id, owner)
+            if full_page:
+                raise ValueError(
+                    "principal Edge supports viewport screenshots only; pass full_page=false"
+                )
+            result = await self._edge_action(
+                item["worker"],
+                "screenshot",
+                {"full_page": False},
+                timeout_s=30,
             )
+            encoded = result.get("image_base64")
+            if not isinstance(encoded, str) or not encoded:
+                raise RuntimeError("principal Edge screenshot returned no image bytes")
+            try:
+                payload = base64.b64decode(encoded, validate=True)
+            except Exception as exc:
+                raise RuntimeError("principal Edge screenshot returned invalid base64") from exc
+            mime_type = str(result.get("mime_type") or "image/jpeg")
+            suffixes = {
+                "image/jpeg": ".jpg",
+                "image/png": ".png",
+            }
+            suffix = suffixes.get(mime_type)
+            if suffix is None:
+                raise RuntimeError("principal Edge screenshot returned unsupported image type")
+            saved = self._write_screenshot_bytes(
+                session_id,
+                payload,
+                suffix,
+                mime_type,
+                str(result.get("url") or "https://chatgpt.com/"),
+                include_base64=include_base64,
+                full_page=False,
+                backend="edge",
+            )
+            saved["session_id"] = session_id
+            self.audit.emit(
+                "browser.screenshot",
+                "ok",
+                {
+                    "session_id": session_id,
+                    "owner": owner,
+                    "bytes": len(payload),
+                    "backend": "edge",
+                    "full_page": False,
+                },
+            )
+            return saved
 
         item = self._owned_playwright(session_id, owner)
         page = item["session"].page
@@ -912,6 +1234,7 @@ class BrowserControlService:
             full_page=bool(full_page),
             backend="playwright",
         )
+        saved["session_id"] = session_id
         self.audit.emit("browser.screenshot", "ok", {"session_id": session_id, "owner": owner, "bytes": len(payload), "backend": "playwright"})
         return saved
 

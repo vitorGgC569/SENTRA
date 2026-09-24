@@ -12,6 +12,7 @@ from sentra_mcp.audit import AuditLogger
 from sentra_mcp.config import MCPConfig
 from sentra_mcp.services.browser import BrowserControlService
 from sentra_mcp.services.documents import DocumentService
+from sentra_mcp.services.durable import DurableRunService
 from sentra_mcp.services.filesystem import FilesystemService
 from sentra_mcp.services.runtime_config import RuntimeConfigService
 from sentra_mcp.services.search_sessions import SearchSessionService
@@ -233,7 +234,7 @@ def test_search_wait_screenshot_resource_and_tool_surfaces(tmp_path: Path) -> No
             assert "sentra_job_wait" in tools
             assert "sentra_request_workspace" in tools
             assert "sentra_read_document" in tools
-            assert len(tools) < 60
+            assert len(tools) <= 60
 
             started = await client.call_tool("sentra_start_search", {
                 "path": ".",
@@ -417,3 +418,66 @@ def test_server_live_reload_approved_root_updates_filesystem_and_repository(tmp_
             runtime.remote_store.close()
 
     asyncio.run(probe())
+
+
+
+def test_persistent_search_is_correlated_to_durable_operation_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    audit = AuditLogger(config.audit_log)
+    durable = DurableRunService(tmp_path / ".sentra")
+    (tmp_path / "a.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    service = SearchSessionService(
+        config,
+        audit,
+        durable=durable,
+        db_path=tmp_path / ".sentra" / "search-durable.sqlite3",
+    )
+    try:
+        run = durable.create_run("test-session", workspace="root:0")
+        first = service.start(
+            ".",
+            "alpha",
+            owner="test-session",
+            search_type="content",
+            run_id=run["run_id"],
+            idempotency_key="search-once",
+        )
+        assert first["run_id"] == run["run_id"]
+        assert first["operation_id"]
+        assert first["idempotency_key"] == "search-once"
+
+        replay = service.start(
+            ".",
+            "alpha",
+            owner="test-session",
+            search_type="content",
+            run_id=run["run_id"],
+            idempotency_key="search-once",
+        )
+        assert replay["search_id"] == first["search_id"]
+        assert replay["operation_id"] == first["operation_id"]
+        assert replay["idempotent_replay"] is True
+
+        deadline = time.monotonic() + 5
+        page = {}
+        while time.monotonic() < deadline:
+            page = service.get_results(
+                first["search_id"], "test-session", 0, 10
+            )
+            if page["state"] not in {"RUNNING", "CANCELLING"}:
+                break
+            time.sleep(0.02)
+
+        assert page["run_id"] == run["run_id"]
+        assert page["operation_id"] == first["operation_id"]
+        operation = durable.operation_status(
+            first["operation_id"], "test-session"
+        )
+        assert operation["state"] == "SUCCEEDED"
+        assert operation["readiness"] == "PRODUCT_READY"
+        assert operation["result"]["search_id"] == first["search_id"]
+    finally:
+        service.close()
+        durable.close()

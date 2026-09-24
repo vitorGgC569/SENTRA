@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -71,7 +72,14 @@ def config_from_args(args: argparse.Namespace, base: MCPConfig | None = None) ->
     if args.sandbox_pids is not None:
         overrides["process_sandbox_pids"] = args.sandbox_pids
     if args.allowed_roots is not None:
-        overrides["allowed_roots"] = tuple(Path(value) for value in args.allowed_roots)
+        roots = tuple(Path(value) for value in args.allowed_roots)
+        overrides["allowed_roots"] = roots
+        # A CLI-selected primary workspace is also the natural local state
+        # boundary unless the operator explicitly selected a global state dir.
+        # Without this, workspace approval may be written/read from a different
+        # .sentra tree than the running MCP instance.
+        if roots and "SENTRA_STATE_DIR" not in os.environ:
+            overrides["state_root"] = roots[0] / ".sentra"
     if args.blocked_commands is not None:
         overrides["blocked_commands"] = tuple(args.blocked_commands)
     if args.audit_log is not None:

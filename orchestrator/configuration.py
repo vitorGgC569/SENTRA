@@ -19,6 +19,85 @@ DEFAULT_LAUNCH_FLAGS: List[str] = [
 ]
 
 
+def configure_decisioning(router: ModelRouter, config: Dict[str, Any]) -> ModelRouter:
+    """Attach an optional typed System One decision chain to a router.
+
+    Disabled by default. Providers are tried in order (for example local Kev,
+    then hosted Jev); low-confidence/unavailable answers fail closed to the
+    router's existing deterministic route.
+    """
+    raw = config.get("decisioning", {}) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("decisioning must be a mapping")
+    enabled = raw.get("enabled", False)
+    routing = raw.get("routing", False)
+    retry = raw.get("retry", False)
+    validator_selection = raw.get("validator_selection", False)
+    quality_advisory = raw.get("quality_advisory", False)
+    if any(not isinstance(value, bool) for value in (
+        enabled, routing, retry, validator_selection, quality_advisory
+    )):
+        raise ValueError(
+            "decisioning.enabled/routing/retry/validator_selection/quality_advisory "
+            "must be booleans"
+        )
+    if not enabled:
+        return router
+
+    threshold = raw.get("min_confidence", 0.35)
+    if type(threshold) not in (int, float) or not 0 <= float(threshold) <= 1:
+        raise ValueError("decisioning.min_confidence must be in [0, 1]")
+    specs = raw.get("providers", [])
+    if not isinstance(specs, list) or not 1 <= len(specs) <= 4:
+        raise ValueError("decisioning.providers must contain 1..4 providers")
+
+    from .decisioning import DecisionController, SystemOneHTTPProvider
+
+    providers = []
+    names = set()
+    for index, spec in enumerate(specs):
+        if not isinstance(spec, dict):
+            raise ValueError("decisioning.providers entries must be mappings")
+        kind = str(spec.get("type", "systemone")).strip().lower()
+        if kind != "systemone":
+            raise ValueError("decisioning provider type must be systemone")
+        name = str(spec.get("name") or f"systemone-{index + 1}").strip()
+        if not name or name in names:
+            raise ValueError("decisioning provider names must be non-empty and unique")
+        names.add(name)
+        base_url = spec.get("base_url")
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ValueError("decisioning provider base_url is required")
+        model = spec.get("model", "kev-latest")
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("decisioning provider model must be a non-empty string")
+        timeout_s = spec.get("timeout_s", 5.0)
+        if type(timeout_s) not in (int, float) or not 0 < float(timeout_s) <= 120:
+            raise ValueError("decisioning provider timeout_s must be in (0, 120]")
+        key_env = spec.get("api_key_env")
+        if key_env is not None and (not isinstance(key_env, str) or not key_env.strip()):
+            raise ValueError("decisioning provider api_key_env must be a non-empty string")
+        api_key = os.environ.get(key_env.strip()) if isinstance(key_env, str) else None
+        providers.append(SystemOneHTTPProvider(
+            base_url,
+            model=model,
+            api_key=api_key,
+            timeout_s=float(timeout_s),
+            name=name,
+        ))
+
+    router.decision_controller = DecisionController(
+        providers,
+        min_confidence=float(threshold),
+    )
+    router.decision_routing_enabled = routing
+    router.decision_retry_enabled = retry
+    router.decision_validator_selection_enabled = validator_selection
+    router.decision_quality_advisory_enabled = quality_advisory
+    router.decision_min_confidence = float(threshold)
+    return router
+
+
 def browser_bot_settings(browser_cfg: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """Validate ``browser.bot_profile_dir / launch_flags / bot_headless``.
 
@@ -67,6 +146,49 @@ def browser_bot_settings(browser_cfg: Dict[str, Any] | None = None) -> Dict[str,
     return {"bot_profile_dir": profile, "launch_flags": cleaned, "bot_headless": bot_headless}
 
 
+
+def resolve_codex_web_model(cfg: Dict[str, Any]) -> str | None:
+    """Resolve the SENTRA Web-model default without mutating project config.
+
+    Precedence is explicit config, process override, then the per-user Desktop
+    preference stored in the SENTRA state directory.
+    """
+    explicit = cfg.get("model_name")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+    if explicit not in (None, ""):
+        return explicit
+
+    environment = os.environ.get("SENTRA_CODEX_WEB_MODEL", "").strip()
+    if environment:
+        return environment
+
+    from sentra_remote.product import ProductPaths, ProductSettings
+
+    saved = ProductSettings.load(ProductPaths.default().settings).web_model_name.strip()
+    return saved or None
+
+
+
+def resolve_gateway_admin_token(cfg: Dict[str, Any]) -> str:
+    """Resolve the private loopback Gateway admin credential.
+
+    Explicit environment configuration wins. Otherwise OMA and Desktop share
+    the same private token file under the SENTRA state directory.
+    """
+    env_name = str(cfg.get("gateway_admin_token_env") or "SENTRA_GATEWAY_ADMIN_TOKEN").strip()
+    if not env_name or any(ch in env_name for ch in ("\n", "\r", "\x00")):
+        raise ValueError("codex_web.gateway_admin_token_env must be a valid environment variable name")
+    explicit = os.environ.get(env_name, "").strip()
+    if explicit:
+        return explicit
+
+    from sentra_model_gateway.gateway import load_or_create_gateway_admin_token
+    from sentra_remote.product import ProductPaths
+
+    return load_or_create_gateway_admin_token(ProductPaths.default().state_dir)
+
+
 def build_router(config, *, worker=None, reviewer=None, mock=False, root=None):
     oma = config.get("oma", {})
     routing = config.get("routing", {})
@@ -83,8 +205,10 @@ def build_router(config, *, worker=None, reviewer=None, mock=False, root=None):
         browser_bot_settings(config.get("browser", {}) or {})
     providers = {}
     for name in selected:
-        if name not in {"local", "extension", "openai", "browser"}:
-            raise ValueError(f"unknown provider '{name}'; choose local, extension, openai or browser")
+        if name not in {"local", "extension", "openai", "browser", "codex_web"}:
+            raise ValueError(
+                f"unknown provider '{name}'; choose local, extension, openai, browser or codex_web"
+            )
         if mock:
             from .providers.mock_provider import MockProvider
             providers[name] = MockProvider(model_name="scripted-demo-" + name)
@@ -121,6 +245,21 @@ def build_router(config, *, worker=None, reviewer=None, mock=False, root=None):
             from .providers.openai_provider import OpenAIProvider
             providers[name] = OpenAIProvider(routing.get("openai_model"),
                 os.environ.get(routing.get("openai_key_env", "OPENAI_API_KEY")))
+        elif name == "codex_web":
+            from .providers.codex_web_provider import CodexChatGPTWebProvider
+            cfg = config.get("codex_web", {}) or {}
+            if not isinstance(cfg, dict):
+                raise ValueError("codex_web must be a mapping")
+            providers[name] = CodexChatGPTWebProvider(
+                base_url=cfg.get("base_url", "http://127.0.0.1:17842/v1"),
+                model_name=resolve_codex_web_model(cfg),
+                api_key=os.environ.get(
+                    cfg.get("api_key_env", "SENTRA_CODEX_WEB_API_KEY"),
+                    cfg.get("api_key", "sentra-local"),
+                ),
+                gateway_admin_token=resolve_gateway_admin_token(cfg),
+                require_web_namespace=cfg.get("require_web_namespace", True),
+            )
         elif name == "local":
             from .providers.local_provider import LocalModelProvider
             cfg = config.get("local_model", {})
@@ -144,7 +283,7 @@ def build_router(config, *, worker=None, reviewer=None, mock=False, root=None):
         raise ValueError("oma.max_inflight_requests must be 1..8")
     if not 5 <= router.request_timeout <= 900 or not 1 <= router.max_output_tokens <= 16000:
         raise ValueError("invalid provider timeout or output-token limit")
-    return router
+    return configure_decisioning(router, config)
 
 
 def _release_score(oma) -> float:
@@ -182,6 +321,13 @@ def engine_options(config, max_rounds=None, workers=None):
     max_seats = oma.get("max_seats", 8)
     if type(max_seats) is not int or not 1 <= max_seats <= 8:
         raise ValueError("oma.max_seats must be an int 1..8 (chat-creation cap; 5 = master+executor+3 validators)")
+    chat_project = oma.get("chat_project")
+    if chat_project is not None and (
+        not isinstance(chat_project, str)
+        or not chat_project.strip()
+        or len(chat_project) > 2048
+    ):
+        raise ValueError("oma.chat_project must be a non-empty project id or ChatGPT project URL")
     transient_max_retries = oma.get("transient_max_retries", 3)
     if type(transient_max_retries) is not int or not 0 <= transient_max_retries <= 10:
         raise ValueError("oma.transient_max_retries must be an int 0..10 (transient delivery retries before isolated failure)")
@@ -215,6 +361,7 @@ def engine_options(config, max_rounds=None, workers=None):
         "fixed_conversations": bool(oma.get("fixed_conversations", False)),
         "inter_call_delay_s": float(delay),
         "max_seats": max_seats,
+        "chat_project": chat_project.strip() if isinstance(chat_project, str) else None,
         "transient_max_retries": transient_max_retries,
         "transient_backoff_base_s": float(transient_backoff),
     }
@@ -226,6 +373,10 @@ async def close_router(router):
         if id(provider) in seen:
             continue
         seen.add(id(provider))
+        close = getattr(provider, "close", None)
+        if callable(close):
+            await close()
+            continue
         client = getattr(provider, "client", None)
         if client is not None:
             await client.close()

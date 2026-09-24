@@ -94,7 +94,17 @@ class Orchestrator:
 
     async def dispatch(self) -> None:
         self.state.log("Phase DISPATCH: Sending prompts to web browser sessions...")
-        active_tasks = self.state.pending_tasks[: self.spec.max_parallel_sessions]
+        resource_manifest = (
+            self.browser_pool.resource_manifest()
+            if hasattr(self.browser_pool, "resource_manifest")
+            else {"max_concurrency": self.spec.max_parallel_sessions, "resources": []}
+        )
+        browser_capacity = max(1, int(resource_manifest.get("max_concurrency") or 1))
+        dispatch_limit = min(self.spec.max_parallel_sessions, browser_capacity)
+        active_tasks = self.state.pending_tasks[:dispatch_limit]
+        self.state.log(
+            f"Browser runtime capacity: {browser_capacity}; dispatch limit: {dispatch_limit}"
+        )
         if not active_tasks:
             # Fallback if no subtasks defined
             active_tasks = [

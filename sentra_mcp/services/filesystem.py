@@ -221,6 +221,14 @@ class FilesystemService:
             "path": relative,
             "depth": depth,
             "entries": entries,
+            "items": entries,
+            "page": {
+                "offset": 0,
+                "limit": len(entries),
+                "returned": len(entries),
+                "total": len(entries),
+                "next_offset": None,
+            },
             **self._workspace_fields(view),
         }
 
@@ -265,7 +273,17 @@ class FilesystemService:
                 })
             except Exception as exc:
                 results.append({"ok": False, "path": path, "error": sanitize_error(exc)})
-        return {"results": results}
+        return {
+            "results": results,
+            "items": results,
+            "page": {
+                "offset": 0,
+                "limit": len(results),
+                "returned": len(results),
+                "total": len(results),
+                "next_offset": None,
+            },
+        }
 
     def file_info(
         self,
@@ -360,6 +378,14 @@ class FilesystemService:
                     if len(results) >= max_results:
                         return {
                             "results": results,
+                            "items": results,
+                            "page": {
+                                "offset": 0,
+                                "limit": max_results,
+                                "returned": len(results),
+                                "total": len(results),
+                                "next_offset": None,
+                            },
                             "max_results": max_results,
                             **self._workspace_fields(view),
                         }
@@ -367,6 +393,14 @@ class FilesystemService:
                 break
         return {
             "results": results,
+            "items": results,
+            "page": {
+                "offset": 0,
+                "limit": max_results,
+                "returned": len(results),
+                "total": len(results),
+                "next_offset": None,
+            },
             "max_results": max_results,
             **self._workspace_fields(view),
         }

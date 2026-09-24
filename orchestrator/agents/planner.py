@@ -34,7 +34,11 @@ JSON Schema:
       "risk": "LOW",
       "required_capabilities": ["python"],
       "validation_strategy": "standard",
-      "target_files": []
+      "target_files": [],
+      "side_effect_scope": "ISOLATED",
+      "resource_locks": [],
+      "timeout_s": 900,
+      "heartbeat_timeout_s": 120
     }
   ]
 }
@@ -150,6 +154,10 @@ REPOSITORY CONTEXT:
                 required_capabilities=d.get("required_capabilities", []),
                 validation_strategy=d.get("validation_strategy", "standard"),
                 target_files=d.get("target_files", []),
+                side_effect_scope=str(d.get("side_effect_scope", "ISOLATED")).upper(),
+                resource_locks=d.get("resource_locks", []),
+                timeout_s=float(d.get("timeout_s", 900)),
+                heartbeat_timeout_s=float(d.get("heartbeat_timeout_s", 120)),
             )
             tasks.append(t)
 
@@ -160,6 +168,17 @@ REPOSITORY CONTEXT:
         for task in tasks:
             if not isinstance(task.dependencies, list) or any(d not in by_id for d in task.dependencies):
                 raise ValueError("unknown dependency in planner DAG")
+            if task.side_effect_scope not in {"READ_ONLY", "ISOLATED", "WORKSPACE_WRITE", "EXTERNAL", "EXCLUSIVE"}:
+                raise ValueError("invalid side_effect_scope in planner DAG")
+            if not isinstance(task.resource_locks, list) or any(
+                not isinstance(lock, str) or not lock.strip() or len(lock) > 240
+                for lock in task.resource_locks
+            ):
+                raise ValueError("invalid resource_locks in planner DAG")
+            if not 1 <= task.timeout_s <= 86400:
+                raise ValueError("task timeout_s must be 1..86400")
+            if not 1 <= task.heartbeat_timeout_s <= task.timeout_s:
+                raise ValueError("heartbeat_timeout_s must be 1..timeout_s")
         while len(done) < len(tasks):
             ready = {t.id for t in tasks if set(t.dependencies) <= done} - done
             if not ready:

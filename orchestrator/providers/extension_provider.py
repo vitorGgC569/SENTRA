@@ -117,9 +117,16 @@ class BrowserExtensionProvider:
                                  metadata={"delivery_state": "NOT_SENT", "retry_safe": False})
         try:
             res = await self.transport.submit_chat(
-                task_id=task_id, prompt=prompt, timeout_s=timeout,
-                new_chat=new_chat, conversation_url=conversation_url if not new_chat else None,
-                images=images or None)
+                task_id=task_id,
+                prompt=prompt,
+                timeout_s=timeout,
+                new_chat=new_chat,
+                conversation_url=conversation_url if not new_chat else None,
+                images=images or None,
+                project_id=request.metadata.get("project_id"),
+                project_url=request.metadata.get("project_url"),
+                chat_title=request.metadata.get("chat_title"),
+            )
         except asyncio.CancelledError:
             raise  # RF-017: nunca engolir cancelamento
         except (TimeoutError, asyncio.TimeoutError) as e:
@@ -142,7 +149,11 @@ class BrowserExtensionProvider:
                         timeout_s=timeout,
                         new_chat=new_chat,
                         conversation_url=conversation_url if not new_chat else None,
-                        images=None)
+                        images=None,
+                        project_id=request.metadata.get("project_id"),
+                        project_url=request.metadata.get("project_url"),
+                        chat_title=request.metadata.get("chat_title"),
+                    )
                 except Exception:
                     pass
         if "IMAGE_PASTE_FAILED" in str(res.get("error") or ""):
@@ -178,6 +189,10 @@ class BrowserExtensionProvider:
             "worker": res.get("worker", ""),
             "delivery_state": "CONFIRMED",
             "images_attached": int(res.get("images_attached", 0) or 0),
+            "project_id": res.get("project_id") or request.metadata.get("project_id"),
+            "project_url": res.get("project_url") or request.metadata.get("project_url"),
+            "chat_title": res.get("chat_title") or request.metadata.get("chat_title"),
+            "title_updated": bool(res.get("title_updated", False)),
         }
         match = re.fullmatch(r"https://chatgpt\.com/c/([A-Za-z0-9-]{1,128})", info["conversation_url"] or "")
         if not match or match[1] != info["conversation_id"]:

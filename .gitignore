@@ -33,3 +33,7 @@ node_modules/
 /dist/
 /dist-v1/
 /release-v1/
+/.tmp/
+/release/
+/third_party/
+/tests/test_resolvenet_multichat_live.py

@@ -16,17 +16,19 @@ import time
 import uuid
 import re
 from dataclasses import asdict, dataclass, field
+from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
 
 OPS_TO_EXTENSION = {"CREATE_CHAT", "SEND_MESSAGE", "WAIT_RESPONSE", "READ_RESPONSE",
                     "GET_CONVERSATION_ID", "GET_CONVERSATION_URL", "STOP_GENERATION",
-                    "GET_STATUS", "NEW_CHAT", "DELETE_CONVERSATION"}
+                    "GET_STATUS", "NEW_CHAT", "DELETE_CONVERSATION",
+                    "SET_CONVERSATION_TITLE"}
 # Job que o OMA submete ao relay (a extensão traduz para ops primitivas).
 # STATUS_PROBE só lê o DOM (envio disponível? banner de cap?) — nunca envia
 # mensagem, nunca consome quota. É a forma segura de vigiar rate-limit.
 # DELETE_CHAT instrui a exclusão remota de conversas para manter a conta limpa.
 JOB_TYPES = {"CHAT_TASK", "CHAT_START", "CHAT_COLLECT", "STATUS_PROBE", "DELETE_CHAT", "BROWSER_ACTION"}
-BROWSER_ACTIONS = {"navigate", "extract", "click", "type", "close"}
+BROWSER_ACTIONS = {"navigate", "extract", "click", "type", "screenshot", "close"}
 
 
 # Visual evidence attachments: screenshots travel as data URLs inside the job
@@ -68,6 +70,9 @@ class ChatJob:
     target_worker: str = ""
     browser_action: str = ""
     browser_args: Dict[str, Any] = field(default_factory=dict)
+    project_id: Optional[str] = None
+    project_url: Optional[str] = None
+    chat_title: Optional[str] = None
 
     def validate(self) -> None:
         if not isinstance(self.task_id, str) or not 1 <= len(self.task_id) <= 128:
@@ -125,6 +130,31 @@ class ChatJob:
                 raise ValueError("invalid conversation URL")
         if self.target_worker and len(self.target_worker) > 100:
             raise ValueError("target_worker max 100 chars")
+        if self.project_id is not None:
+            if not isinstance(self.project_id, str) or not re.fullmatch(
+                r"[A-Za-z0-9_.:-]{1,128}", self.project_id
+            ):
+                raise ValueError("project_id must be a safe 1..128 character identifier")
+        if self.project_url is not None:
+            if not isinstance(self.project_url, str) or len(self.project_url) > 2048:
+                raise ValueError("project_url must be an absolute ChatGPT URL")
+            parsed_project = urlparse(self.project_url)
+            if (
+                parsed_project.scheme != "https"
+                or parsed_project.hostname != "chatgpt.com"
+                or not parsed_project.path.startswith("/")
+                or parsed_project.username
+                or parsed_project.password
+                or parsed_project.fragment
+            ):
+                raise ValueError("project_url must target https://chatgpt.com")
+        if self.chat_title is not None:
+            if (
+                not isinstance(self.chat_title, str)
+                or not self.chat_title.strip()
+                or len(self.chat_title) > 200
+            ):
+                raise ValueError("chat_title must be 1..200 characters")
         passive_kinds = {"STATUS_PROBE", "CHAT_COLLECT", "DELETE_CHAT", "BROWSER_ACTION"}
         if self.kind not in passive_kinds and not self.new_chat and not self.conversation_url:
             raise ValueError("continuation requires an explicit conversation URL")
@@ -148,6 +178,10 @@ class ChatResult:
     # Telemetry: how many job images the extension confirmed pasted.
     # 0 with images submitted = paste failed (visible, never silent).
     images_attached: int = 0
+    project_id: Optional[str] = None
+    project_url: Optional[str] = None
+    chat_title: Optional[str] = None
+    title_updated: bool = False
 
     def validate(self) -> None:
         if not self.job_id:
@@ -162,6 +196,18 @@ class ChatResult:
                     self.conversation_id = m.group(1)
             elif not re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
                 raise ValueError("invalid conversation URL")
+        if self.project_url is not None:
+            parsed_project = urlparse(self.project_url)
+            if parsed_project.scheme != "https" or parsed_project.hostname != "chatgpt.com":
+                raise ValueError("result project_url must target https://chatgpt.com")
+        if self.chat_title is not None and (
+            not isinstance(self.chat_title, str)
+            or not self.chat_title.strip()
+            or len(self.chat_title) > 200
+        ):
+            raise ValueError("result chat_title must be 1..200 characters")
+        if type(self.title_updated) is not bool:
+            raise ValueError("title_updated must be boolean")
         if self.status not in ("COMPLETED", "FAILED"):
             raise ValueError(f"unknown status {self.status!r}")
 

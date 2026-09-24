@@ -4,7 +4,9 @@
  *      DELETE_CONVERSATION. */
 "use strict";
 
-const OMA_CS_VERSION = "1.6.26";
+const OMA_CS_VERSION = "1.6.33";
+const OMA_BUILD_ID = chrome.runtime.getManifest().sentra_build_id || "missing-build-id";
+const OMA_SOURCE_HASH = chrome.runtime.getManifest().sentra_source_hash || "missing-source-hash";
 let omaPendingResponseBaseline = null;
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -748,7 +750,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         } catch (_) { draftEmpty = false; }
         const additionalChecks = omaFindAdditionalChecksBannerText();
         return { finished: omaGenerationFinished(), url: window.location.href,
-                 cs_version: OMA_CS_VERSION, assistant_count: nodes.length,
+                 cs_version: OMA_CS_VERSION, cs_build_id: OMA_BUILD_ID,
+                 cs_source_hash: OMA_SOURCE_HASH,
+                 assistant_count: nodes.length,
                  is_fresh_chat: !hasConv && nodes.length === 0 && draftEmpty,
                  send_available: sendAvailable, cap_banner: capBanner,
                  additional_checks: additionalChecks,
@@ -756,6 +760,32 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                  additional_checks_recovery_active: !!omaAdditionalChecksRecoveryPromise,
                  composer_found: composerFound, buttons_sample: buttonsSample,
                  diagnostics: omaComposerDiagnostics() };
+      }
+      case "SET_CONVERSATION_TITLE": {
+        const convId = request.conversation_id || omaConversationId();
+        const title = String(request.title || "").trim();
+        if (!convId) throw new Error("conversation_id required");
+        if (!title || title.length > 200) throw new Error("title must be 1..200 characters");
+        const sessionResp = await fetch("/api/auth/session", { credentials: "same-origin" });
+        if (!sessionResp.ok) {
+          throw new Error("TITLE_UPDATE_FAILED: session unavailable");
+        }
+        const sessionData = await sessionResp.json();
+        const token = sessionData && sessionData.accessToken;
+        if (!token) throw new Error("TITLE_UPDATE_FAILED: access token unavailable");
+        const patchResp = await fetch(`/backend-api/conversation/${convId}`, {
+          method: "PATCH",
+          credentials: "same-origin",
+          headers: {
+            "Authorization": `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ title }),
+        });
+        if (!patchResp.ok) {
+          throw new Error(`TITLE_UPDATE_FAILED: HTTP ${patchResp.status}`);
+        }
+        return { updated: true, conversation_id: convId, title };
       }
       case "DELETE_CONVERSATION": {
         const convId = request.conversation_id || omaConversationId();

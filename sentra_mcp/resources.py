@@ -55,6 +55,7 @@ def register_resources(
     repository: RepositoryService,
     oma: OmaService,
     browser: BrowserControlService | None = None,
+    durable: Any | None = None,
 ) -> None:
     @mcp.resource(
         "sentra://capabilities",
@@ -89,6 +90,19 @@ def register_resources(
         )
         def sentra_screenshot(name: str) -> bytes:
             return browser.read_screenshot(name)
+
+    if durable is not None:
+        @mcp.resource(
+            "sentra://artifact/{artifact_id}",
+            name="SENTRA durable artifact",
+            description="Integrity-checked binary/image artifact registered to a durable Run.",
+            mime_type="application/octet-stream",
+        )
+        def sentra_artifact(artifact_id: str) -> bytes:
+            return durable.read_artifact(
+                artifact_id,
+                max_bytes=config.max_read_bytes,
+            )
 
     @mcp.resource(
         "sentra://run/{run_id}/summary",

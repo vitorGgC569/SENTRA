@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 import zipfile
@@ -781,5 +782,112 @@ def test_chatgpt_auto_backend_never_falls_back_to_playwright(
 
         assert calls == []
         await service.shutdown()
+
+    asyncio.run(probe())
+
+
+def test_edge_viewport_screenshot_uses_relay_and_writes_jpeg(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def probe() -> None:
+        config = _config(tmp_path)
+        service = BrowserControlService(config, AuditLogger(config.audit_log))
+        service.edge_sessions["edge:TAB-55"] = {
+            "owner": "mcp:A",
+            "worker": "TAB-55",
+            "created": 1.0,
+        }
+        jpeg = b"\xff\xd8\xffedge-test"
+        calls = []
+
+        async def edge_action(worker, action, args, *, timeout_s=20):
+            calls.append((worker, action, dict(args), timeout_s))
+            if action == "screenshot":
+                return {
+                    "image_base64": base64.b64encode(jpeg).decode("ascii"),
+                    "mime_type": "image/jpeg",
+                    "url": "https://chatgpt.com/",
+                    "full_page": False,
+                }
+            if action == "close":
+                return {
+                    "closed": True,
+                    "tab_preserved": True,
+                    "controller_released": True,
+                }
+            raise AssertionError(action)
+
+        monkeypatch.setattr(service, "_edge_action", edge_action)
+
+        saved = await service.screenshot(
+            "edge:TAB-55",
+            "mcp:A",
+            full_page=False,
+            include_base64=False,
+        )
+        assert saved["backend"] == "edge"
+        assert saved["full_page"] is False
+        assert saved["mime_type"] == "image/jpeg"
+        assert saved["bytes"] == len(jpeg)
+        assert "image_base64" not in saved
+        assert Path(saved["path"]).read_bytes() == jpeg
+        assert calls[0] == ("TAB-55", "screenshot", {"full_page": False}, 30)
+
+        with pytest.raises(ValueError, match="viewport screenshots only"):
+            await service.screenshot(
+                "edge:TAB-55",
+                "mcp:A",
+                full_page=True,
+                include_base64=False,
+            )
+
+        await service.close("edge:TAB-55", "mcp:A")
+        assert calls[-1] == ("TAB-55", "close", {}, 20)
+
+    asyncio.run(probe())
+
+
+def test_edge_open_reclaims_offline_orphan_before_lazy_bootstrap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def probe() -> None:
+        config = _config(tmp_path)
+        service = BrowserControlService(config, AuditLogger(config.audit_log))
+        service.edge_sessions["edge:TAB-OLD"] = {
+            "owner": "mcp:lost",
+            "worker": "TAB-OLD",
+            "created": 1.0,
+        }
+        calls = []
+
+        async def no_workers():
+            return []
+
+        async def allow_url(url: str):
+            return url
+
+        async def edge_action(worker, action, args, *, timeout_s=20):
+            calls.append((worker, action, dict(args), timeout_s))
+            assert action == "navigate"
+            assert worker is None
+            return {"url": "https://chatgpt.com/", "worker": "TAB-NEW"}
+
+        monkeypatch.setattr(service, "_edge_worker_inventory", no_workers)
+        monkeypatch.setattr(service, "_validate_url", allow_url)
+        monkeypatch.setattr(service, "_edge_action", edge_action)
+
+        opened = await service.open(
+            "mcp:new",
+            "https://chatgpt.com/",
+            backend="edge",
+        )
+        assert opened["session_id"] == "edge:TAB-NEW"
+        assert "edge:TAB-OLD" not in service.edge_sessions
+        assert service.edge_sessions["edge:TAB-NEW"]["owner"] == "mcp:new"
+        assert calls == [
+            (None, "navigate", {"url": "https://chatgpt.com/"}, 30)
+        ]
 
     asyncio.run(probe())

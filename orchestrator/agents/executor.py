@@ -80,7 +80,12 @@ RELEVANT FILE CONTENTS:
             system_prompt=EXECUTOR_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             role="executor",
-            metadata={"task_id": task.id},
+            metadata={
+                "task_id": task.id,
+                "idempotency_key": task.idempotency_key,
+                "priority": getattr(task.priority, "value", task.priority),
+                "risk": str(task.risk),
+            },
         )
 
         resp = await self.router.execute(req)

@@ -65,10 +65,30 @@ class TelemetryService:
             "security_denials": security_denials,
         }
 
-    def recent_calls(self, limit: int = 100) -> dict[str, Any]:
-        if not 1 <= limit <= 1000:
-            raise ValueError("limit must be between 1 and 1000")
-        return {"records": self._records(limit)}
+    def recent_calls(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if offset < 0 or not 1 <= limit <= 1000:
+            raise ValueError("offset must be >=0 and limit must be between 1 and 1000")
+        records = self._records()
+        total = len(records)
+        end = max(0, total - offset)
+        start = max(0, end - limit)
+        items = records[start:end]
+        next_offset = offset + len(items)
+        return {
+            "items": items,
+            "records": items,
+            "page": {
+                "offset": offset,
+                "limit": limit,
+                "returned": len(items),
+                "total": total,
+                "next_offset": next_offset if start > 0 else None,
+            },
+        }
 
     def query(
         self,
@@ -77,11 +97,12 @@ class TelemetryService:
         outcome: str = "",
         contains: str = "",
         limit: int = 200,
+        offset: int = 0,
     ) -> dict[str, Any]:
-        if not 1 <= limit <= 5000:
-            raise ValueError("limit must be between 1 and 5000")
+        if offset < 0 or not 1 <= limit <= 5000:
+            raise ValueError("offset must be >=0 and limit must be between 1 and 5000")
         records = self._records()
-        result: list[dict[str, Any]] = []
+        filtered: list[dict[str, Any]] = []
         for record in reversed(records):
             if action and action.casefold() not in str(record.get("action", "")).casefold():
                 continue
@@ -89,7 +110,18 @@ class TelemetryService:
                 continue
             if contains and contains.casefold() not in json.dumps(record, ensure_ascii=False).casefold():
                 continue
-            result.append(record)
-            if len(result) >= limit:
-                break
-        return {"records": result}
+            filtered.append(record)
+        total = len(filtered)
+        items = filtered[offset: offset + limit]
+        next_offset = offset + len(items)
+        return {
+            "items": items,
+            "records": items,
+            "page": {
+                "offset": offset,
+                "limit": limit,
+                "returned": len(items),
+                "total": total,
+                "next_offset": next_offset if next_offset < total else None,
+            },
+        }

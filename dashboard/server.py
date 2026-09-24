@@ -9,6 +9,7 @@ No tokens, no secrets, no model calls. Kill with Ctrl+C.
 import argparse
 import json
 import sys
+from urllib.request import urlopen
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -73,6 +74,22 @@ class Handler(BaseHTTPRequestHandler):
                 "workspaces": [
                     {"root": str(r), "runs": store.list_runs(r)} for r in self.roots],
             })
+        if parsed.path == "/api/web-models":
+            result = {"gateway": "http://127.0.0.1:17842/v1", "online": False, "models": []}
+            try:
+                with urlopen("http://127.0.0.1:17842/healthz", timeout=2) as response:
+                    result["health"] = json.load(response)
+                with urlopen("http://127.0.0.1:17842/v1/models", timeout=3) as response:
+                    catalog = json.load(response)
+                result["models"] = [
+                    {"slug": item.get("slug") or item.get("id"), "name": item.get("display_name") or item.get("name")}
+                    for item in (catalog.get("models") or catalog.get("data") or [])
+                    if isinstance(item, dict) and str(item.get("slug") or item.get("id") or "").startswith("sentra/chatgpt-web/")
+                ]
+                result["online"] = True
+            except (OSError, ValueError) as exc:
+                result["error"] = type(exc).__name__
+            return self._send(result)
         if parsed.path == "/api/runs":
             root = self._pick_root(arg("workspace"))
             if root is None:

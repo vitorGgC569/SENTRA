@@ -1,6 +1,8 @@
 """Safe adapters over SENTRA's existing repository CommandGateway."""
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,29 @@ def _safe_arg(value: str, *, allow_empty: bool = False) -> str:
     return value
 
 
+def _registered_operation_passed(operation: str, result: str) -> bool:
+    """Read the canonical command status from direct or ResultStore-paged output."""
+    lines = result.splitlines()
+    if not lines:
+        return False
+    status_line = lines[0]
+    if status_line.startswith("ALIAS="):
+        if (
+            len(lines) < 4
+            or not lines[1].startswith("RESULT_ID=")
+            or lines[2] != f"SUMMARY: {operation} paged"
+        ):
+            return False
+        status_line = lines[3]
+    parts = status_line.split()
+    return bool(
+        parts
+        and parts[0] == operation
+        and len(parts) >= 3
+        and parts[-2:] == ["PASS", "exit=0"]
+    )
+
+
 class RepositoryService:
     """Read-only repository access plus registered deterministic executions."""
 
@@ -33,7 +58,8 @@ class RepositoryService:
         self.config = config
         self.audit = audit
         self.workspaces = workspaces
-        self._gateways: dict[str, CommandGateway] = {}
+        self._gateway_lock = threading.RLock()
+        self._gateways: dict[asyncio.AbstractEventLoop, dict[str, CommandGateway]] = {}
 
     def update_config(self, config: MCPConfig) -> None:
         self.config = config
@@ -41,9 +67,16 @@ class RepositoryService:
             self.workspaces.update_config(config)
         allowed = {str(Path(root).resolve()) for root in config.allowed_roots}
         if self.workspaces is None:
-            self._gateways = {
-                key: gateway for key, gateway in self._gateways.items() if key in allowed
-            }
+            with self._gateway_lock:
+                for loop in list(self._gateways):
+                    if loop.is_closed():
+                        self._gateways.pop(loop, None)
+                        continue
+                    self._gateways[loop] = {
+                        key: gateway
+                        for key, gateway in self._gateways[loop].items()
+                        if key in allowed
+                    }
 
     def _legacy_workspaces(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
@@ -66,7 +99,18 @@ class RepositoryService:
     def list_workspaces(self, owner: str | None = None) -> dict[str, Any]:
         if self.workspaces is not None:
             return self.workspaces.list_workspaces(owner)
-        return {"workspaces": self._legacy_workspaces()}
+        items = self._legacy_workspaces()
+        return {
+            "items": items,
+            "workspaces": items,
+            "page": {
+                "offset": 0,
+                "limit": len(items),
+                "returned": len(items),
+                "total": len(items),
+                "next_offset": None,
+            },
+        }
 
     def _resolve_workspace(
         self,
@@ -111,10 +155,16 @@ class RepositoryService:
         view = self._resolve_workspace(workspace, owner, permission)
         root = Path(view["path"]).resolve()
         key = str(root)
-        gateway = self._gateways.get(key)
-        if gateway is None:
-            gateway = CommandGateway(root)
-            self._gateways[key] = gateway
+        loop = asyncio.get_running_loop()
+        with self._gateway_lock:
+            for existing in list(self._gateways):
+                if existing.is_closed():
+                    self._gateways.pop(existing, None)
+            loop_gateways = self._gateways.setdefault(loop, {})
+            gateway = loop_gateways.get(key)
+            if gateway is None:
+                gateway = CommandGateway(root)
+                loop_gateways[key] = gateway
         return view, root, gateway
 
     async def _execute(
@@ -307,8 +357,7 @@ class RepositoryService:
             owner=owner,
             allow_run=True,
         )
-        first = result.splitlines()[0] if result else ""
-        passed = f"{op} " in first and " PASS exit=0" in first
+        passed = _registered_operation_passed(op, result)
         self.audit.emit(
             f"repository.{op.lower()}",
             "passed" if passed else "failed",

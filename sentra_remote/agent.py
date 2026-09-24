@@ -26,7 +26,11 @@ from mcp import Client
 
 from sentra_mcp.config import MCPConfig
 from sentra_mcp.server import SentraMCPServer
-from sentra_version import SERVER_VERSION
+from sentra_version import (
+    CAPABILITY_VERSION,
+    PROTOCOL_VERSION,
+    SERVER_VERSION,
+)
 
 from .agent_config import AgentConfig
 
@@ -116,6 +120,37 @@ class RelayClient:
         return result
 
 
+
+def build_resource_manifest(config: AgentConfig, schema: dict[str, Any]) -> dict[str, Any]:
+    """Scheduler-facing node resources; descriptive only, never scheduling authority."""
+    return {
+        "schema_version": 1,
+        "resource_type": "remote_node",
+        "max_concurrency": 1,
+        "resources": [
+            {
+                "resource_id": f"node:{config.device_id}",
+                "node_id": config.device_id,
+                "name": config.name,
+                "state": "ONLINE",
+                "capacity": 1,
+                "capabilities": {
+                    "remote_node": True,
+                    "process_mode": config.process_mode,
+                    "os": platform.system().lower(),
+                    "architecture": platform.machine().lower(),
+                    "python": platform.python_version(),
+                    "mcp_tool_count": int(schema.get("tool_count") or 0),
+                },
+                "labels": {
+                    "hostname": platform.node(),
+                    "agent_name": config.name,
+                },
+            }
+        ],
+    }
+
+
 class AgentRuntime:
     def __init__(self, config: AgentConfig, config_path: Path) -> None:
         self.config = config
@@ -133,12 +168,42 @@ class AgentRuntime:
         self.stop_event = asyncio.Event()
 
     def capabilities(self) -> dict[str, Any]:
+        schema = self.server.capabilities.schema()
+        build = dict(self.server.capabilities.build_identity)
+        server_contract = {
+            "name": "sentra-mcp",
+            "version": SERVER_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "capability_version": CAPABILITY_VERSION,
+            **build,
+        }
+        contract = {
+            "schema_hash": schema["schema_hash"],
+            "tool_count": schema["tool_count"],
+            "tool_names": list(schema.get("tool_names") or []),
+        }
+        advertised = self.server.capabilities.server_capabilities()
+        resources = build_resource_manifest(self.config, schema)
         return {
+            "sentra": {
+                "server": server_contract,
+                "contract": contract,
+                "capabilities": advertised,
+                "resources": resources,
+            },
+            # Flat aliases remain for diagnostics/backward-compatible UI.
             "agent_version": SERVER_VERSION,
+            "protocol_version": PROTOCOL_VERSION,
+            "capability_version": CAPABILITY_VERSION,
+            "build_identity": build,
+            "schema_hash": schema["schema_hash"],
+            "tool_count": schema["tool_count"],
+            "server_capabilities": advertised,
+            "resource_manifest": resources,
             "python": platform.python_version(),
             "platform": platform.platform(),
             "hostname": platform.node(),
-            "mcp": "2026-07-28",
+            "mcp": PROTOCOL_VERSION,
             "process_mode": self.config.process_mode,
         }
 

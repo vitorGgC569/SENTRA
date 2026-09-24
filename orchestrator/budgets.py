@@ -90,9 +90,39 @@ class TokenBudget:
         if amount > reservation.amount:
             raise BudgetExceeded("provider exceeded reserved output budget; further work must stop")
 
+    def remaining(self, bucket: str | None = None, task_id: str | None = None):
+        reserved_by_bucket = {
+            name: sum(r.amount for r in self.reservations.values() if r.bucket == name)
+            for name in self.limits
+        }
+        remaining_by_bucket = {
+            name: max(0, self.limits[name] - self.used.get(name, 0) - reserved_by_bucket[name])
+            for name in self.limits
+        }
+        if task_id is not None:
+            limit = self.task_limits.get(task_id)
+            if limit is None:
+                return None
+            reserved = sum(r.amount for r in self.reservations.values() if r.task_id == task_id)
+            return max(0, limit - self.task_used.get(task_id, 0) - reserved)
+        if bucket is not None:
+            if bucket not in remaining_by_bucket:
+                raise ValueError(f"unknown budget bucket: {bucket}")
+            return remaining_by_bucket[bucket]
+        return remaining_by_bucket
+
+    def exhausted(self, bucket: str | None = None, task_id: str | None = None) -> bool:
+        remaining = self.remaining(bucket=bucket, task_id=task_id)
+        if isinstance(remaining, dict):
+            return all(value <= 0 for value in remaining.values())
+        if remaining is None:
+            return False
+        return remaining <= 0
+
     def to_dict(self):
         return {"limits": self.limits, "used": self.used, "task_limits": self.task_limits,
                 "task_used": self.task_used, "accounting": self.accounting,
+                "remaining": self.remaining(),
                 "reservations": {key: vars(value) for key, value in self.reservations.items()}}
 
     def _save(self):

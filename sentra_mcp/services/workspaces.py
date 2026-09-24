@@ -204,7 +204,18 @@ class WorkspaceRegistry:
 
     def list_workspaces(self, owner: str | None) -> dict[str, Any]:
         grants = self._active_grants(owner)
-        return {"workspaces": [self._view(item, index) for index, item in enumerate(grants)]}
+        items = [self._view(item, index) for index, item in enumerate(grants)]
+        return {
+            "items": items,
+            "workspaces": items,
+            "page": {
+                "offset": 0,
+                "limit": len(items),
+                "returned": len(items),
+                "total": len(items),
+                "next_offset": None,
+            },
+        }
 
     def _resolve_item(
         self,

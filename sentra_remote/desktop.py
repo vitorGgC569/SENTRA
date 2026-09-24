@@ -1,6 +1,7 @@
 """SENTRA Desktop: operational UI + tray for installed Windows product."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import threading
 import time
 import webbrowser
+from urllib.request import Request, urlopen
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +47,50 @@ def _install_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+def _validated_web_models_launcher(install_dir: Path) -> Path:
+    install_dir = Path(install_dir).resolve()
+    packaged_root = install_dir / "web-models"
+    if not packaged_root.is_dir():
+        packaged_root = install_dir / "dist" / "web-models"
+
+    launcher = packaged_root / "win-unpacked" / "Codex Web GPT.exe"
+    if not launcher.is_file():
+        raise RuntimeError("Web Models payload is missing; rebuild the Codex Web integration")
+
+    build_state_path = packaged_root / "integration-build.json"
+    if not build_state_path.is_file():
+        raise RuntimeError("Web Models integration build metadata is missing")
+    try:
+        build_state = json.loads(build_state_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("Web Models integration build metadata is invalid") from exc
+
+    source_patch = install_dir / "integrations" / "codex_chatgpt_web" / "sentra-upstream.patch"
+    packaged_patch = packaged_root / "licenses" / "codex-chatgpt-web" / "sentra-upstream.patch"
+    reference_patch = source_patch if source_patch.is_file() else packaged_patch
+    if not reference_patch.is_file():
+        raise RuntimeError("Web Models integration patch provenance is missing")
+
+    patch_hash = hashlib.sha256(reference_patch.read_bytes()).hexdigest()
+    if str(build_state.get("patch_sha256") or "").lower() != patch_hash:
+        raise RuntimeError(
+            "Web Models payload is stale; rebuild scripts/integrations/Build-CodexChatGPTWebRuntime.ps1"
+        )
+
+    source_manifest = install_dir / "integrations" / "codex_chatgpt_web" / "upstream.json"
+    if source_manifest.is_file():
+        try:
+            manifest = json.loads(source_manifest.read_text(encoding="utf-8"))
+            expected_files = sorted(str(item) for item in manifest.get("patch_files", []))
+            built_files = sorted(str(item) for item in build_state.get("patch_files", []))
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError("Web Models integration manifest is invalid") from exc
+        if built_files != expected_files:
+            raise RuntimeError("Web Models payload patch file set is stale; rebuild the integration")
+
+    return launcher
+
+
 def _run_hidden(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -70,6 +116,8 @@ class SentraDesktop:
         self.paths.state_dir.mkdir(parents=True, exist_ok=True)
         self.settings = ProductSettings.load(self.paths.settings)
         self.runtime = LocalRuntime(self.paths, self.settings)
+        self.web_gateway = None
+        self.web_gateway_thread = None
         self.status_labels: dict[str, Any] = {}
         self.tray_icon = None
         self._closing = False
@@ -101,16 +149,275 @@ class SentraDesktop:
         self.activity_tab = ttk.Frame(self.tabs, padding=12)
         self.audit_tab = ttk.Frame(self.tabs, padding=12)
         self.onboarding_tab = ttk.Frame(self.tabs, padding=12)
+        self.web_models_tab = ttk.Frame(self.tabs, padding=12)
         self.tabs.add(self.dashboard, text="Status")
         self.tabs.add(self.settings_tab, text="Workspaces & Policy")
         self.tabs.add(self.activity_tab, text="Jobs & Queue")
         self.tabs.add(self.audit_tab, text="Audit / Diff / Snapshots")
         self.tabs.add(self.onboarding_tab, text="Onboarding")
+        self.tabs.add(self.web_models_tab, text="Web Models")
         self._build_dashboard()
         self._build_settings()
         self._build_activity()
         self._build_audit()
         self._build_onboarding()
+        self._build_web_models()
+        if (self.paths.state_dir / "web-models-enabled").is_file():
+            self.root.after(3000, lambda: self.start_web_models(hidden=True))
+
+    def _build_web_models(self) -> None:
+        ttk = self.ttk
+        ttk.Label(self.web_models_tab, text="ChatGPT Web via SENTRA Model Gateway", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(
+            self.web_models_tab,
+            text="O launcher upstream mantém o login, Browser Host, modelos, limites e runtime. O Gateway do SENTRA expõe o catálogo e Responses ao Codex.",
+            wraplength=900,
+        ).pack(anchor="w", pady=8)
+        controls = ttk.Frame(self.web_models_tab)
+        controls.pack(anchor="w", pady=8)
+        ttk.Button(controls, text="Abrir interface Web", command=self.start_web_models).pack(side="left", padx=3)
+        ttk.Button(controls, text="Conectar Codex", command=self.connect_web_models_codex).pack(side="left", padx=3)
+        ttk.Button(controls, text="Desconectar Codex", command=self.disconnect_web_models_codex).pack(side="left", padx=3)
+        ttk.Button(controls, text="Verificar conexões", command=self.verify_web_models).pack(side="left", padx=3)
+        ttk.Button(controls, text="Drain", command=lambda: self.drain_web_models(False)).pack(side="left", padx=3)
+        ttk.Button(controls, text="Resume", command=lambda: self.drain_web_models(True)).pack(side="left", padx=3)
+        ttk.Button(controls, text="Stop managed launcher", command=self.stop_web_models).pack(side="left", padx=3)
+        ttk.Button(controls, text="Refresh", command=self.refresh_web_models).pack(side="left", padx=3)
+
+        model_row = ttk.Frame(self.web_models_tab)
+        model_row.pack(fill="x", pady=(4, 8))
+        ttk.Label(model_row, text="Modelo Web padrão do SENTRA/OMA").pack(side="left", padx=(0, 8))
+        self.web_model_var = self.tk.StringVar(value=self.settings.web_model_name)
+        self.web_model_catalog_values: tuple[str, ...] = ()
+        self.web_model_picker = ttk.Combobox(
+            model_row,
+            textvariable=self.web_model_var,
+            values=(),
+            state="readonly",
+            width=48,
+        )
+        self.web_model_picker.pack(side="left", padx=3)
+        ttk.Button(model_row, text="Usar seleção", command=self.save_web_model_selection).pack(side="left", padx=3)
+        self.web_model_default = ttk.Label(
+            self.web_models_tab,
+            text=(
+                f"Padrão salvo: {self.settings.web_model_name}"
+                if self.settings.web_model_name
+                else "Padrão salvo: nenhum · selecione um modelo anunciado pelo Gateway"
+            ),
+            wraplength=900,
+        )
+        self.web_model_default.pack(anchor="w", pady=(0, 4))
+
+        self.web_models_status = ttk.Label(self.web_models_tab, text="Gateway: checking…")
+        self.web_models_status.pack(anchor="w", pady=8)
+        self.web_models_route = ttk.Label(self.web_models_tab, text="Codex: aguardando verificação")
+        self.web_models_route.pack(anchor="w", pady=4)
+        self.web_models_checks = ttk.Label(self.web_models_tab, text="Login e conector: verifique na interface Web", wraplength=900)
+        self.web_models_checks.pack(anchor="w", pady=4)
+        self.web_models_catalog = self.tk.Text(self.web_models_tab, height=14, wrap="word")
+        self.web_models_catalog.pack(fill="both", expand=True)
+        self.web_models_catalog.insert("1.0", "O catálogo aparecerá quando o launcher estiver pronto.")
+        self.web_models_catalog.configure(state="disabled")
+        self.root.after(1200, self.refresh_web_models)
+
+    def _set_web_models_status(self, status: str, catalog: list[str] | None = None) -> None:
+        if self._closing:
+            return
+        self.web_models_status.configure(text=status)
+        if catalog is not None:
+            self.web_models_catalog.configure(state="normal")
+            self.web_models_catalog.delete("1.0", "end")
+            self.web_models_catalog.insert("1.0", "\n".join(catalog) or "Nenhum modelo Web anunciado.")
+            self.web_models_catalog.configure(state="disabled")
+            self.web_model_catalog_values = tuple(catalog)
+            self.web_model_picker.configure(values=self.web_model_catalog_values)
+            selected = self.web_model_var.get().strip()
+            saved = self.settings.web_model_name.strip()
+            if saved in catalog:
+                self.web_model_var.set(saved)
+            elif selected not in catalog:
+                self.web_model_var.set(catalog[0] if catalog else "")
+            if saved and saved not in catalog:
+                self.web_model_default.configure(
+                    text=f"Padrão salvo indisponível no catálogo atual: {saved}"
+                )
+            elif saved:
+                self.web_model_default.configure(text=f"Padrão salvo: {saved}")
+            else:
+                self.web_model_default.configure(
+                    text="Padrão salvo: nenhum · a seleção acima ainda não foi persistida"
+                )
+
+    def save_web_model_selection(self) -> None:
+        from tkinter import messagebox
+
+        model = self.web_model_var.get().strip()
+        if not model.startswith("sentra/chatgpt-web/") or model not in self.web_model_catalog_values:
+            messagebox.showerror(
+                "SENTRA Web Models",
+                "Selecione um modelo Web anunciado pelo Gateway SENTRA.",
+            )
+            return
+        self.settings.web_model_name = model
+        self.settings.save(self.paths.settings)
+        os.environ["SENTRA_CODEX_WEB_MODEL"] = model
+        self.web_model_default.configure(text=f"Padrão salvo: {model}")
+        messagebox.showinfo(
+            "SENTRA Web Models",
+            "Modelo padrão salvo. Novas instâncias do OMA usarão esta seleção quando "
+            "config.yaml não definir um model_name explícito.",
+        )
+
+    def refresh_web_models(self) -> None:
+        def worker() -> None:
+            try:
+                with urlopen("http://127.0.0.1:17842/healthz", timeout=2) as response:
+                    health = json.load(response)
+                with urlopen("http://127.0.0.1:17842/v1/models", timeout=4) as response:
+                    models = json.load(response)
+                catalog = [
+                    str(model.get("slug") or model.get("id"))
+                    for model in (models.get("models") or models.get("data") or [])
+                    if isinstance(model, dict) and str(model.get("slug") or model.get("id") or "").startswith("sentra/chatgpt-web/")
+                ]
+                version = health.get("upstream", {}).get("version", "?")
+                route_text = "Codex: rota não verificada"
+                if self.web_gateway is not None:
+                    try:
+                        route = self.web_gateway.launcher.route("status")
+                        if route.get("points_to_sentra"):
+                            route_text = "Codex: conectado ao Gateway SENTRA"
+                        elif route.get("installed") and route.get("active"):
+                            route_text = "Codex: rota ativa aponta fora do SENTRA · clique Conectar Codex para migrar"
+                        else:
+                            route_text = "Codex: conclua o setup na interface Web e clique Conectar Codex"
+                    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                        route_text = f"Codex: rota ainda não verificada ({type(exc).__name__})"
+                self.root.after(0, lambda: self.web_models_route.configure(text=route_text))
+                self.root.after(0, lambda: self._set_web_models_status(f"Gateway ready · upstream {version} · {len(catalog)} modelos Web", catalog))
+            except (OSError, ValueError) as exc:
+                self.root.after(0, lambda: self._set_web_models_status(f"Gateway offline: {type(exc).__name__}"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def connect_web_models_codex(self) -> None:
+        def worker() -> None:
+            try:
+                if self.web_gateway is None:
+                    raise RuntimeError("Inicie a interface Web primeiro")
+                route = self.web_gateway.launcher.route("sentra")
+                if not route.get("points_to_sentra"):
+                    raise RuntimeError("O Codex ainda não aponta para o Gateway SENTRA")
+                self.root.after(0, lambda: self.web_models_route.configure(
+                    text="Codex: conectado ao Gateway SENTRA · reinicie o Codex para atualizar os modelos"))
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                self.root.after(0, lambda: self.web_models_route.configure(text=f"Codex: {exc}"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def disconnect_web_models_codex(self) -> None:
+        def worker() -> None:
+            try:
+                if self.web_gateway is None:
+                    raise RuntimeError("Inicie a interface Web primeiro")
+                route = self.web_gateway.launcher.route("disconnect")
+                active = bool(route.get("active"))
+                text = ("Codex: rota anterior restaurada · reinicie o Codex" if not active
+                        else "Codex: integração Web desativada · reinicie o Codex")
+                self.root.after(0, lambda: self.web_models_route.configure(text=text))
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                self.root.after(0, lambda: self.web_models_route.configure(text=f"Codex: {exc}"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def verify_web_models(self) -> None:
+        def worker() -> None:
+            try:
+                if self.web_gateway is None:
+                    raise RuntimeError("Inicie a interface Web primeiro")
+                report = self.web_gateway.sentra_doctor(verify_connector=True)
+                route = self.web_gateway.launcher.route("status")
+                checks = report.get("checks", [])
+                summary = " · ".join(
+                    f"{item.get('id', 'check')}: {item.get('status', '?')}"
+                    for item in checks if isinstance(item, dict)
+                )
+                route_ok = bool(route.get("installed") and route.get("active") and route.get("points_to_sentra"))
+                text = ("Conexões verificadas" if report.get("ok") and route_ok else "Conexões precisam de atenção")
+                route_state = "codex-route: ok" if route_ok else "codex-route: fora do SENTRA"
+                self.root.after(0, lambda: self.web_models_checks.configure(
+                    text=f"{text} · {route_state}" + (f" · {summary}" if summary else "")
+                ))
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
+                self.root.after(0, lambda: self.web_models_checks.configure(text=f"Verificação falhou: {exc}"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_web_models(self, *, hidden: bool = False) -> None:
+        def worker() -> None:
+            try:
+                from sentra_model_gateway.gateway import (
+                    GatewayConfig,
+                    GatewayServer,
+                    load_or_create_gateway_admin_token,
+                )
+                if self.web_gateway is None:
+                    install_dir = _install_dir()
+                    checkout = install_dir / "third_party" / "codex-chatgpt-web"
+                    packaged = _validated_web_models_launcher(install_dir)
+                    admin_token = (
+                        os.environ.get("SENTRA_GATEWAY_ADMIN_TOKEN", "").strip()
+                        or load_or_create_gateway_admin_token(self.paths.state_dir)
+                    )
+                    os.environ["SENTRA_GATEWAY_ADMIN_TOKEN"] = admin_token
+                    config = GatewayConfig(checkout=checkout,
+                                           launcher_executable=packaged if packaged.is_file() else None,
+                                           state_root=self.paths.state_dir,
+                                           admin_token=admin_token,
+                                           upstream_control_token=os.environ.get("SENTRA_WEB_CONTROL_TOKEN", ""),
+                                           connector_name=os.environ.get("SENTRA_CONNECTOR_NAME", "SENTRA tunnel"))
+                    gateway = GatewayServer(config)
+                    self.web_gateway = gateway
+                    self.web_gateway_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+                    self.web_gateway_thread.start()
+                self.web_gateway.launcher.start(hidden=hidden)
+                if not hidden:
+                    (self.paths.state_dir / "web-models-enabled").write_text("enabled\n", encoding="utf-8")
+                self.root.after(0, lambda: self._set_web_models_status("Launcher iniciado; aguardando login/runtime…"))
+                self.root.after(3000, self.refresh_web_models)
+            except (OSError, ValueError, RuntimeError) as exc:
+                self.root.after(0, lambda: self._set_web_models_status(f"Falha ao iniciar Web Models: {exc}"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def stop_web_models(self) -> None:
+        def worker() -> None:
+            if self.web_gateway is not None:
+                self.web_gateway.launcher.stop()
+                self.web_gateway.shutdown()
+                self.web_gateway.server_close()
+                self.web_gateway = None
+                (self.paths.state_dir / "web-models-enabled").unlink(missing_ok=True)
+                self.root.after(0, lambda: self._set_web_models_status("Launcher gerenciado encerrado"))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def drain_web_models(self, resume: bool) -> None:
+        def worker() -> None:
+            try:
+                token = self.web_gateway.admin_token if self.web_gateway is not None else ""
+                if not token:
+                    raise ValueError("Gateway admin token is unavailable; start Web Models first")
+                action = "resume" if resume else "drain"
+                request = Request(
+                    f"http://127.0.0.1:17842/sentra/upstream/{action}",
+                    data=b"", method="POST",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                with urlopen(request, timeout=8) as response:
+                    result = json.load(response)
+                accepting = result.get("accepting_turns") is True
+                self.root.after(0, lambda: self._set_web_models_status(
+                    "Upstream aceitando turnos" if accepting else "Upstream em drain"
+                ))
+            except (OSError, ValueError) as exc:
+                self.root.after(0, lambda: self._set_web_models_status(f"Drain/resume falhou: {exc}"))
+        threading.Thread(target=worker, daemon=True).start()
 
     def _build_dashboard(self) -> None:
         ttk = self.ttk
@@ -625,6 +932,11 @@ class SentraDesktop:
 
     def quit(self) -> None:
         self._closing = True
+        if self.web_gateway is not None:
+            self.web_gateway.launcher.stop()
+            self.web_gateway.shutdown()
+            self.web_gateway.server_close()
+            self.web_gateway = None
         self.runtime.stop_all()
         if self.tray_icon is not None:
             try:

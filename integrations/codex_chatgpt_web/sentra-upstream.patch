@@ -1,0 +1,1264 @@
+diff --git a/launcher/electron/browser-host.cjs b/launcher/electron/browser-host.cjs
+index b239bc7..e56ad8f 100644
+--- a/launcher/electron/browser-host.cjs
++++ b/launcher/electron/browser-host.cjs
+@@ -1336,6 +1336,7 @@ class BrowserHost {
+       tab.deviceEmulationDirty = true;
+       this.syncViewVisibility();
+     }
++    this.writeDescriptor();
+     return this.snapshot();
+   }
+ 
+@@ -2981,6 +2982,20 @@ class BrowserHost {
+       idleUrl: IDLE_BROWSER_URL,
+       surfaceId: this.surfaceId,
+       surfaceTargets,
++      sentraManaged: Boolean(process.env.SENTRA_TURN_AUTHORITY_TOKEN),
++      sentraIntegrationPatchSha256: process.env.SENTRA_INTEGRATION_PATCH_SHA256 || null,
++      sentraTabs: [...this.turnTabs.values()]
++        .filter(tab => !tab.view.webContents.isDestroyed())
++        .map(tab => ({
++          tabId: tab.id,
++          surfaceId: tab.surfaceId,
++          traceId: tab.traceId,
++          conversationKey: tab.conversationKey || null,
++          helperPid: tab.helperPid,
++          status: tab.status,
++          interactionMode: tab.interactionMode,
++          lastHeartbeatAt: tab.lastHeartbeatAt,
++        })),
+       createdAt: new Date().toISOString(),
+     };
+     writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+diff --git a/launcher/electron/connector-identity.cjs b/launcher/electron/connector-identity.cjs
+index 320ec5a..406d2f1 100644
+--- a/launcher/electron/connector-identity.cjs
++++ b/launcher/electron/connector-identity.cjs
+@@ -1,6 +1,6 @@
+-const CURRENT_CONNECTOR_NAME = "Codex Native2";
++const CURRENT_CONNECTOR_NAME = "SENTRA tunnel";
+ const DEV_CONNECTOR_NAME = `${CURRENT_CONNECTOR_NAME} DEV`;
+-const LEGACY_CONNECTOR_NAMES = Object.freeze(["Codex Native"]);
++const LEGACY_CONNECTOR_NAMES = Object.freeze(["Codex Native2", "Codex Native2 DEV", "Codex Native"]);
+ 
+ function validateConnectorName(value) {
+   if (typeof value !== "string" || !value.trim() || value.length > 80) {
+@@ -14,29 +14,40 @@ function isLegacyConnectorName(value) {
+ }
+ 
+ function connectorNameForSetup(value) {
++  if (value === undefined || value === null) return CURRENT_CONNECTOR_NAME;
+   const configured = validateConnectorName(value);
+-  return isLegacyConnectorName(configured) ? CURRENT_CONNECTOR_NAME : configured;
++  if (configured === CURRENT_CONNECTOR_NAME || isLegacyConnectorName(configured)) {
++    return CURRENT_CONNECTOR_NAME;
++  }
++  throw new Error(
++    `SENTRA-managed runtime requires ChatGPT connector ${JSON.stringify(CURRENT_CONNECTOR_NAME)};`
++    + ` configured ${JSON.stringify(configured)}`,
++  );
+ }
+ 
+ function connectorNameForDevSetup(value) {
+   if (value === undefined || value === null) return DEV_CONNECTOR_NAME;
+   const configured = validateConnectorName(value);
++  if (configured === DEV_CONNECTOR_NAME) return DEV_CONNECTOR_NAME;
+   if (configured === CURRENT_CONNECTOR_NAME || isLegacyConnectorName(configured)) {
+     return DEV_CONNECTOR_NAME;
+   }
+-  return configured;
++  throw new Error(
++    `SENTRA DEV runtime requires ChatGPT connector ${JSON.stringify(DEV_CONNECTOR_NAME)};`
++    + ` configured ${JSON.stringify(configured)}`,
++  );
+ }
+ 
+ function requireCurrentRuntimeConnectorName(value) {
+   const configured = validateConnectorName(value);
+-  if (isLegacyConnectorName(configured)) {
++  if (configured !== CURRENT_CONNECTOR_NAME) {
++    const kind = isLegacyConnectorName(configured) ? "legacy" : "unexpected";
+     throw new Error(
+-      `The local runtime still targets legacy ChatGPT connector ${JSON.stringify(configured)}. Reconnect the harness`
+-      + ` so it targets ${JSON.stringify(CURRENT_CONNECTOR_NAME)}, then create that connector as a new ChatGPT plugin;`
+-      + ` do not rename or refresh the legacy connector.`,
++      `The local runtime targets ${kind} ChatGPT connector ${JSON.stringify(configured)}.`
++      + ` SENTRA requires ${JSON.stringify(CURRENT_CONNECTOR_NAME)}.`,
+     );
+   }
+-  return configured;
++  return CURRENT_CONNECTOR_NAME;
+ }
+ 
+ module.exports = {
+diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
+index 2c9c565..b27ba9e 100644
+--- a/launcher/electron/control-server.cjs
++++ b/launcher/electron/control-server.cjs
+@@ -38,12 +38,13 @@ function writeJson(response, status, body) {
+ }
+ 
+ class BrowserControlServer {
+-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits }) {
++  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits, controlRuntime }) {
+     this.logger = logger;
+     this.getBrowserHost = getBrowserHost;
+     this.getPreferences = getPreferences;
+     this.resolveProxy = resolveProxy;
+     this.limits = limits;
++    this.controlRuntime = controlRuntime;
+     this.token = randomBytes(32).toString("base64url");
+     this.port = 0;
+     this.server = createServer((request, response) => {
+@@ -102,6 +103,7 @@ class BrowserControlServer {
+     const isTurnRelease = request.url === "/v1/turn/release";
+     const isSessionInspect = request.url === "/v1/session/inspect";
+     const isProxyResolution = request.url === "/v1/network/resolve-proxy";
++    const isSentraRuntimeControl = Boolean(this.controlRuntime) && request.url === "/v1/sentra/runtime-control";
+     const manualAction = new Map([
+       ["/v1/manual/start", "start"],
+       ["/v1/manual/wait-sent", "wait-sent"],
+@@ -110,7 +112,7 @@ class BrowserControlServer {
+       ["/v1/manual/end", "end"],
+       ["/v1/manual/cancel", "cancel"],
+     ]).get(request.url);
+-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
++    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isSentraRuntimeControl && !manualAction)) {
+       writeJson(response, 404, { error: "not_found" });
+       return;
+     }
+@@ -119,6 +121,35 @@ class BrowserControlServer {
+         request,
+         manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : MAX_BODY_BYTES,
+       );
++      if (isSentraRuntimeControl) {
++        const action = body?.action;
++        if (!["drain", "resume", "interrupt-turn", "verify-connector"].includes(action)) {
++          throw new Error("SENTRA runtime control action is invalid");
++        }
++        if (action === "verify-connector") {
++          const connectorName = body?.connectorName;
++          if (typeof connectorName !== "string" || !connectorName.trim() || connectorName.length > 80
++            || /[\r\n\0]/.test(connectorName)) {
++            throw new Error("SENTRA connector identity is invalid");
++          }
++          const browserHost = this.getBrowserHost();
++          if (!browserHost) throw new Error("browser host is not ready");
++          await browserHost.verifyConnector(connectorName.trim());
++          writeJson(response, 200, { ok: true, verified: true, connectorName: connectorName.trim() });
++          return;
++        }
++        let payload;
++        if (action === "interrupt-turn") {
++          if (typeof body?.threadId !== "string" || !body.threadId || body.threadId.length > 256
++            || typeof body?.turnId !== "string" || !body.turnId || body.turnId.length > 256) {
++            throw new Error("SENTRA runtime interrupt identity is invalid");
++          }
++          payload = { threadId: body.threadId, turnId: body.turnId };
++        }
++        const result = await this.controlRuntime(action, payload);
++        writeJson(response, 200, result);
++        return;
++      }
+       if (isProxyResolution) {
+         const url = new URL(body?.url);
+         if (url.origin !== "https://chatgpt.com" || url.username || url.password
+diff --git a/launcher/electron/main.cjs b/launcher/electron/main.cjs
+index 71b95c2..b178fbd 100644
+--- a/launcher/electron/main.cjs
++++ b/launcher/electron/main.cjs
+@@ -514,6 +514,30 @@ function syncFreshConversationPreference(stateStore, config) {
+   return state;
+ }
+ 
++async function sentraDoctor(runtimeHost, { verifyConnector = false } = {}) {
++  const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
++  if (!base) return IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor();
++  const doctorPath = verifyConnector ? "/sentra/doctor?verify_connector=1" : "/sentra/doctor";
++  const response = await fetch(new URL(doctorPath, base), {
++    headers: process.env.SENTRA_TURN_AUTHORITY_TOKEN
++      ? { authorization: `Bearer ${process.env.SENTRA_TURN_AUTHORITY_TOKEN}` }
++      : {},
++    signal: AbortSignal.timeout(5000),
++  });
++  if (!response.ok) throw new Error(`SENTRA doctor returned HTTP ${response.status}`);
++  const report = await response.json();
++  if (!report || typeof report !== "object" || !Array.isArray(report.checks)) {
++    throw new Error("SENTRA doctor returned an invalid report");
++  }
++  return report;
++}
++
++function sentraConnectorName() {
++  const name = process.env.SENTRA_CONNECTOR_NAME || "SENTRA tunnel";
++  if (typeof name !== "string" || !name.trim() || name.length > 80) throw new Error("SENTRA connector name is invalid");
++  return name.trim();
++}
++
+ function registerIpc({ logger, stateStore }) {
+   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
+   handle("launcher:limits", () => limitsController.snapshot());
+@@ -657,7 +681,7 @@ function registerIpc({ logger, stateStore }) {
+       return report;
+     }
+     publishOperation({ name: operationName, status: "running", message: "Checking local runtime" });
+-    const report = IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor();
++    const report = await sentraDoctor(runtimeHost);
+     if (!report.ok) {
+       const message = report.checks
+         .filter((check) => check.status === "error")
+@@ -681,14 +705,14 @@ function registerIpc({ logger, stateStore }) {
+           {
+             id: "connector",
+             status: "warning",
+-            message: `Select ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} manually for every Zero Risk turn`,
++            message: `Select ChatGPT connector ${JSON.stringify(sentraConnectorName())} manually for every Zero Risk turn`,
+           },
+         ],
+       };
+     }
+     try {
+       publishOperation({ name: operationName, status: "running", message: "Checking ChatGPT connector" });
+-      await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
++      await browserHost.verifyConnector(sentraConnectorName());
+       const state = stateStore.update({ mcpSetupComplete: true });
+       send("launcher:state-changed", state);
+       const successMessage = IS_DEV_PROFILE
+@@ -701,7 +725,7 @@ function registerIpc({ logger, stateStore }) {
+           ? {
+               id: "connector",
+               status: "ok",
+-              message: `ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} is available`,
++              message: `ChatGPT connector ${JSON.stringify(sentraConnectorName())} is available`,
+             }
+           : check),
+       };
+@@ -721,7 +745,7 @@ function registerIpc({ logger, stateStore }) {
+     }
+   });
+ 
+-  handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
++  handle("launcher:doctor", () => sentraDoctor(runtimeHost, { verifyConnector: true }));
+   handle("launcher:cancel-turns", () => {
+     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
+     return runtimeHost.cancelActiveTurns();
+@@ -817,6 +841,33 @@ function registerIpc({ logger, stateStore }) {
+       ? currentMode
+       : validateBrowserInteractionMode(input.interactionMode);
+     const interactionModeChange = interactionMode !== currentMode;
++    if (process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
++      if (interactionMode !== "automatic") {
++        throw new Error("SENTRA-managed Web Models use the single SENTRA tunnel in Automatic mode");
++      }
++      const report = await sentraDoctor(runtimeHost);
++      if (!report.ok) {
++        const message = report.checks
++          .filter((check) => check.status === "error")
++          .map((check) => check.message)
++          .filter(Boolean)
++          .join("; ") || "SENTRA runtime is not healthy";
++        throw new Error(message);
++      }
++      const state = stateStore.update({
++        browserInteractionMode: "automatic",
++        coreSetupComplete: true,
++        mcpRuntimeInstalled: true,
++        mcpSetupComplete: false,
++        mcpGuideStep: 2,
++        codexRestartRequired: false,
++      });
++      send("launcher:state-changed", state);
++      return {
++        ok: true,
++        stdout: "SENTRA tunnel is authoritative; no secondary Codex Web tunnel runtime was started.",
++      };
++    }
+     const setup = IS_DEV_PROFILE
+       ? runtimeHost.setupDevMcp.bind(runtimeHost)
+       : runtimeHost.setupMcp.bind(runtimeHost);
+@@ -917,6 +968,9 @@ function registerIpc({ logger, stateStore }) {
+   });
+   handle("launcher:browser-interaction-mode", async (_event, rawMode) => {
+     const mode = validateBrowserInteractionMode(rawMode);
++    if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && mode !== "automatic") {
++      throw new Error("SENTRA-managed Web Models use Automatic mode and the single SENTRA tunnel");
++    }
+     const current = stateStore.read();
+     if (current.browserInteractionMode === mode) {
+       return { state: current, credentialsRequired: false, targetMode: mode };
+@@ -1064,6 +1118,13 @@ async function start() {
+   await app.whenReady();
+ 
+   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
++  if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && stateStore.read().browserInteractionMode !== "automatic") {
++    stateStore.update({
++      browserInteractionMode: "automatic",
++      zeroRiskProEnabled: false,
++      mcpSetupComplete: false,
++    });
++  }
+   limitsController = new LimitsController(path.join(app.getPath("userData"), "limits.json"), {
+     getInteractionMode: () => stateStore.read().browserInteractionMode,
+   });
+@@ -1110,6 +1171,17 @@ async function start() {
+     getPreferences: () => syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
+     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
+     limits: limitsController,
++    controlRuntime: process.env.SENTRA_TURN_AUTHORITY_TOKEN
++      ? async (action, body) => {
++          const config = runtimeHost?.runtimeConfigSnapshot().config;
++          if (!runtimeSupervisor || !config) throw new Error("SENTRA runtime control is unavailable");
++          return runtimeSupervisor.control(
++            config,
++            action,
++            body === undefined ? {} : { body },
++          );
++        }
++      : undefined,
+   }).start();
+   runtimeSupervisor = new RuntimeSupervisor({
+     app,
+diff --git a/launcher/electron/runtime-supervisor.cjs b/launcher/electron/runtime-supervisor.cjs
+index 682cdd4..57c866b 100644
+--- a/launcher/electron/runtime-supervisor.cjs
++++ b/launcher/electron/runtime-supervisor.cjs
+@@ -10,7 +10,7 @@ const {
+   processRunning,
+   terminateOwnedProcessTree,
+ } = require("./process-tree.cjs");
+-const { runtimeInvocation } = require("./runtime-command.cjs");
++const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");
+ 
+ const RESTART_WINDOW_MS = 60_000;
+ const MAX_RESTARTS_PER_WINDOW = 5;
+@@ -28,6 +28,10 @@ const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
+ 
+ const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+ 
++function sentraManagedHarness() {
++  return Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim());
++}
++
+ function collectLines(stream, onLine, onError) {
+   let buffered = "";
+   stream.on("data", (chunk) => {
+@@ -197,6 +201,9 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
+     throw new Error("Production launcher refuses a DEV harness configuration");
+   }
+   if (config.solAvailable === undefined) config = { ...config, solAvailable: true };
++  if (sentraManagedHarness()) {
++    config = { ...config, appName: "SENTRA tunnel", automaticAppName: "SENTRA tunnel", browserInteractionMode: "automatic" };
++  }
+   if (config.browserInteractionMode === undefined) {
+     config.browserInteractionMode = "automatic";
+   }
+@@ -300,7 +307,7 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
+       }
+     }
+   };
+-  if (config.mode === "full") {
++  if (config.mode === "full" && !sentraManagedHarness()) {
+     validateTunnel(config.tunnel, "tunnel");
+     if (config.automaticTunnel !== undefined) validateTunnel(config.automaticTunnel, "automaticTunnel");
+     if (config.manualTunnel !== undefined) validateTunnel(config.manualTunnel, "manualTunnel");
+@@ -552,6 +559,13 @@ class RuntimeSupervisor {
+   }
+ 
+   runtimeCommand(args) {
++    if (sentraManagedHarness()) {
++      return embeddedRuntimeInvocation({
++        app: this.app,
++        sourceRoot: this.sourceRoot,
++        args,
++      });
++    }
+     if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();
+     return this.runtimeInvocationFactory({
+       app: this.app,
+@@ -985,7 +999,7 @@ class RuntimeSupervisor {
+   }
+ 
+   async startTunnel(config, operationName = "runtime-start", { forceRestart = false } = {}) {
+-    if (config.mode !== "full") return;
++    if (config.mode !== "full" || sentraManagedHarness()) return;
+     this.assertTunnelClientReady(config);
+     // Every acquisition binds diagnostics to this runtime, including adoption of an existing alias.
+     this.tunnelHealthBaseUrl = null;
+@@ -1347,11 +1361,11 @@ class RuntimeSupervisor {
+     else if (tunnelOnly) throw new Error("DEV runtime cannot recover a Responses daemon");
+     else await this.startDaemon(config);
+     if (!tunnelOnly && !this.daemon) throw new Error("Responses proxy is unavailable after runtime recovery");
+-    if (config.mode === "full" && !this.tunnel) {
++    if (config.mode === "full" && !sentraManagedHarness() && !this.tunnel) {
+       throw new Error("Tunnel runtime is unavailable after runtime recovery");
+     }
+     if (!tunnelOnly) await this.waitForProxy(config);
+-    if (config.mode === "full") {
++    if (config.mode === "full" && !sentraManagedHarness()) {
+       await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, "runtime-recovery");
+     }
+     if (!this.tryWriteState("ready")) {
+@@ -1426,7 +1440,7 @@ class RuntimeSupervisor {
+ 
+   async ownedRuntimeReady(config) {
+     if (this.launcherProfile === "development") {
+-      return config.mode !== "full" || Boolean(this.tunnel && await this.tunnelHealth(config));
++      return config.mode !== "full" || sentraManagedHarness() || Boolean(this.tunnel && await this.tunnelHealth(config));
+     }
+     const daemon = this.daemon;
+     if (!daemon
+@@ -1436,7 +1450,7 @@ class RuntimeSupervisor {
+       || !await this.proxyHealth(config, 2_000, daemon.pid, true)) {
+       return false;
+     }
+-    if (config.mode !== "full") return true;
++    if (config.mode !== "full" || sentraManagedHarness()) return true;
+     return Boolean(this.tunnel && await this.tunnelHealth(config));
+   }
+ 
+@@ -1569,7 +1583,7 @@ class RuntimeSupervisor {
+   }
+ 
+   async adoptConfiguredTunnelForStop(config) {
+-    if (config.mode !== "full" || this.tunnel) return;
++    if (config.mode !== "full" || sentraManagedHarness() || this.tunnel) return;
+     const health = await this.waitForKnownTunnelStatus(config);
+     if (tunnelRuntimeStopped(health)) {
+       return;
+@@ -1742,7 +1756,7 @@ class RuntimeSupervisor {
+       );
+     }
+     let managedTunnelRunning = false;
+-    if (config.mode === "full") {
++    if (config.mode === "full" && !sentraManagedHarness()) {
+       const tunnelHealth = await this.waitForKnownTunnelStatus(config);
+       managedTunnelRunning = !tunnelRuntimeStopped(tunnelHealth);
+       if (managedTunnelRunning
+@@ -1966,7 +1980,7 @@ class RuntimeSupervisor {
+         ? await this.proxyHealth(config)
+         : false;
+       const runtimeMayBeLive = healthyRuntime || runtimeOwnershipMayBeLive(ownershipState);
+-      if (config?.mode === "full"
++      if (config?.mode === "full" && !sentraManagedHarness()
+         && !this.tunnel
+         && (runtimeMayBeLive || !ownershipState)) {
+         await this.adoptConfiguredTunnelForStop(config);
+@@ -2011,7 +2025,7 @@ class RuntimeSupervisor {
+       return { status: "stopped" };
+     } catch (error) {
+       const compensationErrors = [];
+-      if (tunnelStopped && config?.mode === "full" && !this.tunnel) {
++      if (tunnelStopped && config?.mode === "full" && !sentraManagedHarness() && !this.tunnel) {
+         try {
+           await this.startTunnel(config);
+         } catch (caught) {
+diff --git a/launcher/src/App.tsx b/launcher/src/App.tsx
+index eaf177d..1d68488 100644
+--- a/launcher/src/App.tsx
++++ b/launcher/src/App.tsx
+@@ -1280,15 +1280,20 @@ function McpSurface({
+   const busy = localBusy || operation?.status === "running";
+   const [doctor, setDoctor] = useState<DoctorReport | null>(null);
+   const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
++  const sentraManaged = snapshot.connectorNames.automatic === "SENTRA tunnel";
+   const manualInteraction = interactionMode === "manual";
+-  const steps = useMemo(() => [
++  const steps = useMemo(() => sentraManaged ? [
++    { title: "Use the SENTRA tunnel", body: "SENTRA owns tunnel creation, credentials, schema, and lifecycle. Codex Web does not create or reconnect a second MCP tunnel." },
++    { title: "Connect Web Models to SENTRA", body: "This build reuses the existing SENTRA tunnel and never stores a second Tunnel ID or API key." },
++    { title: "Attach the SENTRA connector", body: "Use the exact ChatGPT connector name SENTRA tunnel. Codex Native and Codex Native2 are legacy identities for this build." },
++  ] : [
+     { title: copy.mcpStepOne, body: copy.mcpStepOneBody },
+     { title: copy.mcpStepTwo, body: copy.mcpStepTwoBody },
+     {
+       title: copy.mcpStepThree,
+       body: manualInteraction ? copy.manualMcpStepThreeBody : copy.mcpStepThreeBody,
+     },
+-  ], [copy, manualInteraction]);
++  ], [copy, manualInteraction, sentraManaged]);
+   const guideMedia = MCP_GUIDE_MEDIA[step];
+ 
+   const move = async (next: number) => {
+@@ -1317,12 +1322,14 @@ function McpSurface({
+     setLocalBusy(true);
+     setError(null);
+     try {
+-      await api!.setupMcp({
++      await api!.setupMcp(sentraManaged
++        ? { interactionMode: "automatic", replace: false }
++        : {
+         interactionMode,
+         ...(credentialsConfigured && !replacingCredentials
+           ? { replace: false }
+           : { tunnelId, runtimeKey, replace: true }),
+-      });
++          });
+       setRuntimeKey("");
+       setTunnelId("");
+       setCredentialsConfigured(true);
+@@ -1401,7 +1408,7 @@ function McpSurface({
+               </div>
+             </header>
+ 
+-            {step === 0 ? (
++            {step === 0 && !sentraManaged ? (
+               <div className="inline-actions">
+                 <SecondaryButton icon="external" onClick={() => void openExternal(snapshot.urls.tunnels)}>
+                   {copy.openTunnels}
+@@ -1412,7 +1419,7 @@ function McpSurface({
+               </div>
+             ) : null}
+             {step === 1 ? (
+-              credentialsConfigured && !replacingCredentials ? (
++              sentraManaged || (credentialsConfigured && !replacingCredentials) ? (
+                 <div className="saved-credentials">
+                   <NoticeRow icon="check" tone="success">
+                     <span>
+@@ -1420,14 +1427,16 @@ function McpSurface({
+                       <small>{copy.credentialsConfiguredBody}</small>
+                     </span>
+                   </NoticeRow>
+-                  <button
++                  {!sentraManaged ? (
++                    <button
+                     className="text-button"
+                     disabled={busy}
+                     onClick={() => setReplacingCredentials(true)}
+                     type="button"
+                   >
+                     {copy.replaceCredentials}
+-                  </button>
++                    </button>
++                  ) : null}
+                 </div>
+               ) : (
+                 <div className="field-list">
+@@ -1481,7 +1490,9 @@ function McpSurface({
+                 <NoticeRow icon="alert" tone="warning">
+                   {manualInteraction
+                     ? copy.manualConnectorNotice
+-                    : devProfile ? copy.devConnectorIsolationNotice : copy.connectorMigrationNotice}
++                    : sentraManaged
++                      ? "SENTRA build: Codex Native and Codex Native2 are legacy identities. Use only SENTRA tunnel."
++                      : devProfile ? copy.devConnectorIsolationNotice : copy.connectorMigrationNotice}
+                 </NoticeRow>
+                 <div className="connector-name">
+                   <span>{copy.connectorName}</span>
+@@ -1518,12 +1529,12 @@ function McpSurface({
+           <PrimaryButton
+             disabled={
+               busy
+-              || (!manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified)
+-              || ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey))
++              || (!sentraManaged && !manualInteraction && !configuringInactiveMode && !snapshot.state.codexCatalogVerified)
++              || (!sentraManaged && ((!credentialsConfigured || replacingCredentials) && (!tunnelId || !runtimeKey)))
+             }
+             onClick={() => void install()}
+           >
+-            {busy ? copy.running : credentialsConfigured && !replacingCredentials ? copy.reconnect : copy.connect}
++            {busy ? copy.running : sentraManaged ? copy.connect : credentialsConfigured && !replacingCredentials ? copy.reconnect : copy.connect}
+           </PrimaryButton>
+         ) : null}
+         {step === 2 ? (
+@@ -2207,9 +2218,11 @@ function FieldRow({ children, label }: { children: ReactNode; label: string }) {
+ }
+ 
+ function DoctorSummary({ copy, language, report }: { copy: Copy; language: Language; report: DoctorReport }) {
+-  const visibleChecks = report.ok
+-    ? report.checks.slice(-6)
+-    : report.checks.filter((check) => check.status !== "ok");
++  const visibleChecks = report.mode === "sentra"
++    ? report.checks
++    : report.ok
++      ? report.checks.slice(-6)
++      : report.checks.filter((check) => check.status !== "ok");
+   return (
+     <div className={`doctor-summary${report.ok ? " is-healthy" : ""}`}>
+       <header>
+diff --git a/launcher/src/i18n.ts b/launcher/src/i18n.ts
+index a06efd0..9ae5b29 100644
+--- a/launcher/src/i18n.ts
++++ b/launcher/src/i18n.ts
+@@ -118,26 +118,26 @@ const en = {
+   guideVideo: "Guide video",
+   expandGuideVideo: "Expand guide video",
+   closeGuideVideo: "Close expanded guide video",
+-  mcpStepOne: "Create a tunnel and API key",
+-  mcpStepOneBody: "Create an OpenAI tunnel, copy its Tunnel ID, and create a regular API key with Tunnels Read + Use (free; the key is required only to run the tunnel). (Don't forget to create a ChatGPT workspace.)",
++  mcpStepOne: "Use the SENTRA tunnel",
++  mcpStepOneBody: "SENTRA owns tunnel creation, runtime credentials, schema, and lifecycle. Codex Web must not create or reconnect a second MCP tunnel.",
+   openTunnels: "Open Tunnels",
+   openKeys: "Create API key",
+-  mcpStepTwo: "Connect the local harness",
+-  mcpStepTwoBody: "Paste the Tunnel ID and API key. The tunnel must belong to the same OpenAI account that will use the ChatGPT plugin. The key stays in private local storage and is never written to launcher logs.",
+-  mcpStepTwoHint: "You can add the MCP connector in ChatGPT only after this step succeeds and the tunnel is running.",
++  mcpStepTwo: "Connect Web Models to SENTRA",
++  mcpStepTwoBody: "This SENTRA build reuses the existing SENTRA tunnel. Codex Web does not store a second Tunnel ID or API key and cannot become a competing MCP authority.",
++  mcpStepTwoHint: "Continue when SENTRA reports its tunnel and MCP runtime ready; no additional Codex Web tunnel is required.",
+   mcpCatalogRequired: "Connect harness is unavailable until the Codex models are installed and verified. Return to Setup, click Install models, restart Codex once, and wait for the model catalog check to complete.",
+   tunnelId: "Tunnel ID",
+   runtimeKey: "API key (not Admin key)",
+-  connect: "Connect harness",
+-  reconnect: "Reconnect harness",
+-  credentialsConfigured: "Tunnel credentials saved",
+-  credentialsConfiguredBody: "The launcher will reuse the private Tunnel ID and API key already stored on this device.",
+-  replaceCredentials: "Replace credentials",
++  connect: "Use SENTRA tunnel",
++  reconnect: "Recheck SENTRA tunnel",
++  credentialsConfigured: "SENTRA tunnel managed",
++  credentialsConfiguredBody: "Tunnel credentials remain private under SENTRA. Codex Web does not own or replace them.",
++  replaceCredentials: "Managed by SENTRA",
+   keepCredentials: "Keep saved credentials",
+-  mcpStepThree: "Attach the ChatGPT connector",
+-  mcpStepThreeBody: "Before creating the connector, enable Developer Mode in ChatGPT Settings. In ChatGPT Plugins, create a new connector, choose Tunnel, select the tunnel you created, set Authentication to None, and use the exact connector name shown below. Open Permissions and choose Allow all actions; Allow low-risk actions blocks command and patch calls before they reach this runtime. The outer Codex harness still enforces its sandbox and approvals. Then verify the runtime.",
+-  manualMcpStepThreeBody: "Create the separate connector shown below with the exact name Codex Zero Risk and select it yourself in every Zero Risk turn. Zero Risk requires its own tunnel and credentials, separate from Automatic mode. The launcher never inspects the ChatGPT DOM in this mode.",
+-  connectorMigrationNotice: "Upgrading from Codex Native? Leave the old connector untouched and create Codex Native2 as a new connector. Do not rename or refresh Codex Native. Verify runtime rejects a legacy-only setup.",
++  mcpStepThree: "Attach the SENTRA connector",
++  mcpStepThreeBody: "Enable Developer Mode in ChatGPT Settings, then create or reuse the connector named exactly SENTRA tunnel and point it to the SENTRA tunnel with Authentication set to None. Do not create Codex Native2 or a second tunnel. Open Permissions and choose Allow all actions, then verify the runtime.",
++  manualMcpStepThreeBody: "SENTRA-managed Web Models use Automatic mode and the single SENTRA tunnel; a separate Zero Risk tunnel is intentionally disabled.",
++  connectorMigrationNotice: "SENTRA build: Codex Native and Codex Native2 are legacy connector identities. Use only SENTRA tunnel; verification rejects any competing or legacy connector.",
+   manualConnectorNotice: "Codex Zero Risk is a separate connector. Select it yourself before sending every Zero Risk prompt; the launcher intentionally does not inspect ChatGPT to verify that choice.",
+   openConnectors: "Open ChatGPT Plugins",
+   connectorName: "Connector name",
+diff --git a/launcher/src/types.ts b/launcher/src/types.ts
+index 4c191f8..b33e2fe 100644
+--- a/launcher/src/types.ts
++++ b/launcher/src/types.ts
+@@ -82,7 +82,7 @@ export interface DoctorCheck {
+ 
+ export interface DoctorReport {
+   ok: boolean;
+-  mode?: "browser-only" | "full";
++  mode?: "browser-only" | "full" | "sentra";
+   checks: DoctorCheck[];
+ }
+ 
+diff --git a/src/adapters/chatgpt-web/browser-helper-main.ts b/src/adapters/chatgpt-web/browser-helper-main.ts
+index 1c497e7..0204cd9 100644
+--- a/src/adapters/chatgpt-web/browser-helper-main.ts
++++ b/src/adapters/chatgpt-web/browser-helper-main.ts
+@@ -24,6 +24,7 @@ interface RunMessage {
+   };
+   turn: {
+     traceId: string;
++    sentraCapability?: string;
+     modelId: string;
+     reasoning?: string;
+     modelFamily?: "5.6" | "6";
+@@ -161,6 +162,11 @@ async function run(message: RunMessage): Promise<void> {
+     throw new Error("Browser helper turn identity is invalid");
+   }
+   if (abortControllers.has(message.id)) throw new Error(`Browser helper turn already exists: ${message.id}`);
++  if (message.turn.sentraCapability !== undefined
++    && (typeof message.turn.sentraCapability !== "string"
++      || !/^stc_[A-Za-z0-9_-]{20,256}$/.test(message.turn.sentraCapability))) {
++    throw new Error("Browser helper SENTRA TurnCapability is invalid");
++  }
+   if (message.turn.resumeAvailable !== undefined && typeof message.turn.resumeAvailable !== "boolean") {
+     throw new Error("Browser helper resume availability is invalid");
+   }
+@@ -218,6 +224,7 @@ async function run(message: RunMessage): Promise<void> {
+   const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
+   const turn: BrowserTurn = {
+     traceId: message.turn.traceId,
++    ...(message.turn.sentraCapability ? { sentraCapability: message.turn.sentraCapability } : {}),
+     modelId: message.turn.modelId,
+     reasoning: message.turn.reasoning,
+     ...(message.turn.modelFamily ? { modelFamily: message.turn.modelFamily } : {}),
+diff --git a/src/adapters/chatgpt-web/browser-worker.ts b/src/adapters/chatgpt-web/browser-worker.ts
+index 99ceacb..a2e5228 100644
+--- a/src/adapters/chatgpt-web/browser-worker.ts
++++ b/src/adapters/chatgpt-web/browser-worker.ts
+@@ -131,7 +131,11 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
+ export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
+ export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
+ export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
+-const CHATGPT_CONNECTOR_MENTION_QUERY = "@codex";
++function chatGptConnectorMentionQuery(appName: string): string {
++  const token = appName.trim().split(/\s+/, 1)[0] ?? "";
++  if (!token) throw new Error("ChatGPT connector name is empty");
++  return `@${token}`;
++}
+ const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
+ const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
+ const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
+@@ -565,10 +569,10 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+   // The visible sheet can be aria-hidden during hydration. Include those controls in the role
+   // query but still require visibility; never select a hidden duplicate or switch locator rules.
+   const personalized = page
+-    .getByRole("button", { name: /^(?:Personalized|个性化)$/, exact: true, includeHidden: true })
++    .getByRole("button", { name: /^(?:Personalized|Personalizado|个性化)$/, exact: true, includeHidden: true })
+     .filter({ visible: true });
+   const unpersonalized = page
+-    .getByRole("button", { name: /^(?:Unpersonalized|非个性化)$/, exact: true, includeHidden: true })
++    .getByRole("button", { name: /^(?:Unpersonalized|Não personalizado|Nao personalizado|非个性化)$/, exact: true, includeHidden: true })
+     .filter({ visible: true });
+   let personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
+   let unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
+@@ -614,7 +618,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+         );
+       }
+       throw chatGptConnectorUnavailableError(
+-        "The configured ChatGPT connector remained unavailable after the structural personalization state changed",
++        `ChatGPT connector ${JSON.stringify(process.env.SENTRA_CONNECTOR_NAME?.trim() || CHATGPT_CONNECTOR_NAME)} remained unavailable after the structural personalization state changed`,
+       );
+     }
+   }
+@@ -643,7 +647,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+     );
+     const choice = menu
+       .locator(CHATGPT_PERSONALIZATION_CHOICE_SELECTOR)
+-      .filter({ hasText: /^(?:Personalized|个性化)/ });
++      .filter({ hasText: /^(?:Personalized|Personalizado|个性化)/ });
+     if (await runChatGptPersonalizationStep(() => choice.count(), deadline, abortSignal) !== 1) {
+       throw chatGptConnectorUnavailableError(
+         "ChatGPT personalization menu did not expose one exact Personalized choice",
+@@ -1241,6 +1245,7 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
+ 
+ export interface BrowserTurn {
+   traceId: string;
++  sentraCapability?: string;
+   modelId: string;
+   reasoning?: string;
+   modelFamily?: "5.6" | "6";
+@@ -2042,7 +2047,7 @@ class ChatGptBrowserDiagnostics {
+ 
+ export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
+   const configured = provider.chatgptWeb ?? {};
+-  const appName = configured.appName?.trim() || CHATGPT_CONNECTOR_NAME;
++  const appName = process.env.SENTRA_CONNECTOR_NAME?.trim() || configured.appName?.trim() || CHATGPT_CONNECTOR_NAME;
+   const browserHost = configured.browserHost ?? "managed-chrome";
+   const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
+   const browserHelperScriptPath = configured.browserHelperScriptPath?.trim();
+@@ -3267,6 +3272,7 @@ export class ChatGptBrowserWorker {
+     const appResult = menuRows.filter({
+       has: page.getByText(this.config.appName, { exact: true }),
+     });
++    const mentionQuery = chatGptConnectorMentionQuery(this.config.appName);
+     if (new URL(page.url()).searchParams.get("temporary-chat") === "true") await ensureChatGptPersonalizedConnectorAccess(
+       page,
+       capture,
+@@ -3284,7 +3290,7 @@ export class ChatGptBrowserWorker {
+             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+           });
+           await withBrowserTurnAbort(settleChatGptUi(), personalizationSignal);
+-          await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
++          await composer.pressSequentially(mentionQuery, {
+             delay: 25,
+             signal: personalizationSignal,
+             timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+@@ -3303,9 +3309,9 @@ export class ChatGptBrowserWorker {
+                 ? element.value : element.textContent ?? "",
+               focused: element === document.activeElement,
+             }), undefined, { timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: personalizationSignal });
+-            if (mention.text !== CHATGPT_CONNECTOR_MENTION_QUERY) {
++            if (mention.text !== mentionQuery) {
+               throw new ChatGptPromptAttachmentIntegrityError(
+-                `ChatGPT did not preserve the connector mention (expectedChars=${CHATGPT_CONNECTOR_MENTION_QUERY.length}, actualChars=${mention.text.length}, focused=${mention.focused})`,
++                `ChatGPT did not preserve the connector mention (expectedChars=${mentionQuery.length}, actualChars=${mention.text.length}, focused=${mention.focused})`,
+               );
+             }
+           }
+@@ -3340,7 +3346,7 @@ export class ChatGptBrowserWorker {
+         await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+         await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
+         await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
+-        await composer.pressSequentially(CHATGPT_CONNECTOR_MENTION_QUERY, {
++        await composer.pressSequentially(mentionQuery, {
+           delay: 25,
+           signal: abortSignal,
+           timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
+@@ -4462,6 +4468,9 @@ export class ChatGptBrowserWorker {
+ 
+   private async runExclusive(turn: BrowserTurn): Promise<string> {
+     if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
++    if (turn.sentraCapability && this.config.browserHost !== "launcher") {
++      throw new Error("SENTRA managed Web turns require the physical Electron Browser Host");
++    }
+     if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
+ 
+     const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+@@ -4496,7 +4505,19 @@ export class ChatGptBrowserWorker {
+         phase: "heartbeat",
+         traceId: turn.traceId,
+         helperPid: process.pid,
+-      }, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).catch(error => {
++      }, LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS).then(async () => {
++        if (!turn.sentraCapability) return;
++        const endpoint = process.env.SENTRA_TURN_AUTHORITY_URL;
++        const authorityToken = process.env.SENTRA_TURN_AUTHORITY_TOKEN;
++        if (!endpoint || !authorityToken) throw new Error("SENTRA TurnCapability authority is unavailable");
++        const response = await fetch(endpoint + "/internal/turn/browser-heartbeat", {
++          method: "POST",
++          headers: { "content-type": "application/json", authorization: "Bearer " + authorityToken },
++          body: JSON.stringify({ capability: turn.sentraCapability, traceId: turn.traceId }),
++          signal: AbortSignal.timeout(5000),
++        });
++        if (!response.ok) throw new Error("SENTRA browser heartbeat rejected");
++      }).catch(error => {
+         const now = Date.now();
+         if (now - lastHeartbeatFailureAt < 30_000) return;
+         lastHeartbeatFailureAt = now;
+@@ -4509,6 +4530,18 @@ export class ChatGptBrowserWorker {
+     };
+     try {
+       if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
++      if (turn.sentraCapability) {
++        const endpoint = process.env.SENTRA_TURN_AUTHORITY_URL;
++        const authorityToken = process.env.SENTRA_TURN_AUTHORITY_TOKEN;
++        if (!endpoint || !authorityToken) throw new Error("SENTRA TurnCapability authority is unavailable");
++        const response = await fetch(`${endpoint}/internal/turn/browser-start`, {
++          method: "POST",
++          headers: { "content-type": "application/json", authorization: `Bearer ${authorityToken}` },
++          body: JSON.stringify({ capability: turn.sentraCapability, traceId: turn.traceId }),
++          signal: AbortSignal.timeout(5000),
++        });
++        if (!response.ok) throw new Error(`SENTRA physical browser lease rejected: HTTP ${response.status}`);
++      }
+       if (turn.requireRetainedConversation && !reused) {
+         throw chatGptRetainedConversationUnavailableError();
+       }
+@@ -4518,7 +4551,20 @@ export class ChatGptBrowserWorker {
+       await turn.onPreparedSelected?.(reused);
+       heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
+       heartbeatTimer.unref?.();
+-      return await this.runBrowserTurn(turn, surfaceId, undefined, reused, lease.trackUsage === true);
++      const result = await this.runBrowserTurn(turn, surfaceId, undefined, reused, lease.trackUsage === true);
++      if (turn.sentraCapability && !turn.completionFence) {
++        const endpoint = process.env.SENTRA_TURN_AUTHORITY_URL;
++        const authorityToken = process.env.SENTRA_TURN_AUTHORITY_TOKEN;
++        if (!endpoint || !authorityToken) throw new Error("SENTRA TurnCapability authority is unavailable");
++        const response = await fetch(`${endpoint}/internal/turn/browser-complete`, {
++          method: "POST",
++          headers: { "content-type": "application/json", authorization: `Bearer ${authorityToken}` },
++          body: JSON.stringify({ capability: turn.sentraCapability, traceId: turn.traceId }),
++          signal: AbortSignal.timeout(5000),
++        });
++        if (!response.ok) throw new Error(`SENTRA physical browser completion rejected: HTTP ${response.status}`);
++      }
++      return result;
+     } catch (error) {
+       originalError = error;
+       terminal = error instanceof ChatGptCompactionHandoffAccepted
+diff --git a/src/adapters/chatgpt-web/environment.ts b/src/adapters/chatgpt-web/environment.ts
+index bc9a9ff..e1404d0 100644
+--- a/src/adapters/chatgpt-web/environment.ts
++++ b/src/adapters/chatgpt-web/environment.ts
+@@ -15,6 +15,8 @@ export interface ChatGptTurnEnvironment {
+   writableRoots: string[];
+   sandboxPolicy: ChatGptSandboxPolicy;
+   tools: CodexTool[];
++  /** Opaque SENTRA capability. Authority is checked by the local Gateway, never by request metadata. */
++  sentraCapability?: string;
+ }
+ 
+ export interface ChatGptTurnIdentity {
+diff --git a/src/adapters/chatgpt-web/index.ts b/src/adapters/chatgpt-web/index.ts
+index 6043500..e7b730c 100644
+--- a/src/adapters/chatgpt-web/index.ts
++++ b/src/adapters/chatgpt-web/index.ts
+@@ -55,6 +55,17 @@ function brokerSocketPath(provider: CodexProviderConfig): string {
+   return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
+ }
+ 
++function sentraTurnCapability(parsed: CodexParsedRequest): string | undefined {
++  const raw = parsed._rawBody as Record<string, unknown> | undefined;
++  const metadata = raw?.client_metadata as Record<string, unknown> | undefined;
++  if (metadata?.sentra_managed !== true) return undefined;
++  const capability = metadata.sentra_turn_capability;
++  if (typeof capability !== "string" || !/^stc_[A-Za-z0-9_-]{32,128}$/.test(capability)) {
++    throw new Error("SENTRA TurnCapability is required for a managed Web turn");
++  }
++  return capability;
++}
++
+ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
+   let resolvePromise!: (value: T) => void;
+   let rejectPromise!: (error: Error) => void;
+@@ -296,6 +307,16 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
+ 
+ function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
+   const normalized = error instanceof Error ? error : new Error(String(error));
++  const causeChain: string[] = [];
++  let current: unknown = normalized;
++  for (let depth = 0; depth < 6 && current instanceof Error; depth += 1) {
++    causeChain.push(`${current.name}: ${current.message}`);
++    current = current.cause;
++  }
++  console.error(
++    `[chatgpt-web] submitted_turn_failure_cause phase=${session.runtime.submission?.phase ?? "unknown"} `
++    + causeChain.join(" <- "),
++  );
+   if (normalized instanceof ChatGptWebAdapterError) return normalized;
+   const phase = session.runtime.submission?.phase;
+   if (!phase || phase === "prepared") return normalized;
+@@ -689,6 +710,7 @@ export function createChatGptWebAdapter(
+     if (!mode.localTools) {
+       const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
+         traceId,
++        ...(sentraTurnCapability(parsed) ? { sentraCapability: sentraTurnCapability(parsed) } : {}),
+         modelId: parsed.modelId,
+         reasoning: parsed.options.reasoning,
+         ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
+@@ -760,6 +782,7 @@ export function createChatGptWebAdapter(
+     };
+     const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
+       traceId,
++      ...(sentraTurnCapability(parsed) ? { sentraCapability: sentraTurnCapability(parsed) } : {}),
+       modelId: parsed.modelId,
+       reasoning: parsed.options.reasoning,
+       ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
+@@ -861,6 +884,8 @@ export function createChatGptWebAdapter(
+         if (mode.localTools) {
+           try {
+             environment = environmentStore.resolve(parsed);
++            const capability = sentraTurnCapability(parsed);
++            if (capability) environment = { ...environment, sentraCapability: capability };
+           } catch (error) {
+             const identity = extractChatGptTurnIdentity(parsed);
+             console.warn(
+diff --git a/src/adapters/chatgpt-web/launcher-helper-client.ts b/src/adapters/chatgpt-web/launcher-helper-client.ts
+index 9c1ceac..402a429 100644
+--- a/src/adapters/chatgpt-web/launcher-helper-client.ts
++++ b/src/adapters/chatgpt-web/launcher-helper-client.ts
+@@ -281,6 +281,7 @@ export class LauncherBrowserHelperClient {
+           },
+           turn: {
+             traceId: turn.traceId,
++            ...(turn.sentraCapability ? { sentraCapability: turn.sentraCapability } : {}),
+             modelId: turn.modelId,
+             reasoning: turn.reasoning,
+             ...(turn.modelFamily ? { modelFamily: turn.modelFamily } : {}),
+diff --git a/src/adapters/chatgpt-web/turn-broker.ts b/src/adapters/chatgpt-web/turn-broker.ts
+index f218978..a2ff762 100644
+--- a/src/adapters/chatgpt-web/turn-broker.ts
++++ b/src/adapters/chatgpt-web/turn-broker.ts
+@@ -81,6 +81,8 @@ interface TurnChannel {
+   /** Monotonic across activity start/end so a completed request cannot disappear across a fence. */
+   activityRevision: number;
+   completionCommitted: boolean;
++  completionPending?: boolean;
++  pendingRevocation?: Error;
+   completionRevision?: number;
+   retirementWaiters: Set<SafeWaiter<void>>;
+   batchTimer?: ReturnType<typeof setTimeout>;
+@@ -288,6 +290,9 @@ export class TurnBroker implements TurnBrokerOwner {
+     if (ttlMs !== undefined && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
+       throw new Error("ChatGPT web turn broker TTL must be a positive finite number");
+     }
++    await this.authorizeSentra(environment.sentraCapability, "register", traceId, {
++      allowedTools: environment.tools.map(tool => tool.namespace ? `${tool.namespace}__${tool.name}` : tool.name),
++    });
+     const token = opaqueId(handlePrefix);
+     const channel: TurnChannel = {
+       traceId,
+@@ -361,7 +366,8 @@ export class TurnBroker implements TurnBrokerOwner {
+     this.prune();
+     const channel = this.channels.get(token);
+     if (!channel) throw new Error("turn token is invalid or expired");
+-    if (environmentIdentity(channel.environment) !== environmentIdentity(environment)) {
++    if (environmentIdentity(channel.environment) !== environmentIdentity(environment)
++      || channel.environment.sentraCapability !== environment.sentraCapability) {
+       throw new Error("Codex turn environment changed during an active ChatGPT tool loop");
+     }
+     if (channel.safe?.state === "revoked") throw new Error("Zero Risk turn is already terminal");
+@@ -444,11 +450,12 @@ export class TurnBroker implements TurnBrokerOwner {
+     const channel = this.channels.get(token);
+     if (!channel) throw new Error("turn token is invalid or expired");
+     if (channel.completionCommitted) return channel.completionRevision;
++    if (channel.completionPending) return undefined;
+     if (channel.activities.size > 0 || channel.invocations.size > 0) return undefined;
+     return channel.activityRevision;
+   }
+ 
+-  commitCompletionFence(token: string, revision: number): boolean {
++  commitCompletionFence(token: string, revision: number): boolean | Promise<boolean> {
+     this.prune();
+     if (!Number.isSafeInteger(revision) || revision < 0) {
+       throw new Error("turn completion fence revision is invalid");
+@@ -456,9 +463,25 @@ export class TurnBroker implements TurnBrokerOwner {
+     const channel = this.channels.get(token);
+     if (!channel) throw new Error("turn token is invalid or expired");
+     if (channel.completionCommitted) return channel.completionRevision === revision;
+-    if (channel.activityRevision !== revision
++    if (channel.completionPending || channel.activityRevision !== revision
+       || channel.activities.size > 0
+       || channel.invocations.size > 0) return false;
++    if (channel.environment.sentraCapability) {
++      channel.completionPending = true;
++      return (async () => {
++        await this.authorizeSentra(channel.environment.sentraCapability, "prepare", channel.traceId, { revision });
++        if (channel.pendingRevocation || !this.channels.has(token)
++          || channel.activityRevision !== revision || channel.activities.size > 0
++          || channel.invocations.size > 0) return false;
++        await this.authorizeSentra(channel.environment.sentraCapability, "complete", channel.traceId, { revision });
++        channel.completionCommitted = true;
++        channel.completionRevision = revision;
++        return true;
++      })().finally(() => {
++        channel.completionPending = false;
++        if (channel.pendingRevocation) this.revoke(token, channel.pendingRevocation);
++      });
++    }
+     channel.completionCommitted = true;
+     channel.completionRevision = revision;
+     console.info(
+@@ -467,6 +490,28 @@ export class TurnBroker implements TurnBrokerOwner {
+     return true;
+   }
+ 
++  private async authorizeSentra(
++    capability: string | undefined,
++    action: "register" | "tool" | "prepare" | "complete",
++    traceId: string,
++    details: Record<string, unknown> = {},
++  ): Promise<void> {
++    const endpoint = process.env.SENTRA_TURN_AUTHORITY_URL;
++    const authorityToken = process.env.SENTRA_TURN_AUTHORITY_TOKEN;
++    if (!endpoint || !authorityToken) {
++      if (capability) throw new Error("SENTRA TurnCapability authority is unavailable");
++      return;
++    }
++    if (!capability) return;
++    const response = await fetch(`${endpoint}/internal/turn/${action}`, {
++      method: "POST",
++      headers: { "content-type": "application/json", authorization: `Bearer ${authorityToken}` },
++      body: JSON.stringify({ capability, traceId, ...details }),
++      signal: AbortSignal.timeout(5000),
++    });
++    if (!response.ok) throw new Error(`SENTRA TurnCapability rejected ${action}: HTTP ${response.status}`);
++  }
++
+   waitForRetirement(token: string, signal?: AbortSignal): Promise<void> {
+     this.prune();
+     const channel = this.channels.get(token);
+@@ -612,6 +657,10 @@ export class TurnBroker implements TurnBrokerOwner {
+   revoke(token: string, reason = new Error("Codex turn binding was revoked")): void {
+     const channel = this.channels.get(token);
+     if (!channel) return;
++    if (channel.completionPending) {
++      channel.pendingRevocation = reason;
++      return;
++    }
+     console.info(`[chatgpt-web] broker_retired ${JSON.stringify({
+       traceId: channel.traceId,
+       pendingTools: channel.invocations.size,
+@@ -905,13 +954,19 @@ export class TurnBroker implements TurnBrokerOwner {
+     }
+     if (request.method === "safe_complete") {
+       if (!request.token) throw new Error("Zero Risk request_id is required");
+-      if (typeof request.finalAnswer !== "string") throw new Error("Zero Risk turn final_answer is required");
++      if (typeof request.finalAnswer !== "string" || !request.finalAnswer.trim()) throw new Error("Zero Risk turn final_answer is required");
+       let channel = this.channels.get(request.token);
+       if (channel?.safe?.state === "awaiting_start" && !channel.safe.launcherSent) {
+         await this.waitForSafeSent(request.token, socketSignal);
+         this.prune();
+         channel = this.channels.get(request.token);
+       }
++      if (channel?.safe?.state === "running") {
++        const revision = this.beginCompletionFence(request.token);
++        if (revision === undefined || !await this.commitCompletionFence(request.token, revision)) {
++          throw new Error("Zero Risk completion lost its broker fence");
++        }
++      }
+       return this.completeSafeTurn(request.token, request.finalAnswer);
+     }
+     if (request.method === "submit_compaction_handoff") {
+@@ -983,7 +1038,7 @@ export class TurnBroker implements TurnBrokerOwner {
+       if (!Number.isSafeInteger(request.revision) || request.revision! < 0) {
+         throw new Error("turn completion fence revision is invalid");
+       }
+-      return { committed: this.commitCompletionFence(request.token, request.revision!) };
++      return { committed: await this.commitCompletionFence(request.token, request.revision!) };
+     }
+     if (request.method === "owner_wait_retirement") {
+       if (!request.token) throw new Error("turn owner token is required");
+@@ -1020,7 +1075,7 @@ export class TurnBroker implements TurnBrokerOwner {
+         throw new Error(contract === "safe" ? "request id is required" : "turn token is required");
+       }
+       const channel = this.channels.get(token);
+-      let activeChannel = channel && !channel.completionCommitted ? channel : undefined;
++      let activeChannel = channel && !channel.completionCommitted && !channel.completionPending ? channel : undefined;
+       const retiredTurn = channel?.completionCommitted ? channel.traceId : this.retiredTokens.get(token);
+       console.error(
+         `[chatgpt-web] broker claim received (tokenChars=${token.length}, tokenHash=${handleFingerprint(token)}, valid=${Boolean(activeChannel)}`
+@@ -1085,6 +1140,7 @@ export class TurnBroker implements TurnBrokerOwner {
+       if (!channel) {
+         return { completed: false, retired: this.retiredTokens.has(token) };
+       }
++      if (channel.completionPending) return { completed: false, completionPending: true };
+       if (channel.completedActivities.has(request.activityId)) {
+         return { completed: false, duplicate: true };
+       }
+@@ -1117,6 +1173,9 @@ export class TurnBroker implements TurnBrokerOwner {
+     }
+     if (request.method === "resolve") return { environment: binding.channel.environment };
+     this.assertSafeHarnessRunning(binding.channel);
++    if (binding.channel.completionPending || binding.channel.completionCommitted) {
++      throw new Error("turn completion is already fenced");
++    }
+     if (binding.channel.compactionRequested) {
+       const result = binding.channel.compactionResult;
+       if (!result) throw new Error("Codex context compaction control result is unavailable");
+@@ -1129,6 +1188,12 @@ export class TurnBroker implements TurnBrokerOwner {
+ 
+     const wireName = request.wireName?.trim();
+     if (!wireName) throw new Error("wire tool name is required");
++    await this.authorizeSentra(binding.channel.environment.sentraCapability, "tool", binding.channel.traceId, {
++      wireName,
++    });
++    if (!this.channels.has(binding.token) || binding.channel.completionPending || binding.channel.completionCommitted) {
++      throw new Error("turn was retired while authorizing the tool");
++    }
+     const callId = opaqueId("call");
+     const toolRequest: BrokerToolRequest = {
+       callId,
+diff --git a/src/cli.ts b/src/cli.ts
+index 006da67..782b2e9 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -16,6 +16,7 @@ import {
+   activateCodexIntegration,
+   deactivateCodexIntegration,
+   inspectCodexIntegration,
++  installCodexIntegration,
+   readCodexSubagentProtocol,
+   setCodexSubagentProtocol,
+   uninstallCodexIntegration,
+@@ -385,9 +386,20 @@ async function doctorCommand(args: string[]): Promise<void> {
+   if (!report.ok) process.exitCode = 1;
+ }
+ 
+-async function routeCommand(args: string[]): Promise<void> {
+-  const action = args.shift() ?? "status";
+-  assertNoArgs(args);
++  async function routeCommand(args: string[]): Promise<void> {
++    const action = args.shift() ?? "status";
++    assertNoArgs(args);
++    if (action === "sentra") {
++      const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
++      if (!base) throw new Error("SENTRA_WEB_GATEWAY_URL is required");
++      const health = await fetch(new URL("/healthz", base), { signal: AbortSignal.timeout(5000) });
++      if (!health.ok || (await health.json()).service !== "sentra-model-gateway") {
++        throw new Error("SENTRA Gateway is not healthy");
++      }
++      const journal = installCodexIntegration(loadConfig(), { replaceExistingRoute: true });
++      stdout.write(`${JSON.stringify({ installed: true, active: true, routeUrl: base, journalVersion: journal.version, codexRestartRequired: true }, null, 2)}\n`);
++      return;
++    }
+   const result = action === "status"
+     ? (() => {
+         const status = inspectCodexIntegration();
+diff --git a/src/codex-integration-shared.ts b/src/codex-integration-shared.ts
+index bb685f2..7921bd3 100644
+--- a/src/codex-integration-shared.ts
++++ b/src/codex-integration-shared.ts
+@@ -264,6 +264,15 @@ export function getCodexJournalRecoveryPath(): string {
+ }
+ 
+ export function routeUrl(config: AppConfig): string {
++  const sentra = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
++  if (sentra) {
++    const url = new URL(sentra);
++    if (url.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(url.hostname)
++      || !url.port || url.pathname !== "/v1" || url.search || url.hash || url.username || url.password) {
++      throw new Error("SENTRA Web Gateway route must be a loopback /v1 URL");
++    }
++    return url.href.replace(/\/$/, "");
++  }
+   return `http://${config.host}:${config.port}/v1`;
+ }
+ 
+diff --git a/src/config.ts b/src/config.ts
+index 8a64e60..edeffaa 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -19,10 +19,10 @@ export type SubagentProtocol = "compatibility-v1" | "native";
+  * ChatGPT caches a connector's public MCP contract by connector identity. The direct turn-token
+  * contract therefore has a new identity instead of mutating the retired connector in place.
+  */
+-export const CHATGPT_CONNECTOR_NAME = "Codex Native2";
++export const CHATGPT_CONNECTOR_NAME = "SENTRA tunnel";
+ export const DEV_CHATGPT_CONNECTOR_NAME = `${CHATGPT_CONNECTOR_NAME} DEV`;
+ export const ZERO_RISK_CHATGPT_CONNECTOR_NAME = "Codex Zero Risk";
+-export const LEGACY_CHATGPT_CONNECTOR_NAMES = ["Codex Native"] as const;
++export const LEGACY_CHATGPT_CONNECTOR_NAMES = ["Codex Native2", "Codex Native2 DEV", "Codex Native"] as const;
+ 
+ export function isLegacyChatGptConnectorName(value: string): boolean {
+   return (LEGACY_CHATGPT_CONNECTOR_NAMES as readonly string[]).includes(value);
+@@ -343,10 +343,23 @@ export function defaultChromeExecutable(
+   return "/usr/bin/google-chrome";
+ }
+ 
++function normalizeSentraConnectorIdentity(raw: Record<string, unknown>): void {
++  const sentraManaged = Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim());
++  const interactionMode = sentraManaged ? "automatic" : (raw.browserInteractionMode ?? "automatic");
++  const automaticName = raw.purpose === "dev-harness"
++    ? DEV_CHATGPT_CONNECTOR_NAME
++    : CHATGPT_CONNECTOR_NAME;
++  if (sentraManaged) raw.browserInteractionMode = "automatic";
++  raw.automaticAppName = automaticName;
++  if (interactionMode === "automatic") raw.appName = automaticName;
++}
++
+ export function loadConfig(): AppConfig {
+   const path = getConfigPath();
+   if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run codex-chatgpt-web setup first.`);
+-  return parseConfig(JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))), path);
++  const raw = JSON.parse(stripUtf8Bom(readFileSync(path, "utf8"))) as Record<string, unknown>;
++  normalizeSentraConnectorIdentity(raw);
++  return parseConfig(raw, path);
+ }
+ 
+ export function loadConfigForSetup(): AppConfig {
+@@ -361,13 +374,7 @@ export function loadConfigForSetup(): AppConfig {
+     raw.version = 3;
+     raw.browserHost = "managed-chrome";
+   }
+-  const interactionMode = raw.browserInteractionMode ?? "automatic";
+-  const automaticName = raw.automaticAppName
+-    ?? (interactionMode === "automatic" ? raw.appName : CHATGPT_CONNECTOR_NAME);
+-  if (automaticName === ZERO_RISK_CHATGPT_CONNECTOR_NAME) {
+-    raw.automaticAppName = CHATGPT_CONNECTOR_NAME;
+-    if (interactionMode === "automatic") raw.appName = CHATGPT_CONNECTOR_NAME;
+-  }
++  normalizeSentraConnectorIdentity(raw);
+   return parseConfig(raw, path);
+ }
+ 
+@@ -467,7 +474,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
+       }
+     }
+   };
+-  if (parsed.mode === "full") {
++  if (parsed.mode === "full" && !process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
+     validateTunnel(parsed.tunnel, "tunnel");
+     if (parsed.automaticTunnel !== undefined) validateTunnel(parsed.automaticTunnel, "automaticTunnel");
+     if (parsed.manualTunnel !== undefined) validateTunnel(parsed.manualTunnel, "manualTunnel");
+@@ -562,6 +569,7 @@ export function saveConfig(config: AppConfig): void {
+ 
+ export function providerConfig(config: AppConfig): CodexProviderConfig {
+   const manual = config.browserInteractionMode === "manual";
++  const sentraManaged = Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim());
+   const model = manual
+     ? CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
+     : config.solAvailable ? "gpt-5.6-sol" : "gpt-5.6-luna";
+@@ -590,7 +598,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
+     ),
+     noReasoningModels: [],
+     chatgptWeb: {
+-      appName: manual ? config.manualAppName : config.automaticAppName,
++      appName: sentraManaged ? CHATGPT_CONNECTOR_NAME : manual ? config.manualAppName : config.automaticAppName,
+       browserInteractionMode: config.browserInteractionMode,
+       browserHost: config.browserHost,
+       browserHostDescriptorPath: config.browserHostDescriptorPath,
+@@ -600,7 +608,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
+       threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
+       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
+       headed: config.headed,
+-      localToolsEnabled: config.mode === "full",
++      localToolsEnabled: sentraManaged || config.mode === "full",
+       solAvailable: manual ? false : config.solAvailable,
+       extraHighAvailable: !manual && config.extraHighAvailable === true,
+       proAvailable: manual ? false : config.proAvailable,

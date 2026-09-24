@@ -24,11 +24,13 @@ class SearchSessionService:
         audit: AuditLogger,
         workspaces: WorkspaceRegistry | None = None,
         *,
+        durable: object | None = None,
         db_path: Path | None = None,
     ) -> None:
         self.config = config
         self.audit = audit
         self.workspaces = workspaces
+        self.durable = durable
         self.db_path = Path(db_path or (config.state_root / "searches.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
@@ -45,6 +47,9 @@ class SearchSessionService:
                 workspace_id TEXT NOT NULL DEFAULT '',
                 workspace_alias TEXT NOT NULL DEFAULT '',
                 workspace_path TEXT NOT NULL DEFAULT '',
+                run_id TEXT,
+                operation_id TEXT,
+                idempotency_key TEXT,
                 scope TEXT NOT NULL,
                 pattern TEXT NOT NULL,
                 search_type TEXT NOT NULL,
@@ -74,6 +79,9 @@ class SearchSessionService:
             "workspace_id": "TEXT NOT NULL DEFAULT ''",
             "workspace_alias": "TEXT NOT NULL DEFAULT ''",
             "workspace_path": "TEXT NOT NULL DEFAULT ''",
+            "run_id": "TEXT",
+            "operation_id": "TEXT",
+            "idempotency_key": "TEXT",
         }
         for name, ddl in migrations.items():
             if name not in columns:
@@ -83,6 +91,102 @@ class SearchSessionService:
             "WHERE state IN ('RUNNING','CANCELLING')"
         )
         self.db.commit()
+        self._recover_interrupted_durable_operations()
+
+    def _recover_interrupted_durable_operations(self) -> None:
+        if self.durable is None:
+            return
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT owner,operation_id,id,state FROM searches "
+                "WHERE state='INTERRUPTED' AND operation_id IS NOT NULL"
+            ).fetchall()
+        for row in rows:
+            try:
+                current = self.durable.operation_status(
+                    str(row["operation_id"]), str(row["owner"])
+                )
+                if current["state"] in {"SUCCEEDED", "FAILED", "CANCELLED", "UNCERTAIN"}:
+                    continue
+                self.durable.update_operation(
+                    str(row["operation_id"]),
+                    str(row["owner"]),
+                    state="UNCERTAIN",
+                    progress={
+                        "stage": "INTERRUPTED",
+                        "search_id": str(row["id"]),
+                        "reason": "server restarted while search was active",
+                    },
+                    event_type="SEARCH_INTERRUPTED",
+                    error={
+                        "code": "SEARCH_INTERRUPTED",
+                        "message": "server restarted while search was active; no automatic replay",
+                    },
+                )
+            except Exception:
+                pass
+
+    def _durable_update(
+        self,
+        search_id: str,
+        *,
+        state: str | None = None,
+        readiness: str | None = None,
+        stage: str,
+        files_scanned: int | None = None,
+        matches: int | None = None,
+        event_type: str = "SEARCH_PROGRESS",
+        result: dict[str, Any] | None = None,
+        error: dict[str, Any] | None = None,
+    ) -> None:
+        if self.durable is None:
+            return
+        with self.lock:
+            row = self.db.execute(
+                "SELECT owner,operation_id FROM searches WHERE id=?",
+                (search_id,),
+            ).fetchone()
+        if row is None or not row["operation_id"]:
+            return
+        progress: dict[str, Any] = {"stage": stage, "search_id": search_id}
+        if files_scanned is not None:
+            progress["files_scanned"] = int(files_scanned)
+        if matches is not None:
+            progress["matches"] = int(matches)
+        try:
+            self.durable.update_operation(
+                str(row["operation_id"]),
+                str(row["owner"]),
+                state=state,
+                readiness=readiness,
+                progress=progress,
+                event_type=event_type,
+                result=result,
+                error=error,
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _summary(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "search_id": row["id"],
+            "run_id": row["run_id"],
+            "operation_id": row["operation_id"],
+            "idempotency_key": row["idempotency_key"],
+            "state": row["state"],
+            "files_scanned": row["files_scanned"],
+            "matches": row["matches"],
+            "error": row["error"],
+            "workspace_id": row["workspace_id"],
+            "workspace_alias": row["workspace_alias"],
+            "workspace_path": row["workspace_path"],
+            "scope": row["scope"],
+            "pattern": row["pattern"],
+            "search_type": row["search_type"],
+            "created": row["created"],
+            "updated": row["updated"],
+        }
 
     def update_config(self, config: MCPConfig) -> None:
         self.config = config
@@ -155,6 +259,8 @@ class SearchSessionService:
         context: int = 0,
         max_results: int = 10000,
         max_files: int = 100000,
+        run_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         if not owner.strip():
             raise ValueError("owner is required")
@@ -172,14 +278,86 @@ class SearchSessionService:
             re.compile(pattern)
 
         root_index, root, scope, view = self._workspace(path, workspace, owner)
+        durable_run_id: str | None = None
+        operation_id: str | None = None
+        key = str(idempotency_key or "").strip() or (
+            f"search:{search_type}:{uuid.uuid4().hex}"
+        )
+        if self.durable is not None:
+            if run_id:
+                durable_run = self.durable.run_status(run_id, owner)
+            else:
+                durable_run = self.durable.ensure_implicit_run(
+                    owner, workspace=str(view["id"])
+                )
+            durable_run_id = str(durable_run["run_id"])
+            operation = self.durable.create_operation(
+                durable_run_id,
+                owner,
+                kind="search.scan",
+                idempotency_key=key,
+            )
+            operation_id = str(operation["operation_id"])
+            if operation.get("idempotent_replay"):
+                with self.lock:
+                    row = self.db.execute(
+                        "SELECT * FROM searches WHERE operation_id=? AND owner=? "
+                        "ORDER BY created DESC LIMIT 1",
+                        (operation_id, owner),
+                    ).fetchone()
+                if row is not None:
+                    data = self._summary(row)
+                    data["idempotent_replay"] = True
+                    return data
+                if operation["state"] not in {
+                    "SUCCEEDED", "FAILED", "CANCELLED", "UNCERTAIN"
+                }:
+                    try:
+                        operation = self.durable.update_operation(
+                            operation_id,
+                            owner,
+                            state="UNCERTAIN",
+                            progress={
+                                "stage": "UNCERTAIN",
+                                "reason": "operation exists but search row is absent",
+                            },
+                            event_type="SEARCH_CORRELATION_LOST",
+                            error={
+                                "code": "SEARCH_CORRELATION_LOST",
+                                "message": (
+                                    "durable operation exists but persisted search "
+                                    "state cannot prove whether scanning started"
+                                ),
+                            },
+                        )
+                    except Exception:
+                        operation = self.durable.operation_status(
+                            operation_id, owner
+                        )
+                return {
+                    "run_id": durable_run_id,
+                    "operation_id": operation_id,
+                    "idempotency_key": key,
+                    "idempotent_replay": True,
+                    "state": operation["state"],
+                    "semantic_status": (
+                        operation["state"]
+                        if operation["state"] in {
+                            "SUCCEEDED", "FAILED", "CANCELLED", "UNCERTAIN"
+                        }
+                        else "OPERATION_STILL_RUNNING"
+                    ),
+                }
+
         search_id = str(uuid.uuid4())
         now = time.time()
         with self.lock:
             self.db.execute(
                 "INSERT INTO searches("
-                "id,root_index,owner,workspace_id,workspace_alias,workspace_path,scope,pattern,"
+                "id,root_index,owner,workspace_id,workspace_alias,workspace_path,"
+                "run_id,operation_id,idempotency_key,scope,pattern,"
                 "search_type,literal,ignore_case,context,max_results,max_files,state,created,updated"
-                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'RUNNING',?,?)",
+                ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'RUNNING',?,?)",
                 (
                     search_id,
                     root_index,
@@ -187,6 +365,9 @@ class SearchSessionService:
                     view["workspace_id"],
                     view["alias"],
                     str(root),
+                    durable_run_id,
+                    operation_id,
+                    key,
                     scope,
                     pattern,
                     search_type,
@@ -200,6 +381,24 @@ class SearchSessionService:
                 ),
             )
             self.db.commit()
+
+        if self.durable is not None and operation_id:
+            try:
+                self.durable.update_operation(
+                    operation_id,
+                    owner,
+                    state="STARTING",
+                    progress={
+                        "stage": "STARTING",
+                        "search_id": search_id,
+                        "scope": scope,
+                        "search_type": search_type,
+                    },
+                    event_type="SEARCH_STARTING",
+                )
+            except Exception:
+                pass
+
         stop = threading.Event()
         self.stops[search_id] = stop
         thread = threading.Thread(
@@ -215,6 +414,9 @@ class SearchSessionService:
         thread.start()
         self.audit.emit("search.start", "ok", {
             "search_id": search_id,
+            "run_id": durable_run_id,
+            "operation_id": operation_id,
+            "idempotency_key": key,
             "scope": scope,
             "type": search_type,
             "owner": owner,
@@ -223,6 +425,9 @@ class SearchSessionService:
         })
         return {
             "search_id": search_id,
+            "run_id": durable_run_id,
+            "operation_id": operation_id,
+            "idempotency_key": key,
             "state": "RUNNING",
             "workspace": view["id"],
             "workspace_id": view["workspace_id"],
@@ -269,6 +474,15 @@ class SearchSessionService:
         matches = 0
         state = "COMPLETED"
         error = None
+        last_progress = 0.0
+        self._durable_update(
+            search_id,
+            state="RUNNING",
+            stage="SEARCHING",
+            files_scanned=0,
+            matches=0,
+            event_type="SEARCH_RUNNING",
+        )
         try:
             for file_path in iter_workspace_files(root, scope, max_files=max_files):
                 if stop.is_set():
@@ -305,12 +519,22 @@ class SearchSessionService:
                             matches += 1
                             if matches >= max_results:
                                 break
+                now = time.monotonic()
                 with self.lock:
                     self.db.execute(
                         "UPDATE searches SET files_scanned=?,updated=? WHERE id=?",
                         (scanned, time.time(), search_id),
                     )
                     self.db.commit()
+                if scanned == 1 or scanned % 100 == 0 or now - last_progress >= 0.5:
+                    self._durable_update(
+                        search_id,
+                        stage="SEARCHING",
+                        files_scanned=scanned,
+                        matches=matches,
+                        event_type="SEARCH_PROGRESS",
+                    )
+                    last_progress = now
                 if matches >= max_results:
                     state = "LIMIT_REACHED"
                     break
@@ -324,6 +548,45 @@ class SearchSessionService:
                     (state, scanned, matches, error, time.time(), search_id),
                 )
                 self.db.commit()
+
+            if state in {"COMPLETED", "LIMIT_REACHED"}:
+                self._durable_update(
+                    search_id,
+                    state="SUCCEEDED",
+                    readiness="PRODUCT_READY",
+                    stage=state,
+                    files_scanned=scanned,
+                    matches=matches,
+                    event_type=f"SEARCH_{state}",
+                    result={
+                        "search_id": search_id,
+                        "state": state,
+                        "files_scanned": scanned,
+                        "matches": matches,
+                    },
+                )
+            elif state == "CANCELLED":
+                self._durable_update(
+                    search_id,
+                    state="CANCELLED",
+                    stage="CANCELLED",
+                    files_scanned=scanned,
+                    matches=matches,
+                    event_type="SEARCH_CANCELLED",
+                )
+            else:
+                self._durable_update(
+                    search_id,
+                    state="FAILED",
+                    stage="FAILED",
+                    files_scanned=scanned,
+                    matches=matches,
+                    event_type="SEARCH_FAILED",
+                    error={
+                        "code": "SEARCH_FAILED",
+                        "message": str(error or "search failed")[:1000],
+                    },
+                )
             self.stops.pop(search_id, None)
             self.threads.pop(search_id, None)
 
@@ -359,37 +622,77 @@ class SearchSessionService:
                 (search_id, offset, length),
             ).fetchall()
             payloads = [json.loads(item["payload"]) for item in results]
+            total = int(self.db.execute(
+                "SELECT COUNT(*) FROM search_results WHERE search_id=?",
+                (search_id,),
+            ).fetchone()[0])
+            next_offset = offset + len(payloads)
+            next_offset = next_offset if next_offset < total else None
             return {
                 "search_id": search_id,
+                "run_id": row["run_id"],
+                "operation_id": row["operation_id"],
+                "idempotency_key": row["idempotency_key"],
                 "state": row["state"],
                 "files_scanned": row["files_scanned"],
                 "matches": row["matches"],
                 "error": row["error"],
                 "offset": offset,
                 "returned": len(payloads),
-                "next_offset": offset + len(payloads),
+                "next_offset": next_offset,
                 "next_poll_after_ms": 100 if row["state"] in {"RUNNING", "CANCELLING"} else None,
+                "items": payloads,
                 "results": payloads,
+                "page": {
+                    "offset": offset,
+                    "limit": length,
+                    "returned": len(payloads),
+                    "total": total,
+                    "next_offset": next_offset,
+                },
                 **self._meta(row),
             }
 
-    def list_searches(self, owner: str, limit: int = 100) -> dict[str, Any]:
-        if not 1 <= limit <= 1000:
-            raise ValueError("limit must be 1..1000")
+    def list_searches(
+        self,
+        owner: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if offset < 0 or not 1 <= limit <= 1000:
+            raise ValueError("offset must be >=0 and limit must be 1..1000")
         with self.lock:
+            total = int(self.db.execute(
+                "SELECT COUNT(*) FROM searches WHERE owner IN (?, 'legacy')",
+                (owner,),
+            ).fetchone()[0])
             rows = self.db.execute(
-                "SELECT id,owner,workspace_id,workspace_alias,workspace_path,scope,pattern,"
+                "SELECT id,owner,workspace_id,workspace_alias,workspace_path,"
+                "run_id,operation_id,idempotency_key,scope,pattern,"
                 "search_type,state,files_scanned,matches,error,created,updated "
-                "FROM searches WHERE owner IN (?, 'legacy') ORDER BY created DESC LIMIT ?",
-                (owner, limit),
+                "FROM searches WHERE owner IN (?, 'legacy') "
+                "ORDER BY created DESC LIMIT ? OFFSET ?",
+                (owner, limit, offset),
             ).fetchall()
-            return {"searches": [dict(row) for row in rows]}
+        items = [dict(row) for row in rows]
+        next_offset = offset + len(items)
+        return {
+            "items": items,
+            "searches": items,
+            "page": {
+                "offset": offset,
+                "limit": limit,
+                "returned": len(items),
+                "total": total,
+                "next_offset": next_offset if next_offset < total else None,
+            },
+        }
 
     def stop(self, search_id: str, owner: str) -> dict[str, Any]:
         with self.lock:
             row = self._owned_row(search_id, owner)
             if row["state"] != "RUNNING":
-                return {"search_id": search_id, "state": row["state"]}
+                return self._summary(row)
             event = self.stops.get(search_id)
             if event:
                 event.set()
@@ -398,4 +701,18 @@ class SearchSessionService:
                 (time.time(), search_id),
             )
             self.db.commit()
-            return {"search_id": search_id, "state": "CANCELLING"}
+            data = self._summary(
+                self.db.execute(
+                    "SELECT * FROM searches WHERE id=?", (search_id,)
+                ).fetchone()
+            )
+        if self.durable is not None and row["operation_id"]:
+            try:
+                self.durable.request_cancel(
+                    str(row["operation_id"]),
+                    owner,
+                    side_effect_may_have_started=True,
+                )
+            except Exception:
+                pass
+        return data

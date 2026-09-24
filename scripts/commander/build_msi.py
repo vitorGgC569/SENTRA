@@ -82,13 +82,21 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
         "sentra-desktop.exe", "sentra-human.exe", "sentra-human-worker.exe",
         "sentra-mcp.exe", "sentra-browser-relay.exe",
         "sentra-agent.exe", "sentra-diagnostics.exe", "sentra-admin.exe",
-        "sentra-update-helper.exe", "sentra-oma.exe", "tunnel-client.exe",
+        "sentra-update-helper.exe", "sentra-oma.exe", "sentra.exe",
+        "tunnel-client.exe",
     }
     missing = sorted(name for name in required if not (source / name).is_file())
     if missing:
         raise FileNotFoundError("MSI staging is missing: " + ", ".join(missing))
     if not (source / "edge_extension" / "manifest.json").is_file():
         raise FileNotFoundError("MSI staging is missing edge_extension")
+    web_models = source / "web-models" / "win-unpacked"
+    if not (web_models / "Codex Web GPT.exe").is_file() or not (web_models / "resources" / "runtime" / "manifest.json").is_file():
+        raise FileNotFoundError("MSI staging is missing Web Models payload")
+    if not (source / "web-models" / "licenses" / "codex-chatgpt-web" / "LICENSE").is_file():
+        raise FileNotFoundError("MSI staging is missing codex-chatgpt-web license notice")
+    if not (source / "web-models" / "integration-build.json").is_file():
+        raise FileNotFoundError("MSI staging is missing Web Models integration metadata")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     db = init_database(

@@ -301,6 +301,11 @@ def test_filesystem_schema_exposes_enums_units_and_delete(tmp_path: Path) -> Non
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
             assert "sentra_session_open" in tools
             assert "sentra_delete_path" in tools
+            opened = await client.call_tool("sentra_session_open", {})
+            contract = opened.structured_content["data"]["contract"]
+            assert len(contract["schema_hash"]) == 64
+            assert contract["build_id"]
+            assert len(contract["fingerprint"]) == 64
             read_props = tools["sentra_read_file"].input_schema["properties"]
             assert "session_token" in read_props
             assert "workspace" in read_props

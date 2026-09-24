@@ -1,7 +1,9 @@
 """Strict unified patches: validate every file before publishing any change."""
 from __future__ import annotations
 
+import ast
 import os
+import py_compile
 import re
 import tempfile
 import threading
@@ -135,6 +137,67 @@ class PatchManager:
                 PatchManager._apply_hunks(existing, fp.hunks)
             except ValueError as exc:
                 raise ValueError(f"{fp.path}: {exc}")
+
+    @staticmethod
+    def dry_run_validate(repo_root: Path, patch_text: str) -> Dict[str, Any]:
+        """Validate application plus Python syntax without mutating the workspace.
+
+        Every patched Python file is parsed with AST and compiled through
+        py_compile from a temporary copy. This catches malformed generated
+        patches before validator/model budget is spent and before any candidate
+        workspace mutation occurs.
+        """
+        root = Path(repo_root).resolve()
+        parsed = PatchManager.parse_files(patch_text)
+        checked: List[str] = []
+        python_checked: List[str] = []
+        with tempfile.TemporaryDirectory(prefix="sentra-patch-dryrun-") as temp_dir:
+            temp_root = Path(temp_dir)
+            for fp in parsed:
+                target = resolve_workspace_path(root, fp.path)
+                if fp.old is not None and not target.is_file():
+                    raise ValueError(f"{fp.path}: patch source missing")
+                if fp.old is None and target.exists():
+                    raise ValueError(f"{fp.path}: create target already exists")
+                existing = (
+                    target.read_text(encoding="utf-8", errors="strict").splitlines(keepends=True)
+                    if target.is_file() else []
+                )
+                after = "".join(PatchManager._apply_hunks(existing, fp.hunks))
+                if fp.new is None:
+                    if after:
+                        raise ValueError(f"{fp.path}: deletion patch leaves content behind")
+                    checked.append(fp.path)
+                    continue
+                checked.append(fp.path)
+                if not fp.path.lower().endswith(".py"):
+                    continue
+                try:
+                    ast.parse(after, filename=fp.path)
+                except SyntaxError as exc:
+                    raise ValueError(
+                        f"{fp.path}: AST syntax error line {exc.lineno}: {exc.msg}"
+                    ) from exc
+                temporary = temp_root / fp.path
+                temporary.parent.mkdir(parents=True, exist_ok=True)
+                temporary.write_text(after, encoding="utf-8")
+                try:
+                    py_compile.compile(
+                        str(temporary),
+                        cfile=str(temporary.with_suffix(".pyc")),
+                        doraise=True,
+                    )
+                except py_compile.PyCompileError as exc:
+                    raise ValueError(f"{fp.path}: py_compile failed: {exc.msg}") from exc
+                python_checked.append(fp.path)
+        return {
+            "valid": True,
+            "files": checked,
+            "python_files": python_checked,
+            "checks": ["patch_apply"] + (
+                ["ast_parse", "py_compile"] if python_checked else []
+            ),
+        }
 
     @staticmethod
     def _apply_hunks(existing: List[str], hunks: List[str]) -> List[str]:

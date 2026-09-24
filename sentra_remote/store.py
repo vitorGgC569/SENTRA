@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from sentra_version import CAPABILITY_VERSION, PROTOCOL_VERSION, SERVER_VERSION
+
 from .models import EXEC_PHASES, PRE_EXEC_PHASES, TERMINAL_STATES, LeasedRemoteJob
 
 
@@ -28,6 +30,20 @@ def _error_text(value: Any) -> str | None:
     if isinstance(value, str):
         return value[:4000]
     return _json(value)[:4000]
+
+
+class RemoteAgentCompatibilityError(RuntimeError):
+    code = "REMOTE_AGENT_STALE"
+    category = "contract"
+    retryable = False
+
+    def __init__(self, reasons: list[dict[str, Any]]) -> None:
+        self.reasons = reasons
+        self.details = {"reasons": reasons}
+        if reasons:
+            self.code = str(reasons[0].get("code") or self.code)
+        message = "; ".join(str(item.get("message") or item.get("code")) for item in reasons)
+        super().__init__(message or "remote agent identity is incompatible")
 
 
 class RemoteStore:
@@ -103,6 +119,10 @@ class RemoteStore:
                 device_id TEXT NOT NULL,
                 tool TEXT NOT NULL,
                 arguments TEXT NOT NULL,
+                run_id TEXT,
+                operation_id TEXT,
+                idempotency_key TEXT,
+                contract_required INTEGER NOT NULL DEFAULT 0,
                 state TEXT NOT NULL,
                 lease_hash TEXT NOT NULL DEFAULT '',
                 lease_until REAL NOT NULL DEFAULT 0,
@@ -133,6 +153,20 @@ class RemoteStore:
             self.db.execute("ALTER TABLE devices ADD COLUMN previous_token_hash TEXT NOT NULL DEFAULT ''")
         if "previous_token_expires" not in columns:
             self.db.execute("ALTER TABLE devices ADD COLUMN previous_token_expires REAL NOT NULL DEFAULT 0")
+        job_columns = {
+            str(row[1])
+            for row in self.db.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        for column in ("run_id", "operation_id", "idempotency_key"):
+            if column not in job_columns:
+                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
+        if "contract_required" not in job_columns:
+            self.db.execute(
+                "ALTER TABLE jobs ADD COLUMN contract_required INTEGER NOT NULL DEFAULT 0"
+            )
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_operation ON jobs(operation_id)"
+        )
         self.db.commit()
 
     def close(self) -> None:
@@ -265,6 +299,105 @@ class RemoteStore:
                 raise PermissionError("invalid device credential")
             return row
 
+    @staticmethod
+    def agent_compatibility(capabilities: dict[str, Any] | None) -> dict[str, Any]:
+        caps = dict(capabilities or {})
+        sentra = caps.get("sentra")
+        reasons: list[dict[str, Any]] = []
+        if not isinstance(sentra, dict):
+            return {
+                "compatible": False,
+                "reasons": [{
+                    "code": "REMOTE_AGENT_STALE",
+                    "field": "sentra",
+                    "message": "remote agent did not publish a SENTRA contract manifest",
+                }],
+                "server": None,
+                "contract": None,
+            }
+
+        server = sentra.get("server")
+        contract = sentra.get("contract")
+        advertised = sentra.get("capabilities")
+        if not isinstance(server, dict):
+            reasons.append({
+                "code": "REMOTE_AGENT_STALE",
+                "field": "sentra.server",
+                "message": "remote agent build identity is missing",
+            })
+            server = {}
+        if not isinstance(contract, dict):
+            reasons.append({
+                "code": "SCHEMA_MISMATCH",
+                "field": "sentra.contract",
+                "message": "remote agent live schema identity is missing",
+            })
+            contract = {}
+
+        comparisons = (
+            ("version", SERVER_VERSION, "REMOTE_AGENT_STALE"),
+            ("protocol_version", PROTOCOL_VERSION, "PROTOCOL_MISMATCH"),
+            ("capability_version", CAPABILITY_VERSION, "CAPABILITY_MISMATCH"),
+        )
+        for field, expected, code in comparisons:
+            actual = str(server.get(field) or "")
+            if actual != expected:
+                reasons.append({
+                    "code": code,
+                    "field": f"sentra.server.{field}",
+                    "expected": expected,
+                    "actual": actual or None,
+                    "message": f"remote agent {field} is incompatible",
+                })
+
+        build_id = str(server.get("build_id") or "")
+        fingerprint = str(server.get("fingerprint") or "")
+        source_hash = str(server.get("source_hash") or "")
+        executable_hash = str(server.get("executable_sha256") or "")
+        if not build_id or not fingerprint:
+            reasons.append({
+                "code": "REMOTE_AGENT_STALE",
+                "field": "sentra.server",
+                "message": "remote agent build identity is incomplete",
+            })
+        if not source_hash and not executable_hash:
+            reasons.append({
+                "code": "REMOTE_AGENT_STALE",
+                "field": "sentra.server",
+                "message": "remote agent cannot prove source or executable identity",
+            })
+
+        schema_hash = str(contract.get("schema_hash") or "")
+        if len(schema_hash) != 64 or any(
+            ch not in "0123456789abcdefABCDEF" for ch in schema_hash
+        ):
+            reasons.append({
+                "code": "SCHEMA_MISMATCH",
+                "field": "sentra.contract.schema_hash",
+                "message": "remote agent did not publish a valid live tool schema hash",
+            })
+        tool_names = contract.get("tool_names")
+        if not isinstance(tool_names, list) or not tool_names:
+            reasons.append({
+                "code": "SCHEMA_MISMATCH",
+                "field": "sentra.contract.tool_names",
+                "message": "remote agent live tool inventory is missing",
+            })
+        if not isinstance(advertised, dict):
+            reasons.append({
+                "code": "CAPABILITY_MISSING",
+                "field": "sentra.capabilities",
+                "message": "remote agent capability manifest is missing",
+            })
+
+        return {
+            "compatible": not reasons,
+            "reasons": reasons,
+            "server": server,
+            "contract": contract,
+            "capabilities": advertised if isinstance(advertised, dict) else None,
+        }
+
     def heartbeat(self, device_id: str, token: str, capabilities: dict[str, Any] | None = None) -> dict[str, Any]:
         self.authenticate_device(device_id, token)
         now = self.clock()
@@ -278,7 +411,11 @@ class RemoteStore:
                 (now, raw, now, device_id),
             )
             self.db.commit()
-        return {"ok": True, "server_time": now}
+        return {
+            "ok": True,
+            "server_time": now,
+            "compatibility": self.agent_compatibility(caps),
+        }
 
     def _public_device(self, row: sqlite3.Row) -> dict[str, Any]:
         now = self.clock()
@@ -287,6 +424,7 @@ class RemoteStore:
             and row["last_seen"] > 0
             and now - row["last_seen"] <= self.online_window_s
         )
+        capabilities = json.loads(row["capabilities"] or "{}")
         return {
             "device_id": row["id"],
             "name": row["name"],
@@ -295,7 +433,8 @@ class RemoteStore:
             "last_seen": row["last_seen"],
             "token_expires_at": row["token_expires"],
             "allowed_tools": json.loads(row["allowed_tools"]),
-            "capabilities": json.loads(row["capabilities"] or "{}"),
+            "capabilities": capabilities,
+            "compatibility": self.agent_compatibility(capabilities),
         }
 
     def list_devices(self, user_id: str) -> list[dict[str, Any]]:
@@ -401,6 +540,10 @@ class RemoteStore:
         arguments: dict[str, Any],
         *,
         timeout_s: int = 180,
+        run_id: str | None = None,
+        operation_id: str | None = None,
+        idempotency_key: str | None = None,
+        require_compatible_agent: bool = False,
     ) -> str:
         if timeout_s < 5 or timeout_s > 3600:
             raise ValueError("remote timeout must be between 5 and 3600 seconds")
@@ -417,20 +560,37 @@ class RemoteStore:
                 raise PermissionError("device belongs to another user")
             if row["revoked"]:
                 raise PermissionError("device is revoked")
+            if require_compatible_agent:
+                compatibility = self.agent_compatibility(
+                    json.loads(row["capabilities"] or "{}")
+                )
+                if not compatibility["compatible"]:
+                    raise RemoteAgentCompatibilityError(
+                        list(compatibility["reasons"])
+                    )
             permissions = tuple(json.loads(row["allowed_tools"]))
             if not self._tool_allowed(tool, permissions):
                 raise PermissionError("tool is not authorized for this device")
             job_id = str(uuid.uuid4())
             self.db.execute(
-                "INSERT INTO jobs(id,user_id,device_id,tool,arguments,state,deadline,created,updated) "
-                "VALUES(?,?,?,?,?,'QUEUED',?,?,?)",
-                (job_id, user_id, device_id, tool, raw_args, now + timeout_s, now, now),
+                "INSERT INTO jobs(id,user_id,device_id,tool,arguments,run_id,operation_id,"
+                "idempotency_key,contract_required,state,deadline,created,updated) "
+                "VALUES(?,?,?,?,?,?,?,?,?, 'QUEUED',?,?,?)",
+                (
+                    job_id, user_id, device_id, tool, raw_args,
+                    run_id, operation_id, idempotency_key,
+                    1 if require_compatible_agent else 0,
+                    now + timeout_s, now, now,
+                ),
             )
             self.db.commit()
             return job_id
 
     def poll_job(self, device_id: str, token: str) -> LeasedRemoteJob | None:
-        self.authenticate_device(device_id, token)
+        device = self.authenticate_device(device_id, token)
+        compatibility = self.agent_compatibility(
+            json.loads(device["capabilities"] or "{}")
+        )
         now = self.clock()
         with self.lock:
             self._expire_jobs()
@@ -444,6 +604,8 @@ class RemoteStore:
                 (device_id,),
             ).fetchone()
             if row is None:
+                return None
+            if int(row["contract_required"] or 0) and not compatibility["compatible"]:
                 return None
             lease = secrets.token_urlsafe(32)
             until = min(row["deadline"], now + self.lease_window_s)
@@ -583,6 +745,10 @@ class RemoteStore:
                 raise PermissionError("remote job belongs to another user")
             return {
                 "job_id": row["id"],
+                "run_id": row["run_id"],
+                "operation_id": row["operation_id"],
+                "idempotency_key": row["idempotency_key"],
+                "contract_required": bool(row["contract_required"]),
                 "device_id": row["device_id"],
                 "tool": row["tool"],
                 "state": row["state"],
@@ -594,6 +760,22 @@ class RemoteStore:
                 "updated": row["updated"],
                 "deadline": row["deadline"],
             }
+
+    def job_for_operation(
+        self,
+        user_id: str,
+        operation_id: str,
+    ) -> dict[str, Any] | None:
+        with self.lock:
+            self._expire_jobs()
+            row = self.db.execute(
+                "SELECT id FROM jobs WHERE user_id=? AND operation_id=? "
+                "ORDER BY created DESC LIMIT 1",
+                (user_id, operation_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return self.job_result(user_id, str(row["id"]))
 
     def cancel_job(self, user_id: str, job_id: str) -> None:
         now = self.clock()

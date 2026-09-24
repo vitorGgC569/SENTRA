@@ -231,6 +231,9 @@ DETERMINISTIC TEST RESULTS:
             user_prompt=user_prompt,
             role=self.role.value,
             metadata={"task_id": task.id, "candidate_id": candidate.candidate_id,
+                      "idempotency_key": task.idempotency_key,
+                      "priority": getattr(task.priority, "value", task.priority),
+                      "risk": str(task.risk),
                       "acceptance_criteria": task.metadata.get("acceptance_criteria", []),
                       **({"images": images} if images else {})},
         )

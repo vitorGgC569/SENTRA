@@ -8,6 +8,7 @@ from pathlib import Path
 
 from repository.gateway import CommandGateway
 from .version_guard import check_patch
+from .failure_summary import summarize_test_results
 from workspace.command_runner import CommandRunner
 from workspace.docker_runner import create_runner, settings
 from workspace.sandbox import WorkspaceSandbox, fingerprint, source_files
@@ -57,8 +58,12 @@ class CandidateVerifier:
             gateway = CommandGateway(sandbox.root, event_sink=event_sink)
             session = gateway.open_session()
             applied = "NO_PATCH"
+            dry_run = {"valid": True, "files": [], "python_files": [], "checks": []}
             if candidate.patch:
                 try:
+                    dry_run = PatchManager.dry_run_validate(
+                        sandbox.root, candidate.patch
+                    )
                     paths = {resolve_workspace_path(sandbox.root, item.path).relative_to(sandbox.root).as_posix()
                              for item in PatchManager.parse_files(candidate.patch)}
                     if self.allowed_patch_paths is not None and paths - self.allowed_patch_paths:
@@ -103,6 +108,7 @@ class CandidateVerifier:
                 "refused_commands": refused,
                 "checks_ran": len(ran_results),
                 "version_check": version_check,
+                "dry_run": dry_run,
                 "results": ran_results, "all_results": results,
                 "elapsed_s": time.monotonic() - started,
                 "source_unchanged": sandbox.source_unchanged(),
@@ -110,6 +116,7 @@ class CandidateVerifier:
                                        else "isolated_filesystem_candidate"),
                 "execution": self.execution,
             }
+            evidence["failure_summary"] = summarize_test_results(evidence)
             if inspect is not None:
                 evidence["_reports"] = await inspect(sandbox.root, evidence)
                 if fingerprint(source_files(sandbox.root)) != after_hash:

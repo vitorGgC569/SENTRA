@@ -36,6 +36,7 @@ class PriorityTaskQueue:
         self.max_queue_size = max_queue_size
         self._lock = asyncio.Lock()
         self._all_tasks: Dict[str, Task] = {}
+        self._idempotency_index: Dict[str, str] = {}
         self._ready_queue: List[str] = []
         self._blocked_tasks: Dict[str, Set[str]] = {}  # task_id -> set of unfulfilled dep_ids
         self._running_tasks: Dict[str, Task] = {}
@@ -43,7 +44,72 @@ class PriorityTaskQueue:
         self._cancelled_tasks: Dict[str, Task] = {}
         self._failed_tasks: Dict[str, Task] = {}
         self._dlq: List[Dict[str, Any]] = []
+        self._resource_holders: Dict[str, str] = {}
+        self._task_locks: Dict[str, Set[str]] = {}
         self.dropped_due_to_backpressure: int = 0
+
+    @staticmethod
+    def _normalize_resource(value: str) -> str:
+        return str(value or "").strip().replace("\\", "/").lower()
+
+    def _resources_for_task(self, task: Task) -> Set[str]:
+        scope = str(getattr(task, "side_effect_scope", "ISOLATED") or "ISOLATED").upper()
+        resources = {
+            self._normalize_resource(item)
+            for item in getattr(task, "resource_locks", [])
+            if self._normalize_resource(item)
+        }
+        if scope == "WORKSPACE_WRITE":
+            targets = [
+                self._normalize_resource(item)
+                for item in getattr(task, "target_files", [])
+                if self._normalize_resource(item)
+            ]
+            if targets:
+                resources.update(f"file:{item}" for item in targets)
+            else:
+                resources.add("workspace:*")
+        elif scope == "EXTERNAL" and not resources:
+            resources.add("external:*")
+        elif scope == "EXCLUSIVE":
+            resources.add("__run_exclusive__")
+        return resources
+
+    def _resource_conflict_locked(self, resources: Set[str]) -> bool:
+        if "__run_exclusive__" in self._resource_holders:
+            return True
+        if not resources:
+            return False
+        if "__run_exclusive__" in resources and self._resource_holders:
+            return True
+        if "workspace:*" in self._resource_holders and any(
+            item == "workspace:*" or item.startswith("file:") for item in resources
+        ):
+            return True
+        if "workspace:*" in resources and any(
+            item == "workspace:*" or item.startswith("file:")
+            for item in self._resource_holders
+        ):
+            return True
+        return any(item in self._resource_holders for item in resources)
+
+    def _try_acquire_resources_locked(self, task: Task) -> bool:
+        resources = self._resources_for_task(task)
+        if self._resource_conflict_locked(resources):
+            return False
+        for resource in resources:
+            self._resource_holders[resource] = task.id
+        self._task_locks[task.id] = resources
+        task.metadata["resource_locks_held"] = sorted(resources)
+        return True
+
+    def _release_resources_locked(self, task_id: str) -> None:
+        for resource in self._task_locks.pop(task_id, set()):
+            if self._resource_holders.get(resource) == task_id:
+                self._resource_holders.pop(resource, None)
+        task = self._all_tasks.get(task_id)
+        if task is not None:
+            task.metadata.pop("resource_locks_held", None)
 
     def _sort_ready_queue(self) -> None:
         def sort_key(task_id: str):
@@ -57,12 +123,58 @@ class PriorityTaskQueue:
     def queue_size(self) -> int:
         return len(self._ready_queue) + len(self._running_tasks) + len(self._blocked_tasks)
 
+    @staticmethod
+    def _task_intent(task: Task) -> Dict[str, Any]:
+        return {
+            "id": task.id,
+            "run_id": task.run_id,
+            "objective": task.objective,
+            "description": task.description,
+            "dependencies": list(task.dependencies),
+            "priority": getattr(task.priority, "value", task.priority),
+            "risk": task.risk,
+            "required_capabilities": list(task.required_capabilities),
+            "validation_strategy": task.validation_strategy,
+            "max_iterations": task.max_iterations,
+            "max_repair_rounds": task.max_repair_rounds,
+            "token_budget": task.token_budget,
+            "max_retries": task.max_retries,
+            "depth": task.depth,
+            "target_files": list(task.target_files),
+            "side_effect_scope": task.side_effect_scope,
+            "resource_locks": list(task.resource_locks),
+            "timeout_s": float(task.timeout_s),
+            "heartbeat_timeout_s": float(task.heartbeat_timeout_s),
+            "idempotency_key": task.idempotency_key,
+        }
+
+    def _existing_for_replay_locked(self, task: Task) -> Optional[Task]:
+        by_id = self._all_tasks.get(task.id)
+        indexed_id = self._idempotency_index.get(task.idempotency_key)
+        by_key = self._all_tasks.get(indexed_id) if indexed_id else None
+        existing = by_id or by_key
+        if existing is None:
+            return None
+        if (
+            existing.id != task.id
+            or existing.idempotency_key != task.idempotency_key
+            or self._task_intent(existing) != self._task_intent(task)
+        ):
+            raise ValueError(
+                "task id/idempotency key reused with a different task intent"
+            )
+        return existing
+
     async def add_task(
         self, task: Task, parent_id: Optional[str] = None, block_on_backpressure: bool = False
     ) -> bool:
-        # Backpressure (Section 49): bounded queue. By default reject fast with
-        # QueueFullError accounting; callers may opt into bounded waiting.
-        if self.queue_size() >= self.max_queue_size and task.id not in self._all_tasks:
+        # Backpressure (Section 49): bounded queue. Legitimate idempotent
+        # replays bypass capacity checks and are resolved under the queue lock.
+        known_replay = (
+            task.id in self._all_tasks
+            or task.idempotency_key in self._idempotency_index
+        )
+        if self.queue_size() >= self.max_queue_size and not known_replay:
             if not block_on_backpressure:
                 self.dropped_due_to_backpressure += 1
                 raise QueueFullError(
@@ -70,10 +182,17 @@ class PriorityTaskQueue:
                     f"task {task.id} rejected by backpressure policy"
                 )
         if block_on_backpressure:
-            while self.queue_size() >= self.max_queue_size and task.id not in self._all_tasks:
+            while (
+                self.queue_size() >= self.max_queue_size
+                and task.id not in self._all_tasks
+                and task.idempotency_key not in self._idempotency_index
+            ):
                 await asyncio.sleep(0.05)
         async with self._lock:
-            # Enforce anti-explosion limits
+            if self._existing_for_replay_locked(task) is not None:
+                return True
+
+            # Enforce anti-explosion limits only for genuinely new work.
             try:
                 self.anti_explosion.register_task(task, parent_id)
             except AntiExplosionError as e:
@@ -81,6 +200,7 @@ class PriorityTaskQueue:
                 return False
 
             self._all_tasks[task.id] = task
+            self._idempotency_index[task.idempotency_key] = task.id
 
             # Check dependencies
             unfulfilled = set()
@@ -98,15 +218,63 @@ class PriorityTaskQueue:
 
             return True
 
-    async def pop_ready_task(self) -> Optional[Task]:
+    async def pop_ready_task(
+        self,
+        available_capabilities: Optional[Set[str]] = None,
+        node_id: Optional[str] = None,
+    ) -> Optional[Task]:
         async with self._lock:
             if not self._ready_queue:
                 return None
-            task_id = self._ready_queue.pop(0)
-            task = self._all_tasks[task_id]
+            capabilities = (
+                {str(item).strip().lower() for item in available_capabilities if str(item).strip()}
+                if available_capabilities is not None
+                else None
+            )
+            selected_index = None
+            task = None
+            for index, task_id in enumerate(self._ready_queue):
+                candidate = self._all_tasks[task_id]
+                required = {
+                    str(item).strip().lower()
+                    for item in candidate.required_capabilities
+                    if str(item).strip()
+                }
+                if capabilities is not None and not required.issubset(capabilities):
+                    continue
+                if self._try_acquire_resources_locked(candidate):
+                    selected_index = index
+                    task = candidate
+                    if node_id:
+                        task.metadata["assigned_node_id"] = str(node_id)
+                    if capabilities is not None:
+                        task.metadata["capability_snapshot"] = sorted(capabilities)
+                    break
+            if selected_index is None or task is None:
+                return None
+            self._ready_queue.pop(selected_index)
             TaskStateMachine.transition(task, TaskStatus.RUNNING, reason="Dispatched to worker")
             self._running_tasks[task.id] = task
             return task
+
+    def unsatisfied_capabilities(self, available_capabilities: Set[str]) -> Dict[str, List[str]]:
+        capabilities = {
+            str(item).strip().lower()
+            for item in available_capabilities
+            if str(item).strip()
+        }
+        result: Dict[str, List[str]] = {}
+        for task_id in self._ready_queue:
+            task = self._all_tasks[task_id]
+            required = {
+                str(item).strip().lower()
+                for item in task.required_capabilities
+                if str(item).strip()
+            }
+            missing = sorted(required - capabilities)
+            if missing:
+                result[task_id] = missing
+        return result
 
     async def mark_completed(self, task_id: str) -> None:
         async with self._lock:
@@ -115,6 +283,7 @@ class PriorityTaskQueue:
                 return
 
             self._running_tasks.pop(task_id, None)
+            self._release_resources_locked(task_id)
             TaskStateMachine.transition(task, TaskStatus.COMPLETED, reason="Task finished successfully")
             self._completed_tasks[task_id] = task
 
@@ -151,6 +320,7 @@ class PriorityTaskQueue:
                 return False
 
             self._running_tasks.pop(task_id, None)
+            self._release_resources_locked(task_id)
             task.retry_count += 1
 
             if retryable and task.retry_count <= task.max_retries:
@@ -251,6 +421,7 @@ class PriorityTaskQueue:
             task = self._all_tasks.get(task_id)
             if task:
                 self._running_tasks.pop(task_id, None)
+                self._release_resources_locked(task_id)
                 if task_id in self._ready_queue:
                     self._ready_queue.remove(task_id)
                 self._blocked_tasks.pop(task_id, None)
@@ -273,6 +444,7 @@ class PriorityTaskQueue:
             if task.status in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
                 return False
             self._running_tasks.pop(task_id, None)
+            self._release_resources_locked(task_id)
             if task_id in self._ready_queue:
                 self._ready_queue.remove(task_id)
             self._blocked_tasks.pop(task_id, None)
@@ -303,6 +475,8 @@ class PriorityTaskQueue:
         Returns the list of recovered task ids. Idempotent and duplicate-safe.
         """
         recovered: List[str] = []
+        self._resource_holders.clear()
+        self._task_locks.clear()
         for task_id, task in self._all_tasks.items():
             if task.status in (
                 TaskStatus.RUNNING,
@@ -313,14 +487,32 @@ class PriorityTaskQueue:
                 TaskStatus.READY_FOR_MASTER,
                 TaskStatus.RETRYING,
             ):
-                # Reset to QUEUED without bumping retry_count (crash != failure).
+                scope = str(
+                    getattr(task, "side_effect_scope", "ISOLATED") or "ISOLATED"
+                ).upper()
+                uncertain = bool(task.metadata.get("timeout_uncertain"))
+                if uncertain or scope in {"EXTERNAL", "EXCLUSIVE"}:
+                    previous = task.status.value
+                    task.status = TaskStatus.ESCALATED
+                    task.metadata.setdefault("transition_history", []).append({
+                        "from": previous,
+                        "to": TaskStatus.ESCALATED.value,
+                        "reason": "crash recovery requires explicit reconciliation",
+                    })
+                    task.metadata["recovery_required"] = True
+                    task.metadata["recovery_reason"] = (
+                        "prior execution may have produced nonlocal effects"
+                    )
+                    self._running_tasks.pop(task_id, None)
+                    self._failed_tasks[task_id] = task
+                    continue
+
+                previous = task.status.value
                 task.status = TaskStatus.QUEUED
-                if "transition_history" not in task.metadata:
-                    task.metadata["transition_history"] = []
-                task.metadata["transition_history"].append({
-                    "from": "CRASH",
+                task.metadata.setdefault("transition_history", []).append({
+                    "from": previous,
                     "to": TaskStatus.QUEUED.value,
-                    "reason": "recovered after restart",
+                    "reason": "recovered after restart with stable idempotency key",
                 })
                 self._running_tasks.pop(task_id, None)
                 if task_id not in self._ready_queue:
@@ -342,8 +534,19 @@ class PriorityTaskQueue:
         return recovered
 
     def restore_task(self, task: Task) -> None:
-        """Rehydrate a persisted task without re-running anti-explosion accounting twice."""
+        """Rehydrate persisted work while rebuilding idempotency indexes."""
+        existing = self._existing_for_replay_locked(task)
+        if existing is not None:
+            return
+        indexed_id = self._idempotency_index.get(task.idempotency_key)
+        if indexed_id is not None and indexed_id != task.id:
+            raise ValueError(
+                "persisted task idempotency key collides with another task"
+            )
+        if task.id in self._all_tasks:
+            raise ValueError("persisted task id collides with another task")
         self._all_tasks[task.id] = task
+        self._idempotency_index[task.idempotency_key] = task.id
         if task.status == TaskStatus.COMPLETED:
             self._completed_tasks[task.id] = task
         elif task.status == TaskStatus.CANCELLED:

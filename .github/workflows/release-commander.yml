@@ -47,6 +47,16 @@ jobs:
         shell: pwsh
         run: python scripts/commander/build_windows.py --dist dist --work build/commander --spec build/commander-spec --clean-output --phase payload
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build pinned Web Models Electron payload
+        shell: pwsh
+        run: |
+          npm install --prefix .sentra/toolchain bun@1.4.0
+          ./scripts/integrations/Build-CodexChatGPTWebRuntime.ps1 -Bun "$((Resolve-Path .sentra/toolchain/node_modules/bun/bin/bun.exe).Path)" -Dist dist
+
       - name: Require Authenticode certificate for stable tags
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -88,6 +98,9 @@ jobs:
             & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $exe.FullName
             if ($LASTEXITCODE -ne 0) { throw "Signing failed for $($exe.Name)" }
           }
+          $webExe = "dist\web-models\win-unpacked\Codex Web GPT.exe"
+          & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $webExe
+          if ($LASTEXITCODE -ne 0) { throw "Signing failed for Web Models Electron" }
 
       - name: Build Setup with signed payload
         shell: pwsh
@@ -165,6 +178,7 @@ jobs:
             "sentra-desktop.exe",
             "sentra-human.exe",
             "sentra-human-worker.exe",
+            "sentra.exe",
             "SENTRA-Setup.exe"
           )
           foreach ($name in $executables) {
@@ -193,8 +207,13 @@ jobs:
           if (-not (Test-Path "$install\sentra-desktop.exe")) { throw "control center not installed" }
           if (-not (Test-Path "$install\sentra-human.exe")) { throw "human UI not installed" }
           if (-not (Test-Path "$install\sentra-human-worker.exe")) { throw "human worker not installed" }
+          if (-not (Test-Path "$install\sentra.exe")) { throw "durable run CLI not installed" }
           if (-not (Test-Path "$install\tunnel-client.exe")) { throw "tunnel-client not installed" }
           if (-not (Test-Path "$install\edge_extension\manifest.json")) { throw "Edge extension not installed" }
+          if (-not (Test-Path "$install\web-models\win-unpacked\Codex Web GPT.exe")) { throw "Web Models Electron not installed" }
+          if (-not (Test-Path "$install\web-models\win-unpacked\resources\runtime\manifest.json")) { throw "Web Models runtime not installed" }
+          if (-not (Test-Path "$install\web-models\licenses\codex-chatgpt-web\LICENSE")) { throw "Web Models license notice not installed" }
+          if (-not (Test-Path "$install\web-models\integration-build.json")) { throw "Web Models integration metadata not installed" }
           if (Get-NetTCPConnection -LocalPort 18000,18765 -State Listen -ErrorAction SilentlyContinue) {
             throw "stop-after-doctor left test services running"
           }

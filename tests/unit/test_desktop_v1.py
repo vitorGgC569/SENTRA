@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,7 @@ from sentra_mcp.config import MCPConfig
 from sentra_mcp.server import SentraMCPServer
 from sentra_mcp.services.browser import BrowserControlService
 from sentra_mcp.tool_policy import ToolPolicyProxy, filter_tool_names
+from sentra_remote import desktop as desktop_mod
 from sentra_remote import installer as installer_mod
 from sentra_remote import update_helper as update_helper_mod
 from sentra_remote.product import (
@@ -51,6 +53,67 @@ def test_product_settings_normalize_workspace_permissions(tmp_path: Path) -> Non
     root = str(workspace.resolve())
     assert loaded.allowed_roots == [root]
     assert loaded.workspace_permissions[root] == ["read", "write"]
+
+
+
+def test_product_settings_persist_valid_web_model_default(tmp_path: Path) -> None:
+    state = tmp_path / "desktop.json"
+    settings = ProductSettings(web_model_name=" sentra/chatgpt-web/high ")
+    settings.save(state)
+    loaded = ProductSettings.load(state)
+    assert loaded.web_model_name == "sentra/chatgpt-web/high"
+
+    with pytest.raises(ValueError, match="sentra/chatgpt-web/"):
+        ProductSettings(web_model_name="chatgpt-web/high").save(tmp_path / "invalid.json")
+
+
+def _write_web_models_fixture(
+    tmp_path: Path,
+    *,
+    patch_hash: str | None = None,
+    built_files: list[str] | None = None,
+) -> tuple[Path, Path]:
+    install = tmp_path / "install"
+    integration = install / "integrations" / "codex_chatgpt_web"
+    payload = install / "dist" / "web-models"
+    launcher = payload / "win-unpacked" / "Codex Web GPT.exe"
+    integration.mkdir(parents=True)
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(b"MZ")
+    patch = integration / "sentra-upstream.patch"
+    patch.write_text("sentra-patch\n", encoding="utf-8")
+    expected_files = ["launcher/electron/main.cjs", "src/config.ts"]
+    (integration / "upstream.json").write_text(
+        json.dumps({"patch_files": expected_files}),
+        encoding="utf-8",
+    )
+    (payload / "integration-build.json").write_text(
+        json.dumps(
+            {
+                "patch_sha256": patch_hash or hashlib.sha256(patch.read_bytes()).hexdigest(),
+                "patch_files": expected_files if built_files is None else built_files,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return install, launcher
+
+
+def test_desktop_accepts_current_web_models_payload(tmp_path: Path) -> None:
+    install, launcher = _write_web_models_fixture(tmp_path)
+    assert desktop_mod._validated_web_models_launcher(install) == launcher
+
+
+def test_desktop_rejects_stale_web_models_patch_hash(tmp_path: Path) -> None:
+    install, _ = _write_web_models_fixture(tmp_path, patch_hash="0" * 64)
+    with pytest.raises(RuntimeError, match="payload is stale"):
+        desktop_mod._validated_web_models_launcher(install)
+
+
+def test_desktop_rejects_stale_web_models_patch_file_set(tmp_path: Path) -> None:
+    install, _ = _write_web_models_fixture(tmp_path, built_files=["src/config.ts"])
+    with pytest.raises(RuntimeError, match="patch file set is stale"):
+        desktop_mod._validated_web_models_launcher(install)
 
 
 def test_workspace_registry_sync_has_explicit_permissions(tmp_path: Path) -> None:

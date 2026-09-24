@@ -14,6 +14,10 @@ class ErrorPayload(BaseModel):
 
     code: str
     message: str
+    category: str | None = None
+    retryable: bool | None = None
+    operation_id: str | None = None
+    details: dict[str, Any] | None = None
 
 
 class ResponseMeta(BaseModel):
@@ -39,8 +43,27 @@ class ResponseEnvelope(BaseModel):
         return cls(ok=True, data=data)
 
     @classmethod
-    def failure(cls, code: str, message: str) -> "ResponseEnvelope":
-        return cls(ok=False, error=ErrorPayload(code=code, message=message))
+    def failure(
+        cls,
+        code: str,
+        message: str,
+        *,
+        category: str | None = None,
+        retryable: bool | None = None,
+        operation_id: str | None = None,
+        details: dict[str, Any] | None = None,
+    ) -> "ResponseEnvelope":
+        return cls(
+            ok=False,
+            error=ErrorPayload(
+                code=code,
+                message=message,
+                category=category,
+                retryable=retryable,
+                operation_id=operation_id,
+                details=details,
+            ),
+        )
 
     def to_stable_json(self) -> str:
         return json.dumps(

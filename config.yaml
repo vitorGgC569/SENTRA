@@ -7,6 +7,24 @@ local_model:
   temperature: 0.1
   timeout: 120
 
+# Optional upstream Web-model sidecar.
+# Source/UI/browser/Responses transport stay owned by miuuyy/codex-chatgpt-web.
+# SENTRA remains the authority for runs, operations, context, leases/fencing and DAG.
+codex_web:
+  enabled: false
+  base_url: "http://127.0.0.1:17842/v1"
+  # Set an exact ID advertised by the SENTRA Gateway /v1/models.
+  # Example: "sentra/chatgpt-web/high".
+  model_name: null
+  api_key: "sentra-local"
+  api_key_env: "SENTRA_CODEX_WEB_API_KEY"
+  gateway_admin_token_env: "SENTRA_GATEWAY_ADMIN_TOKEN"
+  require_web_namespace: true
+  upstream:
+    repository: "https://github.com/miuuyy/codex-chatgpt-web.git"
+    ref: "v6.0.0"
+    path: "third_party/codex-chatgpt-web"
+
 browser:
   # Alvo oficial: chatgpt.com no Microsoft Edge, modo NÃO-privado, mantendo infos do navegador.
   target_url: "https://chatgpt.com"
@@ -97,6 +115,31 @@ oma:
       critical_task:
         add_agents: 10
     max_agents: 500
+
+# Optional typed decision layer (Kev/Jev/System One compatible).
+# Disabled by default: with enabled=false, SENTRA behavior is unchanged.
+# Decision models advise; deterministic routing, delivery safety, quorum and
+# Quality Gate remain authoritative.
+decisioning:
+  enabled: false
+  routing: true
+  retry: true
+  validator_selection: true
+  quality_advisory: true
+  min_confidence: 0.35
+  providers:
+    - name: kev
+      type: systemone
+      base_url: "http://127.0.0.1:8009"
+      model: "kev-latest"
+      timeout_s: 5.0
+  # Optional hosted fallback example:
+  # - name: jev
+  #   type: systemone
+  #   base_url: "https://api.typesafe.ai"
+  #   model: "jev-latest"
+  #   api_key_env: "TYPESAFE_API_KEY"
+  #   timeout_s: 5.0
 
 default_acceptance_criteria:
   - "Project compiles / builds without errors"

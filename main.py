@@ -67,6 +67,13 @@ def parser():
                      help="Com --supervise: segundos ociosos até sair sozinho (padrão: 300; 0 = nunca)")
     cli.add_argument("--clear", action="store_true",
                      help="Após a execução (ou com --job-id), exclui os chats criados no provedor remoto para não poluir a conta do usuário")
+    cli.add_argument(
+        "--chat-project",
+        help=(
+            "Project id ou URL https://chatgpt.com/... usado para criar os chats "
+            "persistentes da run dentro do mesmo Project"
+        ),
+    )
     cli.add_argument("--mode", choices=["oma", "legacy"], default="oma", help=argparse.SUPPRESS)
     return cli
 
@@ -259,6 +266,11 @@ async def main_async(argv=None) -> int:
     from orchestrator.configuration import build_router, close_router, engine_options
     from orchestrator.runtime import IntegratedRun, promote_candidate
     options = engine_options(config, args.max_rounds, args.workers)
+    if args.chat_project:
+        value = args.chat_project.strip()
+        if not value or len(value) > 2048:
+            raise ValueError("--chat-project deve ser um project id ou URL válida")
+        options["chat_project"] = value
     demo = args.demo or args.mock
     if not demo and options["execution"]["backend"] == "host" and not args.trust_workspace:
         raise ValueError("use --sandbox docker; testes no host exigem --trust-workspace; use --demo para experimentar")

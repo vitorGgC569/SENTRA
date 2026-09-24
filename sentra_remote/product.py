@@ -124,6 +124,18 @@ class ProductSettings:
     workspace_permissions: dict[str, list[str]] = field(default_factory=dict)
     mcp_port: int = 8000
     relay_port: int = 8765
+    web_model_name: str = ""
+
+    @staticmethod
+    def _normalize_web_model_name(value: object) -> str:
+        model = str(value or "").strip()
+        if model and (
+            not model.startswith("sentra/chatgpt-web/")
+            or len(model) > 200
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in model)
+        ):
+            raise ValueError("web_model_name must use the sentra/chatgpt-web/ namespace")
+        return model
 
     @classmethod
     def load(cls, path: Path) -> "ProductSettings":
@@ -133,7 +145,9 @@ class ProductSettings:
         if not isinstance(data, dict):
             raise ValueError("desktop settings must be a JSON object")
         known = {item.name for item in cls.__dataclass_fields__.values()}
-        return cls(**{key: value for key, value in data.items() if key in known})
+        settings = cls(**{key: value for key, value in data.items() if key in known})
+        settings.web_model_name = cls._normalize_web_model_name(settings.web_model_name)
+        return settings
 
     def save(self, path: Path) -> None:
         if self.profile not in PROFILE_POLICIES:
@@ -143,6 +157,7 @@ class ProductSettings:
                 raise ValueError(f"{label} port must be 1024..65535")
         if self.mcp_port == self.relay_port:
             raise ValueError("MCP and relay ports must be different")
+        self.web_model_name = self._normalize_web_model_name(self.web_model_name)
         roots: list[str] = []
         for item in self.allowed_roots:
             root = Path(item).expanduser().resolve()

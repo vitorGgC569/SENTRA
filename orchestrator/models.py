@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -340,8 +341,20 @@ class Task:
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     target_files: List[str] = field(default_factory=list)
+    side_effect_scope: str = "ISOLATED"
+    resource_locks: List[str] = field(default_factory=list)
+    timeout_s: float = 900.0
+    heartbeat_timeout_s: float = 120.0
+    idempotency_key: str = ""
     active_candidate_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.idempotency_key:
+            basis = f"{self.run_id}\0{self.id}\0{self.objective}"
+            self.idempotency_key = (
+                "task-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
+            )
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -365,6 +378,11 @@ class Task:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "target_files": self.target_files,
+            "side_effect_scope": self.side_effect_scope,
+            "resource_locks": self.resource_locks,
+            "timeout_s": self.timeout_s,
+            "heartbeat_timeout_s": self.heartbeat_timeout_s,
+            "idempotency_key": self.idempotency_key,
             "active_candidate_id": self.active_candidate_id,
             "metadata": self.metadata,
         }

@@ -29,6 +29,8 @@ local MCP tools used by direct clients.
 - Public MCP binding requires OAuth resource-server configuration.
 - OAuth user identity and device identity are separate credentials.
 - The remote agent still enforces local allowed roots, process ownership and repository/OMA policy.
+- Remote execution is contract-gated: Agent heartbeats publish live build/source identity, protocol/capability versions, schema hash and tool inventory. A stale or unverifiable Agent remains diagnosable but cannot receive a new Gateway execution lease.
+- Remote jobs retain legacy `job_id` for compatibility while also carrying Universal `run_id`, `operation_id` and optional `idempotency_key`; connector timeout returns `OPERATION_STILL_RUNNING` instead of implying abort.
 
 ## Commander tools
 
@@ -94,15 +96,14 @@ Remote agent development:
     python -m sentra_remote --config ~/.sentra/agent.json pair --relay https://relay.example --code CODE --process-mode workspace
     python -m sentra_remote --config ~/.sentra/agent.json run
 
+## Durable local execution
+
+Commander now includes a durable Run/Operation layer below the MCP request lifetime. Connector timeout is not treated as abort. Idempotency keys prevent accidental duplicate process starts, progress/readiness remains queryable, and reconciliation uses process/resource/artifact/lease/Agent/Chat evidence before changing state. Agent and Chat identities are separate so a physical conversation can be rebound without losing the mission. See `DURABLE_EXECUTION.md`.
+
+The compact MCP surfaces are `sentra_run`, `sentra_operation` and `sentra_artifact`. The installed `sentra.exe` CLI can resume/status/events/reconcile a Run without depending on the original chat context.
+
 ## Windows release
 
-The release workflow builds:
-- sentra-agent.exe
-- sentra-tray.exe
-- sentra-diagnostics.exe
-- install.ps1 / uninstall.ps1
-- release-manifest.json with SHA-256
+The release workflow builds the native human UI, Control Center, background worker, MCP, browser relay, remote agent, diagnostics/admin/updater, OMA CLI and durable `sentra.exe`, then packages them in the self-contained Setup EXE, per-user MSI and verified update ZIP.
 
-When certificate secrets are configured, executables are Authenticode signed before packaging.
-The tray supervises the agent and restarts it after crashes. The installer registers a
-logon Scheduled Task and falls back to the Startup folder if task registration is unavailable.
+Stable tags require Authenticode certificate secrets. Payload executables are signed before packaging; Setup/MSI are signed afterward. Release assets include SHA-256 checksums, CycloneDX SBOM and a signed/hashed update manifest. The installer preserves the separate human-facing SENTRA UI and operational Control Center and installs the Edge bridge plus tunnel client.

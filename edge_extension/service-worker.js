@@ -8,7 +8,9 @@
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 1, maxTabs: 1 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.6.26";
+const OMA_SW_VERSION = "1.6.33";
+const OMA_BUILD_ID = chrome.runtime.getManifest().sentra_build_id || "missing-build-id";
+const OMA_SOURCE_HASH = chrome.runtime.getManifest().sentra_source_hash || "missing-source-hash";
 // Budgets MV3 (somente-leitura; a verdade est├í no servidor/Chrome):
 // - native_bridge/job_store.py concede lease de 120s: renovar < 120s ou o relay
 //   marca expirado e nenhum post tardio ├® aceito. Janela folgada de prop├│sito
@@ -172,13 +174,19 @@ async function omaHeartbeatWorkers() {
         composer_found: !!r.composer_found,
         diagnostics: r.diagnostics || null,
         sw_version: OMA_SW_VERSION,
+        sw_build_id: OMA_BUILD_ID,
+        sw_source_hash: OMA_SOURCE_HASH,
         cs_version: r.cs_version || "unknown",
+        cs_build_id: r.cs_build_id || "unknown",
+        cs_source_hash: r.cs_source_hash || "unknown",
       };
     } catch (e) {
       status = {
         url: null,
         composer_found: false,
         sw_version: OMA_SW_VERSION,
+        sw_build_id: OMA_BUILD_ID,
+        sw_source_hash: OMA_SOURCE_HASH,
         error: String((e && e.message) || e).slice(0, 500),
       };
     }
@@ -216,8 +224,20 @@ async function omaCheckForUpdates() {
     if (busy) return;
     const resp = await fetch(`${OMA_RELAY}/extension/version`);
     const data = await resp.json();
-    if (data && data.version && data.version !== OMA_SW_VERSION) {
-      console.log(`[OMA Bridge] auto-update ${OMA_SW_VERSION} -> ${data.version}`);
+    const identityChanged = !!(
+      data &&
+      data.version &&
+      (
+        data.version !== OMA_SW_VERSION ||
+        data.build_id !== OMA_BUILD_ID ||
+        data.source_hash !== OMA_SOURCE_HASH
+      )
+    );
+    if (identityChanged) {
+      console.log(
+        `[OMA Bridge] auto-update ${OMA_SW_VERSION}/${OMA_BUILD_ID}/${OMA_SOURCE_HASH} -> ` +
+        `${data.version}/${data.build_id}/${data.source_hash}`
+      );
       chrome.runtime.reload();
     }
   } catch (_) {}
@@ -580,11 +600,29 @@ async function omaWaitTabReady(tabId, timeoutMs = 45000) {
 }
 
 
-async function omaOpenFreshControllerChat(tabId) {
+function omaProjectTargetUrl(job) {
+  if (job && job.project_url) return String(job.project_url);
+  if (job && job.project_id) {
+    const raw = String(job.project_id).trim();
+    const segment = raw.startsWith("g-p-") ? raw : `g-p-${raw}`;
+    return `https://chatgpt.com/g/${segment}/project`;
+  }
+  return null;
+}
+
+async function omaOpenFreshControllerChat(tabId, projectUrl = null) {
   let fresh = false;
+  let targetUrl = "https://chatgpt.com/";
+  if (projectUrl) {
+    const parsed = new URL(String(projectUrl));
+    if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com") {
+      throw new Error("SESSION_WRONG_PLACE: project_url must target https://chatgpt.com");
+    }
+    targetUrl = parsed.href;
+  }
   for (let attempt = 0; attempt < 3 && !fresh; attempt++) {
     if (attempt === 0) {
-      await chrome.tabs.update(tabId, { url: "https://chatgpt.com/" });
+      await chrome.tabs.update(tabId, { url: targetUrl });
     } else {
       await chrome.tabs.reload(tabId);
     }
@@ -702,6 +740,9 @@ async function omaProcessJob(tabId, job) {
     lease_token: job.lease_token, kind: job.kind || "CHAT_TASK",
     timeout_s: job.timeout_s || 180, new_chat: !!job.new_chat,
     conversation_url: job.conversation_url || null,
+    project_id: job.project_id || null,
+    project_url: job.project_url || null,
+    chat_title: job.chat_title || null,
     deadlineMs: Date.now() + (job.timeout_s || 180) * 1000,
     last_conv: worker.last_conv || null,
     sent: false, hb_sw: 0, slices: 0, images_attached: 0,
@@ -727,7 +768,7 @@ async function omaProcessJob(tabId, job) {
     try {
       await renew();
       await omaProgressPhase(tabId, identity, "preparing");
-      await omaOpenFreshControllerChat(tabId);
+      await omaOpenFreshControllerChat(tabId, omaProjectTargetUrl(job));
       await omaProgressPhase(tabId, identity, "ready");
       await omaProgressPhase(tabId, identity, "sending");
       const sent = await omaSendToTab(tabId, {
@@ -740,6 +781,29 @@ async function omaProcessJob(tabId, job) {
       await omaProgressPhase(tabId, identity, "sent");
       const conv = await omaWaitConversationIdentity(tabId, 20000);
       if (conv.conversation_id) worker.last_conv = conv.conversation_id;
+      let titleResult = { requested: false, updated: false };
+      if (job.chat_title && conv.conversation_id) {
+        titleResult = { requested: true, updated: false };
+        try {
+          const renamed = await omaSendToTab(tabId, {
+            operation: "SET_CONVERSATION_TITLE",
+            conversation_id: conv.conversation_id,
+            title: job.chat_title,
+          });
+          titleResult = {
+            requested: true,
+            updated: !!(renamed && renamed.result && renamed.result.updated),
+            title: job.chat_title,
+          };
+        } catch (titleError) {
+          titleResult = {
+            requested: true,
+            updated: false,
+            title: job.chat_title,
+            error: String((titleError && titleError.message) || titleError).slice(0, 300),
+          };
+        }
+      }
       await postResult({
         job_id: job.job_id,
         task_id: job.task_id,
@@ -748,10 +812,18 @@ async function omaProcessJob(tabId, job) {
           started: true,
           conversation_id: conv.conversation_id,
           conversation_url: conv.url,
+          project_id: job.project_id || null,
+          project_url: job.project_url || null,
+          chat_title: job.chat_title || null,
+          title_update: titleResult,
         }),
         conversation_url: conv.url || null,
         conversation_id: conv.conversation_id || null,
         images_attached: attached,
+        project_id: job.project_id || null,
+        project_url: job.project_url || null,
+        chat_title: job.chat_title || null,
+        title_updated: !!titleResult.updated,
         worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION} mode=chat-start`,
       });
     } catch (e) {
@@ -851,6 +923,60 @@ async function omaProcessJob(tabId, job) {
           clear: !!args.clear,
         });
         result = (reply && reply.result) || {};
+      } else if (action === "screenshot") {
+        if (args.full_page) {
+          throw new Error("BROWSER_ACTION screenshot full_page is unsupported in principal Edge");
+        }
+        const tabInfo = await chrome.tabs.get(tabId);
+        if (!/^https:\/\/chatgpt\.com\//.test(String(tabInfo.url || ""))) {
+          throw new Error("BROWSER_ACTION screenshot is restricted to https://chatgpt.com");
+        }
+        const activeTabs = await chrome.tabs.query({ active: true, windowId: tabInfo.windowId });
+        const previousActiveId = activeTabs.length && typeof activeTabs[0].id === "number"
+          ? activeTabs[0].id
+          : null;
+        try {
+          if (previousActiveId !== tabId) {
+            await chrome.tabs.update(tabId, { active: true });
+            await new Promise((resolve) => setTimeout(resolve, 120));
+          }
+          let dataUrl = await chrome.tabs.captureVisibleTab(
+            tabInfo.windowId,
+            { format: "jpeg", quality: 70 }
+          );
+          const prefix = "data:image/jpeg;base64,";
+          if (typeof dataUrl !== "string" || !dataUrl.startsWith(prefix)) {
+            throw new Error("BROWSER_ACTION screenshot returned invalid JPEG data");
+          }
+          let imageBase64 = dataUrl.slice(prefix.length);
+          if (imageBase64.length > 850000) {
+            dataUrl = await chrome.tabs.captureVisibleTab(
+              tabInfo.windowId,
+              { format: "jpeg", quality: 45 }
+            );
+            imageBase64 = dataUrl.startsWith(prefix) ? dataUrl.slice(prefix.length) : "";
+          }
+          if (imageBase64.length > 850000) {
+            dataUrl = await chrome.tabs.captureVisibleTab(
+              tabInfo.windowId,
+              { format: "jpeg", quality: 30 }
+            );
+            imageBase64 = dataUrl.startsWith(prefix) ? dataUrl.slice(prefix.length) : "";
+          }
+          if (!imageBase64 || imageBase64.length > 850000) {
+            throw new Error("BROWSER_ACTION screenshot exceeds relay payload budget");
+          }
+          result = {
+            image_base64: imageBase64,
+            mime_type: "image/jpeg",
+            url: String(tabInfo.url || "https://chatgpt.com/"),
+            full_page: false,
+          };
+        } finally {
+          if (previousActiveId !== null && previousActiveId !== tabId) {
+            try { await chrome.tabs.update(previousActiveId, { active: true }); } catch (_) {}
+          }
+        }
       } else if (action === "close") {
         result = { closed: true, tab_preserved: true, controller_released: true };
         releaseAfter = true;
@@ -956,30 +1082,9 @@ async function omaProcessJob(tabId, job) {
   try {
     await renew(); // ACK delivery before any browser side effect.
     if (job.new_chat) {
-      // Navega├º├úo ├® feita pelo worker (chrome.tabs): navegar via content-script
-      // mataria o canal de mensagem antes da resposta.
-      // SPA pode trocar de rota sem reload: EXIGE conversa zerada, com reload
-      // for├ºado como fallback. Prompt em conversa obsoleta = contamina├º├úo.
-      let fresh = false;
-      for (let attempt = 0; attempt < 3 && !fresh; attempt++) {
-        if (attempt === 0) {
-          await chrome.tabs.update(tabId, { url: "https://chatgpt.com/" });
-        } else {
-          await chrome.tabs.reload(tabId); // reload real: nova inje├º├úo garantida
-        }
-      await omaWaitTabDeparted(tabId);
-      await omaWaitTabComplete(tabId);
-      await omaWaitTabReady(tabId);
-      await omaEnsureFreshScript(tabId);
-      try {
-        const st = await omaSendToTab(tabId, { operation: "GET_STATUS" });
-        fresh = !!(st.result && st.result.is_fresh_chat);
-      } catch (_) { fresh = false; }
-      }
-      if (!fresh) {
-        throw new Error("STALE_CONVERSATION: sem chat zerado ap├│s 3 tentativas; "
-          + "job abortado para n├úo contaminar");
-      }
+      // Reuse the single principal-Edge controller but create the logical chat
+      // from the configured Project URL when one was explicitly supplied.
+      await omaOpenFreshControllerChat(tabId, omaProjectTargetUrl(job));
     } else {
       if (!/^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]{1,128}(\/|\?.*)?$/.test(job.conversation_url || "")) {
         throw new Error("CONVERSATION_MISMATCH: continua├º├úo exige URL expl├¡cita");
@@ -1082,12 +1187,29 @@ async function omaProcessJob(tabId, job) {
         + `(id repetido ${convId}); prompt pode ter ca├¡do no chat anterior`);
     }
     if (convId) worker.last_conv = convId;
+    let titleUpdated = false;
+    if (job.new_chat && job.chat_title && convId) {
+      try {
+        const renamed = await omaSendToTab(tabId, {
+          operation: "SET_CONVERSATION_TITLE",
+          conversation_id: convId,
+          title: job.chat_title,
+        });
+        titleUpdated = !!(renamed && renamed.result && renamed.result.updated);
+      } catch (_) {
+        titleUpdated = false;
+      }
+    }
     await postResult({
       job_id: job.job_id, task_id: job.task_id, status: "COMPLETED",
       result: waited.result ? waited.result.text : "",
       conversation_url: conv.result ? conv.result.url : null,
       conversation_id: conv.result ? conv.result.conversation_id : null,
       images_attached: attached,
+      project_id: job.project_id || null,
+      project_url: job.project_url || null,
+      chat_title: job.chat_title || null,
+      title_updated: titleUpdated,
       worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION} cs=${omaLastCsVersion} err=${omaSwErrors} hb=${hbSw} slices=${slices} cshb=${csHb} rec=0`,
     });
   } catch (e) {

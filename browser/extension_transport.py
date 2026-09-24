@@ -113,19 +113,40 @@ class ExtensionTransport:
                 pass
             raise
 
-    async def submit_chat(self, task_id: str, prompt: str, timeout_s: int = 180,
-                          new_chat: bool = True, conversation_url: str | None = None,
-                          images: Optional[list] = None) -> Dict[str, Any]:
+    async def submit_chat(
+        self,
+        task_id: str,
+        prompt: str,
+        timeout_s: int = 180,
+        new_chat: bool = True,
+        conversation_url: str | None = None,
+        images: Optional[list] = None,
+        *,
+        project_id: str | None = None,
+        project_url: str | None = None,
+        chat_title: str | None = None,
+    ) -> Dict[str, Any]:
         """Submete e espera o resultado. Levanta TimeoutError se estourar.
         images: data URLs (validadas pelo protocolo); vão no corpo do job."""
         if not self.token:
             raise RuntimeError("relay pairing required: start python main.py --relay and pair the extension")
         deadline = time.monotonic() + timeout_s
         await self._wait_first_worker(min(self.FIRST_WORKER_GRACE_S, float(timeout_s)))
-        body: Dict[str, Any] = {"task_id": task_id, "prompt": prompt, "timeout_s": timeout_s,
-                                "new_chat": new_chat, "conversation_url": conversation_url}
+        body: Dict[str, Any] = {
+            "task_id": task_id,
+            "prompt": prompt,
+            "timeout_s": timeout_s,
+            "new_chat": new_chat,
+            "conversation_url": conversation_url,
+        }
         if images:
             body["images"] = images
+        if project_id:
+            body["project_id"] = project_id
+        if project_url:
+            body["project_url"] = project_url
+        if chat_title:
+            body["chat_title"] = chat_title
         sub = await asyncio.to_thread(
             _post, f"{self.base}/jobs/submit", body, 10.0, self.token)
         job_id = sub["job_id"]

@@ -160,7 +160,7 @@ def test_release_payload_includes_human_ui_binaries() -> None:
     installer = (root / "sentra_remote" / "installer.py").read_text(encoding="utf-8")
     workflow = (root / ".github" / "workflows" / "release-commander.yml").read_text(encoding="utf-8")
 
-    for name in ("sentra-human.exe", "sentra-human-worker.exe"):
+    for name in ("sentra-human.exe", "sentra-human-worker.exe", "sentra.exe"):
         assert name in builder
         assert name in installer
         assert name in workflow

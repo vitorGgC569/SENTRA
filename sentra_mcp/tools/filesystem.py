@@ -15,6 +15,7 @@ from ..errors import error_envelope
 from ..identity import open_conversation_session, resolve_owner
 from ..models import ResponseEnvelope
 from ..services.filesystem import FilesystemService
+from ..version import CAPABILITY_VERSION, PROTOCOL_VERSION, SERVER_VERSION
 
 
 def _call(operation: Callable[[], dict[str, Any]]) -> ResponseEnvelope:
@@ -40,7 +41,11 @@ def _call(operation: Callable[[], dict[str, Any]]) -> ResponseEnvelope:
         return error_envelope(exc, code="internal_error")
 
 
-def register_filesystem_tools(mcp: MCPServer, service: FilesystemService) -> None:
+def register_filesystem_tools(
+    mcp: MCPServer,
+    service: FilesystemService,
+    capabilities: Any | None = None,
+) -> None:
     """Register bounded, workspace-aware filesystem tools."""
 
     @mcp.tool()
@@ -57,7 +62,23 @@ def register_filesystem_tools(mcp: MCPServer, service: FilesystemService) -> Non
         conversation and pass session_token to owner-scoped tools. The token is
         signed locally and can be reused after HTTP reconnects until expiry.
         """
-        return _call(lambda: open_conversation_session(ctx, ttl_hours=ttl_hours))
+        def open_with_contract() -> dict[str, Any]:
+            result = open_conversation_session(ctx, ttl_hours=ttl_hours)
+            if capabilities is not None:
+                schema = capabilities.schema()
+                build = dict(getattr(capabilities, "build_identity", {}) or {})
+                result["contract"] = {
+                    "protocol_version": PROTOCOL_VERSION,
+                    "server_version": SERVER_VERSION,
+                    "capability_version": CAPABILITY_VERSION,
+                    "schema_hash": schema["schema_hash"],
+                    "tool_count": schema["tool_count"],
+                    "build_id": build.get("build_id"),
+                    "source_hash": build.get("source_hash"),
+                    "fingerprint": build.get("fingerprint"),
+                }
+            return result
+        return _call(open_with_contract)
 
     @mcp.tool()
     def sentra_list_directory(

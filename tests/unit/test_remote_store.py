@@ -9,7 +9,8 @@ from pathlib import Path
 import pytest
 
 from sentra_remote.relay import RemoteRelayServer
-from sentra_remote.store import RemoteStore
+from sentra_remote.store import RemoteAgentCompatibilityError, RemoteStore
+from sentra_version import CAPABILITY_VERSION, PROTOCOL_VERSION, SERVER_VERSION
 
 
 def test_pairing_device_tokens_permissions_and_rotation(tmp_path: Path) -> None:
@@ -171,3 +172,77 @@ def test_relay_pair_heartbeat_poll_result_roundtrip(tmp_path: Path) -> None:
     finally:
         relay.stop()
         thread.join(timeout=3)
+
+
+
+def _valid_remote_contract(*tools: str) -> dict:
+    tool_names = list(tools or ("sentra_health",))
+    return {
+        "sentra": {
+            "server": {
+                "name": "sentra-mcp",
+                "version": SERVER_VERSION,
+                "protocol_version": PROTOCOL_VERSION,
+                "capability_version": CAPABILITY_VERSION,
+                "build_id": "test-build",
+                "fingerprint": "f" * 64,
+                "source_hash": "a" * 64,
+                "executable_sha256": None,
+            },
+            "contract": {
+                "schema_hash": "b" * 64,
+                "tool_count": len(tool_names),
+                "tool_names": tool_names,
+            },
+            "capabilities": {
+                "durable_run": True,
+                "durable_operation": True,
+            },
+        },
+        "agent_version": SERVER_VERSION,
+    }
+
+
+def test_contract_required_remote_job_fails_closed_and_recovers_without_replay(
+    tmp_path: Path,
+) -> None:
+    store = RemoteStore(tmp_path / "contract.sqlite3", online_window_s=10)
+    pair = store.create_pairing("u", "PC", "win", ["sentra_health"])
+    paired = store.pair_device(pair["pairing_code"])
+    did, tok = paired["device_id"], paired["device_token"]
+
+    store.heartbeat(did, tok, {"python": "3.12"})
+    with pytest.raises(RemoteAgentCompatibilityError):
+        store.submit_job(
+            "u",
+            did,
+            "sentra_health",
+            {},
+            require_compatible_agent=True,
+        )
+
+    valid = _valid_remote_contract("sentra_health")
+    heartbeat = store.heartbeat(did, tok, valid)
+    assert heartbeat["compatibility"]["compatible"] is True
+    job_id = store.submit_job(
+        "u",
+        did,
+        "sentra_health",
+        {},
+        run_id="run-contract",
+        operation_id="op-contract",
+        idempotency_key="remote-once",
+        require_compatible_agent=True,
+    )
+    assert store.job_result("u", job_id)["contract_required"] is True
+
+    stale = _valid_remote_contract("sentra_health")
+    stale["sentra"]["server"]["protocol_version"] = "stale-protocol"
+    store.heartbeat(did, tok, stale)
+    assert store.poll_job(did, tok) is None
+    assert store.job_result("u", job_id)["state"] == "QUEUED"
+
+    store.heartbeat(did, tok, valid)
+    leased = store.poll_job(did, tok)
+    assert leased is not None
+    assert leased.job_id == job_id

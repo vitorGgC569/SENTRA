@@ -23,7 +23,9 @@ class BrowserSession:
       1. cdp_url -> attach to an already-running Edge (never closes it).
       2. persistent Edge profile (channel="msedge", launch_persistent_context)
          -> real Edge window, profile kept on disk.
-      3. legacy chromium launch (fallback when Edge is unavailable).
+      3. bundled Chromium only when allow_invasive_fallback=True.
+         Default is fail-closed so a native/profile failure never silently
+         opens another browser/profile.
     """
 
     def __init__(
@@ -36,6 +38,7 @@ class BrowserSession:
         user_data_dir: Optional[str] = None,
         target_url: str = DEFAULT_TARGET_URL,
         launch_args: Optional[list] = None,
+        allow_invasive_fallback: bool = False,
     ):
         self.role = role
         # chatgpt.com actively blocks headless automation; force headed unless explicitly overridden
@@ -47,6 +50,7 @@ class BrowserSession:
         # Extra Chromium flags (ex.: anti-throttling do perfil do bot).
         # Somados aos args base anti-automacao no launch; nunca substituem.
         self.launch_args = list(launch_args) if launch_args else []
+        self.allow_invasive_fallback = bool(allow_invasive_fallback)
         if user_data_dir:
             self.user_data_dir = Path(os.path.expandvars(os.path.expanduser(str(user_data_dir))))
         else:
@@ -171,9 +175,14 @@ class BrowserSession:
                     pages = list(self.context.pages)
                     self.page = pages[0] if pages else await self.context.new_page()
                 except Exception as edge_err:
-                    # Fallback to bundled chromium when Edge channel is unavailable
+                    if not self.allow_invasive_fallback:
+                        raise RuntimeError(
+                            "native Edge launch failed; invasive bundled-browser fallback "
+                            "is disabled unless explicitly opted in"
+                        ) from edge_err
+                    # Explicit opt-in only: launch a separate bundled Chromium.
                     err_short = str(edge_err)[:160].encode("ascii", "ignore").decode("ascii")
-                    print(f"[{self.role}] Edge channel '{self.browser_channel}' unavailable ({err_short}); falling back to chromium.")
+                    print(f"[{self.role}] Edge unavailable ({err_short}); explicit bundled-browser fallback enabled.")
                     self.browser = await self._playwright.chromium.launch(headless=self.headless)
                     self.context = await self.browser.new_context(
                         storage_state=str(state_file) if state_file else None,

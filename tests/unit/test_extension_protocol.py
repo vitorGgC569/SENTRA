@@ -184,6 +184,17 @@ def test_browser_action_can_bootstrap_without_target_worker():
     targeted.validate()
     assert targeted.target_worker == "TAB-123"
 
+    screenshot = ChatJob(
+        task_id="T-browser-screenshot",
+        kind="BROWSER_ACTION",
+        new_chat=False,
+        browser_action="screenshot",
+        browser_args={"full_page": False},
+        target_worker="TAB-123",
+    )
+    screenshot.validate()
+    assert screenshot.browser_action == "screenshot"
+
 
 def test_probe_kind_validates_and_queues():
     import urllib.request as _url

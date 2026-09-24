@@ -99,6 +99,15 @@ class IntegratedRun:
         if snapshot:
             if snapshot["objective"] != self.objective or snapshot["workspace"] != str(self.source):
                 raise ValueError("resume objective/workspace mismatch")
+            saved_project = snapshot.get("chat_project")
+            requested_project = self.options.get("chat_project")
+            if requested_project in (None, ""):
+                self.options["chat_project"] = saved_project
+            elif requested_project != saved_project:
+                raise ValueError(
+                    "resume chat project differs from snapshot; omit --chat-project "
+                    "to reuse the recorded Project"
+                )
             if snapshot.get("execution", {"backend": "host"}) != self.options["execution"]:
                 raise ValueError("resume execution/image differs from snapshot; use the recorded image or create a new run")
             if snapshot.get("validation_policy", validation_policy(self.options)) != validation_policy(self.options):
@@ -116,6 +125,7 @@ class IntegratedRun:
             self.store._atomic_write_json(self.manifest_file, {
                 "objective": self.objective, "workspace": str(self.source), "base_hash": self.base_hash,
                 "created_at": time.time(), "execution": self.options["execution"],
+                "chat_project": self.options.get("chat_project"),
                 "validation_policy": validation_policy(self.options)})
 
         # Every recovery reconstructs from the last atomic checkpoint. Partial
@@ -146,10 +156,28 @@ class IntegratedRun:
                     t.status = TaskStatus.PENDING  # explicit resume only; budget is NOT reset
             self.store.save_tasks(tasks)
 
+        owned_context = None
+        if (
+            self.options.get("fixed_conversations")
+            and self.options.get("shared_context_bridge") is None
+        ):
+            from sentra_mcp.services.context import ContextBusService
+            from .shared_context import ContextBusSharedContextBridge
+
+            owned_context = ContextBusService(self.source / ".sentra")
+            self.options["shared_context_bridge"] = ContextBusSharedContextBridge(
+                owned_context,
+                owner=f"oma:{self.run_id}",
+            )
+
         self.engine = OMAEngine(self.run_id, self.objective, self.work, self.router,
                                 persistence_base=self.source / "runs", checkpoint_callback=self._checkpoint,
                                 **self.options)
-        result = await self.engine.run(resume=self.resume)
+        try:
+            result = await self.engine.run(resume=self.resume)
+        finally:
+            if owned_context is not None:
+                owned_context.close()
         patch = diff_files(self.before, source_files(self.work))
         patch_path = self.store.run_dir / "candidate.patch"
         patch_path.write_text(patch, encoding="utf-8", newline="\n")

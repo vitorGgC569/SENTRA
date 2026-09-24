@@ -33,7 +33,7 @@ INSTALL_MARKER = ".sentra-install.json"
 
 PRODUCTS = (
     "sentra-mcp.exe", "sentra-browser-relay.exe", "sentra-desktop.exe",
-    "sentra-human.exe", "sentra-human-worker.exe",
+    "sentra-human.exe", "sentra-human-worker.exe", "sentra.exe",
     "sentra-agent.exe", "sentra-diagnostics.exe", "sentra-admin.exe",
     "sentra-update-helper.exe", "sentra-oma.exe",
 )
@@ -143,6 +143,19 @@ def _copy_product_files(install_dir: Path) -> None:
     target = install_dir / "edge_extension"
     shutil.rmtree(target, ignore_errors=True)
     shutil.copytree(ext_source, target)
+    web_source = source / "web-models" / "win-unpacked"
+    if not (web_source / "Codex Web GPT.exe").is_file() or not (web_source / "resources" / "runtime" / "manifest.json").is_file():
+        raise FileNotFoundError("packaged Electron Web Models payload is missing")
+    if not (source / "web-models" / "licenses" / "codex-chatgpt-web" / "LICENSE").is_file():
+        raise FileNotFoundError("codex-chatgpt-web license notice is missing")
+    if not (source / "web-models" / "integration-build.json").is_file():
+        raise FileNotFoundError("Web Models integration build metadata is missing")
+    web_target = (install_dir / "web-models").resolve()
+    if not web_target.is_relative_to(install_dir.resolve()):
+        raise ValueError("Web Models install target escaped install directory")
+    if web_target.exists():
+        shutil.rmtree(web_target)
+    shutil.copytree(source / "web-models", web_target)
     if getattr(sys, "frozen", False):
         shutil.copy2(Path(sys.executable), install_dir / "sentra-installer.exe")
 
@@ -287,6 +300,9 @@ def install(
         else ProductPaths.default(install_dir)
     )
     result: dict[str, Any] = {"version": PRODUCT_VERSION, "install_dir": str(install_dir)}
+    if (install_dir / INSTALL_MARKER).is_file():
+        _validate_sentra_install(install_dir)
+        _stop_installed_processes(install_dir)
     if install_git and not command_exists("git"):
         result["git_install"] = install_winget_package("Git.Git")
     if install_docker and not command_exists("docker"):

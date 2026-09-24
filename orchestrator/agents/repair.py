@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from ..models import Candidate, Finding, Task, ValidationReport, TokenUsage
 from ..providers.base import AgentProvider, AgentRequest
 from ..aggregator import Aggregator
+from ..failure_summary import summarize_test_results
 from .router import ModelRouter
 
 
@@ -81,8 +82,12 @@ VALIDATION FINDINGS:
 CRITIC SCORES (release requires EVERY critic at/above {release_bar:.2f}/10):
 {chr(10).join(score_lines) if score_lines else "(no scores recorded)"}
 
-AUTOMATED TEST OUTPUT:
-{json.dumps(test_results or {}, indent=2)}
+AUTOMATED TEST OUTPUT (failure-focused, bounded):
+{json.dumps(
+    (test_results or {}).get("failure_summary")
+    or summarize_test_results(test_results or {}),
+    indent=2,
+)}
 """
         parse_error = (test_results or {}).get("parse_error", "")
         if parse_error and not validation_reports:
@@ -98,7 +103,13 @@ AUTOMATED TEST OUTPUT:
             system_prompt=REPAIR_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             role="repair",
-            metadata={"task_id": task.id, "candidate_id": previous_candidate.candidate_id},
+            metadata={
+                "task_id": task.id,
+                "idempotency_key": task.idempotency_key,
+                "candidate_id": previous_candidate.candidate_id,
+                "priority": getattr(task.priority, "value", task.priority),
+                "risk": str(task.risk),
+            },
         )
 
         resp = await self.router.execute(req)

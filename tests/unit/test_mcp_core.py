@@ -89,6 +89,24 @@ def test_stdio_is_configurable_and_no_extra_transport_is_exposed() -> None:
         MCPConfig(transport="sse")
 
 
+def test_cli_allowed_root_derives_local_state_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("SENTRA_STATE_DIR", raising=False)
+    root = tmp_path / "workspace"
+    root.mkdir()
+    args = parser().parse_args(["--allowed-root", str(root)])
+    config = config_from_args(args, MCPConfig())
+    assert config.allowed_roots == (root.resolve(),)
+    assert config.state_root == (root / ".sentra").resolve()
+
+    explicit = tmp_path / "global-state"
+    monkeypatch.setenv("SENTRA_STATE_DIR", str(explicit))
+    env_config = MCPConfig.from_env()
+    config = config_from_args(args, env_config)
+    assert config.state_root == explicit.resolve()
+
+
 def test_discovery_list_and_call_tool_in_process(tmp_path: Path) -> None:
     async def probe() -> None:
         runtime = SentraMCPServer(MCPConfig(audit_log=tmp_path / "audit.jsonl"))

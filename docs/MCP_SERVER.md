@@ -9,7 +9,7 @@ O SENTRA agora expõe suas capacidades locais como um servidor Model Context Pro
 - Transporte remoto/local opcional: `streamable-http`.
 - HTTP usa `127.0.0.1:8000` por padrão.
 - SSE não é exposto pela configuração SENTRA.
-- O servidor usa lifecycle MCP para encerrar todos os processos filhos gerenciados no shutdown.
+- O lifecycle MCP aplica a política explícita de cleanup dos processos gerenciados: `terminate_on_run_end` é encerrado com a Run; `preserve`/`manual` não são silenciosamente destruídos.
 - A superfície padrão é `core + developer + browser`; `oma`, `remote` e `admin` só entram quando explicitamente habilitadas (ou com `--surface all`).
 - MCP HTTP `2026-07-28` é single-exchange/stateless: recursos persistentes do SENTRA usam uma sessão de aplicação opaca criada por `sentra_session_open`.
 
@@ -47,7 +47,7 @@ Proteções principais:
 - variáveis contendo TOKEN, SECRET, PASSWORD, API_KEY, COOKIE e variáveis Python de injeção são removidas dos filhos;
 - IDs persistentes (process/search/browser/sandbox/job/research) são owner-scoped; em HTTP MCP 2026-07-28 o owner vem de um `session_token` assinado localmente, e outro token não pode acessar esses IDs;
 - `kill_process` só aceita PID registrado pelo próprio ProcessService;
-- shutdown encerra a árvore de todos os processos gerenciados;
+- cleanup de Run encerra a árvore de processos com `cleanup_policy=terminate_on_run_end`; políticas `preserve`/`manual` permanecem explícitas e auditáveis;
 - mutações de filesystem/processos são auditadas sem registrar conteúdo/argumentos sensíveis;
 - OMA é observacional: não existe tool MCP de promoção/aplicação de candidato.
 
@@ -133,7 +133,11 @@ No HTTP MCP 2026-07-28, chame `sentra_session_open` uma vez por conversa. O toke
 - `sentra_list_processes`
 - `sentra_kill_process`
 
-`sentra_start_process` aceita string ou argv, timeout, `cwd`, `workspace`, `mode` e imagem confiável opcional. O argumento `owner` é apenas um rótulo adicional namespaced sob a sessão real; em HTTP moderno, `session_token` é obrigatório para o ciclo de vida persistente.
+`sentra_start_process` também aceita `run_id`, `idempotency_key`, `cleanup_policy` e `readiness_probe`. Um timeout do cliente não significa abort: a execução continua consultável pela Operation durável. `readiness_probe` pode aguardar porta/HTTP loopback ou marcador de stdout em vez de confundir PID criado com produto pronto. O argumento `owner` é apenas um rótulo adicional namespaced sob a sessão real; em HTTP moderno, `session_token` é obrigatório para o ciclo de vida persistente.
+
+### Runs e Operations duráveis
+
+A superfície compacta `sentra_run` cobre manifest/negociação de contrato, create/status/resume/list/events/checkpoint/reconcile, Agent e Chat; `sentra_operation` cobre create/status/wait/progress/complete/fail/cancel, leases/fencing e process tree; `sentra_artifact` registra/inspeciona artefatos e lê binários de forma limitada. O schema hash e build identity vivos são devolvidos no handshake para detectar schema/plugin stale antes do efeito colateral. Veja `docs/DURABLE_EXECUTION.md`.
 
 ### Repository
 
@@ -208,6 +212,7 @@ A leitura de runs só aceita IDs validados e artifacts allowlisted em `runs/<run
 - `sentra://capabilities`
 - `sentra://project/summary`
 - `sentra://run/{run_id}/summary`
+- `sentra://artifact/{artifact_id}`
 
 ## Prompts
 

@@ -21,7 +21,11 @@ from .models import ResponseEnvelope, SERVER_NAME, SERVER_VERSION
 from .prompts import register_prompts
 from .resources import capability_document, register_resources
 from .services.browser import BrowserControlService
+from .services.capabilities import CapabilityService
+from .services.context import ContextBusService
+from .services.control_plane import ControlPlaneService
 from .services.documents import DocumentService
+from .services.durable import DurableRunService
 from .services.filesystem import FilesystemService
 from .services.jobs import JobService
 from .services.oma import OmaService
@@ -34,6 +38,8 @@ from .services.telemetry import TelemetryService
 from .services.workspace_ops import WorkspaceOpsService
 from .services.workspaces import WorkspaceRegistry
 from .tools.commander import register_commander_tools
+from .tools.context import register_context_tools
+from .tools.durable import register_durable_tools
 from .tools.filesystem import register_filesystem_tools
 from .tools.process import register_process_tools
 from .tools.remote import register_remote_tools
@@ -49,18 +55,42 @@ class SentraMCPServer:
         self.audit = AuditLogger(self.config.audit_log)
         self.workspaces = WorkspaceRegistry(self.config, self.audit)
         self.filesystem = FilesystemService(self.config, self.audit, self.workspaces)
-        self.processes = ProcessService(self.config, self.audit, self.workspaces)
+        self.durable = DurableRunService(self.config.state_root)
+        self.context = ContextBusService(self.config.state_root)
+        self.control_plane = ControlPlaneService(self.durable, self.context)
+        self.processes = ProcessService(
+            self.config, self.audit, self.workspaces, durable=self.durable
+        )
         self.repository = RepositoryService(self.config, self.audit, self.workspaces)
         self.oma = OmaService(self.config, self.audit)
-        self.search = SearchSessionService(self.config, self.audit, self.workspaces)
+        self.search = SearchSessionService(
+            self.config,
+            self.audit,
+            self.workspaces,
+            durable=self.durable,
+        )
         self.telemetry = TelemetryService(self.config)
         self.documents = DocumentService(self.filesystem, self.audit)
         self.browser = BrowserControlService(self.config, self.audit)
         self.workspace_ops = WorkspaceOpsService(self.filesystem, self.audit)
-        self.jobs = JobService(self.config, self.audit, self.repository)
-        self.research = ResearchService(self.config, self.audit, self.browser)
+        self.jobs = JobService(
+            self.config,
+            self.audit,
+            self.repository,
+            durable=self.durable,
+        )
+        self.research = ResearchService(
+            self.config,
+            self.audit,
+            self.browser,
+            durable=self.durable,
+            control_plane=self.control_plane,
+        )
         self.remote_store = RemoteStore(self.config.remote_store_path)
-        self.remote = RemoteGatewayService(self.remote_store)
+        self.remote = RemoteGatewayService(
+            self.remote_store,
+            durable=self.durable,
+        )
         self.runtime_config = RuntimeConfigService(
             self._effective_config,
             self._apply_safe_config,
@@ -97,6 +127,8 @@ class SentraMCPServer:
                 self.search.close()
                 self.processes.shutdown()
                 self.remote_store.close()
+                self.context.close()
+                self.durable.close()
 
         self.mcp = MCPServer(
             SERVER_NAME,
@@ -110,15 +142,21 @@ class SentraMCPServer:
             token_verifier=verifier,
             auth=auth,
         )
+        self.capabilities = CapabilityService(
+            self.config, self.mcp, browser=self.browser
+        )
         instance_id = os.environ.get("SENTRA_INSTANCE_ID", "").strip()
 
         @self.mcp.custom_route("/healthz", methods=["GET"], include_in_schema=False)
         async def healthz(_request):
+            manifest = await self.capabilities.manifest()
             return JSONResponse({
                 "ok": True,
                 "service": "sentra-mcp",
                 "server_version": SERVER_VERSION,
                 "instance_id": instance_id,
+                "build": manifest["server"],
+                "contract": manifest["contract"],
             })
 
         self._register_tools()
@@ -162,6 +200,7 @@ class SentraMCPServer:
         self.browser.config = self.config
         self.research.update_config(self.config)
         self.telemetry.config = self.config
+        self.capabilities.update_config(self.config)
         # OMA intentionally remains bound to the primary SENTRA workspace.
         # Extra roots are project grants, not alternate OMA state directories.
         self.oma.max_read_bytes = self.config.max_read_bytes
@@ -179,6 +218,10 @@ class SentraMCPServer:
                     "device_registry": True,
                     "relay_store": True,
                 },
+                "contract": {
+                    **self.capabilities.schema(),
+                    "build_identity": dict(self.capabilities.build_identity),
+                },
             })
 
         tool_server = ToolPolicyProxy(self.mcp, self.config.tool_allowlist)
@@ -188,8 +231,18 @@ class SentraMCPServer:
 
         surfaces = self.config.enabled_surfaces
         if "core" in surfaces:
-            register_filesystem_tools(tool_server, self.filesystem)
+            register_filesystem_tools(
+                tool_server, self.filesystem, self.capabilities
+            )
             register_process_tools(tool_server, self.processes)
+            register_durable_tools(
+                tool_server,
+                self.durable,
+                self.capabilities,
+                self.filesystem,
+                self.processes,
+            )
+            register_context_tools(tool_server, self.control_plane)
         if {"developer", "oma"} & surfaces:
             register_sentra_tools(
                 tool_server,
@@ -210,9 +263,17 @@ class SentraMCPServer:
             workspaces=self.workspaces,
             jobs=self.jobs,
             research=self.research,
+            durable=self.durable,
             surfaces=surfaces - {"remote"},
         )
-        register_resources(self.mcp, self.config, self.repository, self.oma, self.browser)
+        register_resources(
+            self.mcp,
+            self.config,
+            self.repository,
+            self.oma,
+            self.browser,
+            self.durable,
+        )
         if "oma" in surfaces:
             register_prompts(self.mcp, self.oma)
 

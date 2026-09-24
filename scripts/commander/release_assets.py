@@ -18,6 +18,7 @@ from sentra_remote.installer import INSTALL_MARKER, PRODUCTS, download_tunnel_cl
 from sentra_version import PRODUCT_VERSION
 
 from scripts.commander.build_msi import build_msi
+from scripts.commander.extension_identity import stamp_extension_identity
 
 
 def sha256(path: Path) -> str:
@@ -45,6 +46,20 @@ def build_staging(dist: Path, staging: Path, tunnel_archive: Path) -> Path:
             raise FileNotFoundError(f"release binary missing: {source}")
         shutil.copy2(source, staging / name)
     _copy_tree(ROOT / "edge_extension", staging / "edge_extension")
+    web_models = dist / "web-models" / "win-unpacked"
+    if not (web_models / "Codex Web GPT.exe").is_file() or not (web_models / "resources" / "runtime" / "manifest.json").is_file():
+        raise FileNotFoundError("Electron Web Models payload missing from release")
+    if not (dist / "web-models" / "licenses" / "codex-chatgpt-web" / "LICENSE").is_file():
+        raise FileNotFoundError("codex-chatgpt-web license notice missing from release")
+    build_state_path = dist / "web-models" / "integration-build.json"
+    if not build_state_path.is_file():
+        raise FileNotFoundError("Web Models integration build metadata missing from release")
+    build_state = json.loads(build_state_path.read_text(encoding="utf-8-sig"))
+    patch = ROOT / "integrations" / "codex_chatgpt_web" / "sentra-upstream.patch"
+    if str(build_state.get("patch_sha256") or "").lower() != sha256(patch):
+        raise RuntimeError("Web Models payload was built from a stale SENTRA upstream patch")
+    _copy_tree(dist / "web-models", staging / "web-models")
+    stamp_extension_identity(staging / "edge_extension")
     (staging / INSTALL_MARKER).write_text(
         json.dumps(
             {
@@ -103,6 +118,27 @@ def build_sbom(release_dir: Path, assets: list[Path]) -> Path:
             "version": version,
             "purl": f"pkg:pypi/{name.lower().replace('_', '-')}@{version}",
         })
+    upstream_manifest = json.loads(
+        (ROOT / "integrations" / "codex_chatgpt_web" / "upstream.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    upstream_ref = str(upstream_manifest.get("ref") or "").strip()
+    upstream_version = upstream_ref[1:] if upstream_ref.startswith("v") else upstream_ref
+    components.append({
+        "type": "library",
+        "name": str(upstream_manifest["name"]),
+        "version": upstream_version,
+        "licenses": [{"license": {"id": str(upstream_manifest["license"])}}],
+        "externalReferences": [{
+            "type": "vcs",
+            "url": str(upstream_manifest["repository"]) + "#" + str(upstream_manifest["commit"]),
+        }],
+        "properties": [
+            {"name": "sentra:integration_mode", "value": str(upstream_manifest["integration_mode"])},
+            {"name": "sentra:upstream_commit", "value": str(upstream_manifest["commit"])},
+        ],
+    })
     for asset in assets:
         components.append({
             "type": "file",

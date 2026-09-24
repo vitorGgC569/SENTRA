@@ -100,7 +100,18 @@ class OmaService:
         if not 1 <= limit <= 500:
             raise ValueError("limit must be between 1 and 500")
         if not self.runs_root.exists():
-            return {"runs": [], "limit": limit}
+            return {
+                "items": [],
+                "runs": [],
+                "limit": limit,
+                "page": {
+                    "offset": 0,
+                    "limit": limit,
+                    "returned": 0,
+                    "total": 0,
+                    "next_offset": None,
+                },
+            }
         if self._is_link(self.runs_root):
             raise PermissionError("run storage may not be a filesystem link")
         candidates = [
@@ -121,7 +132,20 @@ class OmaService:
                     row["objective"] = data.get("objective")
                     break
             rows.append(row)
-        return {"runs": rows, "limit": limit}
+        return {
+            "items": rows,
+            "runs": rows,
+            "limit": limit,
+            "page": {
+                "offset": 0,
+                "limit": limit,
+                "returned": len(rows),
+                "total": len(candidates),
+                "next_offset": (
+                    len(rows) if len(rows) < len(candidates) else None
+                ),
+            },
+        }
 
     def run_status(self, run_id: str) -> dict[str, Any]:
         for name in ("handoff.json", "run.json"):

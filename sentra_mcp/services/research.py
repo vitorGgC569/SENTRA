@@ -52,11 +52,15 @@ class ResearchService:
         audit: AuditLogger,
         browser: BrowserControlService,
         *,
+        durable: object | None = None,
+        control_plane: object | None = None,
         db_path: Path | None = None,
     ) -> None:
         self.config = config
         self.audit = audit
         self.browser = browser
+        self.durable = durable
+        self.control_plane = control_plane
         self.db_path = Path(
             db_path or (config.state_root / "research.sqlite3")
         )
@@ -76,6 +80,8 @@ class ResearchService:
                 branches INTEGER NOT NULL,
                 max_depth INTEGER NOT NULL,
                 beam_width INTEGER NOT NULL,
+                operation_id TEXT,
+                idempotency_key TEXT,
                 state TEXT NOT NULL,
                 result_json TEXT,
                 error TEXT,
@@ -86,6 +92,15 @@ class ResearchService:
                 ON research_runs(owner, created DESC);
             """
         )
+        existing_columns = {
+            str(row["name"])
+            for row in self.db.execute("PRAGMA table_info(research_runs)").fetchall()
+        }
+        for column in ("operation_id", "idempotency_key"):
+            if column not in existing_columns:
+                self.db.execute(
+                    f"ALTER TABLE research_runs ADD COLUMN {column} TEXT"
+                )
         self.db.execute(
             "UPDATE research_runs SET state='INTERRUPTED',"
             "error='server restarted during research',updated=? "
@@ -124,11 +139,58 @@ class ResearchService:
             compact["output_truncated"] = True
             payload = json.dumps(compact, ensure_ascii=False)
 
+        now = time.time()
         self.db.execute(
             "UPDATE research_runs SET state=?,result_json=?,error=?,updated=? WHERE id=?",
-            (state, payload, error, time.time(), run_id),
+            (state, payload, error, now, run_id),
         )
         self.db.commit()
+        row = self.db.execute(
+            "SELECT owner,operation_id FROM research_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        if self.durable is not None and row is not None and row["operation_id"]:
+            mapped = {
+                "PENDING": "QUEUED",
+                "RUNNING": "RUNNING",
+                "CANCELLING": "CANCEL_REQUESTED",
+                "COMPLETED": "SUCCEEDED",
+                "FAILED": "FAILED",
+                "CANCELLED": "CANCELLED",
+                "INTERRUPTED": "UNCERTAIN",
+            }.get(state)
+            if mapped is not None:
+                try:
+                    self.durable.update_operation(
+                        str(row["operation_id"]),
+                        str(row["owner"]),
+                        state=mapped,
+                        readiness="PRODUCT_READY" if mapped == "SUCCEEDED" else None,
+                        progress={
+                            "stage": state,
+                            "research_run_id": run_id,
+                            "updated_at": now,
+                        },
+                        event_type=f"RESEARCH_{state}",
+                        result=(
+                            json.loads(payload)
+                            if mapped == "SUCCEEDED" and payload
+                            else None
+                        ),
+                        error=(
+                            {
+                                "code": (
+                                    "RESEARCH_INTERRUPTED"
+                                    if mapped == "UNCERTAIN"
+                                    else "RESEARCH_FAILED"
+                                ),
+                                "message": str(error or "")[:1000],
+                            }
+                            if mapped in {"FAILED", "UNCERTAIN"} else None
+                        ),
+                    )
+                except Exception:
+                    pass
         event = self.done.get(run_id)
         if state in _TERMINAL and event is not None:
             event.set()
@@ -307,8 +369,50 @@ class ResearchService:
                 results.append(item)
         return results
 
+    def _bind_research_chat(
+        self,
+        run_id: str,
+        owner: str,
+        *,
+        node_id: str,
+        role: str,
+        conversation_id: str | None,
+        conversation_url: str | None,
+    ) -> tuple[str | None, str | None]:
+        if self.durable is None:
+            return None, None
+        safe_run = "".join(ch for ch in run_id if ch.isalnum() or ch in "_.:-")[-40:]
+        safe_node = "".join(ch for ch in node_id if ch.isalnum() or ch in "_.:-")[:40]
+        agent_id = f"agent-{safe_run}-{safe_node}"
+        chat_id = f"chat-{safe_run}-{safe_node}"
+        agent = self.durable.assign_agent(
+            run_id,
+            owner,
+            role=role,
+            task_id=f"research:{node_id}",
+            agent_id=agent_id,
+            state="ACTIVE",
+            desired_state="ACTIVE",
+            metadata={"research_node_id": node_id},
+        )
+        chat = self.durable.bind_chat(
+            run_id,
+            owner,
+            agent_id=agent["agent_id"],
+            provider="chatgpt",
+            conversation_id=str(conversation_id) if conversation_id else None,
+            conversation_url=str(conversation_url) if conversation_url else None,
+            title=f"[SENTRA] {node_id} - {role}",
+            chat_id=chat_id,
+            state="READY",
+            desired_state="READY",
+            metadata={"research_node_id": node_id},
+        )
+        return str(agent["agent_id"]), str(chat["chat_id"])
+
     async def _parallel(
         self,
+        run_id: str,
         objective: str,
         owner: str,
         branches: int,
@@ -342,16 +446,71 @@ class ResearchService:
             url = item.get("conversation_url")
             if url:
                 urls.append(str(url))
-            nodes.append(
-                {
-                    "id": f"branch-{index + 1}",
-                    "depth": 1,
-                    "kind": "branch",
-                    "text": str(item.get("text") or ""),
-                    "conversation_url": url,
-                    "conversation_id": item.get("conversation_id"),
-                }
+            node = {
+                "id": f"branch-{index + 1}",
+                "depth": 1,
+                "kind": "branch",
+                "role": roles[index % len(roles)],
+                "text": str(item.get("text") or ""),
+                "conversation_url": url,
+                "conversation_id": item.get("conversation_id"),
+            }
+            agent_id, chat_id = self._bind_research_chat(
+                run_id,
+                owner,
+                node_id=node["id"],
+                role=node["role"],
+                conversation_id=node["conversation_id"],
+                conversation_url=node["conversation_url"],
             )
+            node["agent_id"] = agent_id
+            node["chat_id"] = chat_id
+            if self.control_plane is not None:
+                published = self.control_plane.publish_context(
+                    run_id,
+                    owner,
+                    event_type="RESULT",
+                    subject=f"research.branch.{index + 1}",
+                    payload={
+                        "node_id": node["id"],
+                        "role": node["role"],
+                        "text": node["text"],
+                        "conversation_id": node["conversation_id"],
+                        "conversation_url": node["conversation_url"],
+                    },
+                    evidence=[],
+                    confidence=None,
+                    supersedes=[],
+                    task_id=f"research:{node['id']}",
+                    agent_id=agent_id,
+                    idempotency_key=f"research-branch-{index + 1}",
+                )
+                node["context_event_id"] = published["event_id"]
+            nodes.append(node)
+
+        shared_nodes = nodes
+        if self.control_plane is not None:
+            shared = self.control_plane.read_context(
+                run_id,
+                owner,
+                after_seq=0,
+                types=["RESULT"],
+                subject_prefixes=["research.branch."],
+                limit=max(1, branches),
+            )
+            by_id = {
+                str(item.get("payload", {}).get("node_id")): item
+                for item in shared.get("items", [])
+            }
+            shared_nodes = []
+            for node in nodes:
+                event = by_id.get(node["id"])
+                payload = event.get("payload", {}) if event else {}
+                shared_nodes.append({
+                    **node,
+                    "text": str(payload.get("text") or node["text"]),
+                    "role": str(payload.get("role") or node["role"]),
+                })
 
         synthesis_prompt = (
             "Act as the master research synthesizer. Reconcile the independent "
@@ -359,9 +518,10 @@ class ResearchService:
             "uncertainty. Produce a concrete integrated answer rather than concatenating "
             "the branch outputs.\n\nOBJECTIVE:\n"
             + objective
-            + "\n\nBRANCHES:\n"
+            + "\n\nSHARED CONTEXT BRANCH RESULTS:\n"
             + "\n\n".join(
-                f"[{node['id']}]\n{_bounded(node['text'])}" for node in nodes
+                f"[{node['id']} | {node.get('role', 'agent')}]\n{_bounded(node['text'])}"
+                for node in shared_nodes
             )
         )
         synthesis = await self._chat_retry(
@@ -372,16 +532,50 @@ class ResearchService:
         url = synthesis.get("conversation_url")
         if url:
             urls.append(str(url))
-        nodes.append(
-            {
-                "id": "synthesis",
-                "depth": 2,
-                "kind": "synthesis",
-                "text": str(synthesis.get("text") or ""),
-                "conversation_url": url,
-                "conversation_id": synthesis.get("conversation_id"),
-            }
+        synthesis_node = {
+            "id": "synthesis",
+            "depth": 2,
+            "kind": "synthesis",
+            "role": "master research synthesizer",
+            "text": str(synthesis.get("text") or ""),
+            "conversation_url": url,
+            "conversation_id": synthesis.get("conversation_id"),
+        }
+        synthesis_agent_id, synthesis_chat_id = self._bind_research_chat(
+            run_id,
+            owner,
+            node_id="synthesis",
+            role=synthesis_node["role"],
+            conversation_id=synthesis_node["conversation_id"],
+            conversation_url=synthesis_node["conversation_url"],
         )
+        synthesis_node["agent_id"] = synthesis_agent_id
+        synthesis_node["chat_id"] = synthesis_chat_id
+        if self.control_plane is not None:
+            published = self.control_plane.publish_context(
+                run_id,
+                owner,
+                event_type="DECISION",
+                subject="research.synthesis",
+                payload={
+                    "node_id": "synthesis",
+                    "text": synthesis_node["text"],
+                    "conversation_id": synthesis_node["conversation_id"],
+                    "conversation_url": synthesis_node["conversation_url"],
+                },
+                evidence=[
+                    str(node["context_event_id"])
+                    for node in nodes
+                    if node.get("context_event_id")
+                ],
+                confidence=None,
+                supersedes=[],
+                task_id="research:synthesis",
+                agent_id=synthesis_agent_id,
+                idempotency_key="research-synthesis",
+            )
+            synthesis_node["context_event_id"] = published["event_id"]
+        nodes.append(synthesis_node)
         return nodes, str(synthesis.get("text") or "")
 
     async def _mcts(
@@ -564,6 +758,7 @@ class ResearchService:
                 algorithm = "single-temporary-chat"
             elif strategy == "parallel":
                 nodes, answer = await self._parallel(
+                    run_id,
                     objective,
                     owner,
                     branches,
@@ -645,6 +840,7 @@ class ResearchService:
         max_depth: int = 2,
         beam_width: int = 2,
         timeout_s: int = 300,
+        idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         if self.closed:
             raise RuntimeError("research service is shut down")
@@ -664,12 +860,56 @@ class ResearchService:
         if not 30 <= timeout_s <= 600:
             raise ValueError("timeout_s must be 30..600")
 
-        run_id = str(uuid.uuid4())
+        key = str(idempotency_key or "").strip() or (
+            "research:" + uuid.uuid4().hex
+        )
+        operation_id: str | None = None
+        if self.durable is not None:
+            durable_run = self.durable.create_run(
+                owner,
+                idempotency_key=key,
+                required_capabilities=[
+                    "browser.chat_start",
+                    "browser.chat_collect",
+                ],
+            )
+            run_id = str(durable_run["run_id"])
+            if durable_run.get("idempotent_replay"):
+                existing = self.db.execute(
+                    "SELECT * FROM research_runs WHERE id=? AND owner=?",
+                    (run_id, owner),
+                ).fetchone()
+                if existing is not None:
+                    data = self._view(
+                        existing,
+                        include_result=existing["state"] in _TERMINAL,
+                    )
+                    data["idempotent_replay"] = True
+                    return data
+            durable_operation = self.durable.create_operation(
+                run_id,
+                owner,
+                kind=f"research.{strategy}",
+                idempotency_key=f"execute:{key}",
+            )
+            operation_id = str(durable_operation["operation_id"])
+            try:
+                self.durable.record_capabilities_used(
+                    run_id,
+                    owner,
+                    ["browser.chat_start", "browser.chat_collect"],
+                )
+            except Exception:
+                pass
+        else:
+            run_id = str(uuid.uuid4())
+
         now = time.time()
         self.db.execute(
             "INSERT INTO research_runs("
             "id,owner,objective,strategy,temporary,branches,max_depth,beam_width,"
-            "state,created,updated) VALUES(?,?,?,?,?,?,?,?, 'PENDING',?,?)",
+            "operation_id,idempotency_key,state,created,updated) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?, 'PENDING',?,?)",
             (
                 run_id,
                 owner,
@@ -679,12 +919,30 @@ class ResearchService:
                 branches,
                 max_depth,
                 beam_width,
+                operation_id,
+                key,
                 now,
                 now,
             ),
         )
         self.db.commit()
         self.done[run_id] = asyncio.Event()
+        if self.durable is not None and operation_id:
+            try:
+                self.durable.update_operation(
+                    operation_id,
+                    owner,
+                    state="STARTING",
+                    progress={
+                        "stage": "STARTING",
+                        "research_run_id": run_id,
+                        "strategy": strategy,
+                        "branches": branches,
+                    },
+                    event_type="RESEARCH_STARTING",
+                )
+            except Exception:
+                pass
         task = asyncio.create_task(
             self._run(
                 run_id,
@@ -710,6 +968,8 @@ class ResearchService:
             "ok",
             {
                 "run_id": run_id,
+                "operation_id": operation_id,
+                "idempotency_key": key,
                 "owner": owner,
                 "strategy": strategy,
                 "temporary": temporary,
@@ -720,6 +980,8 @@ class ResearchService:
         )
         return {
             "run_id": run_id,
+            "operation_id": operation_id,
+            "idempotency_key": key,
             "state": "PENDING",
             "strategy": strategy,
             "temporary": temporary,
@@ -743,6 +1005,8 @@ class ResearchService:
     def _view(row: sqlite3.Row, include_result: bool = False) -> dict[str, Any]:
         data = {
             "run_id": row["id"],
+            "operation_id": row["operation_id"],
+            "idempotency_key": row["idempotency_key"],
             "strategy": row["strategy"],
             "temporary": bool(row["temporary"]),
             "branches": row["branches"],
@@ -795,6 +1059,8 @@ class ResearchService:
         data["next_poll_after_ms"] = (
             500 if row["state"] not in _TERMINAL else None
         )
+        if data["timed_out"]:
+            data["semantic_status"] = "OPERATION_STILL_RUNNING"
         return data
 
     def cancel(self, run_id: str, owner: str) -> dict[str, Any]:
@@ -809,17 +1075,51 @@ class ResearchService:
         task = self.tasks.get(run_id)
         if task is not None:
             task.cancel()
-        return {"run_id": run_id, "state": "CANCELLING"}
+        if self.durable is not None and row["operation_id"]:
+            try:
+                self.durable.request_cancel(
+                    str(row["operation_id"]),
+                    owner,
+                    side_effect_may_have_started=True,
+                )
+            except Exception:
+                pass
+        return {
+            "run_id": run_id,
+            "operation_id": row["operation_id"],
+            "state": "CANCELLING",
+        }
 
-    def list_runs(self, owner: str, limit: int = 100) -> dict[str, Any]:
-        if not 1 <= limit <= 1000:
-            raise ValueError("limit must be 1..1000")
+    def list_runs(
+        self,
+        owner: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        if offset < 0 or not 1 <= limit <= 1000:
+            raise ValueError("offset must be >=0 and limit must be 1..1000")
+        total = int(self.db.execute(
+            "SELECT COUNT(*) FROM research_runs WHERE owner=?",
+            (owner,),
+        ).fetchone()[0])
         rows = self.db.execute(
             "SELECT * FROM research_runs WHERE owner=? "
-            "ORDER BY created DESC LIMIT ?",
-            (owner, limit),
+            "ORDER BY created DESC LIMIT ? OFFSET ?",
+            (owner, limit, offset),
         ).fetchall()
-        return {"runs": [self._view(row) for row in rows]}
+        items = [self._view(row) for row in rows]
+        next_offset = offset + len(items)
+        return {
+            "items": items,
+            "runs": items,
+            "page": {
+                "offset": offset,
+                "limit": limit,
+                "returned": len(items),
+                "total": total,
+                "next_offset": next_offset if next_offset < total else None,
+            },
+        }
 
     async def close(self) -> None:
         self.closed = True

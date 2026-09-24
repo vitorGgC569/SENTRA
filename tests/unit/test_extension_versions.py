@@ -185,3 +185,24 @@ def test_idle_wake_never_creates_tabs_and_only_scheduler_can_adopt():
     assert "omaRememberOwned" not in idle_wake
     assert "chrome.tabs.create(" not in idle_wake
     assert "void omaTick();" in worker
+
+
+def test_edge_screenshot_permission_is_runtime_scoped_to_chatgpt():
+    manifest = json.loads(_read("manifest.json"))
+    worker = _read("service-worker.js")
+
+    # captureVisibleTab requires <all_urls> or a user-granted activeTab token.
+    # SENTRA is unattended, so the manifest carries <all_urls>, while the
+    # service worker narrows screenshot execution back to chatgpt.com.
+    assert "<all_urls>" in manifest["host_permissions"]
+    assert 'if (!/^https:\\/\\/chatgpt\\.com\\//.test(String(tabInfo.url || "")))' in worker
+    assert "BROWSER_ACTION screenshot is restricted to https://chatgpt.com" in worker
+    assert "chrome.tabs.captureVisibleTab" in worker
+
+
+def test_auto_update_compares_full_extension_identity():
+    worker = _read("service-worker.js")
+    assert "data.version !== OMA_SW_VERSION" in worker
+    assert "data.build_id !== OMA_BUILD_ID" in worker
+    assert "data.source_hash !== OMA_SOURCE_HASH" in worker
+    assert "chrome.runtime.reload();" in worker

@@ -239,3 +239,27 @@ def test_mcp_repo_tools_expose_optional_workspace_selector(tmp_path: Path) -> No
             assert Path(workspaces[0]["path"]) == tmp_path.resolve()
 
     asyncio.run(probe())
+
+
+def test_repository_build_pass_parser_accepts_targetless_spacing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _fixture_repo(tmp_path)
+    service = RepositoryService(config, AuditLogger(config.audit_log))
+
+    async def fake_execute(*args, **kwargs):
+        return (
+            "BUILD  PASS exit=0\ncollected tests",
+            {"id": "root:0", "workspace_id": "config:0", "alias": "sentra"},
+            tmp_path,
+        )
+
+    monkeypatch.setattr(service, "_execute", fake_execute)
+
+    async def probe() -> None:
+        result = await service.run_registered("BUILD")
+        assert result["passed"] is True
+        assert result["result"].splitlines()[0] == "BUILD  PASS exit=0"
+
+    asyncio.run(probe())

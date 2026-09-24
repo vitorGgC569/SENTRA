@@ -96,6 +96,16 @@ class ModelRouter:
         self.max_inflight_requests = 0
         self._admission_semaphore = None
         self.response_sink = None
+        # Optional typed decision model (Kev/Jev/System One). Disabled by default.
+        # It may recommend a route, but deterministic policy remains the fallback
+        # and explicit/critical routing is never overridden.
+        self.decision_controller = None
+        self.decision_routing_enabled = False
+        self.decision_retry_enabled = False
+        self.decision_validator_selection_enabled = False
+        self.decision_quality_advisory_enabled = False
+        self.decision_min_confidence = 0.35
+        self.decision_trace_sink = None
 
     @contextmanager
     def provider_scope(self, boundary):
@@ -123,6 +133,87 @@ class ModelRouter:
         if comp_str == "LOW" and "cheap" in self.providers:
             return "cheap"
         return self.primary_name
+
+    def _deterministic_target(
+        self, request: AgentRequest, preferred_provider: Optional[str] = None,
+    ) -> str:
+        return preferred_provider or self.role_routes.get(
+            request.role,
+            self.role_routes.get(request.role.split(".")[0], self.primary_name),
+        )
+
+    async def _decision_target(
+        self,
+        request: AgentRequest,
+        preferred_provider: Optional[str],
+        baseline: str,
+    ) -> str:
+        controller = self.decision_controller
+        if preferred_provider is not None or not self.decision_routing_enabled or controller is None:
+            return baseline
+        metadata = request.metadata or {}
+        priority = str(metadata.get("priority") or "").upper()
+        risk = str(metadata.get("risk") or "").upper()
+        if request.role == "master" or priority == "CRITICAL" or risk == "CRITICAL":
+            return baseline
+
+        candidates = [baseline]
+        for name in self.providers:
+            if name == "master" and baseline != "master":
+                continue
+            if name not in candidates:
+                candidates.append(name)
+        criteria = {
+            name: (
+                "Current deterministic route; prefer unless the task state gives a clear reason to switch."
+                if name == baseline else
+                f"Available provider '{name}'. Use only when its observed reliability/capability is a better fit."
+            )
+            for name in candidates
+        }
+        state = {
+            "role": request.role,
+            "priority": priority or "UNSPECIFIED",
+            "risk": risk or "UNSPECIFIED",
+            "deterministic_route": baseline,
+            "request": request.user_prompt[:4000],
+            "providers": {
+                name: {
+                    "reliability": round(self.get_reliability_score(name), 4),
+                    "circuit": self.circuit_breakers[name].state.value,
+                }
+                for name in candidates
+            },
+        }
+        selection = await controller.choose(
+            state=state,
+            instructions=(
+                "Choose the model provider for this request. Preserve the deterministic route unless another "
+                "available provider is clearly more appropriate. Do not infer capabilities not present in the state."
+            ),
+            criteria=criteria,
+            default=baseline,
+            question_id="provider",
+            min_confidence=self.decision_min_confidence,
+        )
+        if self.decision_trace_sink is not None:
+            try:
+                self.decision_trace_sink({
+                    "kind": "model_route",
+                    "role": request.role,
+                    "task_id": request.metadata.get("task_id"),
+                    "candidate_id": request.metadata.get("candidate_id"),
+                    "baseline": baseline,
+                    "selected": selection.value,
+                    "confidence": selection.confidence,
+                    "source": selection.source,
+                    "model": selection.model,
+                    "deterministic_fallback": selection.used_deterministic_fallback,
+                    "probabilities": dict(selection.probabilities),
+                })
+            except Exception:
+                pass
+        return selection.value if selection.value in self.providers else baseline
 
     async def execute(
         self, request: AgentRequest, preferred_provider: Optional[str] = None,
@@ -161,13 +252,19 @@ class ModelRouter:
         import asyncio
         from ..budgets import BudgetExceeded, estimate_input_tokens
 
-        target = preferred_provider or self.role_routes.get(request.role,
-                    self.role_routes.get(request.role.split(".")[0], self.primary_name))
-        if target not in self.providers:
-            return AgentResponse(content="", success=False, error=f"[POLICY_ERROR] unknown provider {target}")
+        baseline_target = self._deterministic_target(request, preferred_provider)
+        if baseline_target not in self.providers:
+            return AgentResponse(content="", success=False,
+                                 error=f"[POLICY_ERROR] unknown provider {baseline_target}")
+        target = await self._decision_target(request, preferred_provider, baseline_target)
         names = [target]
-        if (self.fallback_name in self.providers and self.fallback_name != target
-                and self.providers[self.fallback_name] is not self.providers[target]):
+        # A decision model may only reorder attempts. The deterministic route stays
+        # immediately behind it, so an advisory mistake cannot remove the known path.
+        if (target != baseline_target and baseline_target in self.providers
+                and self.providers[baseline_target] is not self.providers[target]):
+            names.append(baseline_target)
+        if (self.fallback_name in self.providers and self.fallback_name not in names
+                and all(self.providers[self.fallback_name] is not self.providers[name] for name in names)):
             names.append(self.fallback_name)
         last = None
         timeout = max(1, int(request.timeout or 120))

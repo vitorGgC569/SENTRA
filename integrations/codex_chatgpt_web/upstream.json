@@ -1,0 +1,37 @@
+{
+  "name": "codex-chatgpt-web",
+  "repository": "https://github.com/miuuyy/codex-chatgpt-web.git",
+  "ref": "v6.0.0",
+  "commit": "757942251222ee0f71953c35636679c6d92dd636",
+  "development_checkout": "third_party/codex-chatgpt-web",
+  "runtime_root": ".sentra/integrations/codex-chatgpt-web/runtime/6.0.0",
+  "integration_patch": "integrations/codex_chatgpt_web/sentra-upstream.patch",
+  "patch_files": [
+    "launcher/electron/browser-host.cjs",
+    "launcher/electron/connector-identity.cjs",
+    "launcher/electron/control-server.cjs",
+    "launcher/electron/main.cjs",
+    "launcher/electron/runtime-supervisor.cjs",
+    "launcher/src/App.tsx",
+    "launcher/src/i18n.ts",
+    "launcher/src/types.ts",
+    "src/adapters/chatgpt-web/browser-helper-main.ts",
+    "src/adapters/chatgpt-web/browser-worker.ts",
+    "src/adapters/chatgpt-web/environment.ts",
+    "src/adapters/chatgpt-web/index.ts",
+    "src/adapters/chatgpt-web/launcher-helper-client.ts",
+    "src/adapters/chatgpt-web/turn-broker.ts",
+    "src/cli.ts",
+    "src/codex-integration-shared.ts",
+    "src/config.ts"
+  ],
+  "installed_electron": "web-models/win-unpacked/Codex Web GPT.exe",
+  "license": "MIT",
+  "integration_mode": "sidecar",
+  "loopback_base_url": "http://127.0.0.1:17841/v1",
+  "notes": [
+    "Upstream launcher/UI/browser/Responses daemon remain upstream-owned.",
+    "SENTRA wraps the daemon as a ModelProvider and keeps Control Plane authority.",
+    "Upstream updates must pass SENTRA integration tests before the pinned ref changes."
+  ]
+}

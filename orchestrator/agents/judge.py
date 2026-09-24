@@ -55,6 +55,13 @@ VALIDATOR REPORTS:
             system_prompt=JUDGE_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             role="judge",
+            metadata={
+                "task_id": task.id,
+                "idempotency_key": task.idempotency_key,
+                "candidate_id": candidate.candidate_id,
+                "priority": getattr(task.priority, "value", task.priority),
+                "risk": str(task.risk),
+            },
         )
 
         resp = await self.router.execute(req)

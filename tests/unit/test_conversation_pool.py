@@ -145,3 +145,154 @@ async def test_attribute_proxy_forwards_both_ways(tmp_path):
     pool = FixedConversationRouter(inner, run_id="R1", store_dir=tmp_path)
     pool.budget = "B"
     assert inner.budget == "B" and pool.budget == "B"
+
+
+
+@pytest.mark.asyncio
+async def test_shared_context_is_injected_as_non_authoritative_delta(tmp_path):
+    from orchestrator.shared_context import SharedContextBatch
+
+    class Bridge:
+        def __init__(self):
+            self.prepared = []
+            self.acked = []
+            self.published = []
+
+        def prepare(self, **kwargs):
+            self.prepared.append(kwargs)
+            return SharedContextBatch(
+                text="FACT: benchmark baseline is artifact-1",
+                last_seq=7,
+                count=1,
+                consumer_id="consumer:R1:executor:T-1",
+                epoch="ctx-test-epoch",
+                estimated_tokens=11,
+                truncated=True,
+            )
+
+        def acknowledge(self, **kwargs):
+            self.acked.append(kwargs)
+
+        def publish_response(self, **kwargs):
+            self.published.append(kwargs)
+
+    class CaptureInner:
+        def __init__(self):
+            self.requests = []
+            self.providers = {}
+
+        async def execute(self, request, preferred_provider=None):
+            self.requests.append(request)
+            return AgentResponse(
+                content="reviewed shared fact",
+                success=True,
+                model="fake",
+                token_usage=TokenUsage(model="fake"),
+                metadata={},
+            )
+
+    bridge = Bridge()
+    inner = CaptureInner()
+    pool = FixedConversationRouter(
+        inner,
+        run_id="R1",
+        store_dir=tmp_path,
+        shared_context_bridge=bridge,
+    )
+    response = await pool.execute(_req("executor", task="T-1"))
+
+    assert response.success is True
+    sent = inner.requests[0]
+    assert "FACT: benchmark baseline is artifact-1" in sent.user_prompt
+    assert "SHARED_CONTEXT_NON_AUTHORITATIVE" in sent.user_prompt
+    assert "benchmark baseline" not in sent.system_prompt
+    assert sent.metadata["shared_context_count"] == 1
+    assert sent.metadata["shared_context_last_seq"] == 7
+    assert bridge.prepared[0]["task_id"] == "T-1"
+    assert bridge.acked[0]["last_seq"] == 7
+    assert bridge.acked[0]["consumer_id"] == "consumer:R1:executor:T-1"
+    assert bridge.published[0]["content"] == "reviewed shared fact"
+    assert bridge.published[0]["task_id"] == "T-1"
+
+
+@pytest.mark.asyncio
+async def test_shared_context_is_not_acked_when_delivery_fails(tmp_path):
+    from orchestrator.shared_context import SharedContextBatch
+
+    class Bridge:
+        def __init__(self):
+            self.acked = []
+            self.published = []
+
+        def prepare(self, **kwargs):
+            return SharedContextBatch(
+                text="OBJECTION: rerun benchmark",
+                last_seq=11,
+                count=1,
+                consumer_id="consumer",
+            )
+
+        def acknowledge(self, **kwargs):
+            self.acked.append(kwargs)
+
+        def publish_response(self, **kwargs):
+            self.published.append(kwargs)
+
+    class FailingInner:
+        def __init__(self):
+            self.providers = {}
+
+        async def execute(self, request, preferred_provider=None):
+            return AgentResponse(
+                content="",
+                success=False,
+                error="provider unavailable",
+                metadata={"delivery_state": "NOT_SENT"},
+            )
+
+    bridge = Bridge()
+    pool = FixedConversationRouter(
+        FailingInner(),
+        run_id="R1",
+        store_dir=tmp_path,
+        shared_context_bridge=bridge,
+    )
+    response = await pool.execute(_req("executor", task="T-1"))
+
+    assert response.success is False
+    assert bridge.acked == []
+    assert bridge.published == []
+
+
+
+@pytest.mark.asyncio
+async def test_fixed_conversation_exposes_stable_logical_uri(tmp_path):
+    class Inner:
+        def __init__(self):
+            self.providers = {}
+            self.requests = []
+
+        async def execute(self, request, preferred_provider=None):
+            self.requests.append(request)
+            return AgentResponse(
+                content="ok",
+                success=True,
+                model="fake",
+                token_usage=TokenUsage(model="fake"),
+                metadata={},
+            )
+
+    inner = Inner()
+    pool = FixedConversationRouter(inner, run_id="R1", store_dir=tmp_path)
+    response = await pool.execute(_req("executor", task="T-1"))
+    assert response.success is True
+    assert inner.requests[0].metadata["conversation_uri"] == "conversation://builder-primary"
+
+    # Stateless provider responses are not persisted as remote chats, but the
+    # logical identity in the request is independent from a physical tab/url.
+    assert pool._conversation_uri(pool._seat("executor")) == "conversation://builder-primary"
+    assert pool._conversation_uri(pool._seat("master")) == "conversation://supervisor-primary"
+    assert (
+        pool._conversation_uri(pool._seat("validator.logic"))
+        == "conversation://reviewer-logic"
+    )

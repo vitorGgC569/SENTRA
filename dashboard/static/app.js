@@ -40,9 +40,31 @@ function render() {
   if (view === "overview") return vOverview(m);
   if (view === "runs") return vRuns(m);
   if (view === "chats") return vChats(m);
+  if (view === "webmodels") return vWebModels(m);
   if (view === "failures") return vFailures(m);
   if (view === "docs") return vDocs(m);
   if (view === "program") return vProgram(m);
+}
+
+async function vWebModels(m) {
+  m.innerHTML = `<h2>Modelos Web</h2><div class="note">Consultando SENTRA Model Gateway…</div>`;
+  try {
+    const state = await api("/api/web-models");
+    if (view !== "webmodels") return;
+    const health = state.health || {};
+    m.innerHTML = `<h2>Modelos Web</h2>
+      <div class="cards">
+        <div class="card"><b>${state.online ? "Online" : "Offline"}</b><small>Gateway / sidecar</small></div>
+        <div class="card"><b>${esc(health.upstream?.version || "—")}</b><small>versão upstream</small></div>
+        <div class="card"><b>${state.models.length}</b><small>modelos Web disponíveis</small></div>
+      </div>
+      <div class="note">A interface de login, navegador, limites e runtime é o launcher Electron do codex-chatgpt-web. O Gateway responde em ${esc(state.gateway)}.</div>
+      <table><tr><th>Modelo SENTRA</th><th>Nome</th></tr>
+      ${rows(state.models, (model) => `<tr><td>${esc(model.slug)}</td><td>${esc(model.name || "")}</td></tr>`)}
+      </table>`;
+  } catch (e) {
+    if (view === "webmodels") m.innerHTML = `<h2>Modelos Web</h2><div class="note">Gateway indisponível: ${esc(e.message)}</div>`;
+  }
 }
 
 function vOverview(m) {
