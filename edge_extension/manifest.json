@@ -1,18 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "OMA Browser Bridge",
-  "version": "1.6.33",
-  "sentra_build_id": "sentra-edge-1.6.33-durable-r7",
-  "description": "Atuador do OMA: executa operações primitivas de conversa em tabs reais e reporta ao relay local. Não decide nada.",
+  "name": "SENTRA Browser Bridge",
+  "version": "1.6.52",
+  "sentra_build_id": "sentra-edge-1.6.52-durable-r27",
+  "description": "Ponte opcional do SENTRA para operações autorizadas em abas existentes e comunicação com o relay local.",
   "permissions": [
     "tabs",
     "storage",
-    "alarms"
+    "alarms",
+    "scripting"
   ],
   "options_page": "options.html",
   "host_permissions": [
     "<all_urls>",
     "https://chatgpt.com/*",
+    "https://gemini.google.com/*",
     "http://127.0.0.1/*"
   ],
   "background": {
@@ -21,9 +23,11 @@
   "content_scripts": [
     {
       "matches": [
-        "https://chatgpt.com/*"
+        "https://chatgpt.com/*",
+        "https://gemini.google.com/*"
       ],
       "js": [
+        "recovery-guard.js",
         "selectors.js",
         "observer.js",
         "content-script.js"
@@ -31,5 +35,5 @@
       "run_at": "document_idle"
     }
   ],
-  "sentra_source_hash": "f8b4ee26550bc7cf5d30db761119a5e20e12b2cec23db7072e0729f7c56d9b92"
+  "sentra_source_hash": "c49653655c7b4ad3fe8cda65138d7f0ea8cb706e628cbc2df3f71c4b6507c7e9"
 }

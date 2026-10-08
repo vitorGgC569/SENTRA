@@ -40,7 +40,9 @@ form.addEventListener("submit", async (event) => {
     await chrome.storage.local.set({
       oma_relay_token: value,
       oma_enabled: enabled.checked,
+      oma_user_disabled: !enabled.checked,
       oma_pool_size: 1,
+      oma_state: enabled.checked ? "PAIRED" : "PAIRED_DISABLED",
     });
     status.textContent = "Pareamento confirmado e configuração salva.";
   } catch (error) {

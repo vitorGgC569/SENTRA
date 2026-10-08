@@ -37,7 +37,7 @@ sentra-cli
 sentra service status
 ```
 
-`sentra-cli` é o agente interativo.  
+`sentra-cli` é o agente interativo.
 `sentra` é a CLI operacional para serviços, durable runs e swarms.
 
 Git e Docker são opcionais e só precisam ser instalados quando uma tarefa realmente exigir essas capacidades.

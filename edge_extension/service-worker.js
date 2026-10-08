@@ -8,7 +8,7 @@
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 1, maxTabs: 1 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.6.33";
+const OMA_SW_VERSION = "1.6.52";
 const OMA_BUILD_ID = chrome.runtime.getManifest().sentra_build_id || "missing-build-id";
 const OMA_SOURCE_HASH = chrome.runtime.getManifest().sentra_source_hash || "missing-source-hash";
 // Budgets MV3 (somente-leitura; a verdade est├í no servidor/Chrome):
@@ -60,7 +60,7 @@ async function omaControllerOrigins() {
 async function omaRememberControllerOrigin(tab) {
   if (!tab || typeof tab.id !== "number") return;
   const url = String(tab.url || "");
-  if (!/^https:\/\/chatgpt\.com\//.test(url)) return;
+  if (!omaAllowedControllerUrl(url)) return;
   const origins = await omaControllerOrigins();
   const key = String(tab.id);
   if (!origins[key]) {
@@ -86,7 +86,7 @@ async function omaRestoreControllerTab(tabId) {
   try {
     const tab = await chrome.tabs.get(tabId);
     const current = String(tab.url || "");
-    if (/^https:\/\/chatgpt\.com\//.test(origin) && current !== origin) {
+    if (omaAllowedControllerUrl(origin) && current !== origin) {
       await chrome.tabs.update(tabId, { url: origin });
     }
   } catch (_) {
@@ -143,16 +143,102 @@ async function omaClaimPoolLeadership() {
   return !!(result && result.leader);
 }
 
-async function omaRelay(path, options = {}) {
-  const { oma_relay_token } = await chrome.storage.local.get("oma_relay_token");
-  if (!oma_relay_token) throw new Error("PAIRING_REQUIRED");
+async function omaReadBootstrapProof() {
+  try {
+    const response = await fetch(chrome.runtime.getURL("sentra-bootstrap.json"), {
+      cache: "no-store",
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (
+      Number(data.schema_version) !== 1
+      || String(data.extension_version || "") !== OMA_SW_VERSION
+      || String(data.build_id || "") !== OMA_BUILD_ID
+      || String(data.source_hash || "") !== OMA_SOURCE_HASH
+      || !/^[a-f0-9]{64}$/.test(String(data.proof || ""))
+    ) {
+      return null;
+    }
+    return data;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function omaBootstrapPairing() {
+  const bootstrap = await omaReadBootstrapProof();
+  if (!bootstrap) return false;
+  const preference = await chrome.storage.local.get({ oma_user_disabled: false });
+  try {
+    const response = await fetch(OMA_RELAY + "/auth/bootstrap", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(bootstrap),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!response.ok) return false;
+    const result = await response.json();
+    const token = String(result.token || "");
+    if (token.length < 32) return false;
+    const enabled = !preference.oma_user_disabled;
+    await chrome.storage.local.set({
+      oma_relay_token: token,
+      oma_enabled: enabled,
+      oma_pool_size: 1,
+      oma_state: enabled ? "AUTO_PAIRED" : "PAIRED_DISABLED",
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+async function omaEnsurePairing() {
+  const stored = await chrome.storage.local.get({ oma_relay_token: "" });
+  if (stored.oma_relay_token) return true;
+  return omaBootstrapPairing();
+}
+
+async function omaRelay(path, options = {}, allowBootstrap = true) {
+  let stored = await chrome.storage.local.get({ oma_relay_token: "" });
+  if (!stored.oma_relay_token && allowBootstrap) {
+    await omaBootstrapPairing();
+    stored = await chrome.storage.local.get({ oma_relay_token: "" });
+  }
+  const token = String(stored.oma_relay_token || "");
+  if (!token) throw new Error("PAIRING_REQUIRED");
   const response = await fetch(OMA_RELAY + path, {
     ...options, headers: { "Content-Type": "application/json", ...options.headers,
-      Authorization: `Bearer ${oma_relay_token}` },
+      Authorization: `Bearer ${token}` },
     signal: AbortSignal.timeout(10000),
   });
+  if (response.status === 401 && allowBootstrap) {
+    await chrome.storage.local.remove("oma_relay_token");
+    if (await omaBootstrapPairing()) {
+      return omaRelay(path, options, false);
+    }
+  }
   if (!response.ok) throw new Error(`RELAY_HTTP_${response.status}`);
   return response.json();
+}
+
+async function omaHeartbeatExtension() {
+  try {
+    await omaRelay("/extension/heartbeat", {
+      method: "POST",
+      body: JSON.stringify({
+        status: {
+          sw_version: OMA_SW_VERSION,
+          sw_build_id: OMA_BUILD_ID,
+          sw_source_hash: OMA_SOURCE_HASH,
+        },
+      }),
+    });
+    return true;
+  } catch (error) {
+    await omaNoteError("extension_heartbeat", error);
+    return false;
+  }
 }
 
 async function omaHeartbeatWorkers() {
@@ -195,7 +281,9 @@ async function omaHeartbeatWorkers() {
         method: "POST",
         body: JSON.stringify({ worker: `TAB-${tabId}`, status }),
       });
-    } catch (_) {}
+    } catch (error) {
+      await omaNoteError("worker_heartbeat", error);
+    }
   }
 }
 
@@ -264,12 +352,25 @@ async function omaRecycleTab(tabId) {
 }
 
 // Contador persistente de erros por local (catches nunca mais s├úo invis├¡veis).
-async function omaNoteError(where) {
+async function omaNoteError(where, error = null) {
   try {
-    const stored = await chrome.storage.local.get({ oma_error_counts: {} });
+    const stored = await chrome.storage.local.get({
+      oma_error_counts: {},
+      oma_last_errors: {},
+    });
     const counts = stored.oma_error_counts || {};
+    const lastErrors = stored.oma_last_errors || {};
     counts[where] = (counts[where] || 0) + 1;
-    await chrome.storage.local.set({ oma_error_counts: counts });
+    if (error !== null && error !== undefined) {
+      lastErrors[where] = {
+        message: String((error && error.message) || error).slice(0, 500),
+        at: Date.now(),
+      };
+    }
+    await chrome.storage.local.set({
+      oma_error_counts: counts,
+      oma_last_errors: lastErrors,
+    });
     const total = Object.values(counts).reduce((a, b) => a + b, 0);
     omaSwErrors = total;
   } catch (_) {}
@@ -307,14 +408,19 @@ async function omaSaveActive(tabId, patch) {
     const stored = await chrome.storage.local.get({ [key]: null });
     const prev = stored[key] || {};
     await chrome.storage.local.set({ [key]: { ...prev, ...patch, tabId, updated: Date.now() } });
-  } catch (_) {}
+  } catch (error) {
+    await omaNoteError("active_save", error);
+  }
 }
 
 async function omaLoadActive(tabId) {
   try {
     const stored = await chrome.storage.local.get({ [omaActiveKey(tabId)]: null });
     return stored[omaActiveKey(tabId)];
-  } catch (_) { return null; }
+  } catch (error) {
+    await omaNoteError("active_load", error);
+    return null;
+  }
 }
 
 async function omaLoadAllActive() {
@@ -322,11 +428,18 @@ async function omaLoadAllActive() {
     const stored = await chrome.storage.local.get(null);
     return Object.entries(stored).filter(([k]) => k.startsWith(OMA_ACTIVE_PREFIX))
       .map(([k, v]) => [k.slice(OMA_ACTIVE_PREFIX.length), v]);
-  } catch (_) { return []; }
+  } catch (error) {
+    await omaNoteError("active_load_all", error);
+    return [];
+  }
 }
 
 async function omaClearActive(tabId) {
-  try { await chrome.storage.local.remove(omaActiveKey(tabId)); } catch (_) {}
+  try {
+    await chrome.storage.local.remove(omaActiveKey(tabId));
+  } catch (error) {
+    await omaNoteError("active_clear", error);
+  }
 }
 
 async function omaRenewIdentity(identity) {
@@ -359,7 +472,11 @@ async function omaRenewActive(tabId) {
   await omaRenewIdentity({ job_id: active.job_id, worker: active.worker, lease_token: active.lease_token });
   active.hb_sw = (active.hb_sw || 0) + 1;
   active.updated = Date.now();
-  try { await chrome.storage.local.set({ [omaActiveKey(tabId)]: active }); } catch (_) {}
+  try {
+    await chrome.storage.local.set({ [omaActiveKey(tabId)]: active });
+  } catch (error) {
+    await omaNoteError("active_renew_persist", error);
+  }
   return true;
 }
 
@@ -377,7 +494,11 @@ async function omaRenewAllActive() {
       if (String((e && e.message) || e).includes("RELAY_HTTP_400")) {
         // Servidor declarou o lease morto: gera├º├úo ├│rf├ú nunca postar├í.
         // Para (economiza quota/compute) e para de rastrear.
-        try { await omaSendToTab(tabId, { operation: "STOP_GENERATION" }); } catch (_) {}
+        try {
+          await omaSendToTab(tabId, { operation: "STOP_GENERATION" });
+        } catch (stopError) {
+          await omaNoteError("stop_generation_dead_lease", stopError);
+        }
         await omaClearActive(tabId);
       }
       // Erro de rede/transiente: mant├®m o active; a pr├│xima tentativa cura.
@@ -402,6 +523,48 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   omaForgetControllerOrigin(tabId);
 });
 
+function omaJobProvider(job) {
+  return job && job.provider === "gemini" ? "gemini" : "chatgpt";
+}
+
+function omaProviderHome(provider) {
+  return provider === "gemini"
+    ? "https://gemini.google.com/app"
+    : "https://chatgpt.com/";
+}
+
+function omaProviderForUrl(value) {
+  try {
+    const url = new URL(String(value || ""));
+    if (url.protocol !== "https:") return null;
+    if (url.hostname === "chatgpt.com") return "chatgpt";
+    if (url.hostname === "gemini.google.com") return "gemini";
+  } catch (_) {}
+  return null;
+}
+
+function omaConversationIdFromUrl(value, provider) {
+  const text = String(value || "");
+  if (provider === "gemini") {
+    const match = text.match(/^https:\/\/gemini\.google\.com\/app\/([A-Za-z0-9_-]{1,256})(?:\/|\?|$)/);
+    return match ? match[1] : null;
+  }
+  const match = text.match(/^https:\/\/chatgpt\.com\/c\/([A-Za-z0-9-]{1,128})(?:\/|\?|$)/);
+  return match ? match[1] : null;
+}
+
+function omaConversationUrlValid(value, provider) {
+  return !!omaConversationIdFromUrl(value, provider);
+}
+
+function omaConversationKey(provider, conversationId) {
+  return conversationId ? String(provider || "chatgpt") + ":" + String(conversationId) : null;
+}
+
+function omaAllowedControllerUrl(value) {
+  return omaProviderForUrl(value) !== null;
+}
+
 async function omaEnsureTabs(desiredTabs = OMA_POOL.minTabs) {
   const target = Math.max(
     OMA_POOL.minTabs,
@@ -413,7 +576,7 @@ async function omaEnsureTabs(desiredTabs = OMA_POOL.minTabs) {
     try {
       const tab = await chrome.tabs.get(tabId);
       const url = String(tab.url || "");
-      if (!/^https:\/\/chatgpt\.com\//.test(url)) {
+      if (!omaAllowedControllerUrl(url)) {
         await omaForgetOwned(tabId);
         continue;
       }
@@ -434,15 +597,16 @@ async function omaEnsureTabs(desiredTabs = OMA_POOL.minTabs) {
   }
   if (alive.length >= target) return;
 
-  // Principal-Edge-only: adopt exactly one already-open, INACTIVE ChatGPT tab.
-  // Never hijack the user's active ChatGPT tab (which may be this control chat).
-  // If no inactive controller candidate exists, fail closed: SENTRA does not
-  // create a tab and never launches/falls back to another browser/profile.
-  const candidates = (await chrome.tabs.query({ url: ["https://chatgpt.com/*"] }))
+  // Principal-Edge-only: adopt exactly one already-open, INACTIVE supported
+  // web-model tab. Never hijack the user's active control chat. The adopted tab
+  // may later navigate between ChatGPT and Gemini, but SENTRA never creates one.
+  const candidates = (await chrome.tabs.query({
+    url: ["https://chatgpt.com/*", "https://gemini.google.com/*"],
+  }))
     .filter((tab) => (
       typeof tab.id === "number"
       && tab.active !== true
-      && /^https:\/\/chatgpt\.com\//.test(String(tab.url || ""))
+      && omaAllowedControllerUrl(String(tab.url || ""))
     ))
     .sort((a, b) => Number(b.lastAccessed || 0) - Number(a.lastAccessed || 0));
 
@@ -493,11 +657,21 @@ async function omaSendReadOnlyToTab(tabId, message, maxAttempts = 2) {
           await chrome.tabs.reload(tabId);
           await omaWaitTabDeparted(tabId, 8000);
           await omaWaitTabComplete(tabId, 15000);
-        } catch (_) {}
+        } catch (error) {
+          await omaNoteError("readonly_reload_recovery", error);
+        }
       } else if (attempt === 0) {
-        try { await omaEnsureFreshScript(tabId); } catch (_) {}
+        try {
+          await omaEnsureFreshScript(tabId);
+        } catch (error) {
+          await omaNoteError("readonly_script_refresh", error);
+        }
       }
-      try { await omaWaitTabReady(tabId, 10000); } catch (_) {}
+      try {
+        await omaWaitTabReady(tabId, 10000);
+      } catch (error) {
+        await omaNoteError("readonly_tab_ready", error);
+      }
       await new Promise((r) => setTimeout(r, 350));
     }
   }
@@ -511,7 +685,7 @@ async function omaWaitTabComplete(tabId, timeoutMs = 60000) {
   while (Date.now() - start < timeoutMs) {
     try {
       const tab = await chrome.tabs.get(tabId);
-      if (tab.status === "complete" && tab.url && tab.url.startsWith("https://chatgpt.com/")) {
+      if (tab.status === "complete" && tab.url && omaAllowedControllerUrl(tab.url)) {
         return;
       }
     } catch (e) {
@@ -528,7 +702,11 @@ async function omaWaitSettled(tabId, timeoutMs = 60000) {
   let calmSince = 0;
   while (Date.now() - start < timeoutMs) {
     try {
-      const ans = await chrome.tabs.sendMessage(tabId, { operation: "GET_STATUS" });
+      const ans = await omaSendReadOnlyToTab(
+        tabId,
+        { operation: "GET_STATUS" },
+        3,
+      );
       const fin = ans && ans.result ? ans.result.finished !== false : true;
       if (fin) {
         if (!calmSince) calmSince = Date.now();
@@ -539,7 +717,7 @@ async function omaWaitSettled(tabId, timeoutMs = 60000) {
     } catch (_) { calmSince = 0; }
     await new Promise((r) => setTimeout(r, 1000));
   }
-  throw new Error(`TAB_ERROR tab=${tabId}: conversa n├úo estabilizou (gera├º├úo presa?)`);
+  throw new Error(`PRE_SEND_NOT_READY: TAB_ERROR tab=${tabId}: conversa n├úo estabilizou (gera├º├úo presa?)`);
 }
 
 async function omaWaitTabDeparted(tabId, timeoutMs = 15000) {
@@ -563,23 +741,36 @@ async function omaEnsureFreshScript(tabId) {
   // Soft-navigations SPA preservam content-scripts obsoletos indefinidamente.
   // Arquivos ├¡ntegros t├¬m cs_version == manifest.version;
   // diverg├¬ncia = script obsoleto -> reload real (reinje├º├úo garantida).
-  const manifestVersion = chrome.runtime.getManifest().version;
+  const manifest = chrome.runtime.getManifest();
+  const manifestVersion = manifest.version;
+  const manifestBuildId = manifest.sentra_build_id || null;
+  const manifestSourceHash = manifest.sentra_source_hash || null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const ans = await chrome.tabs.sendMessage(tabId, { operation: "GET_STATUS" });
       const inner = (ans && ans.result) || ans || {};
       const csv = inner.cs_version || inner.version || null;
-      if (csv === manifestVersion) {
+      const csBuildId = inner.cs_build_id || null;
+      const csSourceHash = inner.cs_source_hash || null;
+      if (
+        csv === manifestVersion
+        && csBuildId === manifestBuildId
+        && csSourceHash === manifestSourceHash
+      ) {
         omaLastCsVersion = csv;
         return;
       }
-    } catch (_) {}
+    } catch (error) {
+      await omaNoteError("fresh_script_probe", error);
+    }
     try {
       await chrome.tabs.reload(tabId);
       await omaWaitTabDeparted(tabId, 8000);
       await omaWaitTabComplete(tabId, 15000);
       await omaWaitTabReady(tabId, 15000);
-    } catch (_) {}
+    } catch (error) {
+      await omaNoteError("fresh_script_reload", error);
+    }
   }
 }
 
@@ -601,6 +792,7 @@ async function omaWaitTabReady(tabId, timeoutMs = 45000) {
 
 
 function omaProjectTargetUrl(job) {
+  if (omaJobProvider(job) !== "chatgpt") return null;
   if (job && job.project_url) return String(job.project_url);
   if (job && job.project_id) {
     const raw = String(job.project_id).trim();
@@ -610,9 +802,11 @@ function omaProjectTargetUrl(job) {
   return null;
 }
 
-async function omaOpenFreshControllerChat(tabId, projectUrl = null) {
+async function omaOpenFreshControllerChat(tabId, job) {
+  const provider = omaJobProvider(job);
   let fresh = false;
-  let targetUrl = "https://chatgpt.com/";
+  let targetUrl = omaProviderHome(provider);
+  const projectUrl = omaProjectTargetUrl(job);
   if (projectUrl) {
     const parsed = new URL(String(projectUrl));
     if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com") {
@@ -632,27 +826,85 @@ async function omaOpenFreshControllerChat(tabId, projectUrl = null) {
     await omaEnsureFreshScript(tabId);
     try {
       const st = await omaSendToTab(tabId, { operation: "GET_STATUS" });
-      fresh = !!(st.result && st.result.is_fresh_chat);
+      const result = (st && st.result) || {};
+      fresh = !!(
+        result.is_fresh_chat
+        && result.provider === provider
+      );
     } catch (_) {
       fresh = false;
     }
   }
   if (!fresh) {
     throw new Error(
-      "STALE_CONVERSATION: controlador não conseguiu abrir chat zerado após 3 tentativas"
+      `STALE_CONVERSATION: ${provider} controller could not open a fresh chat after 3 attempts`
     );
   }
 }
 
-async function omaOpenConversationByUrl(tabId, conversationUrl) {
-  if (!/^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]{1,128}(\/|\?.*)?$/.test(conversationUrl || "")) {
-    throw new Error("CONVERSATION_MISMATCH: URL explícita de conversa é obrigatória");
+async function omaApplyRequestedModel(tabId, job) {
+  const provider = omaJobProvider(job);
+  if (provider !== "gemini" || !job || !job.model) {
+    return { selected: false, model: null };
   }
-  const expected = (conversationUrl.match(/\/c\/([A-Za-z0-9-]{1,128})/) || [])[1] || null;
+  const reply = await omaSendToTab(tabId, {
+    operation: "SET_MODEL",
+    model: String(job.model),
+  });
+  const result = (reply && reply.result) || {};
+  if (!result.selected || result.model !== String(job.model)) {
+    throw new Error("MODEL_SELECTION_FAILED: Gemini model was not confirmed");
+  }
+  return result;
+}
+
+async function omaWaitConversationHydrated(tabId, expectedConversationId, timeoutMs = 15000) {
+  const started = Date.now();
+  let lastStatus = null;
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const statusReply = await omaSendReadOnlyToTab(
+        tabId,
+        { operation: "GET_STATUS" },
+        4,
+      );
+      const status = (statusReply && statusReply.result) || {};
+      lastStatus = status;
+      const actualId = status.conversation_id || null;
+      const identityMatches = !expectedConversationId || actualId === expectedConversationId;
+      const messageCount = Number(status.message_count || 0);
+      if (identityMatches && messageCount > 0) {
+        return status;
+      }
+    } catch (_) {}
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  const detail = lastStatus
+    ? ` last_status=${JSON.stringify({
+        conversation_id: lastStatus.conversation_id || null,
+        message_count: Number(lastStatus.message_count || 0),
+        composer_found: !!lastStatus.composer_found,
+        generation_running: !!lastStatus.generation_running,
+      })}`
+    : "";
+  throw new Error(
+    "CONVERSATION_HYDRATION_TIMEOUT: conversa abriu sem mensagens renderizadas" + detail
+  );
+}
+
+async function omaOpenConversationByUrl(tabId, conversationUrl, provider = null) {
+  const resolvedProvider = provider || omaProviderForUrl(conversationUrl);
+  if (!resolvedProvider || !omaConversationUrlValid(conversationUrl, resolvedProvider)) {
+    throw new Error("CONVERSATION_MISMATCH: explicit supported conversation URL is required");
+  }
+  const expected = omaConversationIdFromUrl(conversationUrl, resolvedProvider);
   let current = null;
   try {
     const tab = await chrome.tabs.get(tabId);
-    current = ((tab.url || "").match(/\/c\/([A-Za-z0-9-]{1,128})/) || [])[1] || null;
+    const currentProvider = omaProviderForUrl(tab.url || "");
+    current = currentProvider === resolvedProvider
+      ? omaConversationIdFromUrl(tab.url || "", resolvedProvider)
+      : null;
   } catch (_) {}
   if (expected && current !== expected) {
     await chrome.tabs.update(tabId, { url: conversationUrl });
@@ -661,18 +913,42 @@ async function omaOpenConversationByUrl(tabId, conversationUrl) {
     await omaWaitTabReady(tabId);
     await omaEnsureFreshScript(tabId);
   }
-  const actual = await omaSendReadOnlyToTab(
-    tabId,
-    { operation: "GET_CONVERSATION_URL" },
-    4,
-  );
-  const result = (actual && actual.result) || {};
-  const actualId = result.conversation_id
-    || (((result.url || "").match(/\/c\/([A-Za-z0-9-]{1,128})/) || [])[1] || null);
-  if (!expected || !actualId || expected !== actualId) {
-    throw new Error("CONVERSATION_MISMATCH: controlador não abriu a conversa solicitada");
+
+  let result = null;
+  for (let hydrationAttempt = 0; hydrationAttempt < 2; hydrationAttempt++) {
+    const actual = await omaSendReadOnlyToTab(
+      tabId,
+      { operation: "GET_CONVERSATION_URL" },
+      4,
+    );
+    result = (actual && actual.result) || {};
+    const actualProvider = omaProviderForUrl(result.url || "");
+    const actualId = result.conversation_id || (
+      actualProvider === resolvedProvider
+        ? omaConversationIdFromUrl(result.url || "", resolvedProvider)
+        : null
+    );
+    if (
+      actualProvider !== resolvedProvider
+      || !expected
+      || !actualId
+      || expected !== actualId
+    ) {
+      throw new Error("CONVERSATION_MISMATCH: controller did not open requested conversation");
+    }
+    try {
+      await omaWaitConversationHydrated(tabId, expected, 15000);
+      return result;
+    } catch (e) {
+      if (hydrationAttempt >= 1) throw e;
+      await chrome.tabs.reload(tabId);
+      await omaWaitTabDeparted(tabId);
+      await omaWaitTabComplete(tabId);
+      await omaWaitTabReady(tabId);
+      await omaEnsureFreshScript(tabId);
+    }
   }
-  return result;
+  return result || { url: conversationUrl, conversation_id: expected };
 }
 
 async function omaWaitConversationIdentity(tabId, timeoutMs = 20000) {
@@ -743,6 +1019,8 @@ async function omaProcessJob(tabId, job) {
     project_id: job.project_id || null,
     project_url: job.project_url || null,
     chat_title: job.chat_title || null,
+    provider: omaJobProvider(job),
+    model: job.model || null,
     deadlineMs: Date.now() + (job.timeout_s || 180) * 1000,
     last_conv: worker.last_conv || null,
     sent: false, hb_sw: 0, slices: 0, images_attached: 0,
@@ -759,16 +1037,26 @@ async function omaProcessJob(tabId, job) {
     // (Antes: QUALQUER erro abortava uma gera├º├úo saud├ível.)
     if (!String((e && e.message) || e).includes("RELAY_HTTP_400")) return;
     leaseLost = true;
-    try { await omaSendToTab(tabId, { operation: "STOP_GENERATION" }); } catch (_) {}
+    try {
+      await omaSendToTab(tabId, { operation: "STOP_GENERATION" });
+    } catch (stopError) {
+      await omaNoteError("stop_generation_lost_lease", stopError);
+    }
   }), OMA_HB_MS);
   const postResult = async (payload) => omaPostResult(identity, job, payload);
 
 
-  if (job.kind === "CHAT_START") {
+  if (job.kind === "CHAT_START" || job.kind === "CHAT_SEND") {
     try {
       await renew();
       await omaProgressPhase(tabId, identity, "preparing");
-      await omaOpenFreshControllerChat(tabId, omaProjectTargetUrl(job));
+      if (job.new_chat) {
+        await omaOpenFreshControllerChat(tabId, job);
+      } else {
+        await omaOpenConversationByUrl(tabId, job.conversation_url, omaJobProvider(job));
+        await omaWaitSettled(tabId);
+      }
+      const selectedModel = await omaApplyRequestedModel(tabId, job);
       await omaProgressPhase(tabId, identity, "ready");
       await omaProgressPhase(tabId, identity, "sending");
       const sent = await omaSendToTab(tabId, {
@@ -780,7 +1068,13 @@ async function omaProcessJob(tabId, job) {
       await omaSaveActive(tabId, { sent: true, images_attached: attached });
       await omaProgressPhase(tabId, identity, "sent");
       const conv = await omaWaitConversationIdentity(tabId, 20000);
-      if (conv.conversation_id) worker.last_conv = conv.conversation_id;
+      await omaWaitConversationHydrated(tabId, conv.conversation_id || null, 10000);
+      if (conv.conversation_id) {
+        worker.last_conv = omaConversationKey(
+          omaJobProvider(job),
+          conv.conversation_id,
+        );
+      }
       let titleResult = { requested: false, updated: false };
       if (job.chat_title && conv.conversation_id) {
         titleResult = { requested: true, updated: false };
@@ -816,6 +1110,8 @@ async function omaProcessJob(tabId, job) {
           project_url: job.project_url || null,
           chat_title: job.chat_title || null,
           title_update: titleResult,
+          provider: omaJobProvider(job),
+          model: selectedModel.model || job.model || null,
         }),
         conversation_url: conv.url || null,
         conversation_id: conv.conversation_id || null,
@@ -844,11 +1140,78 @@ async function omaProcessJob(tabId, job) {
     return;
   }
 
+
+  if (job.kind === "CHAT_PEEK") {
+    try {
+      await renew();
+      await omaProgressPhase(tabId, identity, "navigating");
+      const conv = await omaOpenConversationByUrl(tabId, job.conversation_url, omaJobProvider(job));
+      await omaProgressPhase(tabId, identity, "peeking");
+
+      let text = "";
+      let statusResult = {};
+      // CHAT_PEEK is deliberately read-only. WAIT_RESPONSE is not used here:
+      // its special-UI recovery can send "Continue", which would turn a safe
+      // probe into an uncertain side effect. Fast peeks free the single adopted
+      // Edge controller so logical subagents are sampled round-robin.
+      try {
+        const status = await omaSendReadOnlyToTab(tabId, { operation: "GET_STATUS" });
+        statusResult = (status && status.result) || {};
+      } catch (_) {}
+      try {
+        const read = await omaSendReadOnlyToTab(tabId, { operation: "READ_RESPONSE" });
+        text = (read && read.result && read.result.text) || "";
+      } catch (_) {}
+      const ready = (
+        statusResult.finished === true
+        && !!text
+        && !statusResult.additional_checks
+      );
+
+      await postResult({
+        job_id: job.job_id,
+        task_id: job.task_id,
+        status: "COMPLETED",
+        result: JSON.stringify({
+          ready,
+          finished: statusResult.finished === true,
+          text: ready ? text : "",
+          additional_checks: statusResult.additional_checks || null,
+          additional_checks_recovery_attempts: Number(
+            statusResult.additional_checks_recovery_attempts || 0
+          ),
+          additional_checks_recovery_active: !!statusResult.additional_checks_recovery_active,
+          assistant_count: statusResult.assistant_count || 0,
+          conversation_id: conv.conversation_id || null,
+          conversation_url: conv.url || job.conversation_url,
+        }),
+        conversation_url: conv.url || job.conversation_url,
+        conversation_id: conv.conversation_id || null,
+        worker: "BROWSER_WORKER_" + tabId + " sw=" + OMA_SW_VERSION + " mode=chat-peek",
+      });
+    } catch (e) {
+      await omaNoteError("chat_peek");
+      await postResult({
+        job_id: job.job_id,
+        task_id: job.task_id,
+        status: "FAILED",
+        error: "[sw=" + OMA_SW_VERSION + "] chat_peek: " + String((e && e.message) || e),
+      });
+    } finally {
+      clearInterval(heartbeat);
+      await omaClearActive(tabId);
+      if (omaWorkers.has(tabId)) {
+        omaWorkers.set(tabId, { state: "IDLE", last_conv: worker.last_conv || null });
+      }
+    }
+    return;
+  }
+
   if (job.kind === "CHAT_COLLECT") {
     try {
       await renew();
       await omaProgressPhase(tabId, identity, "navigating");
-      const conv = await omaOpenConversationByUrl(tabId, job.conversation_url);
+      const conv = await omaOpenConversationByUrl(tabId, job.conversation_url, omaJobProvider(job));
       // Do NOT wait for "settled" here. WAIT_RESPONSE must observe the live UI
       // so transient additional-checks banners can be recovered while the
       // generation is still active.
@@ -893,8 +1256,13 @@ async function omaProcessJob(tabId, job) {
       if (action === "navigate") {
         const target = String(args.url || "");
         const parsed = new URL(target);
-        if (parsed.protocol !== "https:" || parsed.hostname !== "chatgpt.com") {
-          throw new Error("BROWSER_ACTION navigate is restricted to https://chatgpt.com");
+        if (
+          parsed.protocol !== "https:"
+          || !["chatgpt.com", "gemini.google.com"].includes(parsed.hostname)
+        ) {
+          throw new Error(
+            "BROWSER_ACTION navigate is restricted to ChatGPT/Gemini web"
+          );
         }
         await chrome.tabs.update(tabId, { url: target });
         await omaWaitTabDeparted(tabId, 8000);
@@ -928,8 +1296,10 @@ async function omaProcessJob(tabId, job) {
           throw new Error("BROWSER_ACTION screenshot full_page is unsupported in principal Edge");
         }
         const tabInfo = await chrome.tabs.get(tabId);
-        if (!/^https:\/\/chatgpt\.com\//.test(String(tabInfo.url || ""))) {
-          throw new Error("BROWSER_ACTION screenshot is restricted to https://chatgpt.com");
+        if (!omaAllowedControllerUrl(String(tabInfo.url || ""))) {
+          throw new Error(
+            "BROWSER_ACTION screenshot is restricted to ChatGPT/Gemini web"
+          );
         }
         const activeTabs = await chrome.tabs.query({ active: true, windowId: tabInfo.windowId });
         const previousActiveId = activeTabs.length && typeof activeTabs[0].id === "number"
@@ -969,7 +1339,7 @@ async function omaProcessJob(tabId, job) {
           result = {
             image_base64: imageBase64,
             mime_type: "image/jpeg",
-            url: String(tabInfo.url || "https://chatgpt.com/"),
+            url: String(tabInfo.url || omaProviderHome("chatgpt")),
             full_page: false,
           };
         } finally {
@@ -1023,6 +1393,12 @@ async function omaProcessJob(tabId, job) {
         result: JSON.stringify({ send_available: !!r.send_available,
           cap_banner: r.cap_banner || null, url: r.url || null,
           finished: r.finished !== false,
+          generation_running: r.generation_running === true,
+          provider: r.provider || null, model: r.model || null,
+          assistant_count: Number(r.assistant_count || 0),
+          user_count: Number(r.user_count || 0),
+          message_count: Number(r.message_count || 0),
+          buttons_sample: Array.isArray(r.buttons_sample) ? r.buttons_sample.slice(0, 40) : [],
           composer_found: r.composer_found, diagnostics: r.diagnostics || null,
           sw_version: OMA_SW_VERSION, cs_version: r.cs_version || "unknown",
           worker: `BROWSER_WORKER_${tabId} sw=${OMA_SW_VERSION}` }),
@@ -1081,21 +1457,23 @@ async function omaProcessJob(tabId, job) {
   }
   try {
     await renew(); // ACK delivery before any browser side effect.
+    const provider = omaJobProvider(job);
     if (job.new_chat) {
       // Reuse the single principal-Edge controller but create the logical chat
       // from the configured Project URL when one was explicitly supplied.
-      await omaOpenFreshControllerChat(tabId, omaProjectTargetUrl(job));
+      await omaOpenFreshControllerChat(tabId, job);
     } else {
-      if (!/^https:\/\/chatgpt\.com\/c\/[A-Za-z0-9-]{1,128}(\/|\?.*)?$/.test(job.conversation_url || "")) {
-        throw new Error("CONVERSATION_MISMATCH: continua├º├úo exige URL expl├¡cita");
+      if (!omaConversationUrlValid(job.conversation_url || "", provider)) {
+        throw new Error("CONVERSATION_MISMATCH: explicit provider conversation URL required");
       }
-      const targetConvIdMatch = (job.conversation_url || "").match(/\/c\/([A-Za-z0-9-]{1,128})/);
-      const targetConvId = targetConvIdMatch ? targetConvIdMatch[1] : null;
+      const targetConvId = omaConversationIdFromUrl(job.conversation_url || "", provider);
       let alreadyOnConv = false;
       try {
         const currentTab = await chrome.tabs.get(tabId);
-        const currentConvIdMatch = (currentTab && currentTab.url && currentTab.url.match(/\/c\/([A-Za-z0-9-]{1,128})/));
-        const currentConvId = currentConvIdMatch ? currentConvIdMatch[1] : null;
+        const currentProvider = omaProviderForUrl(currentTab && currentTab.url);
+        const currentConvId = currentProvider === provider
+          ? omaConversationIdFromUrl(currentTab.url || "", provider)
+          : null;
         if (targetConvId && currentConvId && targetConvId === currentConvId) {
           alreadyOnConv = true;
         }
@@ -1116,15 +1494,33 @@ async function omaProcessJob(tabId, job) {
         { operation: "GET_CONVERSATION_URL" },
         4,
       );
-      const actualConvId = (actual && actual.result && (actual.result.conversation_id || ((actual.result.url || "").match(/\/c\/([A-Za-z0-9-]{1,128})/) || [])[1])) || null;
+      const actualProvider = actual && actual.result
+        ? omaProviderForUrl(actual.result.url || "")
+        : null;
+      const actualConvId = (
+        actual
+        && actual.result
+        && (
+          actual.result.conversation_id
+          || (
+            actualProvider === provider
+              ? omaConversationIdFromUrl(actual.result.url || "", provider)
+              : null
+          )
+        )
+      ) || null;
       const urlMatches = actual && actual.result && actual.result.url && (
-        (targetConvId && actualConvId && targetConvId === actualConvId) ||
-        actual.result.url.split("?")[0].replace(/\/$/, "") === job.conversation_url.split("?")[0].replace(/\/$/, "")
+        actualProvider === provider
+        && (
+          (targetConvId && actualConvId && targetConvId === actualConvId)
+          || actual.result.url.split("?")[0].replace(/\/$/, "") === job.conversation_url.split("?")[0].replace(/\/$/, "")
+        )
       );
       if (!actual.ok || !actual.result || !urlMatches) {
         throw new Error("CONVERSATION_MISMATCH: tab n├úo abriu a conversa solicitante");
       }
     }
+    await omaApplyRequestedModel(tabId, job);
     if (leaseLost) throw new Error("LEASE_LOST");
     await renew();
     await omaProgressPhase(tabId, identity, "ready");
@@ -1182,11 +1578,12 @@ async function omaProcessJob(tabId, job) {
     const conv = await omaSendToTab(tabId, { operation: "GET_CONVERSATION_URL" });
     const convId = conv.result ? conv.result.conversation_id : null;
     // Guarda anti-contamina├º├úo: com new_chat, o ID da conversa TEM que mudar.
-    if (job.new_chat && worker.last_conv && convId && convId === worker.last_conv) {
-      throw new Error("STALE_CONVERSATION: conversa n├úo mudou ap├│s new_chat "
-        + `(id repetido ${convId}); prompt pode ter ca├¡do no chat anterior`);
+    const convKey = omaConversationKey(provider, convId);
+    if (job.new_chat && worker.last_conv && convKey && convKey === worker.last_conv) {
+      throw new Error("STALE_CONVERSATION: conversation did not change after new_chat "
+        + `(repeated key ${convKey})`);
     }
-    if (convId) worker.last_conv = convId;
+    if (convKey) worker.last_conv = convKey;
     let titleUpdated = false;
     if (job.new_chat && job.chat_title && convId) {
       try {
@@ -1267,7 +1664,11 @@ async function omaResumeJob(tabId, active) {
       } else {
         // Lease j├í expirou no servidor (DELIVERY_EXPIRED registrado l├í):
         // nenhum post salvaria; para a gera├º├úo ├│rf├ú e desiste sem ru├¡do.
-        try { await omaSendToTab(tabId, { operation: "STOP_GENERATION" }); } catch (_) {}
+        try {
+          await omaSendToTab(tabId, { operation: "STOP_GENERATION" });
+        } catch (stopError) {
+          await omaNoteError("stop_generation_resume_expired", stopError);
+        }
         return;
       }
     }
@@ -1303,13 +1704,22 @@ async function omaResumeJob(tabId, active) {
     const convId = conv.result ? conv.result.conversation_id : null;
     // Guarda anti-contamina├º├úo do caminho normal, com o last_conv de ANTES do
     // job (persistido ÔÇö o em mem├│ria morreu com o SW antigo).
-    if (active.new_chat && active.last_conv && convId && convId === active.last_conv) {
-      throw new Error("STALE_CONVERSATION: conversa n├úo mudou ap├│s new_chat "
-        + `(id repetido ${convId}); prompt pode ter ca├¡do no chat anterior`);
+    const resumedProvider = active.provider === "gemini" ? "gemini" : "chatgpt";
+    const resumedConvKey = omaConversationKey(resumedProvider, convId);
+    if (
+      active.new_chat
+      && active.last_conv
+      && resumedConvKey
+      && resumedConvKey === active.last_conv
+    ) {
+      throw new Error(
+        "STALE_CONVERSATION: resumed conversation did not change after new_chat "
+        + `(repeated key ${resumedConvKey})`
+      );
     }
-    if (convId) {
+    if (resumedConvKey) {
       const mem = omaWorkers.get(tabId);
-      if (mem) mem.last_conv = convId;
+      if (mem) mem.last_conv = resumedConvKey;
     }
     await omaPostResult(identity, active, {
       job_id: active.job_id, task_id: active.task_id, status: "COMPLETED",
@@ -1342,7 +1752,12 @@ async function omaResumeJob(tabId, active) {
 // repetir via novo poll ÔÇö ambos sem reanima├º├úo incerta aqui.
 async function omaRecoverActive() {
   let all;
-  try { all = await omaLoadAllActive(); } catch (_) { return; }
+  try {
+    all = await omaLoadAllActive();
+  } catch (error) {
+    await omaNoteError("recover_active_load", error);
+    return;
+  }
   for (const [suffix, active] of all) {
     try {
       const tabId = Number(suffix);
@@ -1364,9 +1779,11 @@ async function omaRecoverActive() {
       // Sem await (paralelo como o poll); a trava + WAITING s├¡ncrono evitam
       // que o poll lease outro job para esta tab no mesmo tick.
       omaResumeJob(tabId, active)
-        .catch(() => {})
+        .catch((error) => { void omaNoteError("resume_job", error); })
         .finally(() => { omaResumeBusy.delete(tabId); });
-    } catch (_) {}
+    } catch (error) {
+      await omaNoteError("recover_active_item", error);
+    }
   }
 }
 
@@ -1377,12 +1794,16 @@ async function omaTick() {
     // Version discovery is public, loopback-only and contains no secret. Run it
     // before pairing/auth so a stale relay token can never block self-update.
     await omaCheckForUpdates();
+    await omaEnsurePairing();
 
     const settings = await chrome.storage.local.get({
       oma_enabled: false,
       oma_relay_token: "",
       oma_pool_size: OMA_POOL.maxTabs,
     });
+    if (settings.oma_relay_token) {
+      await omaHeartbeatExtension();
+    }
     if (!settings.oma_enabled || !settings.oma_relay_token) return;
     const desiredPool = Math.max(
       OMA_POOL.minTabs,
@@ -1390,7 +1811,10 @@ async function omaTick() {
     );
     let leader = false;
     try { leader = await omaClaimPoolLeadership(); }
-    catch (_) { return; }
+    catch (error) {
+      await omaNoteError("pool_leadership", error);
+      return;
+    }
     if (!leader) {
       await omaReleaseControllerReferences();
       return;
@@ -1400,7 +1824,12 @@ async function omaTick() {
     // Lazy controller: no queued/leased work means no adopted controller
     // reference. The user's ChatGPT tab itself is never closed or created.
     let relayHealth = {};
-    try { relayHealth = await omaRelay("/health"); } catch (_) { return; }
+    try {
+      relayHealth = await omaRelay("/health");
+    } catch (error) {
+      await omaNoteError("relay_health", error);
+      return;
+    }
     const queued = Number(relayHealth.queued || 0);
     const leased = Number(relayHealth.leased || 0);
     const activeJobs = await omaLoadAllActive();
@@ -1433,14 +1862,17 @@ async function omaTick() {
       let data = null;
       try {
         data = await omaRelay(`/jobs/poll?worker=TAB-${tabId}`);
-      } catch (_) { return; } // relay offline: tenta de novo no pr├│ximo tick
+      } catch (error) {
+        await omaNoteError("job_poll", error);
+        return;
+      } // relay offline: tenta de novo no próximo tick
       if (data && data.job) {
         omaControllerLastWorkAt = Date.now();
         omaProcessJob(tabId, data.job); // controller único; job continua async
       }
     }
-  } catch (_) {
-    omaNoteError("tick");
+  } catch (error) {
+    await omaNoteError("tick", error);
   } finally {
     omaTickBusy = false;
   }
@@ -1462,30 +1894,101 @@ async function omaStartupCleanup() {
   try { omaResumeBusy.clear(); } catch (_) {}
 }
 
+async function omaEnsureRecoveryGuardOnExistingTabs() {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") return;
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*"] });
+  } catch (e) {
+    await omaNoteError("recovery_guard_query_tabs", e);
+    return;
+  }
+  for (const tab of tabs) {
+    if (!tab || typeof tab.id !== "number") continue;
+    let current = false;
+    try {
+      const status = await chrome.tabs.sendMessage(tab.id, {
+        operation: "SENTRA_RECOVERY_GUARD_STATUS",
+      });
+      current = !!(status && status.ok && status.version === OMA_SW_VERSION);
+    } catch (probeError) {
+      await omaNoteError("recovery_guard_probe", probeError);
+    }
+    if (current) continue;
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        files: ["recovery-guard.js"],
+      });
+    } catch (e) {
+      await omaNoteError("recovery_guard_inject", e);
+    }
+  }
+}
+
 chrome.runtime.onInstalled.addListener(async () => {
   await chrome.storage.local.set({ oma_state: "PAIR_IN_OPTIONS" });
-  try { chrome.alarms.create("oma-poll", { periodInMinutes: 0.5 }); }
-  catch (_) { chrome.alarms.create("oma-poll", { periodInMinutes: 1 }); }
-  try { chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 0.5 }); }
-  catch (_) { try { chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 1 }); } catch (_) {} }
+  await omaEnsureRecoveryGuardOnExistingTabs();
+  try {
+    chrome.alarms.create("oma-poll", { periodInMinutes: 0.5 });
+  } catch (error) {
+    void omaNoteError("alarm_poll_primary", error);
+    try {
+      chrome.alarms.create("oma-poll", { periodInMinutes: 1 });
+    } catch (fallbackError) {
+      void omaNoteError("alarm_poll_fallback", fallbackError);
+    }
+  }
+  try {
+    chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 0.5 });
+  } catch (error) {
+    void omaNoteError("alarm_hb_primary", error);
+    try {
+      chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 1 });
+    } catch (fallbackError) {
+      void omaNoteError("alarm_hb_fallback", fallbackError);
+    }
+  }
 });
 chrome.runtime.onStartup.addListener(async () => {
   await omaStartupCleanup();
+  await omaEnsureRecoveryGuardOnExistingTabs();
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   // Retornar a promise estende a vida do SW at├® o trabalho assentar.
   if (alarm.name === "oma-poll") return omaTick();
   if (alarm.name === OMA_HB_ALARM) {
-    return Promise.allSettled([omaRenewAllActive(), omaHeartbeatWorkers(), omaTick()]);
+    return Promise.allSettled([
+      omaRenewAllActive(),
+      omaHeartbeatExtension(),
+      omaHeartbeatWorkers(),
+      omaTick(),
+    ]);
   }
   return undefined;
 });
 // Alarmes sobrevivem ao restart do SW, mas recriar no topo (idempotente)
 // cobre update/reload que limpe a agenda sem disparar onInstalled.
-try { chrome.alarms.create("oma-poll", { periodInMinutes: 0.5 }); }
-catch (_) { try { chrome.alarms.create("oma-poll", { periodInMinutes: 1 }); } catch (_) {} }
-try { chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 0.5 }); }
-catch (_) { try { chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 1 }); } catch (_) {} }
+try {
+  chrome.alarms.create("oma-poll", { periodInMinutes: 0.5 });
+} catch (error) {
+  void omaNoteError("alarm_poll_bootstrap_primary", error);
+  try {
+    chrome.alarms.create("oma-poll", { periodInMinutes: 1 });
+  } catch (fallbackError) {
+    void omaNoteError("alarm_poll_bootstrap_fallback", fallbackError);
+  }
+}
+try {
+  chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 0.5 });
+} catch (error) {
+  void omaNoteError("alarm_hb_bootstrap_primary", error);
+  try {
+    chrome.alarms.create(OMA_HB_ALARM, { periodInMinutes: 1 });
+  } catch (fallbackError) {
+    void omaNoteError("alarm_hb_bootstrap_fallback", fallbackError);
+  }
+}
 
 // Acordado pela tab: OMA_LEASE_PING (a cada ~10s durante o WAIT) renova o
 // lease na hora; OMA_RESULT_READY (resposta estabilizou) dispara o recover.
@@ -1504,7 +2007,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       // a controller merely by pinging: omaTick() adopts a tab only when relay
       // work exists. This avoids the MV3 deadlock where no owned tab existed yet.
       const senderUrl = String((sender && sender.tab && sender.tab.url) || "");
-      if (!/^https:\/\/chatgpt\.com\//.test(senderUrl)) {
+      if (!omaAllowedControllerUrl(senderUrl)) {
         return { ok: true, ignored: true };
       }
 
@@ -1515,24 +2018,35 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             method: "POST",
             body: JSON.stringify({ worker: `TAB-${tabId}` }),
           });
-        } catch (_) {}
+        } catch (error) {
+          await omaNoteError("idle_worker_heartbeat", error);
+        }
       }
       await omaTick();
       return { ok: true, idle_wake: true, owned: owned.has(tabId) };
     }
     if (request.operation === "OMA_LEASE_PING" && typeof tabId === "number") {
-      try { await omaRenewActive(tabId); } catch (_) {}
+      try {
+        await omaRenewActive(tabId);
+      } catch (error) {
+        await omaNoteError("lease_renew", error);
+      }
       return { ok: true };
     }
-    try { await omaRecoverActive(); } catch (_) {}
+    try {
+      await omaRecoverActive();
+    } catch (error) {
+      await omaNoteError("recover_active", error);
+    }
     return { ok: true };
   })()
     .then((r) => { try { sendResponse(r); } catch (_) {} })
     .catch((e) => { try { sendResponse({ ok: false, error: String((e && e.message) || e) }); } catch (_) {} });
   return true;
 });
-// Bootstrap immediately after extension reload; subsequent wake-ups come from
-// alarms and OMA_IDLE_WAKE pings from existing ChatGPT tabs.
+// Bootstrap immediately after extension reload. Reinject the autonomous
+// recovery guard into already-open ChatGPT tabs before normal OMA scheduling.
+void omaEnsureRecoveryGuardOnExistingTabs();
 void omaTick();
 setInterval(omaTick, OMA_POLL_MS);
 

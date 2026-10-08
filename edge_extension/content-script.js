@@ -4,10 +4,20 @@
  *      DELETE_CONVERSATION. */
 "use strict";
 
-const OMA_CS_VERSION = "1.6.33";
+const OMA_CS_VERSION = "1.6.52";
 const OMA_BUILD_ID = chrome.runtime.getManifest().sentra_build_id || "missing-build-id";
 const OMA_SOURCE_HASH = chrome.runtime.getManifest().sentra_source_hash || "missing-source-hash";
 let omaPendingResponseBaseline = null;
+
+function omaProvider() {
+  return window.location.hostname === "gemini.google.com" ? "gemini" : "chatgpt";
+}
+
+function omaHomeUrl() {
+  return omaProvider() === "gemini"
+    ? "https://gemini.google.com/app"
+    : "https://chatgpt.com/";
+}
 
 async function omaWaitForComposer(timeoutMs = 15000) {
   const start = Date.now();
@@ -46,7 +56,9 @@ function omaCapBanner() {
   } catch (_) { return null; }
 }
 
-const OMA_MAX_ADDITIONAL_CHECK_RECOVERIES = 2;
+const OMA_MAX_ADDITIONAL_CHECK_RECOVERIES = 1;
+const OMA_ADDITIONAL_CHECKS_CLEAR_TIMEOUT_MS = 45000;
+const OMA_ADDITIONAL_CHECKS_RESUME_COOLDOWN_MS = 3000;
 
 function omaFoldUiText(text) {
   return String(text || "")
@@ -60,7 +72,15 @@ function omaFoldUiText(text) {
 function omaIsAdditionalChecksMessage(text) {
   const folded = omaFoldUiText(text);
   const additionalChecksPt = (
-    folded.includes("verificacoes adicionais")
+    (
+      folded.includes("verificacoes adicionais")
+      || folded.includes("mais algumas verificacoes")
+      || (
+        folded.includes("nossos sistemas")
+        && folded.includes("verificacoes")
+        && folded.includes("solicitacao")
+      )
+    )
     && (
       folded.includes("antes de responder")
       || folded.includes("antes de fornecer uma resposta")
@@ -178,9 +198,49 @@ async function omaStopGenerationForRecovery(timeoutMs = 6000) {
 let omaAdditionalChecksRecoveryPromise = null;
 let omaAdditionalChecksRecoveryKey = null;
 let omaAdditionalChecksRecoveryAttempts = 0;
+let omaAdditionalChecksRecoveryBaselineCount = -1;
 
 function omaAdditionalChecksConversationKey() {
   return omaConversationId() || window.location.pathname || "chatgpt-root";
+}
+
+function omaMaybeResetAdditionalChecksRecoveryCycle() {
+  if (omaAdditionalChecksRecoveryAttempts < 1 || omaAdditionalChecksRecoveryBaselineCount < 0) return;
+  try {
+    const latest = omaLastAssistantText();
+    if (
+      omaAssistantMessageCount() > omaAdditionalChecksRecoveryBaselineCount
+      && latest
+      && !omaIsAdditionalChecksMessage(latest)
+      && !omaFindAdditionalChecksBannerText(false)
+    ) {
+      omaAdditionalChecksRecoveryAttempts = 0;
+      omaAdditionalChecksRecoveryBaselineCount = -1;
+    }
+  } catch (_) {}
+}
+
+async function omaWaitAdditionalChecksCleared(
+  timeoutMs = OMA_ADDITIONAL_CHECKS_CLEAR_TIMEOUT_MS
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    let finished = false;
+    try { finished = omaGenerationFinished(); } catch (_) {}
+    const composer = omaQueryFirst(OMA_SELECTORS.composer);
+    const composerReady = !!(
+      composer
+      && omaIsVisible(composer)
+      && composer.getAttribute("aria-disabled") !== "true"
+      && !omaComposerText(composer).trim()
+    );
+    if (finished && composerReady) {
+      await new Promise((resolve) => setTimeout(resolve, OMA_ADDITIONAL_CHECKS_RESUME_COOLDOWN_MS));
+      if (omaGenerationFinished() && !omaComposerText(composer).trim()) return composer;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("ADDITIONAL_CHECKS_RESUME_TIMEOUT: composer nao ficou pronto apos interromper");
 }
 
 async function omaRecoverAdditionalChecks() {
@@ -198,11 +258,13 @@ async function omaRecoverAdditionalChecks() {
   omaAdditionalChecksRecoveryAttempts++;
   omaAdditionalChecksRecoveryPromise = (async () => {
     await omaStopGenerationForRecovery();
+    await omaWaitAdditionalChecksCleared();
     // "Continue" starts a new assistant turn. Reset the response baseline after
-    // stopping the transient warning so WAIT_RESPONSE cannot mistake the
-    // interrupted turn for the recovered one.
+    // the transient warning has fully cleared so WAIT_RESPONSE cannot mistake
+    // the interrupted turn for the recovered one.
+    omaAdditionalChecksRecoveryBaselineCount = omaAssistantMessageCount();
     omaPendingResponseBaseline = {
-      count: document.querySelectorAll(OMA_SELECTORS.assistantMessages.join(",")).length,
+      count: omaAdditionalChecksRecoveryBaselineCount,
       text: omaLastAssistantText(),
     };
     await omaSendMessage("Continue", []);
@@ -510,7 +572,15 @@ function omaTextsMatch(actual, expected) {
   if (actual === expected) return true;
   const a = omaNormSpace(actual).replace(/\s+$/, "");
   const b = omaNormSpace(expected).replace(/\s+$/, "");
-  return a === b;
+  if (a === b) return true;
+
+  // Rich web editors may rewrite line breaks/indentation while preserving the
+  // exact non-whitespace character stream. Accept only that narrow class of
+  // DOM normalization; inserted/removed/reordered non-whitespace still fails
+  // closed and triggers PROMPT_MISMATCH. Whitespace position itself is not
+  // trusted because contenteditable may synthesize block-boundary newlines.
+  const nonWhitespace = (value) => value.replace(/\s+/g, "");
+  return nonWhitespace(a) === nonWhitespace(b);
 }
 
 async function omaWaitSendAffordance(timeoutMs) {
@@ -518,8 +588,8 @@ async function omaWaitSendAffordance(timeoutMs) {
   while (Date.now() - start < timeoutMs) {
     try {
       const btns = document.querySelectorAll(
-        "button[data-testid='send-button'],button[aria-label*='Send'],"
-        + "button[aria-label*='Enviar'],form button[type='submit']");
+        OMA_SELECTORS.sendButton.join(",") + ",form button[type='submit']"
+      );
       for (const b of btns) {
         if (omaIsVisible(b) && !b.disabled) return true;
       }
@@ -555,9 +625,7 @@ async function omaSubmitAttempt(box, text) {
   };
   // 1) Bot├Áes de envio (v├írios seletores: testid/aria/form).
   const buttons = [
-    ...document.querySelectorAll("button[data-testid='send-button']"),
-    ...document.querySelectorAll("button[aria-label*='Send']"),
-    ...document.querySelectorAll("button[aria-label*='Enviar']"),
+    ...document.querySelectorAll(OMA_SELECTORS.sendButton.join(",")),
     ...document.querySelectorAll("form button[type='submit']"),
   ];
   for (const btn of buttons) {
@@ -566,6 +634,66 @@ async function omaSubmitAttempt(box, text) {
         btn.click();
         tried.push("button");
         if (await omaSubmitAccepted(box)) return { accepted: true, method: "button" };
+
+        // Gemini/Angular can ignore HTMLElement.click() on a background tab
+        // even though the Material send button is visible and enabled. Only
+        // retry while the exact draft is still present, so an accepted but
+        // delayed first click can never be duplicated.
+        if (
+          omaProvider() === "gemini"
+          && omaTextsMatch(omaComposerText(box), text)
+        ) {
+          try {
+            box.focus();
+            box.dispatchEvent(new InputEvent("input", {
+              bubbles: true,
+              inputType: "insertText",
+              data: null,
+            }));
+            await new Promise((resolve) => setTimeout(resolve, 120));
+            if (!omaTextsMatch(omaComposerText(box), text)) {
+              throw new Error("draft changed during Gemini submit resync");
+            }
+
+            const rect = btn.getBoundingClientRect();
+            const clientX = rect.left + rect.width / 2;
+            const clientY = rect.top + rect.height / 2;
+            try { btn.focus({ preventScroll: true }); } catch (_) { try { btn.focus(); } catch (_) {} }
+            const pointer = (type, buttons) => btn.dispatchEvent(new PointerEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              pointerId: 1,
+              pointerType: "mouse",
+              isPrimary: true,
+              button: 0,
+              buttons,
+              clientX,
+              clientY,
+            }));
+            const mouse = (type, buttons) => btn.dispatchEvent(new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              button: 0,
+              buttons,
+              clientX,
+              clientY,
+              view: window,
+            }));
+            pointer("pointerdown", 1);
+            mouse("mousedown", 1);
+            pointer("pointerup", 0);
+            mouse("mouseup", 0);
+            mouse("click", 0);
+            tried.push("pointer-sequence");
+            if (await omaSubmitAccepted(box)) {
+              return { accepted: true, method: "pointer-sequence" };
+            }
+          } catch (_) {
+            tried.push("pointer-sequence-error");
+          }
+        }
       } else if (btn) {
         tried.push("button-disabled-or-hidden");
       }
@@ -601,8 +729,308 @@ async function omaSubmitAttempt(box, text) {
 }
 
 function omaConversationId() {
-  const m = window.location.pathname.match(/\/c\/([a-f0-9-]+)/i);
+  const path = window.location.pathname || "";
+  if (omaProvider() === "gemini") {
+    const m = path.match(/^\/app\/([A-Za-z0-9_-]{1,256})(?:\/|$)/);
+    return m ? m[1] : null;
+  }
+  const m = path.match(/\/c\/([A-Za-z0-9-]+)/i);
   return m ? m[1] : null;
+}
+
+function omaGeminiModelLabel(model) {
+  const normalized = String(model || "").trim().toLowerCase();
+  if (normalized === "flash-lite") return "Flash-Lite";
+  if (normalized === "flash") return "Flash";
+  if (normalized === "pro") return "Pro";
+  throw new Error("MODEL_SELECTION_FAILED: unsupported Gemini model");
+}
+
+function omaVisibleText(node) {
+  if (!node || !omaIsVisible(node)) return "";
+  return String(
+    node.innerText || node.textContent || node.getAttribute("aria-label") || ""
+  ).replace(/\s+/g, " ").trim();
+}
+
+function omaGeminiModelIdFromText(text) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (/\bflash[- ]?lite\b/i.test(value)) return "flash-lite";
+  if (/\bflash\b/i.test(value)) return "flash";
+  if (/\bpro\b/i.test(value)) return "pro";
+  return null;
+}
+
+function omaGeminiNearbyModelLabel(composer) {
+  if (!composer) return null;
+  const composerRect = composer.getBoundingClientRect();
+  const scopes = [];
+  let scope = composer.parentElement;
+  for (let depth = 0; scope && depth < 7; depth++, scope = scope.parentElement) {
+    scopes.push(scope);
+  }
+  const seen = new Set();
+  const acceptCandidate = (candidate) => {
+    if (!candidate || seen.has(candidate) || !omaIsVisible(candidate)) return null;
+    seen.add(candidate);
+    if (candidate.children.length > 6) return null;
+    const text = omaVisibleText(candidate);
+    if (!text || text.length > 80) return null;
+    const model = omaGeminiModelIdFromText(text);
+    if (!model) return null;
+    const rect = candidate.getBoundingClientRect();
+    const verticalGap = Math.max(
+      0,
+      rect.top - composerRect.bottom,
+      composerRect.top - rect.bottom,
+    );
+    const horizontalGap = Math.max(
+      0,
+      rect.left - composerRect.right,
+      composerRect.left - rect.right,
+    );
+    if (
+      verticalGap <= 320
+      && horizontalGap <= Math.max(480, window.innerWidth * 0.35)
+    ) {
+      return { model, node: candidate };
+    }
+    return null;
+  };
+
+  for (const root of scopes) {
+    let scanned = 0;
+    for (const candidate of root.querySelectorAll("*")) {
+      if (++scanned > 900) break;
+      const accepted = acceptCandidate(candidate);
+      if (accepted) return accepted;
+    }
+  }
+
+  // Gemini may render the model switcher outside the rich-textarea ancestor
+  // tree (for example in a sibling/custom-element footer). Scan text nodes in
+  // the whole light DOM, but still accept only a compact model label close to
+  // the composer. This avoids binding to sidebar/history occurrences.
+  if (document.body && typeof NodeFilter !== "undefined") {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let current = walker.nextNode();
+    let scannedText = 0;
+    while (current && scannedText < 6000) {
+      scannedText++;
+      const raw = String(current.nodeValue || "").replace(/\s+/g, " ").trim();
+      if (raw && raw.length <= 80 && omaGeminiModelIdFromText(raw)) {
+        const accepted = acceptCandidate(current.parentElement);
+        if (accepted) return accepted;
+      }
+      current = walker.nextNode();
+    }
+  }
+  return null;
+}
+
+function omaGeminiCurrentModel() {
+  if (omaProvider() !== "gemini") return null;
+  const composer = omaQueryFirst(OMA_SELECTORS.composer);
+  const scopes = [];
+  if (composer) {
+    let node = composer;
+    for (let depth = 0; node && depth < 6; depth++, node = node.parentElement) {
+      scopes.push(node);
+    }
+  }
+  scopes.push(document);
+  for (const scope of scopes) {
+    const nodes = scope.querySelectorAll(
+      "button,[role='button'][aria-haspopup],"
+      + "[aria-label*='model' i],[mattooltip*='model' i],"
+      + "[aria-label*='seletor de modo' i],[aria-label*='mode selector' i]"
+    );
+    for (const node of nodes) {
+      if (!omaIsVisible(node)) continue;
+      const text = omaVisibleText(node);
+      const aria = String(node.getAttribute("aria-label") || "");
+      const combined = (text + " " + aria).replace(/\s+/g, " ").trim();
+      if (!combined || combined.length > 260) continue;
+      const model = omaGeminiModelIdFromText(combined);
+      if (model) return model;
+    }
+  }
+  // Gemini currently renders the selected model label in a custom wrapper that
+  // may have no button/role/aria-haspopup semantics. Restrict the fallback to
+  // compact visible text geometrically adjacent to the composer.
+  const nearby = omaGeminiNearbyModelLabel(composer);
+  return nearby ? nearby.model : null;
+}
+
+async function omaSetGeminiModel(model, timeoutMs = 12000) {
+  if (omaProvider() !== "gemini") {
+    throw new Error("MODEL_SELECTION_FAILED: current site is not Gemini");
+  }
+  const target = String(model || "").trim().toLowerCase();
+  const targetLabel = omaGeminiModelLabel(target);
+  if (omaGeminiCurrentModel() === target) {
+    return { selected: true, model: target, unchanged: true };
+  }
+  const composer = await omaWaitForComposer(timeoutMs);
+  const deadline = Date.now() + timeoutMs;
+  let toggle = null;
+  while (Date.now() < deadline && !toggle) {
+    if (omaGeminiCurrentModel() === target) {
+      return { selected: true, model: target, unchanged: true };
+    }
+    const scopes = [];
+    let node = composer;
+    for (let depth = 0; node && depth < 7; depth++, node = node.parentElement) {
+      scopes.push(node);
+    }
+    scopes.push(document);
+    for (const scope of scopes) {
+      const candidates = scope.querySelectorAll(
+        "button,[role='button'][aria-haspopup='menu'],[role='button'][aria-haspopup='listbox'],[aria-haspopup='true']"
+      );
+      for (const candidate of candidates) {
+        const text = omaVisibleText(candidate);
+        const aria = String(candidate.getAttribute("aria-label") || "");
+        const combined = `${text} ${aria}`;
+        if (
+          combined.length <= 240
+          && (
+            /flash[- ]?lite|\bflash\b|\bpro\b/i.test(combined)
+            || /model|modelo|modo/i.test(aria)
+          )
+        ) {
+          toggle = candidate;
+          break;
+        }
+      }
+      if (toggle) break;
+    }
+    if (!toggle) {
+      const nearby = omaGeminiNearbyModelLabel(composer);
+      if (nearby) {
+        let clickable = nearby.node;
+        for (let depth = 0; clickable && depth < 6; depth++, clickable = clickable.parentElement) {
+          if (!omaIsVisible(clickable) || clickable === composer) continue;
+          const semantic = clickable.matches(
+            "button,[role='button'],[aria-haspopup],[tabindex],mat-select,mat-chip"
+          );
+          let pointer = false;
+          try {
+            pointer = window.getComputedStyle(clickable).cursor === "pointer";
+          } catch (_) {}
+          if (semantic || pointer) {
+            toggle = clickable;
+            break;
+          }
+        }
+        if (!toggle && nearby.node instanceof HTMLElement) toggle = nearby.node;
+      }
+    }
+    if (!toggle) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!toggle) {
+    throw new Error("MODEL_SELECTION_FAILED: Gemini model selector not found after wait");
+  }
+  toggle.click();
+  let option = null;
+  while (Date.now() < deadline && !option) {
+    const candidates = document.querySelectorAll(
+      "[role='menuitem'],[role='option'],mat-option,button,[role='button']"
+    );
+    for (const candidate of candidates) {
+      if (!omaIsVisible(candidate) || candidate === toggle) continue;
+      const text = omaVisibleText(candidate);
+      if (!text || text.length > 180) continue;
+      const candidateModel = omaGeminiModelIdFromText(text);
+      if (candidateModel === target) {
+        option = candidate;
+        break;
+      }
+    }
+    if (!option) await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (!option) {
+    throw new Error("MODEL_SELECTION_FAILED: requested Gemini model option not found");
+  }
+  option.click();
+
+  while (Date.now() < deadline) {
+    if (omaGeminiCurrentModel() === target) {
+      return { selected: true, model: target, unchanged: false };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("MODEL_SELECTION_FAILED: Gemini UI did not confirm requested model");
+}
+
+function omaGeminiModelDiagnostics(composer) {
+  if (omaProvider() !== "gemini" || !composer || !document.body) return [];
+  const composerRect = composer.getBoundingClientRect();
+  const describeCandidate = (node, text) => {
+    const rect = node.getBoundingClientRect();
+    const chain = [];
+    let current = node;
+    for (let depth = 0; current && depth < 5; depth++, current = current.parentElement) {
+      let cursor = "";
+      try { cursor = window.getComputedStyle(current).cursor || ""; } catch (_) {}
+      chain.push({
+        tag: current.tagName,
+        class_name: String(current.className || "").slice(0, 160),
+        role: current.getAttribute("role"),
+        aria_label: current.getAttribute("aria-label"),
+        aria_haspopup: current.getAttribute("aria-haspopup"),
+        tabindex: current.getAttribute("tabindex"),
+        cursor,
+      });
+    }
+    return {
+      text: String(text || "").slice(0, 80),
+      model: omaGeminiModelIdFromText(text),
+      rect: {
+        x: Math.round(rect.x), y: Math.round(rect.y),
+        width: Math.round(rect.width), height: Math.round(rect.height),
+      },
+      composer_rect: {
+        x: Math.round(composerRect.x), y: Math.round(composerRect.y),
+        width: Math.round(composerRect.width), height: Math.round(composerRect.height),
+      },
+      vertical_gap: Math.round(Math.max(
+        0,
+        rect.top - composerRect.bottom,
+        composerRect.top - rect.bottom,
+      )),
+      horizontal_gap: Math.round(Math.max(
+        0,
+        rect.left - composerRect.right,
+        composerRect.left - rect.right,
+      )),
+      chain,
+    };
+  };
+
+  const results = [];
+  const seen = new Set();
+  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let current = walker.nextNode();
+  let scanned = 0;
+  while (current && scanned < 6000 && results.length < 12) {
+    scanned++;
+    const raw = String(current.nodeValue || "").replace(/\s+/g, " ").trim();
+    const parent = current.parentElement;
+    if (
+      raw
+      && raw.length <= 80
+      && omaGeminiModelIdFromText(raw)
+      && parent
+      && !seen.has(parent)
+      && omaIsVisible(parent)
+    ) {
+      seen.add(parent);
+      results.push(describeCandidate(parent, raw));
+    }
+    current = walker.nextNode();
+  }
+  return results;
 }
 
 function omaComposerDiagnostics() {
@@ -614,10 +1042,35 @@ function omaComposerDiagnostics() {
   } : null;
   const box = omaQueryFirst(OMA_SELECTORS.composer);
   const form = box && box.closest("form");
+  const sendCandidates = [];
+  try {
+    const nodes = document.querySelectorAll(OMA_SELECTORS.sendButton.join(","));
+    for (const node of [...nodes].slice(0, 12)) {
+      const rect = node.getBoundingClientRect();
+      const cx = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
+      const cy = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+      let top = null;
+      try { top = document.elementFromPoint(cx, cy); } catch (_) {}
+      sendCandidates.push(Object.assign(describe(node), {
+        class_name: String(node.className || "").slice(0, 200),
+        mattooltip: node.getAttribute("mattooltip"),
+        text: String(node.innerText || node.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80),
+        rect: {
+          x: Math.round(rect.x), y: Math.round(rect.y),
+          width: Math.round(rect.width), height: Math.round(rect.height),
+        },
+        topmost: !!top && (top === node || node.contains(top)),
+        top_tag: top ? top.tagName : null,
+        top_class: top ? String(top.className || "").slice(0, 120) : null,
+      }));
+    }
+  } catch (_) {}
   return { composer: describe(box), form: describe(form),
     form_buttons: form ? [...form.querySelectorAll("button")].slice(0,20).map(describe) : [],
+    send_candidates: sendCandidates,
     composer_candidates: OMA_SELECTORS.composer.map(selector => ({selector,
       nodes: [...document.querySelectorAll(selector)].slice(0,4).map(describe)})),
+    gemini_model_candidates: omaGeminiModelDiagnostics(box),
     composer_len: box ? omaComposerText(box).length : 0,
     ready_state: document.readyState, visibility: document.visibilityState };
 }
@@ -664,7 +1117,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   // sen├úo o canal morre com o contexto JS (message channel closed).
   if (request && request.operation === "NEW_CHAT") {
     try { sendResponse({ ok: true, result: { navigating: true } }); } catch (_) {}
-    setTimeout(() => { window.location.href = "https://chatgpt.com/"; }, 100);
+    setTimeout(() => { window.location.href = omaHomeUrl(); }, 100);
     return false;
   }
   (async () => {
@@ -672,7 +1125,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       case "BROWSER_EXTRACT": {
         const node = omaBrowserNode(request.selector || "body");
         const maxChars = Math.max(1, Math.min(Number(request.max_chars) || 200000, 1000000));
-        const text = String(node.innerText ?? node.textContent ?? "");
+        const text = omaNodeReadableText(node);
         return {
           text: text.slice(0, maxChars),
           truncated: text.length > maxChars,
@@ -691,9 +1144,11 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         omaBrowserSetValue(node, request.text || "", !!request.clear);
         return { typed: true, url: window.location.href };
       }
+      case "SET_MODEL":
+        return await omaSetGeminiModel(request.model);
       case "SEND_MESSAGE": {
         omaPendingResponseBaseline = {
-          count: document.querySelectorAll(OMA_SELECTORS.assistantMessages.join(",")).length,
+          count: omaAssistantMessageCount(),
           text: omaLastAssistantText(),
         };
         return await omaSendMessage(request.text || "", request.images || []);
@@ -723,13 +1178,12 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         return { stopped: true };
       }
       case "GET_STATUS": {
-        const nodes = document.querySelectorAll(
-          OMA_SELECTORS.assistantMessages.join(","));
+        const assistantCount = omaAssistantMessageCount();
+        const userNodes = document.querySelectorAll(
+          OMA_SELECTORS.userMessages.join(","));
         const capBanner = omaCapBanner();
         const sendBtns = [
-          ...document.querySelectorAll("button[data-testid='send-button']"),
-          ...document.querySelectorAll("button[aria-label*='Send']"),
-          ...document.querySelectorAll("button[aria-label*='Enviar']"),
+          ...document.querySelectorAll(OMA_SELECTORS.sendButton.join(",")),
         ];
         const sendAvailable = !capBanner && sendBtns.some((b) => omaIsVisible(b) && !b.disabled);
         // Telemetria para distinguir cap de UI quebrada/parcial (custo zero).
@@ -742,7 +1196,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
               || b.getAttribute("data-testid") || (b.innerText || "").trim()).slice(0, 40))
             .filter(Boolean);
         } catch (_) {}
-        const hasConv = /\/c\/[a-f0-9-]+/i.test(window.location.pathname);
+        const hasConv = !!omaConversationId();
         let draftEmpty = true;
         try {
           const box = omaQueryFirst(OMA_SELECTORS.composer);
@@ -750,10 +1204,16 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         } catch (_) { draftEmpty = false; }
         const additionalChecks = omaFindAdditionalChecksBannerText();
         return { finished: omaGenerationFinished(), url: window.location.href,
+                 provider: omaProvider(), model: omaGeminiCurrentModel(),
                  cs_version: OMA_CS_VERSION, cs_build_id: OMA_BUILD_ID,
                  cs_source_hash: OMA_SOURCE_HASH,
-                 assistant_count: nodes.length,
-                 is_fresh_chat: !hasConv && nodes.length === 0 && draftEmpty,
+                 assistant_count: assistantCount,
+                 user_count: userNodes.length,
+                 message_count: assistantCount + userNodes.length,
+                 conversation_id: omaConversationId(),
+                 has_conversation: hasConv,
+                 generation_running: !omaGenerationFinished(),
+                 is_fresh_chat: !hasConv && assistantCount === 0 && userNodes.length === 0 && draftEmpty,
                  send_available: sendAvailable, cap_banner: capBanner,
                  additional_checks: additionalChecks,
                  additional_checks_recovery_attempts: omaAdditionalChecksRecoveryAttempts,
@@ -762,6 +1222,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                  diagnostics: omaComposerDiagnostics() };
       }
       case "SET_CONVERSATION_TITLE": {
+        if (omaProvider() !== "chatgpt") {
+          throw new Error("TITLE_UPDATE_FAILED: unsupported for Gemini");
+        }
         const convId = request.conversation_id || omaConversationId();
         const title = String(request.title || "").trim();
         if (!convId) throw new Error("conversation_id required");
@@ -788,6 +1251,9 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         return { updated: true, conversation_id: convId, title };
       }
       case "DELETE_CONVERSATION": {
+        if (omaProvider() !== "chatgpt") {
+          throw new Error("DELETE_CONVERSATION: unsupported for Gemini");
+        }
         const convId = request.conversation_id || omaConversationId();
         if (!convId) throw new Error("conversation_id required");
         let deleted = false;
@@ -825,7 +1291,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         return { deleted, conversation_id: convId, details };
       }
       case "NEW_CHAT":
-        window.location.href = "https://chatgpt.com/";
+        window.location.href = omaHomeUrl();
         return { navigating: true };
       default:
         throw new Error(`UNKNOWN_OPERATION: ${request.operation}`);
@@ -843,20 +1309,28 @@ let omaGlobalChecksLastSignature = "";
 let omaGlobalChecksLastAt = 0;
 
 async function omaMaybeRecoverGlobalAdditionalChecks() {
+  if (omaProvider() !== "chatgpt") return;
+  // 1.6.50+: the autonomous guard owns global recovery so an already-open tab
+  // can be repaired after extension reload without duplicating Stop/Continue.
+  if (globalThis.__SENTRA_RECOVERY_GUARD__) return;
   if (omaGlobalChecksBusy) return;
   let settings = {};
   try {
     settings = await chrome.storage.local.get({
-      oma_enabled: false,
       oma_auto_recover_additional_checks: true,
     });
   } catch (_) {
     return;
   }
-  if (!settings.oma_enabled || settings.oma_auto_recover_additional_checks === false) return;
+  // This is a local safety/recovery behavior for the current ChatGPT page.
+  // It must not depend on the OMA scheduler being paired or enabled.
+  if (settings.oma_auto_recover_additional_checks === false) return;
 
   const banner = omaFindAdditionalChecksBannerText(false);
-  if (!banner) return;
+  if (!banner) {
+    omaMaybeResetAdditionalChecksRecoveryCycle();
+    return;
+  }
 
   // Never destroy a user's draft while auto-recovering a system warning.
   try {

@@ -3,6 +3,8 @@
 
 let omaStableWaitPings = 0;
 const OMA_IDLE_WAKE_MS = 15000;
+const OMA_RESPONSE_QUIET_MS = 5000;
+const OMA_DONE_QUIET_MS = 3000;
 
 function omaSendSwPing(operation) {
   try {
@@ -24,10 +26,66 @@ function omaGenerationFinished() {
   return !(stop && omaIsVisible(stop));
 }
 
+function omaNodeReadableText(node) {
+  if (!node) return "";
+  try {
+    const rendered = String(node.innerText || "").trim();
+    if (rendered) return rendered;
+  } catch (_) {}
+  try {
+    return String(node.textContent || "").trim();
+  } catch (_) {
+    return "";
+  }
+}
+
+function omaChatGptAccessibleAssistantNodes() {
+  if (typeof OMA_SITE !== "undefined" && OMA_SITE !== "chatgpt") return [];
+  const found = [];
+  const seen = new Set();
+  let labels = [];
+  try {
+    labels = [...document.querySelectorAll("main [class*='sr-only']")];
+  } catch (_) {
+    return found;
+  }
+  for (const label of labels) {
+    const labelText = omaNodeReadableText(label);
+    if (!/chatgpt/i.test(labelText)) continue;
+    const candidates = [];
+    if (label.nextElementSibling) candidates.push(label.nextElementSibling);
+    if (label.parentElement) {
+      for (const child of label.parentElement.children) {
+        if (child !== label) candidates.push(child);
+      }
+    }
+    for (const candidate of candidates) {
+      if (!candidate || seen.has(candidate)) continue;
+      const text = omaNodeReadableText(candidate);
+      if (!text || text === labelText) continue;
+      seen.add(candidate);
+      found.push(candidate);
+      break;
+    }
+  }
+  return found;
+}
+
+function omaAssistantMessageCount() {
+  if (typeof OMA_SITE !== "undefined" && OMA_SITE === "gemini") {
+    return document.querySelectorAll("model-response").length;
+  }
+  const direct = document.querySelectorAll(OMA_SELECTORS.assistantMessages.join(","));
+  if (direct.length) return direct.length;
+  return omaChatGptAccessibleAssistantNodes().length;
+}
+
 function omaLastAssistantText() {
   const nodes = document.querySelectorAll(OMA_SELECTORS.assistantMessages.join(","));
-  if (!nodes.length) return "";
-  return (nodes[nodes.length - 1].innerText || "").trim();
+  if (nodes.length) return omaNodeReadableText(nodes[nodes.length - 1]);
+  const fallback = omaChatGptAccessibleAssistantNodes();
+  if (!fallback.length) return "";
+  return omaNodeReadableText(fallback[fallback.length - 1]);
 }
 
 function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null) {
@@ -36,6 +94,8 @@ function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null)
     let previousHash = null;
     let stableCount = 0;
     let lastText = "";
+    let lastTextChangedAt = Date.now();
+    let doneSince = null;
     let settled = false;
     let ticker = 0;
     let lastPing = Date.now();
@@ -104,6 +164,8 @@ function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null)
       previousHash = null;
       stableCount = 0;
       lastText = "";
+      lastTextChangedAt = Date.now();
+      doneSince = null;
       try {
         if (typeof omaRecoverAdditionalChecks !== "function") {
           throw new Error("ADDITIONAL_CHECKS_RECOVERY_FAILED: helper indisponível");
@@ -134,23 +196,44 @@ function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null)
 
         let text = "";
         try { text = omaLastAssistantText(); } catch (_) { text = ""; }
-        const count = document.querySelectorAll(OMA_SELECTORS.assistantMessages.join(",")).length;
+        const count = omaAssistantMessageCount();
         if (await recoverSpecialUi(text, count)) return;
 
         if (baseline && count <= baseline.count && text === baseline.text) {
           stableCount = 0;
+          doneSince = null;
+          lastTextChangedAt = Date.now();
           return;
         }
 
         let h = 0;
         for (let i = 0; i < text.length; i++) h = (h * 31 + text.charCodeAt(i)) | 0;
-        if (h === previousHash && text) stableCount++;
-        else { stableCount = 0; previousHash = h; }
+        if (h === previousHash && text) {
+          stableCount++;
+        } else {
+          stableCount = 0;
+          previousHash = h;
+          lastTextChangedAt = Date.now();
+        }
         lastText = text;
 
         let done = false;
         try { done = omaGenerationFinished(); } catch (_) { done = false; }
-        if (done && stableCount >= stableSamples && text) finish(true, text);
+        if (done) {
+          if (doneSince === null) doneSince = Date.now();
+        } else {
+          doneSince = null;
+        }
+        const now = Date.now();
+        const textQuiet = now - lastTextChangedAt >= OMA_RESPONSE_QUIET_MS;
+        const doneQuiet = doneSince !== null && now - doneSince >= OMA_DONE_QUIET_MS;
+        if (
+          done
+          && stableCount >= stableSamples
+          && text
+          && textQuiet
+          && doneQuiet
+        ) finish(true, text);
       } finally {
         sampleBusy = false;
       }

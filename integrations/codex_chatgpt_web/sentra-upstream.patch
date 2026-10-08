@@ -1,8 +1,8 @@
 diff --git a/launcher/electron/browser-host.cjs b/launcher/electron/browser-host.cjs
-index b239bc7..e56ad8f 100644
+index 9025c18f1ea87c178948c9e7e95e64c76500521c..d36c9ce69954a9131c6d0604cb6b4bf9780b27a1 100644
 --- a/launcher/electron/browser-host.cjs
 +++ b/launcher/electron/browser-host.cjs
-@@ -1336,6 +1336,7 @@ class BrowserHost {
+@@ -1419,6 +1419,7 @@ class BrowserHost {
        tab.deviceEmulationDirty = true;
        this.syncViewVisibility();
      }
@@ -10,7 +10,7 @@ index b239bc7..e56ad8f 100644
      return this.snapshot();
    }
  
-@@ -2981,6 +2982,20 @@ class BrowserHost {
+@@ -3039,6 +3040,20 @@ class BrowserHost {
        idleUrl: IDLE_BROWSER_URL,
        surfaceId: this.surfaceId,
        surfaceTargets,
@@ -32,7 +32,7 @@ index b239bc7..e56ad8f 100644
      };
      writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
 diff --git a/launcher/electron/connector-identity.cjs b/launcher/electron/connector-identity.cjs
-index 320ec5a..406d2f1 100644
+index 320ec5af058a0244eed710605fc375ec22190765..406d2f1907066541418d01ef950dab0212fdd990 100644
 --- a/launcher/electron/connector-identity.cjs
 +++ b/launcher/electron/connector-identity.cjs
 @@ -1,6 +1,6 @@
@@ -93,7 +93,7 @@ index 320ec5a..406d2f1 100644
  
  module.exports = {
 diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
-index 2c9c565..b27ba9e 100644
+index 2c9c5651fbe3e84e326f0cf6e24c27f68e3f6e4d..b27ba9e2ab920c73f6bdc0429f1e67a534f84340 100644
 --- a/launcher/electron/control-server.cjs
 +++ b/launcher/electron/control-server.cjs
 @@ -38,12 +38,13 @@ function writeJson(response, status, body) {
@@ -165,13 +165,29 @@ index 2c9c565..b27ba9e 100644
          const url = new URL(body?.url);
          if (url.origin !== "https://chatgpt.com" || url.username || url.password
 diff --git a/launcher/electron/main.cjs b/launcher/electron/main.cjs
-index 71b95c2..b178fbd 100644
+index 71b95c20ad2056592fda5bd8a106a999186c7a91..0b483039d2e491ba7280e9c1461f7757d4ed55fd 100644
 --- a/launcher/electron/main.cjs
 +++ b/launcher/electron/main.cjs
-@@ -514,6 +514,30 @@ function syncFreshConversationPreference(stateStore, config) {
+@@ -47,6 +47,7 @@ const {
+ } = require("./window-state.cjs");
+ 
+ const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
++const SENTRA_BROWSER_HOST_ONLY = process.env.SENTRA_BROWSER_HOST_ONLY?.trim() === "1";
+ const SOURCE_ROOT = path.resolve(__dirname, "../..");
+ const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
+ const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
+@@ -60,6 +61,7 @@ const X_URL = "https://x.com/miu21590";
+ const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
+ const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
+ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
++const SENTRA_ONBOARDING_URL = "sentra://onboarding";
+ const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL, LIMITS_SOURCE_URL]);
+ const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
+ const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
+@@ -513,6 +515,30 @@ function syncFreshConversationPreference(stateStore, config) {
+   send("launcher:state-changed", state);
    return state;
  }
- 
 +async function sentraDoctor(runtimeHost, { verifyConnector = false } = {}) {
 +  const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
 +  if (!base) return IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor();
@@ -196,10 +212,32 @@ index 71b95c2..b178fbd 100644
 +  return name.trim();
 +}
 +
+ 
  function registerIpc({ logger, stateStore }) {
    const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
-   handle("launcher:limits", () => limitsController.snapshot());
-@@ -657,7 +681,7 @@ function registerIpc({ logger, stateStore }) {
+@@ -536,6 +562,7 @@ function registerIpc({ logger, stateStore }) {
+       manual: "Codex Zero Risk",
+     },
+     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
++    sentraManaged: Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim()),
+     logs: logger.recent(),
+     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
+     platform: process.platform,
+@@ -580,6 +607,13 @@ function registerIpc({ logger, stateStore }) {
+     await openWebUrl(url);
+     return true;
+   });
++  handle("launcher:open-sentra-onboarding", async () => {
++    if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
++      throw new Error("This launcher is not managed by SENTRA");
++    }
++    await shell.openExternal(SENTRA_ONBOARDING_URL);
++    return true;
++  });
+ 
+   handle("launcher:browser-bounds", (event, bounds) => {
+     browserHost?.setBounds(validateBounds(bounds), event.sender.getZoomFactor());
+@@ -657,7 +691,7 @@ function registerIpc({ logger, stateStore }) {
        return report;
      }
      publishOperation({ name: operationName, status: "running", message: "Checking local runtime" });
@@ -208,7 +246,7 @@ index 71b95c2..b178fbd 100644
      if (!report.ok) {
        const message = report.checks
          .filter((check) => check.status === "error")
-@@ -681,14 +705,14 @@ function registerIpc({ logger, stateStore }) {
+@@ -681,14 +715,14 @@ function registerIpc({ logger, stateStore }) {
            {
              id: "connector",
              status: "warning",
@@ -225,7 +263,7 @@ index 71b95c2..b178fbd 100644
        const state = stateStore.update({ mcpSetupComplete: true });
        send("launcher:state-changed", state);
        const successMessage = IS_DEV_PROFILE
-@@ -701,7 +725,7 @@ function registerIpc({ logger, stateStore }) {
+@@ -701,7 +735,7 @@ function registerIpc({ logger, stateStore }) {
            ? {
                id: "connector",
                status: "ok",
@@ -234,7 +272,7 @@ index 71b95c2..b178fbd 100644
              }
            : check),
        };
-@@ -721,7 +745,7 @@ function registerIpc({ logger, stateStore }) {
+@@ -721,7 +755,7 @@ function registerIpc({ logger, stateStore }) {
      }
    });
  
@@ -243,7 +281,7 @@ index 71b95c2..b178fbd 100644
    handle("launcher:cancel-turns", () => {
      if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
      return runtimeHost.cancelActiveTurns();
-@@ -817,6 +841,33 @@ function registerIpc({ logger, stateStore }) {
+@@ -817,6 +851,33 @@ function registerIpc({ logger, stateStore }) {
        ? currentMode
        : validateBrowserInteractionMode(input.interactionMode);
      const interactionModeChange = interactionMode !== currentMode;
@@ -277,7 +315,7 @@ index 71b95c2..b178fbd 100644
      const setup = IS_DEV_PROFILE
        ? runtimeHost.setupDevMcp.bind(runtimeHost)
        : runtimeHost.setupMcp.bind(runtimeHost);
-@@ -917,6 +968,9 @@ function registerIpc({ logger, stateStore }) {
+@@ -917,6 +978,9 @@ function registerIpc({ logger, stateStore }) {
    });
    handle("launcher:browser-interaction-mode", async (_event, rawMode) => {
      const mode = validateBrowserInteractionMode(rawMode);
@@ -287,7 +325,27 @@ index 71b95c2..b178fbd 100644
      const current = stateStore.read();
      if (current.browserInteractionMode === mode) {
        return { state: current, credentialsRequired: false, targetMode: mode };
-@@ -1064,6 +1118,13 @@ async function start() {
+@@ -1037,9 +1101,17 @@ async function start() {
+   app.on("activate", () => showMainWindow());
+ 
+   await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
+-  let installedRuntimeRoot = null;
+-  let runtimeRootResolved = false;
++  let installedRuntimeRoot = SENTRA_BROWSER_HOST_ONLY && app.isPackaged
++    ? path.join(process.resourcesPath, "runtime")
++    : null;
++  let runtimeRootResolved = Boolean(installedRuntimeRoot);
+   const runtimeRootProvider = () => {
++    if (SENTRA_BROWSER_HOST_ONLY && app.isPackaged) {
++      // Browser-host-only mode consumes the signed embedded runtime in place.
++      // It never installs/replaces ~/.codex-chatgpt-web/versions, so a running
++      // SENTRA-managed Bun daemon cannot cause Windows EPERM rename failures.
++      return installedRuntimeRoot;
++    }
+     const packagedRuntimeWasRemoved = app.isPackaged
+       && (!installedRuntimeRoot || !fs.existsSync(installedRuntimeRoot));
+     if (!runtimeRootResolved || packagedRuntimeWasRemoved) {
+@@ -1064,6 +1136,13 @@ async function start() {
    await app.whenReady();
  
    const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
@@ -301,7 +359,17 @@ index 71b95c2..b178fbd 100644
    limitsController = new LimitsController(path.join(app.getPath("userData"), "limits.json"), {
      getInteractionMode: () => stateStore.read().browserInteractionMode,
    });
-@@ -1110,6 +1171,17 @@ async function start() {
+@@ -1096,7 +1175,8 @@ async function start() {
+     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
+     publish: (record) => send("launcher:log", record),
+   });
+-  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
++  const startHidden = SENTRA_BROWSER_HOST_ONLY
++    || (process.argv.includes("--hidden") && stateStore.read().onboardingComplete);
+   nativeTheme.themeSource = "system";
+   mainWindow = createWindow({
+     logger,
+@@ -1110,6 +1190,17 @@ async function start() {
      getPreferences: () => syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
      resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
      limits: limitsController,
@@ -319,8 +387,185 @@ index 71b95c2..b178fbd 100644
    }).start();
    runtimeSupervisor = new RuntimeSupervisor({
      app,
+@@ -1179,7 +1270,11 @@ async function start() {
+     logger,
+   });
+   registerIpc({ logger, stateStore });
+-  const trayAvailable = createTray(logger, stateStore.read().language);
++  // Browser-host-only is infrastructure owned by SENTRA; do not add a second
++  // launcher tray icon and never reveal the shell just because tray setup was skipped.
++  const trayAvailable = SENTRA_BROWSER_HOST_ONLY
++    ? true
++    : createTray(logger, stateStore.read().language);
+   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
+   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
+   let startupAuthenticationRefresh = Promise.resolve();
+@@ -1191,7 +1286,7 @@ async function start() {
+     });
+   }
+   await loadRenderer(mainWindow);
+-  if (!launcherSmokeTest) void updateController.checkOnce();
++  if (!launcherSmokeTest && !SENTRA_BROWSER_HOST_ONLY) void updateController.checkOnce();
+   if (launcherSmokeTest) {
+     const smokeRuntimeRoot = runtimeRootProvider();
+     if (app.isPackaged && !smokeRuntimeRoot) {
+@@ -1230,7 +1325,14 @@ async function start() {
+     app.quit();
+     return;
+   }
+-  if (IS_DEV_PROFILE) {
++  if (SENTRA_BROWSER_HOST_ONLY) {
++    await startupAuthenticationRefresh;
++    logger.info("sentra.browser_host_only_ready", {
++      descriptorPath: BROWSER_DESCRIPTOR_PATH,
++      cdpPort,
++      embeddedRuntime: app.isPackaged,
++    });
++  } else if (IS_DEV_PROFILE) {
+     let config = null;
+     try {
+       config = runtimeSupervisor.readConfig();
+@@ -1417,6 +1519,14 @@ void start().catch(async (error) => {
+   try {
+     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
+   } catch {}
++  if (SENTRA_BROWSER_HOST_ONLY) {
++    // Infrastructure startup fails closed and silent. SENTRA surfaces the
++    // diagnostic without interrupting the desktop with a native modal dialog.
++    try { browserHost?.destroy(); } catch {}
++    try { await browserControl?.close(); } catch {}
++    app.exit(1);
++    return;
++  }
+   try {
+     // Browser bootstrap can fail before the renderer is loaded. Keep the error reachable
+     // through the existing instance, and release browser resources before a user retry.
+diff --git a/launcher/electron/orphan-runtime-recovery.cjs b/launcher/electron/orphan-runtime-recovery.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..90696a21ff109b07a6873f4691595a8d03dc4dda
+--- /dev/null
++++ b/launcher/electron/orphan-runtime-recovery.cjs
+@@ -0,0 +1,86 @@
++const fs = require("node:fs");
++const path = require("node:path");
++const { spawnSync } = require("node:child_process");
++const { processRunning } = require("./process-tree.cjs");
++
++const EXIT_TIMEOUT_MS = 5_000;
++const SYNC_WAIT = new Int32Array(new SharedArrayBuffer(4));
++
++function sleepSync(milliseconds) {
++  Atomics.wait(SYNC_WAIT, 0, 0, milliseconds);
++}
++
++function readOwnershipState(coreHome) {
++  const statePath = path.join(coreHome, "runtime", "launcher-supervisor.json");
++  if (!fs.existsSync(statePath)) return null;
++  try {
++    const state = JSON.parse(fs.readFileSync(statePath, "utf8"));
++    return state && typeof state === "object" ? state : null;
++  } catch {
++    return null;
++  }
++}
++function inspectWindowsProcess(pid, spawnSyncFn) {
++  const script =
++    "$p=Get-CimInstance Win32_Process -Filter \"ProcessId=" + pid + "\"; "
++    + "if($p){$p | Select-Object ExecutablePath,CommandLine | ConvertTo-Json -Compress}";
++  const result = spawnSyncFn(
++    "powershell.exe",
++    ["-NoProfile", "-NonInteractive", "-Command", script],
++    { encoding: "utf8", windowsHide: true, timeout: 5_000 },
++  );
++  if (result.error || result.status !== 0 || !result.stdout?.trim()) {
++    throw new Error("Could not verify orphan runtime process " + pid);
++  }
++  try {
++    return JSON.parse(result.stdout);
++  } catch {
++    throw new Error("Orphan runtime process " + pid + " returned invalid identity evidence");
++  }
++}
++function recoverOrphanedRuntimeLock({
++  coreHome, destination, platform = process.platform,
++  processRunningFn = processRunning, spawnSyncFn = spawnSync,
++}) {
++  if (platform !== "win32") return false;
++  const state = readOwnershipState(coreHome);
++  const ownerPid = state?.ownerPid;
++  const daemonPid = state?.daemonPid;
++  if (!Number.isInteger(ownerPid) || ownerPid < 1
++    || !Number.isInteger(daemonPid) || daemonPid < 1
++    || processRunningFn(ownerPid) || !processRunningFn(daemonPid)) return false;
++
++  const info = inspectWindowsProcess(daemonPid, spawnSyncFn);
++  const expected = path.win32.resolve(destination).toLowerCase();
++  const executable = typeof info?.ExecutablePath === "string"
++    ? path.win32.resolve(info.ExecutablePath).toLowerCase() : "";
++  const commandLine = typeof info?.CommandLine === "string"
++    ? info.CommandLine.toLowerCase() : "";
++  const matches = executable.startsWith(expected + "\\")
++    && commandLine.includes(expected)
++    && commandLine.includes("serve");  if (!matches) {
++    throw new Error(
++      "Refusing to stop orphan PID " + daemonPid
++      + ": process identity does not match " + destination,
++    );
++  }
++
++  const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
++  const taskkill = path.win32.join(systemRoot, "System32", "taskkill.exe");
++  const stopped = spawnSyncFn(
++    taskkill, ["/PID", String(daemonPid), "/T", "/F"],
++    { stdio: "ignore", windowsHide: true, timeout: 10_000 },
++  );
++  if ((stopped.error || stopped.status !== 0) && processRunningFn(daemonPid)) {
++    throw new Error("Could not stop verified orphan runtime process " + daemonPid);
++  }
++  const deadline = Date.now() + EXIT_TIMEOUT_MS;
++  while (processRunningFn(daemonPid) && Date.now() < deadline) sleepSync(50);
++  if (processRunningFn(daemonPid)) {
++    throw new Error("Verified orphan runtime process " + daemonPid + " did not exit");
++  }
++  return true;
++}
++module.exports = {
++  recoverOrphanedRuntimeLock,
++};
+diff --git a/launcher/electron/preload.cjs b/launcher/electron/preload.cjs
+index 0ed9dfc00f54d965d16414df4f96c0cc14704fce..a7958b9faded288c5880b8ffeb28b2110081b84c 100644
+--- a/launcher/electron/preload.cjs
++++ b/launcher/electron/preload.cjs
+@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
+     browserInteractionMode,
+   ),
+   openExternal: (url) => ipcRenderer.invoke("launcher:open-external", url),
++  openSentraOnboarding: () => ipcRenderer.invoke("launcher:open-sentra-onboarding"),
+   setBrowserBounds: (bounds) => ipcRenderer.invoke("launcher:browser-bounds", bounds),
+   setBrowserSurfaceActive: (active) => ipcRenderer.invoke("launcher:browser-surface-active", active),
+   showBrowser: () => ipcRenderer.invoke("launcher:browser-show"),
+diff --git a/launcher/electron/runtime-install.cjs b/launcher/electron/runtime-install.cjs
+index f516eace38b9d81bd351f2097b69857d186c2019..33e1efa618765133695ee2b84f2e6d3e6d3ad102 100644
+--- a/launcher/electron/runtime-install.cjs
++++ b/launcher/electron/runtime-install.cjs
+@@ -2,6 +2,7 @@ const { createHash } = require("node:crypto");
+ const fs = require("node:fs");
+ const path = require("node:path");
+ const { renameAtomicFile } = require("./atomic-file.cjs");
++const { recoverOrphanedRuntimeLock } = require("./orphan-runtime-recovery.cjs");
+ const { runtimeBundlePaths } = require("./runtime-command.cjs");
+ 
+ const DEFAULT_SOURCE_WAIT_TIMEOUT_MS = 30_000;
+@@ -252,6 +253,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
+     });
+     validateRuntimeBundle(temporary, expectedIdentity);
+     if (fs.existsSync(destination)) {
++      recoverOrphanedRuntimeLock({ coreHome, destination });
+       renameAtomicFile(destination, previous);
+       previousMoved = true;
+     }
 diff --git a/launcher/electron/runtime-supervisor.cjs b/launcher/electron/runtime-supervisor.cjs
-index 682cdd4..57c866b 100644
+index 682cdd40285cca3354dab005f4a7b27c7fd89d37..130fb4577f64bbc14849bb01871a703867535400 100644
 --- a/launcher/electron/runtime-supervisor.cjs
 +++ b/launcher/electron/runtime-supervisor.cjs
 @@ -10,7 +10,7 @@ const {
@@ -332,28 +577,29 @@ index 682cdd4..57c866b 100644
  
  const RESTART_WINDOW_MS = 60_000;
  const MAX_RESTARTS_PER_WINDOW = 5;
-@@ -28,6 +28,10 @@ const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
+@@ -27,6 +27,11 @@ const BOOT_TIME_CLOCK_TOLERANCE_MS = 5_000;
+ const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
  
  const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
- 
 +function sentraManagedHarness() {
-+  return Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim());
++  return process.env.SENTRA_MANAGED_TUNNEL === "1"
++    || Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim());
 +}
 +
+ 
  function collectLines(stream, onLine, onError) {
    let buffered = "";
-   stream.on("data", (chunk) => {
-@@ -197,6 +201,9 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
+@@ -196,6 +201,9 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
+   } else if (config.purpose !== undefined) {
      throw new Error("Production launcher refuses a DEV harness configuration");
    }
-   if (config.solAvailable === undefined) config = { ...config, solAvailable: true };
 +  if (sentraManagedHarness()) {
 +    config = { ...config, appName: "SENTRA tunnel", automaticAppName: "SENTRA tunnel", browserInteractionMode: "automatic" };
 +  }
+   if (config.solAvailable === undefined) config = { ...config, solAvailable: true };
    if (config.browserInteractionMode === undefined) {
      config.browserInteractionMode = "automatic";
-   }
-@@ -300,7 +307,7 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
+@@ -300,7 +308,7 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
        }
      }
    };
@@ -362,10 +608,10 @@ index 682cdd4..57c866b 100644
      validateTunnel(config.tunnel, "tunnel");
      if (config.automaticTunnel !== undefined) validateTunnel(config.automaticTunnel, "automaticTunnel");
      if (config.manualTunnel !== undefined) validateTunnel(config.manualTunnel, "manualTunnel");
-@@ -552,6 +559,13 @@ class RuntimeSupervisor {
-   }
+@@ -553,6 +561,13 @@ class RuntimeSupervisor {
  
    runtimeCommand(args) {
+     if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();
 +    if (sentraManagedHarness()) {
 +      return embeddedRuntimeInvocation({
 +        app: this.app,
@@ -373,10 +619,10 @@ index 682cdd4..57c866b 100644
 +        args,
 +      });
 +    }
-     if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();
      return this.runtimeInvocationFactory({
        app: this.app,
-@@ -985,7 +999,7 @@ class RuntimeSupervisor {
+       sourceRoot: this.sourceRoot,
+@@ -985,7 +1000,7 @@ class RuntimeSupervisor {
    }
  
    async startTunnel(config, operationName = "runtime-start", { forceRestart = false } = {}) {
@@ -385,7 +631,7 @@ index 682cdd4..57c866b 100644
      this.assertTunnelClientReady(config);
      // Every acquisition binds diagnostics to this runtime, including adoption of an existing alias.
      this.tunnelHealthBaseUrl = null;
-@@ -1347,11 +1361,11 @@ class RuntimeSupervisor {
+@@ -1347,11 +1362,11 @@ class RuntimeSupervisor {
      else if (tunnelOnly) throw new Error("DEV runtime cannot recover a Responses daemon");
      else await this.startDaemon(config);
      if (!tunnelOnly && !this.daemon) throw new Error("Responses proxy is unavailable after runtime recovery");
@@ -399,7 +645,7 @@ index 682cdd4..57c866b 100644
        await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, "runtime-recovery");
      }
      if (!this.tryWriteState("ready")) {
-@@ -1426,7 +1440,7 @@ class RuntimeSupervisor {
+@@ -1426,7 +1441,7 @@ class RuntimeSupervisor {
  
    async ownedRuntimeReady(config) {
      if (this.launcherProfile === "development") {
@@ -408,7 +654,7 @@ index 682cdd4..57c866b 100644
      }
      const daemon = this.daemon;
      if (!daemon
-@@ -1436,7 +1450,7 @@ class RuntimeSupervisor {
+@@ -1436,7 +1451,7 @@ class RuntimeSupervisor {
        || !await this.proxyHealth(config, 2_000, daemon.pid, true)) {
        return false;
      }
@@ -417,7 +663,7 @@ index 682cdd4..57c866b 100644
      return Boolean(this.tunnel && await this.tunnelHealth(config));
    }
  
-@@ -1569,7 +1583,7 @@ class RuntimeSupervisor {
+@@ -1569,7 +1584,7 @@ class RuntimeSupervisor {
    }
  
    async adoptConfiguredTunnelForStop(config) {
@@ -426,7 +672,7 @@ index 682cdd4..57c866b 100644
      const health = await this.waitForKnownTunnelStatus(config);
      if (tunnelRuntimeStopped(health)) {
        return;
-@@ -1742,7 +1756,7 @@ class RuntimeSupervisor {
+@@ -1742,7 +1757,7 @@ class RuntimeSupervisor {
        );
      }
      let managedTunnelRunning = false;
@@ -435,7 +681,7 @@ index 682cdd4..57c866b 100644
        const tunnelHealth = await this.waitForKnownTunnelStatus(config);
        managedTunnelRunning = !tunnelRuntimeStopped(tunnelHealth);
        if (managedTunnelRunning
-@@ -1966,7 +1980,7 @@ class RuntimeSupervisor {
+@@ -1966,7 +1981,7 @@ class RuntimeSupervisor {
          ? await this.proxyHealth(config)
          : false;
        const runtimeMayBeLive = healthyRuntime || runtimeOwnershipMayBeLive(ownershipState);
@@ -444,7 +690,7 @@ index 682cdd4..57c866b 100644
          && !this.tunnel
          && (runtimeMayBeLive || !ownershipState)) {
          await this.adoptConfiguredTunnelForStop(config);
-@@ -2011,7 +2025,7 @@ class RuntimeSupervisor {
+@@ -2011,7 +2026,7 @@ class RuntimeSupervisor {
        return { status: "stopped" };
      } catch (error) {
        const compensationErrors = [];
@@ -454,14 +700,14 @@ index 682cdd4..57c866b 100644
            await this.startTunnel(config);
          } catch (caught) {
 diff --git a/launcher/src/App.tsx b/launcher/src/App.tsx
-index eaf177d..1d68488 100644
+index e9d3fac8840cd5b407697e56d58fa650609afc9b..54ee3c10aded4cce9c82c795cc9050ba104f77c4 100644
 --- a/launcher/src/App.tsx
 +++ b/launcher/src/App.tsx
-@@ -1280,15 +1280,20 @@ function McpSurface({
+@@ -1281,15 +1281,20 @@ function McpSurface({
    const busy = localBusy || operation?.status === "running";
    const [doctor, setDoctor] = useState<DoctorReport | null>(null);
    const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
-+  const sentraManaged = snapshot.connectorNames.automatic === "SENTRA tunnel";
++  const sentraManaged = snapshot.sentraManaged || snapshot.connectorNames.automatic === "SENTRA tunnel";
    const manualInteraction = interactionMode === "manual";
 -  const steps = useMemo(() => [
 +  const steps = useMemo(() => sentraManaged ? [
@@ -480,7 +726,7 @@ index eaf177d..1d68488 100644
    const guideMedia = MCP_GUIDE_MEDIA[step];
  
    const move = async (next: number) => {
-@@ -1317,12 +1322,14 @@ function McpSurface({
+@@ -1318,12 +1323,14 @@ function McpSurface({
      setLocalBusy(true);
      setError(null);
      try {
@@ -497,16 +743,37 @@ index eaf177d..1d68488 100644
        setRuntimeKey("");
        setTunnelId("");
        setCredentialsConfigured(true);
-@@ -1401,7 +1408,7 @@ function McpSurface({
+@@ -1402,7 +1409,28 @@ function McpSurface({
                </div>
              </header>
  
 -            {step === 0 ? (
++            {step === 0 && sentraManaged ? (
++              <div className="saved-credentials">
++                <NoticeRow icon="check" tone="success">
++                  <span>
++                    <strong>Managed by SENTRA</strong>
++                    <small>
++                      Tunnel ID, Runtime API key, DPAPI storage, MCP health, and lifecycle are owned by SENTRA.
++                      Codex Web never stores a second tunnel credential set.
++                    </small>
++                  </span>
++                </NoticeRow>
++                <div className="inline-actions">
++                  <SecondaryButton
++                    icon="external"
++                    onClick={() => void api!.openSentraOnboarding().catch((cause) => setError(messageOf(cause)))}
++                  >
++                    Open SENTRA Quick Start
++                  </SecondaryButton>
++                </div>
++              </div>
++            ) : null}
 +            {step === 0 && !sentraManaged ? (
                <div className="inline-actions">
                  <SecondaryButton icon="external" onClick={() => void openExternal(snapshot.urls.tunnels)}>
                    {copy.openTunnels}
-@@ -1412,7 +1419,7 @@ function McpSurface({
+@@ -1413,22 +1441,28 @@ function McpSurface({
                </div>
              ) : null}
              {step === 1 ? (
@@ -515,8 +782,14 @@ index eaf177d..1d68488 100644
                  <div className="saved-credentials">
                    <NoticeRow icon="check" tone="success">
                      <span>
-@@ -1420,14 +1427,16 @@ function McpSurface({
-                       <small>{copy.credentialsConfiguredBody}</small>
+-                      <strong>{copy.credentialsConfigured}</strong>
+-                      <small>{copy.credentialsConfiguredBody}</small>
++                      <strong>{sentraManaged ? "SENTRA credentials ready" : copy.credentialsConfigured}</strong>
++                      <small>
++                        {sentraManaged
++                          ? "Credentials remain in SENTRA's DPAPI-protected store. This launcher only reuses the SENTRA tunnel."
++                          : copy.credentialsConfiguredBody}
++                      </small>
                      </span>
                    </NoticeRow>
 -                  <button
@@ -534,7 +807,7 @@ index eaf177d..1d68488 100644
                  </div>
                ) : (
                  <div className="field-list">
-@@ -1481,7 +1490,9 @@ function McpSurface({
+@@ -1482,7 +1516,9 @@ function McpSurface({
                  <NoticeRow icon="alert" tone="warning">
                    {manualInteraction
                      ? copy.manualConnectorNotice
@@ -545,7 +818,7 @@ index eaf177d..1d68488 100644
                  </NoticeRow>
                  <div className="connector-name">
                    <span>{copy.connectorName}</span>
-@@ -1518,12 +1529,12 @@ function McpSurface({
+@@ -1519,12 +1555,12 @@ function McpSurface({
            <PrimaryButton
              disabled={
                busy
@@ -561,7 +834,7 @@ index eaf177d..1d68488 100644
            </PrimaryButton>
          ) : null}
          {step === 2 ? (
-@@ -2207,9 +2218,11 @@ function FieldRow({ children, label }: { children: ReactNode; label: string }) {
+@@ -2236,9 +2272,11 @@ function FieldRow({ children, label }: { children: ReactNode; label: string }) {
  }
  
  function DoctorSummary({ copy, language, report }: { copy: Copy; language: Language; report: DoctorReport }) {
@@ -577,12 +850,12 @@ index eaf177d..1d68488 100644
      <div className={`doctor-summary${report.ok ? " is-healthy" : ""}`}>
        <header>
 diff --git a/launcher/src/i18n.ts b/launcher/src/i18n.ts
-index a06efd0..9ae5b29 100644
+index 3ffaf193d1032867b80640e92450427c57479618..e458db4ef3101f3146244c5547dbdef31af08e8f 100644
 --- a/launcher/src/i18n.ts
 +++ b/launcher/src/i18n.ts
-@@ -118,26 +118,26 @@ const en = {
-   guideVideo: "Guide video",
-   expandGuideVideo: "Expand guide video",
+@@ -120,26 +120,26 @@ const en = {
+   playGuideVideo: "Play video",
+   pauseGuideVideo: "Pause video",
    closeGuideVideo: "Close expanded guide video",
 -  mcpStepOne: "Create a tunnel and API key",
 -  mcpStepOneBody: "Create an OpenAI tunnel, copy its Tunnel ID, and create a regular API key with Tunnels Read + Use (free; the key is required only to run the tunnel). (Don't forget to create a ChatGPT workspace.)",
@@ -622,7 +895,7 @@ index a06efd0..9ae5b29 100644
    openConnectors: "Open ChatGPT Plugins",
    connectorName: "Connector name",
 diff --git a/launcher/src/types.ts b/launcher/src/types.ts
-index 4c191f8..b33e2fe 100644
+index 4c191f8067dd283c6d7b6475e130fd7a1937a3d5..7af04e559395a96dae76ddce7d2c44e7ca3c1c21 100644
 --- a/launcher/src/types.ts
 +++ b/launcher/src/types.ts
 @@ -82,7 +82,7 @@ export interface DoctorCheck {
@@ -634,8 +907,145 @@ index 4c191f8..b33e2fe 100644
    checks: DoctorCheck[];
  }
  
+@@ -109,6 +109,7 @@ export interface LauncherSnapshot {
+   connectorName: string;
+   connectorNames: Record<BrowserInteractionMode, string>;
+   mcpCredentialsConfigured: boolean;
++  sentraManaged: boolean;
+   logs: LogRecord[];
+   urls: {
+     github: string;
+@@ -133,6 +134,7 @@ export interface LauncherApi {
+   openSocial(target: "github" | "x"): Promise<LauncherState>;
+   completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
+   openExternal(url: string): Promise<boolean>;
++  openSentraOnboarding(): Promise<boolean>;
+   setBrowserBounds(bounds: { x: number; y: number; width: number; height: number }): Promise<boolean>;
+   setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;
+   showBrowser(): Promise<BrowserState>;
+diff --git a/launcher/tests/packaging-contract.test.cjs b/launcher/tests/packaging-contract.test.cjs
+index d96cc16bce2115aa606a269d6b1a6f95c4579f30..de34cc3ceb6c5210bfe8d6327ae300d3965a1029 100644
+--- a/launcher/tests/packaging-contract.test.cjs
++++ b/launcher/tests/packaging-contract.test.cjs
+@@ -25,6 +25,25 @@ test("the full verification gate audits launcher dependencies", () => {
+   assert.match(verify, /await run\(\["run", "launcher:audit"\]\);/);
+ });
+ 
++test("SENTRA browser-host-only mode never replaces the durable runtime or starts owned services", () => {
++  const main = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
++  assert.match(main, /SENTRA_BROWSER_HOST_ONLY/);
++  assert.match(
++    main,
++    /SENTRA_BROWSER_HOST_ONLY && app\.isPackaged[\s\S]*path\.join\(process\.resourcesPath, "runtime"\)/,
++  );
++  assert.match(
++    main,
++    /if \(SENTRA_BROWSER_HOST_ONLY && app\.isPackaged\)[\s\S]*return installedRuntimeRoot/,
++  );
++  assert.match(main, /if \(!launcherSmokeTest && !SENTRA_BROWSER_HOST_ONLY\) void updateController\.checkOnce\(\)/);
++  assert.match(main, /if \(SENTRA_BROWSER_HOST_ONLY\) \{[\s\S]*sentra\.browser_host_only_ready/);
++  assert.match(
++    main,
++    /if \(SENTRA_BROWSER_HOST_ONLY\) \{[\s\S]*app\.exit\(1\);[\s\S]*return;/,
++  );
++});
++
+ test("launcher publishes native packages for all supported desktop operating systems", () => {
+   assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
+   assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");
+@@ -384,3 +403,18 @@ test("Windows packages embed the checksummed Bun baseline runtime for CPUs witho
+   assert.match(baseline, /Get-FileHash[^\n]+SHA256/);
+   assert.match(baseline, /CODEX_CHATGPT_WEB_EMBEDDED_BUN=/);
+ });
++
++test("SENTRA-managed launcher delegates onboarding to SENTRA Desktop", () => {
++  const main = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
++  const preload = fs.readFileSync(path.join(launcherRoot, "electron", "preload.cjs"), "utf8");
++  const types = fs.readFileSync(path.join(launcherRoot, "src", "types.ts"), "utf8");
++  const appSource = fs.readFileSync(path.join(launcherRoot, "src", "App.tsx"), "utf8");
++  assert.match(main, /SENTRA_ONBOARDING_URL = "sentra:\/\/onboarding"/);
++  assert.match(main, /sentraManaged: Boolean\(process\.env\.SENTRA_WEB_GATEWAY_URL/);
++  assert.match(main, /launcher:open-sentra-onboarding/);
++  assert.match(preload, /openSentraOnboarding/);
++  assert.match(types, /sentraManaged: boolean/);
++  assert.match(types, /openSentraOnboarding\(\): Promise<boolean>/);
++  assert.match(appSource, /Managed by SENTRA/);
++  assert.match(appSource, /openSentraOnboarding\(\)/);
++});
+diff --git a/launcher/tests/runtime-install-orphan.test.cjs b/launcher/tests/runtime-install-orphan.test.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..c8956be54c90b5db10cc7a5a4fc136f21680438e
+--- /dev/null
++++ b/launcher/tests/runtime-install-orphan.test.cjs
+@@ -0,0 +1,66 @@
++const test = require("node:test");
++const assert = require("node:assert/strict");
++const fs = require("node:fs");
++const os = require("node:os");
++const path = require("node:path");
++const { recoverOrphanedRuntimeLock } = require("../electron/orphan-runtime-recovery.cjs");
++
++function fixture() {
++  const root = fs.mkdtempSync(path.join(os.tmpdir(), "codex-web-gpt-orphan-"));
++  const coreHome = path.join(root, "core-home");
++  const destination = path.join(coreHome, "versions", "6.1.1-win32-x64");
++  const stateDir = path.join(coreHome, "runtime");
++  fs.mkdirSync(destination, { recursive: true });
++  fs.mkdirSync(stateDir, { recursive: true });
++  return { root, coreHome, destination, stateDir };
++}
++test("stops a verified orphan runtime daemon before replacement", () => {
++  const { root, coreHome, destination, stateDir } = fixture();
++  fs.writeFileSync(path.join(stateDir, "launcher-supervisor.json"), JSON.stringify({
++    version: 1, ownerPid: 111, daemonPid: 222, tunnelPid: null,
++    status: "ready", updatedAt: new Date().toISOString(),
++  }));
++  const alive = new Set([222]);
++  const calls = [];
++  const spawnSyncFn = (command, args) => {
++    calls.push([command, args]);
++    if (command === "powershell.exe") return {
++      status: 0,
++      stdout: JSON.stringify({
++        ExecutablePath: path.win32.join(destination, "runtime", "bun.exe"),
++        CommandLine: `"${path.win32.join(destination, "runtime", "bun.exe")}" "${path.win32.join(destination, "app", "cli.js")}" serve`,
++      }),
++    };    alive.delete(222);
++    return { status: 0 };
++  };
++  try {
++    assert.equal(recoverOrphanedRuntimeLock({
++      coreHome, destination, platform: "win32",
++      processRunningFn: pid => alive.has(pid), spawnSyncFn,
++    }), true);
++    assert.equal(alive.has(222), false);
++    assert.equal(calls.length, 2);
++  } finally {
++    fs.rmSync(root, { recursive: true, force: true });
++  }
++});
++test("refuses an orphan PID outside the installed runtime", () => {
++  const { root, coreHome, destination, stateDir } = fixture();
++  fs.writeFileSync(path.join(stateDir, "launcher-supervisor.json"), JSON.stringify({
++    version: 1, ownerPid: 333, daemonPid: 444, tunnelPid: null,
++    status: "ready", updatedAt: new Date().toISOString(),
++  }));
++  const alive = new Set([444]);
++  const spawnSyncFn = () => ({ status: 0, stdout: JSON.stringify({
++    ExecutablePath: "C:\\Windows\\System32\\notepad.exe",
++    CommandLine: "notepad.exe serve",
++  }) });
++  try {
++    assert.throws(() => recoverOrphanedRuntimeLock({
++      coreHome, destination, platform: "win32",
++      processRunningFn: pid => alive.has(pid), spawnSyncFn,
++    }), /Refusing to stop orphan PID/);
++    assert.equal(alive.has(444), true);  } finally {
++    fs.rmSync(root, { recursive: true, force: true });
++  }
++});
 diff --git a/src/adapters/chatgpt-web/browser-helper-main.ts b/src/adapters/chatgpt-web/browser-helper-main.ts
-index 1c497e7..0204cd9 100644
+index 1c497e72fddc984510c0a12cfb8c9d83f6fb255a..0204cd9f1af54463d3f75b345048113232120a0a 100644
 --- a/src/adapters/chatgpt-web/browser-helper-main.ts
 +++ b/src/adapters/chatgpt-web/browser-helper-main.ts
 @@ -24,6 +24,7 @@ interface RunMessage {
@@ -667,10 +1077,10 @@ index 1c497e7..0204cd9 100644
      reasoning: message.turn.reasoning,
      ...(message.turn.modelFamily ? { modelFamily: message.turn.modelFamily } : {}),
 diff --git a/src/adapters/chatgpt-web/browser-worker.ts b/src/adapters/chatgpt-web/browser-worker.ts
-index 99ceacb..a2e5228 100644
+index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed2fe844c7 100644
 --- a/src/adapters/chatgpt-web/browser-worker.ts
 +++ b/src/adapters/chatgpt-web/browser-worker.ts
-@@ -131,7 +131,11 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
+@@ -132,7 +132,11 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
  export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
  export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
  export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
@@ -683,7 +1093,7 @@ index 99ceacb..a2e5228 100644
  const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
  const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
  const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
-@@ -565,10 +569,10 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -573,10 +577,10 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
    // The visible sheet can be aria-hidden during hydration. Include those controls in the role
    // query but still require visibility; never select a hidden duplicate or switch locator rules.
    const personalized = page
@@ -696,7 +1106,7 @@ index 99ceacb..a2e5228 100644
      .filter({ visible: true });
    let personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
    let unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
-@@ -614,7 +618,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -622,7 +626,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
          );
        }
        throw chatGptConnectorUnavailableError(
@@ -705,7 +1115,7 @@ index 99ceacb..a2e5228 100644
        );
      }
    }
-@@ -643,7 +647,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -651,7 +655,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
      );
      const choice = menu
        .locator(CHATGPT_PERSONALIZATION_CHOICE_SELECTOR)
@@ -714,7 +1124,7 @@ index 99ceacb..a2e5228 100644
      if (await runChatGptPersonalizationStep(() => choice.count(), deadline, abortSignal) !== 1) {
        throw chatGptConnectorUnavailableError(
          "ChatGPT personalization menu did not expose one exact Personalized choice",
-@@ -1241,6 +1245,7 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
+@@ -1249,6 +1253,7 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
  
  export interface BrowserTurn {
    traceId: string;
@@ -722,7 +1132,7 @@ index 99ceacb..a2e5228 100644
    modelId: string;
    reasoning?: string;
    modelFamily?: "5.6" | "6";
-@@ -2042,7 +2047,7 @@ class ChatGptBrowserDiagnostics {
+@@ -2069,7 +2074,7 @@ class ChatGptBrowserDiagnostics {
  
  export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
    const configured = provider.chatgptWeb ?? {};
@@ -731,7 +1141,7 @@ index 99ceacb..a2e5228 100644
    const browserHost = configured.browserHost ?? "managed-chrome";
    const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
    const browserHelperScriptPath = configured.browserHelperScriptPath?.trim();
-@@ -3267,6 +3272,7 @@ export class ChatGptBrowserWorker {
+@@ -3331,6 +3336,7 @@ export class ChatGptBrowserWorker {
      const appResult = menuRows.filter({
        has: page.getByText(this.config.appName, { exact: true }),
      });
@@ -739,7 +1149,7 @@ index 99ceacb..a2e5228 100644
      if (new URL(page.url()).searchParams.get("temporary-chat") === "true") await ensureChatGptPersonalizedConnectorAccess(
        page,
        capture,
-@@ -3284,7 +3290,7 @@ export class ChatGptBrowserWorker {
+@@ -3348,7 +3354,7 @@ export class ChatGptBrowserWorker {
              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
            });
            await withBrowserTurnAbort(settleChatGptUi(), personalizationSignal);
@@ -748,7 +1158,7 @@ index 99ceacb..a2e5228 100644
              delay: 25,
              signal: personalizationSignal,
              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-@@ -3303,9 +3309,9 @@ export class ChatGptBrowserWorker {
+@@ -3367,9 +3373,9 @@ export class ChatGptBrowserWorker {
                  ? element.value : element.textContent ?? "",
                focused: element === document.activeElement,
              }), undefined, { timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: personalizationSignal });
@@ -760,7 +1170,7 @@ index 99ceacb..a2e5228 100644
                );
              }
            }
-@@ -3340,7 +3346,7 @@ export class ChatGptBrowserWorker {
+@@ -3404,7 +3410,7 @@ export class ChatGptBrowserWorker {
          await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
          await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
          await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
@@ -769,7 +1179,7 @@ index 99ceacb..a2e5228 100644
            delay: 25,
            signal: abortSignal,
            timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-@@ -4462,6 +4468,9 @@ export class ChatGptBrowserWorker {
+@@ -4561,6 +4567,9 @@ export class ChatGptBrowserWorker {
  
    private async runExclusive(turn: BrowserTurn): Promise<string> {
      if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -779,7 +1189,7 @@ index 99ceacb..a2e5228 100644
      if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
  
      const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-@@ -4496,7 +4505,19 @@ export class ChatGptBrowserWorker {
+@@ -4595,7 +4604,19 @@ export class ChatGptBrowserWorker {
          phase: "heartbeat",
          traceId: turn.traceId,
          helperPid: process.pid,
@@ -800,7 +1210,7 @@ index 99ceacb..a2e5228 100644
          const now = Date.now();
          if (now - lastHeartbeatFailureAt < 30_000) return;
          lastHeartbeatFailureAt = now;
-@@ -4509,6 +4530,18 @@ export class ChatGptBrowserWorker {
+@@ -4608,6 +4629,18 @@ export class ChatGptBrowserWorker {
      };
      try {
        if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
@@ -819,7 +1229,7 @@ index 99ceacb..a2e5228 100644
        if (turn.requireRetainedConversation && !reused) {
          throw chatGptRetainedConversationUnavailableError();
        }
-@@ -4518,7 +4551,20 @@ export class ChatGptBrowserWorker {
+@@ -4617,7 +4650,20 @@ export class ChatGptBrowserWorker {
        await turn.onPreparedSelected?.(reused);
        heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
        heartbeatTimer.unref?.();
@@ -842,7 +1252,7 @@ index 99ceacb..a2e5228 100644
        originalError = error;
        terminal = error instanceof ChatGptCompactionHandoffAccepted
 diff --git a/src/adapters/chatgpt-web/environment.ts b/src/adapters/chatgpt-web/environment.ts
-index bc9a9ff..e1404d0 100644
+index bc9a9ffe690d109f0092ed4ca4b8870e50bd8426..e1404d0b76ad669da525c8b952e584f3e32a37cf 100644
 --- a/src/adapters/chatgpt-web/environment.ts
 +++ b/src/adapters/chatgpt-web/environment.ts
 @@ -15,6 +15,8 @@ export interface ChatGptTurnEnvironment {
@@ -855,13 +1265,13 @@ index bc9a9ff..e1404d0 100644
  
  export interface ChatGptTurnIdentity {
 diff --git a/src/adapters/chatgpt-web/index.ts b/src/adapters/chatgpt-web/index.ts
-index 6043500..e7b730c 100644
+index 6043500a0634dd965ad767f67f35d33b19b9e5f0..7396e0dd2629f1c08acb8ed445a8120a250a3d83 100644
 --- a/src/adapters/chatgpt-web/index.ts
 +++ b/src/adapters/chatgpt-web/index.ts
-@@ -55,6 +55,17 @@ function brokerSocketPath(provider: CodexProviderConfig): string {
+@@ -54,6 +54,17 @@ function brokerSocketPath(provider: CodexProviderConfig): string {
+   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
    return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
  }
- 
 +function sentraTurnCapability(parsed: CodexParsedRequest): string | undefined {
 +  const raw = parsed._rawBody as Record<string, unknown> | undefined;
 +  const metadata = raw?.client_metadata as Record<string, unknown> | undefined;
@@ -873,9 +1283,9 @@ index 6043500..e7b730c 100644
 +  return capability;
 +}
 +
+ 
  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
    let resolvePromise!: (value: T) => void;
-   let rejectPromise!: (error: Error) => void;
 @@ -296,6 +307,16 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
  
  function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
@@ -919,7 +1329,7 @@ index 6043500..e7b730c 100644
              const identity = extractChatGptTurnIdentity(parsed);
              console.warn(
 diff --git a/src/adapters/chatgpt-web/launcher-helper-client.ts b/src/adapters/chatgpt-web/launcher-helper-client.ts
-index 9c1ceac..402a429 100644
+index 9c1ceac522d70e1c00b3ddfdde3f66bfbe37426a..402a429823be0d870bac6a764b48d15dfe4021fc 100644
 --- a/src/adapters/chatgpt-web/launcher-helper-client.ts
 +++ b/src/adapters/chatgpt-web/launcher-helper-client.ts
 @@ -281,6 +281,7 @@ export class LauncherBrowserHelperClient {
@@ -931,7 +1341,7 @@ index 9c1ceac..402a429 100644
              reasoning: turn.reasoning,
              ...(turn.modelFamily ? { modelFamily: turn.modelFamily } : {}),
 diff --git a/src/adapters/chatgpt-web/turn-broker.ts b/src/adapters/chatgpt-web/turn-broker.ts
-index f218978..a2ff762 100644
+index f218978630a4b6b830be70797565421471871fc7..9f72a0ce1342e3fb39eea6ce5a0b284158b1e61d 100644
 --- a/src/adapters/chatgpt-web/turn-broker.ts
 +++ b/src/adapters/chatgpt-web/turn-broker.ts
 @@ -81,6 +81,8 @@ interface TurnChannel {
@@ -1004,10 +1414,10 @@ index f218978..a2ff762 100644
      channel.completionCommitted = true;
      channel.completionRevision = revision;
      console.info(
-@@ -467,6 +490,28 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -466,6 +489,28 @@ export class TurnBroker implements TurnBrokerOwner {
+     );
      return true;
    }
- 
 +  private async authorizeSentra(
 +    capability: string | undefined,
 +    action: "register" | "tool" | "prepare" | "complete",
@@ -1030,9 +1440,9 @@ index f218978..a2ff762 100644
 +    if (!response.ok) throw new Error(`SENTRA TurnCapability rejected ${action}: HTTP ${response.status}`);
 +  }
 +
+ 
    waitForRetirement(token: string, signal?: AbortSignal): Promise<void> {
      this.prune();
-     const channel = this.channels.get(token);
 @@ -612,6 +657,10 @@ export class TurnBroker implements TurnBrokerOwner {
    revoke(token: string, reason = new Error("Codex turn binding was revoked")): void {
      const channel = this.channels.get(token);
@@ -1114,8 +1524,521 @@ index f218978..a2ff762 100644
      const callId = opaqueId("call");
      const toolRequest: BrokerToolRequest = {
        callId,
+diff --git a/src/adapters/gemini-web/index.ts b/src/adapters/gemini-web/index.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..f73dfec992102a3d6793a83506745fc6d08b72da
+--- /dev/null
++++ b/src/adapters/gemini-web/index.ts
+@@ -0,0 +1,507 @@
++import { randomUUID } from "node:crypto";
++import { existsSync, readFileSync } from "node:fs";
++import Ajv from "ajv";
++import type { AppConfig } from "../../config";
++import { expandUserPath } from "../../config";
++import type { GeminiWebModelRoute } from "../../gemini-web-models";
++import {
++  namespacedToolName,
++  type AdapterEvent,
++  type CodexContentPart,
++  type CodexMessage,
++  type CodexParsedRequest,
++  type CodexTool,
++  type CodexProviderContinuationState,
++  type CodexUsage,
++} from "../../types";
++import type { IncomingMeta, ProviderAdapter } from "../base";
++
++interface RelaySubmission {
++  job_id?: unknown;
++}
++
++interface RelayResult {
++  pending?: unknown;
++  job_id?: unknown;
++  task_id?: unknown;
++  status?: unknown;
++  result?: unknown;
++  error?: unknown;
++  conversation_url?: unknown;
++  conversation_id?: unknown;
++  may_have_sent?: unknown;
++  phase?: unknown;
++}
++
++interface GeminiContinuation {
++  conversationUrl: string;
++  model: string;
++}
++
++const TOOL_OPEN = "<SENTRA_TOOL_CALLS>";
++const TOOL_CLOSE = "</SENTRA_TOOL_CALLS>";
++
++function textOfContent(content: string | CodexContentPart[]): string {
++  if (typeof content === "string") return content;
++  return content
++    .map(part => part.type === "text" ? part.text : "[image attached]")
++    .join("\n");
++}
++
++function formatMessage(message: CodexMessage): string {
++  switch (message.role) {
++    case "user":
++      return "USER:\n" + textOfContent(message.content);
++    case "developer":
++      return "DEVELOPER:\n" + textOfContent(message.content);
++    case "agentMessage":
++      return "AGENT MESSAGE:\n" + textOfContent(message.content);
++    case "toolResult":
++      return [
++        `TOOL RESULT ${message.toolName || "unknown"} (${message.toolCallId}):`,
++        textOfContent(message.content),
++      ].join("\n");
++    case "assistant": {
++      const parts = message.content
++        .map(part => {
++          if (part.type === "text") return part.text;
++          if (part.type === "toolCall") {
++            return `[previous tool call ${part.name} ${JSON.stringify(part.arguments)}]`;
++          }
++          return "";
++        })
++        .filter(Boolean);
++      return "ASSISTANT:\n" + parts.join("\n");
++    }
++  }
++}
++
++function incrementalMessages(parsed: CodexParsedRequest): CodexMessage[] {
++  const messages = parsed.context.messages;
++  const continuation = geminiContinuation(parsed);
++  if (!continuation) return messages;
++  let lastAssistant = -1;
++  for (let index = messages.length - 1; index >= 0; index--) {
++    if (messages[index]?.role === "assistant") {
++      lastAssistant = index;
++      break;
++    }
++  }
++  return lastAssistant >= 0 ? messages.slice(lastAssistant + 1) : messages;
++}
++
++function toolDescriptor(tool: CodexTool): string {
++  const wire = namespacedToolName(tool.namespace, tool.name);
++  if (tool.freeform) {
++    return [
++      `- ${wire}: ${tool.description || "freeform tool"}`,
++      "  arguments: {\"input\":\"raw tool input\"}",
++    ].join("\n");
++  }
++  return [
++    `- ${wire}: ${tool.description || "tool"}`,
++    `  JSON schema: ${JSON.stringify(tool.parameters)}`,
++  ].join("\n");
++}
++
++function toolProtocol(parsed: CodexParsedRequest): string {
++  const tools = parsed.context.tools ?? [];
++  if (tools.length === 0 || parsed.options.toolChoice === "none") return "";
++  const allowed = parsed.options.toolChoice;
++  const constraint = typeof allowed === "object"
++    ? "You may call only: " + (
++      "name" in allowed
++        ? allowed.name
++        : allowed.allowedTools.join(", ")
++    )
++    : allowed === "required"
++    ? "You MUST call one listed tool before giving a final answer."
++    : "Call a tool only when it is necessary.";
++  return [
++    "",
++    "TOOLS AVAILABLE THROUGH CODEX:",
++    ...tools.map(toolDescriptor),
++    "",
++    constraint,
++    "To request one or more tools, output ONLY this envelope and no other text:",
++    `${TOOL_OPEN}{\"calls\":[{\"name\":\"tool_name\",\"arguments\":{}}]}${TOOL_CLOSE}`,
++    "Do not invent tool names. Do not claim a tool result before Codex returns it.",
++  ].join("\n");
++}
++
++function buildPrompt(parsed: CodexParsedRequest): string {
++  const sections: string[] = [];
++  if (!geminiContinuation(parsed) && parsed.context.systemPrompt?.length) {
++    sections.push("SYSTEM/DEVELOPER INSTRUCTIONS:\n" + parsed.context.systemPrompt.join("\n\n"));
++  }
++  const messages = incrementalMessages(parsed);
++  if (messages.length) sections.push(messages.map(formatMessage).join("\n\n"));
++  if (parsed.options.outputFormat) {
++    sections.push(
++      "OUTPUT CONTRACT:\nReturn content conforming to this JSON schema:\n"
++      + JSON.stringify(parsed.options.outputFormat.schema),
++    );
++  }
++  sections.push(toolProtocol(parsed));
++  return sections.filter(Boolean).join("\n\n").trim();
++}
++
++function geminiContinuation(parsed: CodexParsedRequest): GeminiContinuation | undefined {
++  const raw = parsed._providerState?.geminiWeb;
++  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
++  const conversationUrl = (raw as Record<string, unknown>).conversationUrl;
++  const model = (
++    (raw as Record<string, unknown>).model
++    ?? (raw as Record<string, unknown>).mode
++  );
++  if (
++    typeof conversationUrl !== "string"
++    || !/^https:\/\/gemini\.google\.com\/app\/[A-Za-z0-9_-]{1,256}$/.test(conversationUrl)
++  ) return undefined;
++  return {
++    conversationUrl,
++    model: typeof model === "string" ? model : "",
++  };
++}
++
++function providerState(conversationUrl: string, model: string): CodexProviderContinuationState {
++  return {
++    geminiWeb: {
++      conversationUrl,
++      model,
++    },
++  };
++}
++
++function estimatedUsage(input: string, output: string): CodexUsage {
++  const inputTokens = Math.max(1, Math.ceil(input.length / 4));
++  const outputTokens = Math.max(1, Math.ceil(output.length / 4));
++  return {
++    inputTokens,
++    outputTokens,
++    totalTokens: inputTokens + outputTokens,
++    estimated: true,
++  };
++}
++
++function imageDataUrls(parsed: CodexParsedRequest): string[] {
++  const out: string[] = [];
++  for (const message of incrementalMessages(parsed)) {
++    const content = "content" in message ? message.content : undefined;
++    if (!Array.isArray(content)) continue;
++    for (const part of content) {
++      if (part.type !== "image") continue;
++      if (!/^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(part.imageUrl)) {
++        throw new Error("Gemini Web supports only inline PNG/JPEG data URLs through the Edge relay");
++      }
++      out.push(part.imageUrl);
++    }
++  }
++  if (out.length > 2) {
++    throw new Error("Gemini Web relay accepts at most two inline images per turn");
++  }
++  return out;
++}
++
++interface ParsedGeminiToolCall {
++  id: string;
++  name: string;
++  argumentsJson: string;
++}
++
++function parseToolCalls(text: string, parsed: CodexParsedRequest): ParsedGeminiToolCall[] {
++  const start = text.indexOf(TOOL_OPEN);
++  const end = text.indexOf(TOOL_CLOSE);
++  if (start < 0 && end < 0) return [];
++  if (start < 0 || end < 0 || end <= start) {
++    throw new Error("Gemini emitted a malformed SENTRA tool envelope");
++  }
++  const before = text.slice(0, start).trim();
++  const after = text.slice(end + TOOL_CLOSE.length).trim();
++  if (before || after) {
++    throw new Error("Gemini mixed final text with a tool call; refusing ambiguous output");
++  }
++
++  let payload: unknown;
++  try {
++    payload = JSON.parse(text.slice(start + TOOL_OPEN.length, end).trim());
++  } catch {
++    throw new Error("Gemini tool envelope is not valid JSON");
++  }
++  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
++    throw new Error("Gemini tool envelope must be an object");
++  }
++  const calls = (payload as Record<string, unknown>).calls;
++  if (!Array.isArray(calls) || calls.length === 0 || calls.length > 16) {
++    throw new Error("Gemini tool envelope must contain 1..16 calls");
++  }
++  if (parsed.options.parallelToolCalls === false && calls.length > 1) {
++    throw new Error("Gemini requested parallel tools while parallel_tool_calls=false");
++  }
++  if (parsed.options.toolChoice === "none") {
++    throw new Error("Gemini requested a tool while tool_choice=none");
++  }
++
++  const tools = parsed.context.tools ?? [];
++  const ajv = new Ajv({ allErrors: true, strict: false });
++  return calls.map((value, index) => {
++    if (!value || typeof value !== "object" || Array.isArray(value)) {
++      throw new Error(`Gemini tool call ${index} must be an object`);
++    }
++    const record = value as Record<string, unknown>;
++    if (typeof record.name !== "string" || !record.name) {
++      throw new Error(`Gemini tool call ${index} is missing name`);
++    }
++    const tool = tools.find(candidate =>
++      namespacedToolName(candidate.namespace, candidate.name) === record.name
++    );
++    if (!tool) throw new Error(`Gemini requested unavailable tool ${record.name}`);
++
++    const forced = parsed.options.toolChoice;
++    if (
++      typeof forced === "object"
++      && "name" in forced
++      && forced.name !== record.name
++      && forced.name !== tool.name
++    ) {
++      throw new Error("Gemini requested a tool outside the forced tool choice");
++    }
++    if (
++      typeof forced === "object"
++      && "allowedTools" in forced
++      && !forced.allowedTools.includes(record.name)
++      && !forced.allowedTools.includes(tool.name)
++    ) {
++      throw new Error("Gemini requested a tool outside allowed_tools");
++    }
++
++    let args: unknown = record.arguments;
++    if (tool.freeform) {
++      if (typeof record.input === "string") args = { input: record.input };
++      if (
++        !args
++        || typeof args !== "object"
++        || Array.isArray(args)
++        || typeof (args as Record<string, unknown>).input !== "string"
++      ) {
++        throw new Error("Gemini freeform tool call requires arguments.input");
++      }
++    } else {
++      if (!args || typeof args !== "object" || Array.isArray(args)) {
++        throw new Error("Gemini function tool call requires an arguments object");
++      }
++      const validate = ajv.compile(tool.parameters);
++      if (!validate(args)) {
++        throw new Error(
++          `Gemini tool arguments failed schema for ${record.name}: ${ajv.errorsText(validate.errors)}`,
++        );
++      }
++    }
++    return {
++      id: "call_" + randomUUID().replaceAll("-", ""),
++      name: record.name,
++      argumentsJson: JSON.stringify(args),
++    };
++  });
++}
++
++async function relayJson(
++  url: string,
++  token: string,
++  init?: RequestInit,
++  fetchImpl: typeof fetch = globalThis.fetch,
++): Promise<Record<string, unknown>> {
++  const response = await fetchImpl(url, {
++    ...init,
++    headers: {
++      "authorization": "Bearer " + token,
++      ...(init?.body ? { "content-type": "application/json" } : {}),
++      ...(init?.headers ?? {}),
++    },
++  });
++  const text = await response.text();
++  let payload: unknown;
++  try {
++    payload = text ? JSON.parse(text) : {};
++  } catch {
++    throw new Error(`Gemini relay returned non-JSON HTTP ${response.status}`);
++  }
++  if (!response.ok) {
++    const detail = payload && typeof payload === "object"
++      ? JSON.stringify(payload)
++      : String(payload);
++    throw new Error(`Gemini relay HTTP ${response.status}: ${detail}`);
++  }
++  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
++    throw new Error("Gemini relay response must be an object");
++  }
++  return payload as Record<string, unknown>;
++}
++
++export class GeminiWebAdapter implements ProviderAdapter {
++  name = "gemini-web";
++
++  constructor(
++    private readonly config: AppConfig,
++    private readonly route: GeminiWebModelRoute,
++    private readonly fetchImpl: typeof fetch = globalThis.fetch,
++  ) {}
++
++  private token(): string {
++    const direct = process.env.OMA_RELAY_TOKEN?.trim();
++    if (direct) return direct;
++
++    const configured = this.config.geminiRelayTokenFile?.trim()
++      || process.env.SENTRA_EDGE_RELAY_TOKEN_PATH?.trim();
++    if (!configured) {
++      throw new Error(
++        "Gemini relay token is not configured; set OMA_RELAY_TOKEN or geminiRelayTokenFile",
++      );
++    }
++    const path = expandUserPath(configured);
++    if (!existsSync(path)) throw new Error(`Gemini relay token file does not exist: ${path}`);
++    const token = readFileSync(path, "utf8").trim();
++    if (!token) throw new Error("Gemini relay token file is empty");
++    return token;
++  }
++
++  async runTurn(
++    parsed: CodexParsedRequest,
++    incoming: IncomingMeta,
++    emit: (event: AdapterEvent) => void,
++  ): Promise<void> {
++    const token = this.token();
++    const continuation = geminiContinuation(parsed);
++    if (continuation?.model && continuation.model !== this.route.mode) {
++      throw new Error("Gemini continuation belongs to another model mode");
++    }
++    const prompt = buildPrompt(parsed);
++    if (prompt.length > 180_000) {
++      throw new Error("Gemini Web compiled prompt exceeds 180000 characters");
++    }
++    if (!prompt) throw new Error("Gemini Web turn has no new input");
++    const taskId = "codex-gemini-" + randomUUID().replaceAll("-", "");
++    const timeoutSec = 300;
++    const body = {
++      task_id: taskId,
++      prompt,
++      timeout_s: timeoutSec,
++      new_chat: !continuation,
++      conversation_url: continuation?.conversationUrl ?? null,
++      provider: "gemini",
++      model: this.route.mode,
++      images: imageDataUrls(parsed),
++    };
++    const submission = await relayJson(
++      this.config.geminiRelayBase + "/jobs/submit",
++      token,
++      { method: "POST", body: JSON.stringify(body), signal: incoming.abortSignal },
++      this.fetchImpl,
++    ) as RelaySubmission;
++    if (typeof submission.job_id !== "string" || !submission.job_id) {
++      throw new Error("Gemini relay did not return a job id");
++    }
++    const jobId = submission.job_id;
++    const deadline = Date.now() + timeoutSec * 1000;
++    let result: RelayResult | null = null;
++    try {
++      while (Date.now() < deadline) {
++        if (incoming.abortSignal?.aborted) {
++          throw new DOMException("Gemini Web turn cancelled", "AbortError");
++        }
++        emit({ type: "heartbeat" });
++        const waitSeconds = Math.min(5, Math.max(0.1, (deadline - Date.now()) / 1000));
++        const next = await relayJson(
++          this.config.geminiRelayBase
++            + `/jobs/wait?job_id=${encodeURIComponent(jobId)}&timeout_s=${waitSeconds}`,
++          token,
++          { signal: incoming.abortSignal },
++          this.fetchImpl,
++        ) as RelayResult;
++        if (next.pending === true) continue;
++        result = next;
++        break;
++      }
++    } catch (error) {
++      if (incoming.abortSignal?.aborted) {
++        try {
++          await relayJson(
++            this.config.geminiRelayBase + "/jobs/cancel",
++            token,
++            { method: "POST", body: JSON.stringify({ job_id: jobId }) },
++            this.fetchImpl,
++          );
++        } catch {
++          // Best-effort only. Relay lease/recovery remains authoritative.
++        }
++      }
++      throw error;
++    }
++    if (!result) throw new Error(`Gemini relay job ${jobId} timed out`);
++    if (result.job_id !== jobId || result.task_id !== taskId) {
++      throw new Error("Gemini relay response correlation mismatch");
++    }
++
++    await relayJson(
++      this.config.geminiRelayBase + "/jobs/ack",
++      token,
++      { method: "POST", body: JSON.stringify({ job_id: jobId }), signal: incoming.abortSignal },
++      this.fetchImpl,
++    );
++
++    if (result.status !== "COMPLETED") {
++      const uncertain = result.may_have_sent === true;
++      throw new Error(
++        `Gemini relay job failed${uncertain ? " after possible send" : ""}: `
++        + String(result.error ?? result.status ?? "unknown error"),
++      );
++    }
++    if (
++      typeof result.conversation_url !== "string"
++      || !/^https:\/\/gemini\.google\.com\/app\/[A-Za-z0-9_-]{1,256}$/.test(result.conversation_url)
++    ) {
++      throw new Error("Gemini relay returned an invalid conversation URL");
++    }
++    if (typeof result.result !== "string") {
++      throw new Error("Gemini relay returned a non-text result");
++    }
++
++    const terminalState = providerState(result.conversation_url, this.route.mode);
++    const usage = estimatedUsage(prompt, result.result);
++    const toolCalls = parseToolCalls(result.result.trim(), parsed);
++    if (toolCalls.length > 0) {
++      for (const toolCall of toolCalls) {
++        emit({ type: "tool_call_start", id: toolCall.id, name: toolCall.name });
++        emit({ type: "tool_call_delta", arguments: toolCall.argumentsJson });
++        emit({ type: "tool_call_end" });
++      }
++      emit({
++        type: "done",
++        stopReason: "tool_use",
++        endTurn: false,
++        usage,
++        providerState: terminalState,
++      });
++      return;
++    }
++
++    if (parsed.options.toolChoice === "required" && (parsed.context.tools?.length ?? 0) > 0) {
++      throw new Error("Gemini returned final text while tool_choice=required");
++    }
++    if (result.result) emit({ type: "text_delta", text: result.result, phase: "final_answer" });
++    emit({
++      type: "done",
++      stopReason: "stop",
++      endTurn: true,
++      usage,
++      providerState: terminalState,
++    });
++  }
++}
++export function createGeminiWebAdapter(
++  config: AppConfig,
++  route: GeminiWebModelRoute,
++  fetchImpl: typeof fetch = globalThis.fetch,
++): ProviderAdapter {
++  return new GeminiWebAdapter(config, route, fetchImpl);
++}
 diff --git a/src/cli.ts b/src/cli.ts
-index 006da67..782b2e9 100644
+index 006da679ae74532ec6da71bd575d9dbccf261083..782b2e9cf25df031768c417538cec620d971166b 100644
 --- a/src/cli.ts
 +++ b/src/cli.ts
 @@ -16,6 +16,7 @@ import {
@@ -1151,7 +2074,7 @@ index 006da67..782b2e9 100644
      ? (() => {
          const status = inspectCodexIntegration();
 diff --git a/src/codex-integration-shared.ts b/src/codex-integration-shared.ts
-index bb685f2..7921bd3 100644
+index bb685f29a7b567336f66ac6736071376ec9e1272..7921bd38695c0d5e6f262cdb7f4575e1e25c21aa 100644
 --- a/src/codex-integration-shared.ts
 +++ b/src/codex-integration-shared.ts
 @@ -264,6 +264,15 @@ export function getCodexJournalRecoveryPath(): string {
@@ -1171,7 +2094,7 @@ index bb685f2..7921bd3 100644
  }
  
 diff --git a/src/config.ts b/src/config.ts
-index 8a64e60..edeffaa 100644
+index 8a64e6032a2feb9e7ab0792bd2cf6af2285906bf..450257fef99a016a04666ca8f9ddcd512d86047c 100644
 --- a/src/config.ts
 +++ b/src/config.ts
 @@ -19,10 +19,10 @@ export type SubagentProtocol = "compatibility-v1" | "native";
@@ -1187,10 +2110,32 @@ index 8a64e60..edeffaa 100644
  
  export function isLegacyChatGptConnectorName(value: string): boolean {
    return (LEGACY_CHATGPT_CONNECTOR_NAMES as readonly string[]).includes(value);
-@@ -343,10 +343,23 @@ export function defaultChromeExecutable(
+@@ -88,6 +88,12 @@ export interface AppConfig {
+   experimentalSkillAttachments: boolean;
+   experimentalFreshConversationPerTurn: boolean;
+   useSavedChats: boolean;
++  /** Expose SENTRA-routed Gemini Web models in the Codex catalog. */
++  geminiWebEnabled: boolean;
++  /** Loopback SENTRA browser relay used by the Gemini adapter. */
++  geminiRelayBase: string;
++  /** Optional token file for the SENTRA browser relay. */
++  geminiRelayTokenFile?: string;
+   /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
+   zeroRiskProEnabled: boolean;
+   /** Optional adapter-silence budget for the Responses watchdog. */
+@@ -220,6 +226,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
+     experimentalSkillAttachments: false,
+     experimentalFreshConversationPerTurn: false,
+     useSavedChats: false,
++    geminiWebEnabled: false,
++    geminiRelayBase: "http://127.0.0.1:8765",
+     zeroRiskProEnabled: false,
+     autoApproveToolCalls: false,
+     controlToken: randomBytes(32).toString("base64url"),
+@@ -342,11 +350,24 @@ export function defaultChromeExecutable(
+   }
    return "/usr/bin/google-chrome";
  }
- 
 +function normalizeSentraConnectorIdentity(raw: Record<string, unknown>): void {
 +  const sentraManaged = Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim());
 +  const interactionMode = sentraManaged ? "automatic" : (raw.browserInteractionMode ?? "automatic");
@@ -1202,6 +2147,7 @@ index 8a64e60..edeffaa 100644
 +  if (interactionMode === "automatic") raw.appName = automaticName;
 +}
 +
+ 
  export function loadConfig(): AppConfig {
    const path = getConfigPath();
    if (!existsSync(path)) throw new Error(`Configuration is missing: ${path}. Run codex-chatgpt-web setup first.`);
@@ -1212,7 +2158,7 @@ index 8a64e60..edeffaa 100644
  }
  
  export function loadConfigForSetup(): AppConfig {
-@@ -361,13 +374,7 @@ export function loadConfigForSetup(): AppConfig {
+@@ -361,13 +382,7 @@ export function loadConfigForSetup(): AppConfig {
      raw.version = 3;
      raw.browserHost = "managed-chrome";
    }
@@ -1227,7 +2173,7 @@ index 8a64e60..edeffaa 100644
    return parseConfig(raw, path);
  }
  
-@@ -467,7 +474,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
+@@ -467,7 +482,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
        }
      }
    };
@@ -1236,7 +2182,69 @@ index 8a64e60..edeffaa 100644
      validateTunnel(parsed.tunnel, "tunnel");
      if (parsed.automaticTunnel !== undefined) validateTunnel(parsed.automaticTunnel, "automaticTunnel");
      if (parsed.manualTunnel !== undefined) validateTunnel(parsed.manualTunnel, "manualTunnel");
-@@ -562,6 +569,7 @@ export function saveConfig(config: AppConfig): void {
+@@ -523,6 +538,49 @@ function parseConfig(value: unknown, path: string): AppConfig {
+     throw new Error(`Invalid useSavedChats in ${path}`);
+   }
+   const useSavedChats = parsed.useSavedChats === true;
++  if (parsed.geminiWebEnabled !== undefined && typeof parsed.geminiWebEnabled !== "boolean") {
++    throw new Error(`Invalid geminiWebEnabled in ${path}`);
++  }
++  const geminiWebEnabled = (
++    parsed.geminiWebEnabled === true
++    || process.env.SENTRA_GEMINI_WEB_ENABLED === "1"
++  );
++  const geminiRelayBase = parsed.geminiRelayBase ?? "http://127.0.0.1:8765";
++  if (typeof geminiRelayBase !== "string") {
++    throw new Error(`Invalid geminiRelayBase in ${path}`);
++  }
++  let geminiRelayUrl: URL;
++  try {
++    geminiRelayUrl = new URL(geminiRelayBase);
++  } catch {
++    throw new Error(`Invalid geminiRelayBase in ${path}`);
++  }
++  if (
++    geminiRelayUrl.protocol !== "http:"
++    || !["127.0.0.1", "localhost"].includes(geminiRelayUrl.hostname)
++  ) {
++    throw new Error(`geminiRelayBase must use loopback HTTP in ${path}`);
++  }
++  const sentraManagedRelayTokenFile = (
++    process.env.SENTRA_WEB_GATEWAY_URL?.trim()
++      ? process.env.SENTRA_BROWSER_RELAY_TOKEN_FILE?.trim()
++      : undefined
++  );
++  const geminiRelayTokenFile = (
++    sentraManagedRelayTokenFile
++    ?? parsed.geminiRelayTokenFile
++    ?? process.env.SENTRA_BROWSER_RELAY_TOKEN_FILE
++  );
++  if (
++    geminiRelayTokenFile !== undefined
++    && (
++      typeof geminiRelayTokenFile !== "string"
++      || !geminiRelayTokenFile.trim()
++      || !isAbsolute(expandUserPath(geminiRelayTokenFile))
++    )
++  ) {
++    throw new Error(`Invalid geminiRelayTokenFile in ${path}`);
++  }
+   if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
+     throw new Error(`Zero Risk does not support Skills as files in ${path}`);
+   }
+@@ -550,6 +608,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
+     experimentalSkillAttachments,
+     experimentalFreshConversationPerTurn,
+     useSavedChats,
++    geminiWebEnabled,
++    geminiRelayBase: geminiRelayUrl.href.replace(/\/$/, ""),
++    ...(geminiRelayTokenFile
++      ? { geminiRelayTokenFile: expandUserPath(geminiRelayTokenFile) }
++      : {}),
+     zeroRiskProEnabled,
+   } as AppConfig;
+ }
+@@ -562,6 +625,7 @@ export function saveConfig(config: AppConfig): void {
  
  export function providerConfig(config: AppConfig): CodexProviderConfig {
    const manual = config.browserInteractionMode === "manual";
@@ -1244,7 +2252,7 @@ index 8a64e60..edeffaa 100644
    const model = manual
      ? CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
      : config.solAvailable ? "gpt-5.6-sol" : "gpt-5.6-luna";
-@@ -590,7 +598,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
+@@ -590,7 +654,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
      ),
      noReasoningModels: [],
      chatgptWeb: {
@@ -1253,7 +2261,7 @@ index 8a64e60..edeffaa 100644
        browserInteractionMode: config.browserInteractionMode,
        browserHost: config.browserHost,
        browserHostDescriptorPath: config.browserHostDescriptorPath,
-@@ -600,7 +608,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
+@@ -600,7 +664,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
        threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
        lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
        headed: config.headed,
@@ -1262,3 +2270,1264 @@ index 8a64e60..edeffaa 100644
        solAvailable: manual ? false : config.solAvailable,
        extraHighAvailable: !manual && config.extraHighAvailable === true,
        proAvailable: manual ? false : config.proAvailable,
+diff --git a/src/gemini-web-models.ts b/src/gemini-web-models.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..ac7a725df283fbe77fcd6849068e4097d71f655c
+--- /dev/null
++++ b/src/gemini-web-models.ts
+@@ -0,0 +1,54 @@
++import type { AppConfig } from "./config";
++
++export const GEMINI_WEB_MODEL_PREFIX = "gemini-web/";
++export type GeminiWebMode = "flash-lite" | "flash" | "pro";
++
++export interface GeminiWebModelRoute {
++  slug: string;
++  displayName: string;
++  description: string;
++  mode: GeminiWebMode;
++}
++
++export const GEMINI_WEB_MODEL_ROUTES: readonly GeminiWebModelRoute[] = [
++  {
++    slug: "gemini-web/flash-lite",
++    displayName: "Gemini Web — Flash-Lite",
++    description: "Gemini Web Flash-Lite through the SENTRA durable Edge relay.",
++    mode: "flash-lite",
++  },
++  {
++    slug: "gemini-web/flash",
++    displayName: "Gemini Web — Flash",
++    description: "Gemini Web Flash through the SENTRA durable Edge relay.",
++    mode: "flash",
++  },
++  {
++    slug: "gemini-web/pro",
++    displayName: "Gemini Web — Pro",
++    description: "Gemini Web Pro through the SENTRA durable Edge relay.",
++    mode: "pro",
++  },
++];
++
++export function isGeminiWebModelSlug(modelId: string): boolean {
++  return modelId.startsWith(GEMINI_WEB_MODEL_PREFIX);
++}
++
++export function availableGeminiWebModelRoutes(
++  config: Pick<AppConfig, "geminiWebEnabled">,
++): readonly GeminiWebModelRoute[] {
++  return config.geminiWebEnabled ? GEMINI_WEB_MODEL_ROUTES : [];
++}
++
++export function requireGeminiWebModelRoute(
++  modelId: string,
++  config: Pick<AppConfig, "geminiWebEnabled">,
++): GeminiWebModelRoute {
++  if (!config.geminiWebEnabled) {
++    throw new Error("Gemini Web is disabled in the local runtime configuration");
++  }
++  const route = GEMINI_WEB_MODEL_ROUTES.find(candidate => candidate.slug === modelId);
++  if (!route) throw new Error(`Unknown Gemini Web model: ${modelId}`);
++  return route;
++}
+diff --git a/src/model-catalog.ts b/src/model-catalog.ts
+index 3820878ecffd6206881a5f6c901c9b1c9afa8226..2c7584961db1984aabf31c1d40605fea9f46e913 100644
+--- a/src/model-catalog.ts
++++ b/src/model-catalog.ts
+@@ -1,4 +1,9 @@
+ import type { AppConfig } from "./config";
++import {
++  availableGeminiWebModelRoutes,
++  GEMINI_WEB_MODEL_PREFIX,
++  type GeminiWebModelRoute,
++} from "./gemini-web-models";
+ import type { CodexModelContextOverride } from "./codex-integration";
+ import {
+   availableChatGptWebModelRoutes,
+@@ -60,7 +65,9 @@ function nativeTemplateCandidate(value: unknown, requireTools: boolean): value i
+   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+   const model = value as JsonObject;
+   const modelSlug = slug(model);
+-  if (!modelSlug || modelSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)) return false;
++  if (!modelSlug
++    || modelSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)
++    || modelSlug.startsWith(GEMINI_WEB_MODEL_PREFIX)) return false;
+   // This route forwards ChatGPT authentication. Codex's own model manager keeps every list-visible
+   // model in ChatGPT mode even when `supported_in_api` is false; that flag gates API-key mode, not
+   // whether the backend row is a valid catalog template. The routed Web row overrides the flag to
+@@ -160,6 +167,51 @@ export function buildChatGptWebModel(
+   delete model.availability_nux;
+   return model;
+ }
++export function buildGeminiWebModel(
++  templateValue: unknown,
++  route: GeminiWebModelRoute,
++  config: AppConfig,
++): JsonObject {
++  const template = object(templateValue, "native Codex model template");
++  const templateSlug = slug(template);
++  if (!templateSlug
++    || templateSlug.startsWith(CHATGPT_WEB_MODEL_PREFIX)
++    || templateSlug.startsWith(GEMINI_WEB_MODEL_PREFIX)) {
++    throw new Error("Gemini Web model template must be a native Codex model");
++  }
++  const priority = modelPriority(template);
++  const multiAgentVersion = routedSubagentVersion(template, config);
++  const model: JsonObject = {
++    ...structuredClone(template),
++    slug: route.slug,
++    display_name: route.displayName,
++    description: route.description,
++    input_modalities: ["text", "image"],
++    visibility: "list",
++    supported_in_api: true,
++    ...(priority === undefined ? {} : { priority }),
++    ...(multiAgentVersion === undefined ? {} : { multi_agent_version: multiAgentVersion }),
++    tool_mode: null,
++    upgrade: null,
++    default_reasoning_level: "low",
++    supported_reasoning_levels: [
++      reasoningLevel(template, "low", route.displayName),
++    ],
++    // Conservative local planning budget. The browser UI remains the authoritative
++    // provider surface; this prevents Codex from overfilling the composer.
++    context_window: 128_000,
++    max_context_window: 128_000,
++    effective_context_window_percent: 90,
++    auto_compact_token_limit: 110_000,
++    additional_speed_tiers: [],
++    service_tiers: [],
++    default_service_tier: null,
++  };
++  delete model.comp_hash;
++  delete model.availability_nux;
++  return model;
++}
++
+ 
+ export function augmentNativeModelCatalog(
+   value: unknown,
+@@ -171,7 +223,11 @@ export function augmentNativeModelCatalog(
+     throw new Error("Native Codex models response is missing a models array");
+   }
+   const nativeModels = structuredClone(
+-    catalog.models.filter(model => !slug(model)?.startsWith(CHATGPT_WEB_MODEL_PREFIX)),
++    catalog.models.filter(model => {
++      const modelSlug = slug(model);
++      return !modelSlug?.startsWith(CHATGPT_WEB_MODEL_PREFIX)
++        && !modelSlug?.startsWith(GEMINI_WEB_MODEL_PREFIX);
++    }),
+   );
+   if (config.subagentProtocol === "compatibility-v1") {
+     for (const candidate of nativeModels) {
+@@ -201,8 +257,10 @@ export function augmentNativeModelCatalog(
+   }
+   const webModels = availableChatGptWebModelRoutes(config, true)
+     .map(route => buildChatGptWebModel(template, route, config));
++  const geminiModels = availableGeminiWebModelRoutes(config)
++    .map(route => buildGeminiWebModel(template, route, config));
+   return {
+     ...structuredClone(catalog),
+-    models: [...nativeModels, ...webModels],
++    models: [...nativeModels, ...webModels, ...geminiModels],
+   };
+ }
+diff --git a/src/responses/parser.ts b/src/responses/parser.ts
+index ded9b12250c0e2d6934914f77963747e3ed9834c..2c7920bff3e3885a400c82a8dfc604057dc06ce6 100644
+--- a/src/responses/parser.ts
++++ b/src/responses/parser.ts
+@@ -14,7 +14,10 @@ import type {
+ import { namespacedToolName } from "../types";
+ import { responsesRequestSchema } from "./schema";
+ import { compactionItemToText, isNativeTextCompaction } from "./compaction";
+-import { previousResponseReplayPrefixLength } from "./state";
++import {
++  previousResponseProviderState,
++  previousResponseReplayPrefixLength,
++} from "./state";
+ import { decodeReasoningEnvelope } from "./reasoning-envelope";
+ 
+ function isObj(v: unknown): v is Record<string, unknown> {
+@@ -278,6 +281,7 @@ const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "
+ 
+ export function parseRequest(body: unknown): CodexParsedRequest {
+   const replayedInputPrefixLength = previousResponseReplayPrefixLength(body);
++  const replayedProviderState = previousResponseProviderState(body);
+   const parsed = responsesRequestSchema.safeParse(body);
+   if (!parsed.success) {
+     throw new Error(`responses parse error: ${parsed.error.message}`);
+@@ -626,6 +630,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
+   if (data.service_tier !== undefined) options.serviceTier = data.service_tier;
+   Object.assign(options, parseTextControls(data.text));
+   if (data.prompt_cache_key !== undefined) options.promptCacheKey = data.prompt_cache_key;
++  const providerState = previousResponseProviderState(body);
+ 
+   const textCompaction = !compactionRequest && isNativeTextCompaction(body);
+   return {
+@@ -636,6 +641,8 @@ export function parseRequest(body: unknown): CodexParsedRequest {
+     options,
+     _rawBody: body,
+     ...(replayedInputPrefixLength > 0 ? { _replayPrefixLen: replayedInputPrefixLength } : {}),
++    ...(replayedProviderState ? { _providerState: replayedProviderState } : {}),
++    ...(providerState ? { _providerState: providerState } : {}),
+     ...(compactionRequest || textCompaction ? { _compactionRequest: true } : {}),
+     ...(textCompaction ? { _compactionResponseFormat: "message" as const } : {}),
+     ...(opaqueMultiAgentV2Payload ? { _opaqueMultiAgentV2Payload: true } : {}),
+diff --git a/src/responses/state.ts b/src/responses/state.ts
+index a889c3a8bb5d9aa7b82e582521a959f4537d8fe9..54935fa53990a244ac992c581f7e978719211b52 100644
+--- a/src/responses/state.ts
++++ b/src/responses/state.ts
+@@ -1,6 +1,7 @@
+ import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+ import { dirname, join } from "node:path";
+ import { atomicWriteFile, getConfigDir } from "../config";
++import type { CodexProviderContinuationState } from "../types";
+ 
+ const MAX_STORED_RESPONSES = 1_000;
+ const RESPONSE_TTL_MS = 60 * 60 * 1_000;
+@@ -17,6 +18,7 @@ const SNAPSHOT_TOTAL_MAX_BYTES = 24 * 1024 * 1024;
+ interface StoredResponseState {
+   createdAt: number;
+   items: unknown[];
++  providerState?: CodexProviderContinuationState;
+   /** Approximate in-memory size, computed locally at insert time (never trusted from disk). */
+   sizeBytes?: number;
+ }
+@@ -28,7 +30,10 @@ let storedResponseBytes = 0;
+ function measuredEntry(entry: Omit<StoredResponseState, "sizeBytes">): StoredResponseState {
+   let sizeBytes = 0;
+   try {
+-    sizeBytes = JSON.stringify(entry.items).length;
++    sizeBytes = JSON.stringify({
++      items: entry.items,
++      providerState: entry.providerState,
++    }).length;
+   } catch {
+     /* unserializable items: weightless rather than fatal */
+   }
+@@ -56,6 +61,7 @@ function deleteEntry(id: string): void {
+ // upstream. Consumers use the prefix length to bind trusted history and rolling checkpoints to the
+ // exact replayed portion of this request.
+ const replayedInputPrefixLengths = new WeakMap<object, number>();
++const replayedProviderStates = new WeakMap<object, CodexProviderContinuationState>();
+ let loaded = false;
+ let persistTimer: ReturnType<typeof setTimeout> | null = null;
+ let pendingPersistPath: string | null = null;
+@@ -93,6 +99,9 @@ function ensureLoaded(): void {
+       setEntry(id, {
+         createdAt: rec.createdAt,
+         items: rec.items,
++        ...(rec.providerState && typeof rec.providerState === "object"
++          ? { providerState: rec.providerState }
++          : {}),
+       });
+     }
+     pruneResponses();
+@@ -188,6 +197,9 @@ export function expandPreviousResponseInput(body: unknown): unknown {
+     input: [...previous.items, ...inputItems(request.input)],
+   };
+   replayedInputPrefixLengths.set(expanded, previous.items.length);
++  if (previous.providerState) {
++    replayedProviderStates.set(expanded, structuredClone(previous.providerState));
++  }
+   return expanded;
+ }
+ 
+@@ -196,6 +208,14 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
+   if (!body || typeof body !== "object" || Array.isArray(body)) return 0;
+   return replayedInputPrefixLengths.get(body) ?? 0;
+ }
++export function previousResponseProviderState(
++  body: unknown,
++): CodexProviderContinuationState | undefined {
++  if (!body || typeof body !== "object" || Array.isArray(body)) return undefined;
++  const state = replayedProviderStates.get(body);
++  return state ? structuredClone(state) : undefined;
++}
++
+ 
+ /**
+  * Cache completed output and max_output_tokens partial output for previous_response_id replay.
+@@ -204,7 +224,7 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
+ export function rememberResponseState(
+   requestBody: unknown,
+   response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
+-  opts?: { force?: boolean },
++  opts?: { force?: boolean; providerState?: CodexProviderContinuationState },
+ ): void {
+   if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
+   const request = requestBody as Record<string, unknown>;
+@@ -224,6 +244,9 @@ export function rememberResponseState(
+   setEntry(response.id, {
+     createdAt: now(),
+     items: [...inputItems(request.input), ...response.output],
++    ...(opts?.providerState
++      ? { providerState: structuredClone(opts.providerState) }
++      : {}),
+   });
+   pruneResponses();
+   schedulePersist();
+diff --git a/src/server.ts b/src/server.ts
+index 8bae1ac704926551eb3b7ac05ce77b9d2b5720f4..207fbbe60e2613e15363c7a00a90b8f9cefe25be 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -1,4 +1,5 @@
+ import { chatGptWebTraceId, createChatGptWebAdapter } from "./adapters/chatgpt-web";
++import { createGeminiWebAdapter } from "./adapters/gemini-web";
+ import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
+ import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
+ import { timingSafeEqual } from "node:crypto";
+@@ -35,6 +36,11 @@ import {
+   requireChatGptWebModelRoute,
+   type ChatGptWebModelRoute,
+ } from "./chatgpt-web-models";
++import {
++  isGeminiWebModelSlug,
++  requireGeminiWebModelRoute,
++  type GeminiWebModelRoute,
++} from "./gemini-web-models";
+ import { forwardNativeCodexRequest, type NativeFetch, type NativeImageEndpoint } from "./native-passthrough";
+ import { fetchNativeCodex } from "./native-network";
+ import {
+@@ -45,7 +51,12 @@ import {
+ } from "./responses/compaction";
+ import { parseRequest } from "./responses/parser";
+ import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "./responses/state";
+-import { namespacedToolName, type AdapterEvent, type CodexParsedRequest } from "./types";
++import {
++  namespacedToolName,
++  type AdapterEvent,
++  type CodexParsedRequest,
++  type CodexProviderContinuationState,
++} from "./types";
+ import type { CodexProviderConfig } from "./types";
+ import type { ProviderAdapter } from "./adapters/base";
+ import { VERSION } from "./version";
+@@ -352,12 +363,18 @@ export class HttpTurnCounter {
+ }
+ 
+ type ChatGptWebAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
++type GeminiWebAdapterFactory = (
++  config: AppConfig,
++  route: GeminiWebModelRoute,
++) => ProviderAdapter;
+ 
+ export interface ResponseRequestOptions {
+   /** DEV and other in-process harnesses can keep continuation state in their own canonical store. */
+   rememberState?: boolean;
+   /** Observe the exact production adapter stream when invoking the handler in-process. */
+   onAdapterEvent?: (event: AdapterEvent) => void;
++  /** Test seam for the Gemini durable Edge adapter. */
++  geminiAdapterFactory?: GeminiWebAdapterFactory;
+   /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
+   onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
+ }
+@@ -465,6 +482,144 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
+   }
+   return { toolNsMap, freeformToolNames, toolSearchToolNames };
+ }
++async function geminiResponseRequest(
++  req: Request,
++  raw: unknown,
++  config: AppConfig,
++  options: ResponseRequestOptions,
++): Promise<Response> {
++  const requestedPreviousResponseId = raw && typeof raw === "object" && !Array.isArray(raw)
++    ? (raw as { previous_response_id?: unknown }).previous_response_id
++    : undefined;
++  const expanded = expandPreviousResponseInput(raw);
++  if (typeof requestedPreviousResponseId === "string" && expanded === raw) {
++    return formatErrorResponse(
++      409,
++      "invalid_request_error",
++      "Local continuation state for previous_response_id is unavailable; refusing to run Gemini Web with partial Codex context.",
++    );
++  }
++
++  let parsed: CodexParsedRequest;
++  let route: GeminiWebModelRoute;
++  try {
++    parsed = parseRequest(expanded);
++    route = requireGeminiWebModelRoute(parsed.modelId, config);
++  } catch (error) {
++    return formatErrorResponse(
++      400,
++      "invalid_request_error",
++      error instanceof Error ? error.message : String(error),
++    );
++  }
++
++  if (parsed._opaqueMultiAgentV2Payload) {
++    return formatErrorResponse(
++      400,
++      "invalid_request_error",
++      "Gemini Web cannot read this encrypted cross-backend subagent payload. Use the plaintext compatibility surface for cross-provider delegation.",
++    );
++  }
++
++  const compaction = parsed._compactionRequest === true;
++  const compactionItem = compaction && parsed._compactionResponseFormat !== "message";
++  if (compaction) {
++    delete parsed.context.tools;
++    delete parsed.options.toolChoice;
++    delete parsed.options.parallelToolCalls;
++    // Compaction is a standalone summarization turn. Its returned summary becomes
++    // authoritative history, so do not contaminate the retained task conversation.
++    delete parsed._providerState;
++    parsed.context.messages.push({
++      role: "user",
++      content: COMPACT_PROMPT,
++      timestamp: Date.now(),
++    });
++  }
++
++  const adapter = (options.geminiAdapterFactory ?? createGeminiWebAdapter)(config, route);
++  const queue = new AsyncEventQueue<AdapterEvent>();
++  const abort = new AbortController();
++  if (req.signal.aborted) abort.abort();
++  else req.signal.addEventListener("abort", () => abort.abort(), { once: true });
++
++  const run = async (): Promise<void> => {
++    try {
++      await adapter.runTurn(parsed, {
++        headers: req.headers,
++        abortSignal: abort.signal,
++      }, event => {
++        options.onAdapterEvent?.(event);
++        queue.push(event);
++      });
++    } catch (error) {
++      const event: AdapterEvent = {
++        type: "error",
++        message: error instanceof Error ? error.message : String(error),
++      };
++      options.onAdapterEvent?.(event);
++      queue.push(event);
++    } finally {
++      queue.close();
++    }
++  };
++
++  const maps = toolBridgeMaps(parsed);
++  const responseModel = route.slug;
++  const rememberCompletedResponse = (
++    response: Record<string, unknown>,
++    providerState?: CodexProviderContinuationState,
++  ): void => {
++    if (options.rememberState === false) return;
++    rememberResponseState(parsed._rawBody, response, {
++      force: true,
++      providerState,
++    });
++  };
++
++  if (parsed.stream) {
++    void run();
++    const stream = bridgeToResponsesSSE(
++      queue,
++      responseModel,
++      maps.toolNsMap,
++      maps.freeformToolNames,
++      maps.toolSearchToolNames,
++      () => abort.abort(),
++      2_000,
++      {
++        hideThinkingSummary: parsed.options.hideThinkingSummary,
++        ...(compactionItem ? { compaction: true } : {}),
++        onCompletedResponse: rememberCompletedResponse,
++      },
++    );
++    return new Response(stream, {
++      headers: {
++        "Content-Type": "text/event-stream",
++        "Cache-Control": "no-cache",
++        "Connection": "keep-alive",
++        "X-Accel-Buffering": "no",
++      },
++    });
++  }
++
++  await run();
++  const events = await queue.collect();
++  let providerState: CodexProviderContinuationState | undefined;
++  const json = buildResponseJSON(events, responseModel, {
++    hideThinkingSummary: parsed.options.hideThinkingSummary,
++    toolNsMap: maps.toolNsMap,
++    freeformToolNames: maps.freeformToolNames,
++    toolSearchToolNames: maps.toolSearchToolNames,
++    ...(compactionItem ? { compaction: true } : {}),
++    onProviderState: state => {
++      providerState = state;
++    },
++  });
++  rememberCompletedResponse(json, providerState);
++  return Response.json(json);
++}
++
+ 
+ export async function responseRequest(
+   req: Request,
+@@ -494,7 +649,15 @@ export async function responseRequest(
+   } catch (error) {
+     return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+   }
+-  if (typeof requestedModel === "string" && !isChatGptWebModelSlug(requestedModel)) {
++  if (typeof requestedModel === "string" && isGeminiWebModelSlug(requestedModel)) {
++    return geminiResponseRequest(req, raw, config, options);
++  }
++
++  if (
++    typeof requestedModel === "string"
++    && !isChatGptWebModelSlug(requestedModel)
++    && !isGeminiWebModelSlug(requestedModel)
++  ) {
+     try {
+       return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
+     } catch (error) {
+@@ -535,9 +698,17 @@ export async function responseRequest(
+ 
+   const compaction = parsed._compactionRequest === true;
+   const compactionItem = compaction && parsed._compactionResponseFormat !== "message";
+-  const rememberCompletedResponse = (response: Record<string, unknown>): void => {
++  const rememberCompletedResponse = (
++    response: Record<string, unknown>,
++    providerState?: CodexProviderContinuationState,
++  ): void => {
+     if (!compaction) {
+-      if (options.rememberState !== false) rememberResponseState(parsed._rawBody, response, { force: true });
++      if (options.rememberState !== false) {
++        rememberResponseState(parsed._rawBody, response, {
++          force: true,
++          providerState,
++        });
++      }
+       return;
+     }
+     if (response.status !== "completed") return;
+@@ -726,25 +897,35 @@ export async function compactRequest(
+   if (typeof raw.model !== "string" || !raw.model) {
+     return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
+   }
+-  if (!isChatGptWebModelSlug(raw.model)) {
++  const chatGptCompact = isChatGptWebModelSlug(raw.model);
++  const geminiCompact = isGeminiWebModelSlug(raw.model);
++  if (!chatGptCompact && !geminiCompact) {
+     try {
+       return await forwardNativeCodexRequest(nativeRequest, "responses/compact", undefined, raw);
+     } catch (error) {
+       return formatErrorResponse(502, "upstream_error", error instanceof Error ? error.message : String(error));
+     }
+   }
+-  let route: ChatGptWebModelRoute;
+-  try {
+-    route = requireChatGptWebModelRoute(raw.model, config);
+-  } catch (error) {
+-    return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
+-  }
+-  if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+-    return formatErrorResponse(
+-      409,
+-      "invalid_request_error",
+-      "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
+-    );
++  if (chatGptCompact) {
++    let route: ChatGptWebModelRoute;
++    try {
++      route = requireChatGptWebModelRoute(raw.model, config);
++    } catch (error) {
++      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
++    }
++    if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
++      return formatErrorResponse(
++        409,
++        "invalid_request_error",
++        "ChatGPT Web Luna uses a rolling checkpoint on every completed browser turn; separate Codex compaction is disabled for this route.",
++      );
++    }
++  } else {
++    try {
++      requireGeminiWebModelRoute(raw.model, config);
++    } catch (error) {
++      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
++    }
+   }
+   const input = Array.isArray(raw.input) ? raw.input : [];
+   const headers = new Headers(req.headers);
+@@ -1003,8 +1184,7 @@ export function startServer(
+             "codex-chatgpt-web is draining for a requested service operation",
+           );
+         }
+-        return httpTurns.track(async signal => {
+-          const request = ++modelCatalogRequests;
++        const request = ++modelCatalogRequests;
+           const started = Date.now();
+           const recordResult = (response: Response, failure?: ModelCatalogFailure): Response => {
+             const result = { request, at: new Date().toISOString(), status: response.status, ...(failure ? { failure } : {}) };
+@@ -1032,7 +1212,7 @@ export function startServer(
+           }
+           let failure: ModelCatalogFailure | undefined;
+           const response = await modelsRequest(
+-            new Request(req, { signal }),
++            new Request(req, { signal: req.signal }),
+             catalogConfig,
+             dependencies.fetchUpstream,
+             readCodexModelContextOverride,
+@@ -1042,8 +1222,7 @@ export function startServer(
+             successfulModelCatalogRequests += 1;
+             lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
+           }
+-          return recordResult(response, failure);
+-        }, req.signal, process.platform, "models");
++        return recordResult(response, failure);
+       }
+       if (req.method === "GET" && url.pathname === "/v1/responses") {
+         return new Response("Responses WebSocket transport is not enabled on this local route", {
+diff --git a/src/types.ts b/src/types.ts
+index cccf7e1ccca76190d9b20d95f3e8516fe3cc14a0..4b45636930c4386925763e609b37c572df8ac708 100644
+--- a/src/types.ts
++++ b/src/types.ts
+@@ -9,6 +9,8 @@ export interface CodexParsedRequest {
+   _chatgptModelFamily?: "5.6" | "6";
+   /** Number of leading raw input items restored from local previous_response_id state. */
+   _replayPrefixLen?: number;
++  /** Provider-private continuation restored from the local previous_response_id cache. */
++  _providerState?: CodexProviderContinuationState;
+   /**
+    * Dedicated native compaction, identified by compaction_trigger or canonical responses/memento
+    * metadata. Both run without local tools; their output contracts differ.
+diff --git a/tests/gemini-web-adapter.test.ts b/tests/gemini-web-adapter.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..92c500365e3bc49f849be110b48a8d0013744abb
+--- /dev/null
++++ b/tests/gemini-web-adapter.test.ts
+@@ -0,0 +1,310 @@
++import { afterEach, beforeEach, describe, expect, test } from "bun:test";
++import { createGeminiWebAdapter } from "../src/adapters/gemini-web";
++import { defaultConfig } from "../src/config";
++import { requireGeminiWebModelRoute } from "../src/gemini-web-models";
++import type { AdapterEvent, CodexParsedRequest } from "../src/types";
++
++const originalToken = process.env.OMA_RELAY_TOKEN;
++
++function parsedRequest(overrides: Partial<CodexParsedRequest> = {}): CodexParsedRequest {
++  return {
++    modelId: "gemini-web/flash",
++    context: {
++      systemPrompt: ["Be concise."],
++      messages: [{ role: "user", content: "hello", timestamp: 1 }],
++    },
++    stream: false,
++    options: {},
++    _rawBody: { model: "gemini-web/flash", input: [] },
++    ...overrides,
++  };
++}
++
++function installRelay(answer: string, inspect?: (payload: Record<string, unknown>) => void): typeof fetch {
++  let taskId = "";
++  return (async (input: RequestInfo | URL, init?: RequestInit) => {
++    const url = String(input);
++    if (url.endsWith("/jobs/submit")) {
++      const payload = JSON.parse(String(init?.body || "{}")) as Record<string, unknown>;
++      taskId = String(payload.task_id);
++      inspect?.(payload);
++      return Response.json({ job_id: "job_gemini_test" });
++    }
++    if (url.includes("/jobs/wait?")) {
++      return Response.json({
++        job_id: "job_gemini_test",
++        task_id: taskId,
++        status: "COMPLETED",
++        result: answer,
++        conversation_url: "https://gemini.google.com/app/abc_DEF-123",
++        conversation_id: "abc_DEF-123",
++      });
++    }
++    if (url.endsWith("/jobs/ack") || url.endsWith("/jobs/cancel")) {
++      return Response.json({ ok: true });
++    }
++    throw new Error("unexpected fetch " + url);
++  }) as typeof fetch;
++}
++
++describe("Gemini Web adapter", () => {
++  beforeEach(() => {
++    process.env.OMA_RELAY_TOKEN = "test-relay-token";
++  });
++
++  afterEach(() => {
++    if (originalToken === undefined) delete process.env.OMA_RELAY_TOKEN;
++    else process.env.OMA_RELAY_TOKEN = originalToken;
++  });
++
++  test("returns text and provider continuation state", async () => {
++    let submitted: Record<string, unknown> | undefined;
++    const fetchImpl = installRelay("GEMINI_OK", payload => {
++      submitted = payload;
++    });
++
++    const config = { ...defaultConfig(), geminiWebEnabled: true };
++    const route = requireGeminiWebModelRoute("gemini-web/flash", config);
++    const adapter = createGeminiWebAdapter(config, route, fetchImpl);
++    const events: AdapterEvent[] = [];
++    await adapter.runTurn(parsedRequest(), { headers: new Headers() }, event => events.push(event));
++
++    expect(submitted).toMatchObject({
++      provider: "gemini",
++      model: "flash",
++      new_chat: true,
++      conversation_url: null,
++    });
++    expect(events.find(event => event.type === "text_delta")).toMatchObject({
++      type: "text_delta",
++      text: "GEMINI_OK",
++    });
++    expect(events.at(-1)).toMatchObject({
++      type: "done",
++      stopReason: "stop",
++      endTurn: true,
++      providerState: {
++        geminiWeb: {
++          conversationUrl: "https://gemini.google.com/app/abc_DEF-123",
++          model: "flash",
++        },
++      },
++    });
++  });
++
++  test("emits validated native Codex tool calls", async () => {
++    const answer = '<SENTRA_TOOL_CALLS>{"calls":[{"name":"read_file","arguments":{"path":"README.md"}}]}</SENTRA_TOOL_CALLS>';
++    let taskId = "";
++    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++      const url = String(input);
++      if (url.endsWith("/jobs/submit")) {
++        const payload = JSON.parse(String(init?.body || "{}"));
++        taskId = String(payload.task_id);
++        return Response.json({ job_id: "job_tool" });
++      }
++      if (url.includes("/jobs/wait?")) {
++        return Response.json({
++          job_id: "job_tool",
++          task_id: taskId,
++          status: "COMPLETED",
++          result: answer,
++          conversation_url: "https://gemini.google.com/app/tool_123",
++          conversation_id: "tool_123",
++        });
++      }
++      if (url.endsWith("/jobs/ack")) return Response.json({ ok: true });
++      throw new Error("unexpected fetch " + url);
++    }) as typeof fetch;
++
++    const config = { ...defaultConfig(), geminiWebEnabled: true };
++    const route = requireGeminiWebModelRoute("gemini-web/flash", config);
++    const adapter = createGeminiWebAdapter(config, route, fetchImpl);
++    const request = parsedRequest({
++      context: {
++        messages: [{ role: "user", content: "read the readme", timestamp: 1 }],
++        tools: [{
++          name: "read_file",
++          description: "Read a text file",
++          parameters: {
++            type: "object",
++            properties: { path: { type: "string" } },
++            required: ["path"],
++            additionalProperties: false,
++          },
++        }],
++      },
++    });
++    const events: AdapterEvent[] = [];
++    await adapter.runTurn(request, { headers: new Headers() }, event => events.push(event));
++
++    expect(events.find(event => event.type === "tool_call_start")).toMatchObject({
++      type: "tool_call_start",
++      name: "read_file",
++    });
++    expect(events.find(event => event.type === "tool_call_delta")).toMatchObject({
++      type: "tool_call_delta",
++      arguments: '{"path":"README.md"}',
++    });
++    expect(events.at(-1)).toMatchObject({
++      type: "done",
++      stopReason: "tool_use",
++      endTurn: false,
++    });
++  });
++
++  test("rejects invented tools before Codex can execute them", async () => {
++    const answer = '<SENTRA_TOOL_CALLS>{"calls":[{"name":"evil_tool","arguments":{}}]}</SENTRA_TOOL_CALLS>';
++    let taskId = "";
++    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++      const url = String(input);
++      if (url.endsWith("/jobs/submit")) {
++        const payload = JSON.parse(String(init?.body || "{}"));
++        taskId = String(payload.task_id);
++        return Response.json({ job_id: "job_bad_tool" });
++      }
++      if (url.includes("/jobs/wait?")) {
++        return Response.json({
++          job_id: "job_bad_tool",
++          task_id: taskId,
++          status: "COMPLETED",
++          result: answer,
++          conversation_url: "https://gemini.google.com/app/bad_123",
++          conversation_id: "bad_123",
++        });
++      }
++      if (url.endsWith("/jobs/ack")) return Response.json({ ok: true });
++      throw new Error("unexpected fetch " + url);
++    }) as typeof fetch;
++
++    const config = { ...defaultConfig(), geminiWebEnabled: true };
++    const route = requireGeminiWebModelRoute("gemini-web/flash", config);
++    const adapter = createGeminiWebAdapter(config, route, fetchImpl);
++    const request = parsedRequest({
++      context: {
++        messages: [{ role: "user", content: "do something", timestamp: 1 }],
++        tools: [{
++          name: "safe_tool",
++          description: "Only allowed tool",
++          parameters: { type: "object", additionalProperties: false },
++        }],
++      },
++    });
++
++    await expect(
++      adapter.runTurn(request, { headers: new Headers() }, () => {}),
++    ).rejects.toThrow("unavailable tool");
++  });
++
++  test("continues the exact Gemini conversation after a Codex tool result", async () => {
++    let taskId = "";
++    let submitted: Record<string, unknown> | undefined;
++    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++      const url = String(input);
++      if (url.endsWith("/jobs/submit")) {
++        submitted = JSON.parse(String(init?.body || "{}"));
++        taskId = String(submitted!.task_id);
++        return Response.json({ job_id: "job_follow" });
++      }
++      if (url.includes("/jobs/wait?")) {
++        return Response.json({
++          job_id: "job_follow",
++          task_id: taskId,
++          status: "COMPLETED",
++          result: "FOLLOWUP_OK",
++          conversation_url: "https://gemini.google.com/app/follow_123",
++          conversation_id: "follow_123",
++        });
++      }
++      if (url.endsWith("/jobs/ack")) return Response.json({ ok: true });
++      throw new Error("unexpected fetch " + url);
++    }) as typeof fetch;
++
++    const config = { ...defaultConfig(), geminiWebEnabled: true };
++    const route = requireGeminiWebModelRoute("gemini-web/pro", config);
++    const adapter = createGeminiWebAdapter(config, route, fetchImpl);
++    const request = parsedRequest({
++      modelId: "gemini-web/pro",
++      context: {
++        messages: [{
++          role: "toolResult",
++          toolCallId: "call_1",
++          toolName: "read_file",
++          content: "file contents",
++          isError: false,
++          timestamp: 2,
++        }],
++      },
++      _providerState: {
++        geminiWeb: {
++          conversationUrl: "https://gemini.google.com/app/follow_123",
++          model: "pro",
++        },
++      },
++    });
++    const events: AdapterEvent[] = [];
++    await adapter.runTurn(request, { headers: new Headers() }, event => events.push(event));
++
++    expect(submitted).toMatchObject({
++      provider: "gemini",
++      model: "pro",
++      new_chat: false,
++      conversation_url: "https://gemini.google.com/app/follow_123",
++    });
++    expect(String(submitted!.prompt)).toContain("TOOL RESULT read_file (call_1)");
++    expect(events.find(event => event.type === "text_delta")).toMatchObject({
++      type: "text_delta",
++      text: "FOLLOWUP_OK",
++    });
++  });
++
++  test("cancels the durable relay job when the Codex request aborts", async () => {
++  process.env.OMA_RELAY_TOKEN = "test-relay-token";
++  const controller = new AbortController();
++  let cancelledJob: string | undefined;
++  let taskId = "";
++
++  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
++    const url = String(input);
++    if (url.endsWith("/jobs/submit")) {
++      const payload = JSON.parse(String(init?.body || "{}"));
++      taskId = String(payload.task_id);
++      setTimeout(() => controller.abort(), 0);
++      return Response.json({ job_id: "job_abort" });
++    }
++    if (url.includes("/jobs/wait?")) {
++      await new Promise<void>((_resolve, reject) => {
++        if (init?.signal?.aborted) {
++          reject(new DOMException("aborted", "AbortError"));
++          return;
++        }
++        init?.signal?.addEventListener(
++          "abort",
++          () => reject(new DOMException("aborted", "AbortError")),
++          { once: true },
++        );
++      });
++      throw new Error("unreachable");
++    }
++    if (url.endsWith("/jobs/cancel")) {
++      const payload = JSON.parse(String(init?.body || "{}"));
++      cancelledJob = String(payload.job_id);
++      return Response.json({ ok: true, task_id: taskId });
++    }
++    throw new Error("unexpected fetch " + url);
++  }) as typeof fetch;
++
++  const config = { ...defaultConfig(), geminiWebEnabled: true };
++  const route = requireGeminiWebModelRoute("gemini-web/flash", config);
++  const adapter = createGeminiWebAdapter(config, route, fetchImpl);
++
++  await expect(
++    adapter.runTurn(
++      parsedRequest(),
++      { headers: new Headers(), abortSignal: controller.signal },
++      () => {},
++    ),
++  ).rejects.toThrow();
++
++  expect(cancelledJob).toBe("job_abort");
++  });
++});
+diff --git a/tests/gemini-web.test.ts b/tests/gemini-web.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..b941995b2a85af56fb4a23f022617962c630654c
+--- /dev/null
++++ b/tests/gemini-web.test.ts
+@@ -0,0 +1,214 @@
++import { expect, test } from "bun:test";
++import { mkdtempSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { defaultConfig, loadConfig, saveConfig } from "../src/config";
++import { augmentNativeModelCatalog } from "../src/model-catalog";
++import { responseRequest } from "../src/server";
++import type { ProviderAdapter } from "../src/adapters/base";
++
++function config() {
++  const value = defaultConfig("full");
++  value.geminiWebEnabled = true;
++  value.geminiRelayBase = "http://127.0.0.1:8765";
++  value.geminiRelayTokenFile = "C:\\sentra\\relay-token";
++  return value;
++}
++
++function request(body: Record<string, unknown>): Request {
++  return new Request("http://127.0.0.1:17841/v1/responses", {
++    method: "POST",
++    headers: { "content-type": "application/json" },
++    body: JSON.stringify(body),
++  });
++}
++
++const nativeCatalog = {
++  models: [{
++    slug: "gpt-native",
++    display_name: "Native",
++    description: "Native model",
++    visibility: "list",
++    supported_in_api: true,
++    priority: 1,
++    multi_agent_version: "v1",
++    tool_mode: "function",
++    supported_reasoning_levels: [{
++      effort: "low",
++      description: "Low",
++    }],
++    default_reasoning_level: "low",
++    context_window: 200000,
++    max_context_window: 200000,
++  }],
++};
++
++test("SENTRA-managed relay token authority overrides persisted config", () => {
++  const previousHome = process.env.CODEX_CHATGPT_WEB_HOME;
++  const previousGateway = process.env.SENTRA_WEB_GATEWAY_URL;
++  const previousRelayToken = process.env.SENTRA_BROWSER_RELAY_TOKEN_FILE;
++  const root = mkdtempSync(join(tmpdir(), "sentra-gemini-config-"));
++  try {
++    process.env.CODEX_CHATGPT_WEB_HOME = root;
++    process.env.SENTRA_WEB_GATEWAY_URL = "http://127.0.0.1:17842/v1";
++    const managedToken = join(root, "managed-relay-token");
++    process.env.SENTRA_BROWSER_RELAY_TOKEN_FILE = managedToken;
++
++    const persisted = defaultConfig("browser-only");
++    persisted.geminiWebEnabled = true;
++    persisted.geminiRelayTokenFile = join(root, "stale-relay-token");
++    saveConfig(persisted);
++
++    expect(loadConfig().geminiRelayTokenFile).toBe(managedToken);
++  } finally {
++    if (previousHome === undefined) delete process.env.CODEX_CHATGPT_WEB_HOME;
++    else process.env.CODEX_CHATGPT_WEB_HOME = previousHome;
++    if (previousGateway === undefined) delete process.env.SENTRA_WEB_GATEWAY_URL;
++    else process.env.SENTRA_WEB_GATEWAY_URL = previousGateway;
++    if (previousRelayToken === undefined) delete process.env.SENTRA_BROWSER_RELAY_TOKEN_FILE;
++    else process.env.SENTRA_BROWSER_RELAY_TOKEN_FILE = previousRelayToken;
++    rmSync(root, { recursive: true, force: true });
++  }
++});
++
++test("Gemini Web models are opt-in catalog rows", () => {
++  const disabled = defaultConfig("full");
++  expect(
++    (augmentNativeModelCatalog(nativeCatalog, disabled).models as Array<{ slug: string }>)
++      .some(model => model.slug.startsWith("gemini-web/")),
++  ).toBe(false);
++
++  const enabled = config();
++  const slugs = (augmentNativeModelCatalog(nativeCatalog, enabled).models as Array<{ slug: string }>)
++    .map(model => model.slug);
++  expect(slugs).toContain("gemini-web/flash-lite");
++  expect(slugs).toContain("gemini-web/flash");
++  expect(slugs).toContain("gemini-web/pro");
++});
++
++test("Gemini Web response route returns text and preserves private continuation state", async () => {
++  const firstFactory = (): ProviderAdapter => ({
++    name: "gemini-test-first",
++    async runTurn(parsed, _incoming, emit) {
++      expect(parsed.modelId).toBe("gemini-web/flash");
++      expect(parsed._providerState).toBeUndefined();
++      emit({ type: "text_delta", text: "GEMINI_FIRST", phase: "final_answer" });
++      emit({
++        type: "done",
++        endTurn: true,
++        providerState: {
++          geminiWeb: {
++            conversationUrl: "https://gemini.google.com/app/abc_DEF-123",
++            mode: "flash",
++          },
++        },
++      });
++    },
++  });
++
++  const first = await responseRequest(request({
++    model: "gemini-web/flash",
++    stream: false,
++    store: false,
++    input: [{
++      type: "message",
++      role: "user",
++      content: [{ type: "input_text", text: "hello" }],
++    }],
++  }), config(), undefined, {
++    geminiAdapterFactory: firstFactory,
++  });
++  expect(first.status).toBe(200);
++  const firstBody = await first.json() as {
++    id: string;
++    output: Array<{ type?: string; content?: Array<{ text?: string }> }>;
++  };
++  expect(JSON.stringify(firstBody.output)).toContain("GEMINI_FIRST");
++
++  const secondFactory = (): ProviderAdapter => ({
++    name: "gemini-test-second",
++    async runTurn(parsed, _incoming, emit) {
++      expect(parsed._providerState?.geminiWeb).toEqual({
++        conversationUrl: "https://gemini.google.com/app/abc_DEF-123",
++        mode: "flash",
++      });
++      emit({ type: "text_delta", text: "GEMINI_SECOND", phase: "final_answer" });
++      emit({
++        type: "done",
++        endTurn: true,
++        providerState: parsed._providerState,
++      });
++    },
++  });
++
++  const second = await responseRequest(request({
++    model: "gemini-web/flash",
++    stream: false,
++    store: false,
++    previous_response_id: firstBody.id,
++    input: [{
++      type: "message",
++      role: "user",
++      content: [{ type: "input_text", text: "continue" }],
++    }],
++  }), config(), undefined, {
++    geminiAdapterFactory: secondFactory,
++  });
++  expect(second.status).toBe(200);
++  const secondBody = await second.json() as { output: unknown[] };
++  expect(JSON.stringify(secondBody.output)).toContain("GEMINI_SECOND");
++});
++
++test("Gemini Web tool call is surfaced to native Codex", async () => {
++  const factory = (): ProviderAdapter => ({
++    name: "gemini-test-tool",
++    async runTurn(parsed, _incoming, emit) {
++      expect(parsed.context.tools?.[0]?.name).toBe("weather");
++      emit({ type: "tool_call_start", id: "call_weather", name: "weather" });
++      emit({ type: "tool_call_delta", arguments: JSON.stringify({ city: "Tokyo" }) });
++      emit({ type: "tool_call_end" });
++      emit({
++        type: "done",
++        endTurn: true,
++        providerState: {
++          geminiWeb: {
++            conversationUrl: "https://gemini.google.com/app/tool_123",
++            mode: "pro",
++          },
++        },
++      });
++    },
++  });
++
++  const response = await responseRequest(request({
++    model: "gemini-web/pro",
++    stream: false,
++    store: false,
++    tools: [{
++      type: "function",
++      name: "weather",
++      description: "Get weather",
++      strict: false,
++      parameters: {
++        type: "object",
++        properties: { city: { type: "string" } },
++        required: ["city"],
++      },
++    }],
++    input: [{
++      type: "message",
++      role: "user",
++      content: [{ type: "input_text", text: "weather?" }],
++    }],
++  }), config(), undefined, {
++    geminiAdapterFactory: factory,
++  });
++  expect(response.status).toBe(200);
++  const body = await response.json() as { output: Array<Record<string, unknown>> };
++  expect(body.output).toContainEqual(expect.objectContaining({
++    type: "function_call",
++    call_id: "call_weather",
++    name: "weather",
++    arguments: JSON.stringify({ city: "Tokyo" }),
++  }));
++});
+diff --git a/tests/model-catalog.test.ts b/tests/model-catalog.test.ts
+index 979e0556d9388be63e68221d5f495c7df4376c14..01b3fe9f1ad32a430befaf910352225aa56f20c1 100644
+--- a/tests/model-catalog.test.ts
++++ b/tests/model-catalog.test.ts
+@@ -12,6 +12,7 @@ import {
+   chatGptWebRouteEfforts,
+   resolveChatGptWebContextLimits,
+ } from "../src/chatgpt-web-models";
++import { GEMINI_WEB_MODEL_ROUTES } from "../src/gemini-web-models";
+ import { augmentNativeModelCatalog, buildChatGptWebModel } from "../src/model-catalog";
+ 
+ function source(): Record<string, unknown> {
+@@ -372,3 +373,34 @@ describe("native /models augmentation", () => {
+     }, defaultConfig("full"))).toThrow("no list-visible, tool-capable model");
+   });
+ });
++
++
++test("Gemini Web catalog rows are explicit opt-in and keep native tool routing", () => {
++  const disabled = augmentNativeModelCatalog(source(), defaultConfig("full"));
++  const disabledModels = disabled.models as Array<Record<string, unknown>>;
++  expect(disabledModels.some(model => String(model.slug).startsWith("gemini-web/"))).toBe(false);
++
++  const config = defaultConfig("full");
++  config.geminiWebEnabled = true;
++  const enabled = augmentNativeModelCatalog(source(), config);
++  const models = enabled.models as Array<Record<string, unknown>>;
++  const gemini = models.filter(model => String(model.slug).startsWith("gemini-web/"));
++
++  expect(gemini.map(model => model.slug)).toEqual(
++    GEMINI_WEB_MODEL_ROUTES.map(route => route.slug),
++  );
++  expect(gemini).toHaveLength(3);
++  for (const model of gemini) {
++    expect(model).toMatchObject({
++      visibility: "list",
++      supported_in_api: true,
++      tool_mode: null,
++      default_reasoning_level: "low",
++      context_window: 128_000,
++      auto_compact_token_limit: 110_000,
++      additional_speed_tiers: [],
++      service_tiers: [],
++      default_service_tier: null,
++    });
++  }
++});
+diff --git a/tests/server-lifecycle.test.ts b/tests/server-lifecycle.test.ts
+index 81e4b1d59f90c3ba8dcc9ff594f7f747cdfb73ba..e4395f2a38b81232cb1353591736f6f8a66728fd 100644
+--- a/tests/server-lifecycle.test.ts
++++ b/tests/server-lifecycle.test.ts
+@@ -1155,6 +1155,48 @@ test("health proves that Codex received a successful augmented model catalog", a
+   }
+ });
+ 
++test("model catalog requests are control-plane traffic, not active user turns", async () => {
++  const config = { ...defaultConfig("browser-only"), port: 0 };
++  let releaseCatalog!: () => void;
++  let markCatalogStarted!: () => void;
++  const catalogStarted = new Promise<void>(resolve => { markCatalogStarted = resolve; });
++  const catalogGate = new Promise<void>(resolve => { releaseCatalog = resolve; });
++  const server = startServer(config, {
++    fetchUpstream: async () => {
++      markCatalogStarted();
++      await catalogGate;
++      return Response.json({
++        models: [{
++          slug: "gpt-5.6-sol",
++          display_name: "5.6 Sol",
++          visibility: "list",
++          supported_in_api: true,
++          supported_reasoning_levels: [],
++          tool_mode: "code_mode_only",
++        }],
++      });
++    },
++  });
++  const endpoint = `http://127.0.0.1:${server.port}`;
++  try {
++    const pendingCatalog = fetch(`${endpoint}/v1/models`, {
++      headers: { authorization: "Bearer test-codex-session" },
++    });
++    await catalogStarted;
++
++    expect(await (await fetch(`${endpoint}/healthz`)).json()).toMatchObject({
++      active_http_turns: 0,
++      active_browser_turns: 0,
++    });
++
++    releaseCatalog();
++    expect((await pendingCatalog).status).toBe(200);
++  } finally {
++    releaseCatalog();
++    await server.stop(true);
++  }
++});
++
+ test("server exposes authenticated standalone Web Search on the routed v1 base URL", async () => {
+   const config = { ...defaultConfig("browser-only"), port: 0 };
+   let upstreamRequest: Request | undefined;

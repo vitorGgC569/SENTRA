@@ -10,7 +10,7 @@ uma no composer via clipboard real ANTES do texto e confirma quantas anexaram
 (`images_attached` no resultado; 0 com imagens enviadas = paste falhou, job
 FAILED honesto, nada enviado). Nunca executa "paste" sem antes escrever o
 próprio conteúdo (jamais toca no clipboard do usuário). Após atualizar os
-arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.6.26).
+arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.6.52).
 
 Anti-morte-silenciosa MV3: WAIT fatiado em 25s (cada fatia renova o lease),
 job ativo persistido em storage (restart retoma sem reenviar), a tab pinga o
@@ -25,10 +25,10 @@ SW a cada ~10s (mensagem acorda SW suspenso) e o worker carrega telemetria
 ## Subir o caminho real
 
 1. Na raiz do projeto, inicie `python -B main.py --relay`. Ele persiste os jobs em
-   `.oma/relay.sqlite3` e informa o arquivo do token de pareamento. Não exponha o token.
+   `.oma/relay.sqlite3`; mantenha o relay restrito ao loopback.
 2. Edge → `edge://extensions` → modo desenvolvedor → "Carregar sem compactação"
    → pasta `edge_extension/`.
-3. Nas opções da extensão, cole o token de `.oma/relay-token`, marque Ativar e salve.
+3. Builds atuais pareiam a extensão com o relay por prova install-local. Não copie bearer/relay tokens.
    A extensão usa exclusivamente o Edge/perfil em que foi instalada. Não abre outro
    navegador e não cria nem fecha tabs. Quando há trabalho no relay, adota temporariamente
    uma aba `chatgpt.com` já aberta e inativa como controller único, guarda sua URL
@@ -44,7 +44,7 @@ SW a cada ~10s (mensagem acorda SW suspenso) e o worker carrega telemetria
 Novas instalações começam desativadas. Tokens não vão para prompts; jobs possuem
 lease, expiração e correlação por tarefa/worker. Resultados aguardam ACK e sobrevivem
 ao restart do relay. Falhas de entrega incertas não são automaticamente reenviadas.
-A versão 1.6.26 usa controller lazy único, `CHAT_START/CHAT_COLLECT` por
+A versão 1.6.52 usa controller lazy único, `CHAT_START/CHAT_COLLECT` por
 `conversation_id`, lifecycle explícito de `browser_close/shutdown` e recovery
 limitado de avisos transitórios “additional checks”.
 

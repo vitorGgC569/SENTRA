@@ -106,5 +106,3 @@ def test_one_click_plugin_handoff_requires_real_local_and_tunnel_health():
     assert ready["chatgpt_url"] == "https://chatgpt.com/"
     assert any("review" in text.lower() for text in ready["steps"])
     assert not any("key" in key for key in ready)
-
-
