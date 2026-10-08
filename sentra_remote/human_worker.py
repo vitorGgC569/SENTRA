@@ -22,14 +22,20 @@ def _pid_alive(pid: int) -> bool:
         return False
     if os.name == "nt":
         import ctypes
-        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
-        handle = ctypes.windll.kernel32.OpenProcess(
-            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
-        )
+
+        process_query_limited_information = 0x1000
+        still_active = 259
+        kernel = ctypes.windll.kernel32
+        handle = kernel.OpenProcess(process_query_limited_information, False, pid)
         if not handle:
             return False
-        ctypes.windll.kernel32.CloseHandle(handle)
-        return True
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == still_active
+        finally:
+            kernel.CloseHandle(handle)
     try:
         os.kill(pid, 0)
         return True
@@ -38,8 +44,22 @@ def _pid_alive(pid: int) -> bool:
 
 
 class WorkerLease:
+    INVALID_LEASE_GRACE_S = 5.0
+
     def __init__(self, path: Path) -> None:
         self.path = path
+
+    def is_held(self) -> bool:
+        try:
+            raw_pid = self.path.read_text(encoding="ascii").strip()
+            pid = int(raw_pid)
+        except (OSError, ValueError):
+            try:
+                age_s = max(0.0, time.time() - self.path.stat().st_mtime)
+            except OSError:
+                return False
+            return age_s < self.INVALID_LEASE_GRACE_S
+        return _pid_alive(pid)
 
     def acquire(self) -> bool:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -50,11 +70,7 @@ class WorkerLease:
                     handle.write(str(os.getpid()))
                 return True
             except FileExistsError:
-                try:
-                    pid = int(self.path.read_text(encoding="ascii").strip())
-                except (OSError, ValueError):
-                    pid = 0
-                if _pid_alive(pid):
+                if self.is_held():
                     return False
                 try:
                     self.path.unlink()

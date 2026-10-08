@@ -38,15 +38,16 @@ class AgentSupervisor:
                 time.sleep(2)
                 continue
             try:
+                proc = subprocess.Popen(
+                    self._command(),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
                 with self.lock:
-                    self.process = subprocess.Popen(
-                        self._command(),
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                    )
-                    proc = self.process
+                    self.process = proc
                 code = proc.wait()
                 with self.lock:
                     self.process = None

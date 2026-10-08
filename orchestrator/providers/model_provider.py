@@ -61,6 +61,18 @@ class ChatGPTWebModelProvider:
         await self.client.aclose()
 
     async def list_models(self) -> list[dict[str, Any]]:
+        # The native Codex /v1/models route requires the real incoming Codex
+        # bearer. SENTRA's internal provider deliberately does not possess that
+        # credential, so use the Gateway's redacted cache when admin authority
+        # is available instead of forwarding the local placeholder API key.
+        if self.gateway_admin_token:
+            response = await self.client.get(
+                "/sentra/model-catalog",
+                headers={"Authorization": f"Bearer {self.gateway_admin_token}"},
+            )
+            response.raise_for_status()
+            catalog = response.json()
+            return list(catalog.get("models") or [])
         response = await self.client.get("/v1/models")
         response.raise_for_status()
         catalog = response.json()

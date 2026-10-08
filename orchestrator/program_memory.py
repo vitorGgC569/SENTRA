@@ -49,6 +49,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from .process_lock import exclusive_file_lock
+
 MEMORY_DIRNAME = "memory"
 ADRS_FILENAME = "adrs.json"
 LESSONS_FILENAME = "lessons.json"
@@ -189,6 +191,7 @@ class ProgramMemory:
         self.adrs_file = self.memory_dir / ADRS_FILENAME
         self.lessons_file = self.memory_dir / LESSONS_FILENAME
         self.candidates_file = self.memory_dir / CANDIDATES_FILENAME
+        self.lock_file = self.memory_dir / ".memory.lock"
 
     # -- atomic IO ------------------------------------------------------
     def _atomic_write_json(self, path: Path, payload: Any) -> None:
@@ -288,7 +291,7 @@ class ProgramMemory:
         out.sort(key=lambda e: e["id"])
         return out
 
-    def record_adr(
+    def _record_adr_unlocked(
         self,
         decision: str,
         rationale: str = "",
@@ -306,6 +309,15 @@ class ProgramMemory:
         _check_text("rationale", rationale, required=False)
         norm_refs = _normalize_refs(refs)
         adrs = self.list_adrs()
+        normalized_decision = decision.strip()
+        normalized_rationale = rationale.strip() if isinstance(rationale, str) else ""
+        for existing in adrs:
+            if (
+                existing.get("decision") == normalized_decision
+                and existing.get("rationale", "") == normalized_rationale
+                and existing.get("refs", {}) == norm_refs
+            ):
+                return str(existing["id"])
         if len(adrs) >= MAX_ADRS:
             raise ValueError(f"ADR store full ({MAX_ADRS} records)")
         taken = {a["id"] for a in adrs}
@@ -320,14 +332,23 @@ class ProgramMemory:
         entry = {
             "id": f"ADR-{seq:04d}",
             "date": _utcnow(),
-            "decision": decision.strip(),
-            "rationale": rationale.strip() if isinstance(rationale, str) else "",
+            "decision": normalized_decision,
+            "rationale": normalized_rationale,
             "refs": norm_refs,
         }
         raw = self._load_list(self.adrs_file)
         raw.append(entry)
         self._atomic_write_json(self.adrs_file, raw)
         return entry["id"]
+
+    def record_adr(
+        self,
+        decision: str,
+        rationale: str = "",
+        refs: Optional[Any] = None,
+    ) -> str:
+        with exclusive_file_lock(self.lock_file):
+            return self._record_adr_unlocked(decision, rationale, refs)
 
     # -- lessons --------------------------------------------------------
     def list_lessons(self) -> List[Dict[str, Any]]:
@@ -339,7 +360,7 @@ class ProgramMemory:
         out.sort(key=lambda e: e["id"])
         return out
 
-    def record_lesson(self, text: str, evidence: str) -> str:
+    def _record_lesson_unlocked(self, text: str, evidence: str) -> str:
         """Persist one lesson; return its id (``LES-0001`` ...).
 
         Lessons are accepted ONLY with evidence citing a run id plus a
@@ -353,6 +374,14 @@ class ProgramMemory:
                 "or event reference"
             )
         lessons = self.list_lessons()
+        normalized_text = text.strip()
+        normalized_evidence = evidence.strip()
+        for existing in lessons:
+            if (
+                existing.get("text") == normalized_text
+                and existing.get("evidence") == normalized_evidence
+            ):
+                return str(existing["id"])
         if len(lessons) >= MAX_LESSONS:
             raise ValueError(f"lesson store full ({MAX_LESSONS} records)")
         taken = {entry["id"] for entry in lessons}
@@ -367,13 +396,17 @@ class ProgramMemory:
         entry = {
             "id": f"LES-{seq:04d}",
             "date": _utcnow(),
-            "text": text.strip(),
-            "evidence": evidence.strip(),
+            "text": normalized_text,
+            "evidence": normalized_evidence,
         }
         raw = self._load_list(self.lessons_file)
         raw.append(entry)
         self._atomic_write_json(self.lessons_file, raw)
         return entry["id"]
+
+    def record_lesson(self, text: str, evidence: str) -> str:
+        with exclusive_file_lock(self.lock_file):
+            return self._record_lesson_unlocked(text, evidence)
 
     # -- candidate index ------------------------------------------------
     def get_candidates(
@@ -390,7 +423,7 @@ class ProgramMemory:
             return clean
         return list(clean.get(task_type.strip().lower(), []))
 
-    def record_candidate(
+    def _record_candidate_unlocked(
         self,
         task_type: str,
         patch_ref: str,
@@ -422,19 +455,44 @@ class ProgramMemory:
             if kind not in data and len(data) >= MAX_CANDIDATE_TYPES:
                 raise ValueError("too many candidate task types")
             data[kind] = []
-        if len(data[kind]) >= MAX_CANDIDATES_PER_TYPE:
-            raise ValueError(f"candidate list full for task type {kind!r}")
-        entry = {
+        normalized = {
             "patch_ref": patch_ref.strip(),
             "outcome": outcome.strip(),
             "run_id": run_id.strip() if isinstance(run_id, str) else "",
             "task_id": task_id.strip() if isinstance(task_id, str) else "",
             "notes": notes.strip() if isinstance(notes, str) else "",
+        }
+        for index, existing in enumerate(data[kind]):
+            if all(existing.get(key, "") == value for key, value in normalized.items()):
+                return index
+        if len(data[kind]) >= MAX_CANDIDATES_PER_TYPE:
+            raise ValueError(f"candidate list full for task type {kind!r}")
+        entry = {
+            **normalized,
             "date": _utcnow(),
         }
         data[kind].append(entry)
         self._atomic_write_json(self.candidates_file, data)
         return len(data[kind]) - 1
+
+    def record_candidate(
+        self,
+        task_type: str,
+        patch_ref: str,
+        outcome: str,
+        run_id: str = "",
+        task_id: str = "",
+        notes: str = "",
+    ) -> int:
+        with exclusive_file_lock(self.lock_file):
+            return self._record_candidate_unlocked(
+                task_type,
+                patch_ref,
+                outcome,
+                run_id=run_id,
+                task_id=task_id,
+                notes=notes,
+            )
 
     def stats(self) -> Dict[str, int]:
         data = self._load_dict(self.candidates_file)

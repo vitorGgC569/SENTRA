@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from functools import partial
 import sqlite3
 import subprocess
 import threading
@@ -14,6 +15,7 @@ from typing import Any
 
 from ..audit import AuditLogger
 from ..config import MCPConfig
+from .durable import DurableRunService
 from .repository import RepositoryService
 
 _TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"}
@@ -26,14 +28,14 @@ class JobService:
         audit: AuditLogger,
         repository: RepositoryService,
         *,
-        durable: object | None = None,
+        durable: DurableRunService | None = None,
         db_path: Path | None = None,
     ) -> None:
         self.config = config
         self.audit = audit
         self.repository = repository
         self.durable = durable
-        self.db_path = Path(db_path or (config.state_root / "jobs.sqlite3"))
+        self.db_path = Path(db_path or (config.resolved_state_root / "jobs.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -58,9 +60,11 @@ class JobService:
             CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY,
                 owner TEXT NOT NULL,
+                principal TEXT,
                 operation TEXT NOT NULL,
                 target TEXT,
                 workspace TEXT,
+                resource_key TEXT,
                 run_id TEXT,
                 operation_id TEXT,
                 idempotency_key TEXT,
@@ -78,11 +82,15 @@ class JobService:
         existing_columns = {
             str(row["name"]) for row in self.db.execute("PRAGMA table_info(jobs)").fetchall()
         }
-        for column in ("run_id", "operation_id", "idempotency_key"):
+        for column in ("run_id", "operation_id", "idempotency_key", "resource_key", "principal"):
             if column not in existing_columns:
                 self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
         if "producer_pid" not in existing_columns:
             self.db.execute("ALTER TABLE jobs ADD COLUMN producer_pid INTEGER")
+        self.db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_principal_created "
+            "ON jobs(principal, created DESC)"
+        )
         self._recover_stale_jobs()
         self.db.commit()
         self._closed = False
@@ -136,6 +144,45 @@ class JobService:
 
     def update_config(self, config: MCPConfig) -> None:
         self.config = config
+
+    def _execution_resource_key(
+        self,
+        workspace: str | None,
+        owner: str,
+    ) -> str:
+        resolver = getattr(self.repository, "execution_resource_key", None)
+        if callable(resolver):
+            return str(resolver(workspace, owner))
+        selector = str(workspace or "").strip()
+        return os.path.normcase(selector) if os.name == "nt" else selector
+
+    def _active_exclusive_job(
+        self,
+        operation: str,
+        resource_key: str,
+    ) -> sqlite3.Row | None:
+        if operation != "BUILD":
+            return None
+        rows = self.db.execute(
+            "SELECT * FROM jobs WHERE operation=? "
+            "AND state IN ('PENDING','RUNNING','CANCELLING') "
+            "ORDER BY created DESC",
+            (operation,),
+        ).fetchall()
+        for row in rows:
+            existing = str(row["resource_key"] or "").strip()
+            if not existing:
+                try:
+                    existing = self._execution_resource_key(
+                        row["workspace"],
+                        str(row["owner"]),
+                    )
+                except Exception:
+                    selector = str(row["workspace"] or "").strip()
+                    existing = os.path.normcase(selector) if os.name == "nt" else selector
+            if existing == resource_key:
+                return row
+        return None
 
     def _set(
         self,
@@ -282,6 +329,7 @@ class JobService:
         workspace: str | None = None,
         run_id: str | None = None,
         idempotency_key: str | None = None,
+        principal: str | None = None,
     ) -> dict[str, Any]:
         if self._closed:
             raise RuntimeError("job service is shut down")
@@ -298,60 +346,107 @@ class JobService:
         key = str(idempotency_key or "").strip() or (
             f"job:{op}:{target or '-'}:{uuid.uuid4().hex}"
         )
-        if self.durable is not None:
-            if run_id:
-                durable_run = self.durable.run_status(run_id, owner)
-            else:
-                durable_run = self.durable.ensure_implicit_run(
-                    owner, workspace=workspace
-                )
-            durable_run_id = str(durable_run["run_id"])
-            durable_operation = self.durable.create_operation(
-                durable_run_id,
-                owner,
-                kind=f"repository.{op.lower()}",
-                idempotency_key=key,
-            )
-            operation_id = str(durable_operation["operation_id"])
-            if durable_operation.get("idempotent_replay"):
-                with self.lock:
-                    row = self.db.execute(
-                        "SELECT * FROM jobs WHERE operation_id=? AND owner=? "
-                        "ORDER BY created DESC LIMIT 1",
-                        (operation_id, owner),
-                    ).fetchone()
-                if row is not None:
-                    data = self._view(row, include_result=row["state"] in _TERMINAL)
-                    data["idempotent_replay"] = True
-                    return data
-                return {
-                    "run_id": durable_run_id,
-                    "operation_id": operation_id,
-                    "idempotency_key": key,
-                    "idempotent_replay": True,
-                    "state": durable_operation["state"],
-                    "semantic_status": (
-                        "OPERATION_STILL_RUNNING"
-                        if durable_operation["state"]
-                        not in {"SUCCEEDED", "FAILED", "CANCELLED", "UNCERTAIN"}
-                        else durable_operation["state"]
-                    ),
-                }
-
         job_id = str(uuid.uuid4())
         now = time.time()
+        resource_key = (
+            self._execution_resource_key(workspace, owner)
+            if op == "BUILD"
+            else None
+        )
+
+        # Serialize admission across sessions and even across JobService
+        # instances sharing the same jobs.sqlite3. BUILD mutates common work,
+        # dist and spec trees, so a second BUILD for the same canonical
+        # workspace must never overlap the first one.
         with self.lock:
-            self.db.execute(
-                "INSERT INTO jobs(id,owner,operation,target,workspace,run_id,operation_id,"
-                "idempotency_key,producer_pid,state,created,updated) "
-                "VALUES(?,?,?,?,?,?,?,?,?, 'PENDING',?,?)",
-                (
-                    job_id, owner, op, target or None, workspace,
-                    durable_run_id, operation_id, key, os.getpid(), now, now,
-                ),
-            )
-            self.db.commit()
-            self.done_events[job_id] = threading.Event()
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                if principal:
+                    replay_row = self.db.execute(
+                        "SELECT * FROM jobs WHERE (owner=? OR principal=?) AND operation=? "
+                        "AND idempotency_key=? ORDER BY created DESC LIMIT 1",
+                        (owner, principal, op, key),
+                    ).fetchone()
+                else:
+                    replay_row = self.db.execute(
+                        "SELECT * FROM jobs WHERE owner=? AND operation=? "
+                        "AND idempotency_key=? ORDER BY created DESC LIMIT 1",
+                        (owner, op, key),
+                    ).fetchone()
+                if replay_row is not None:
+                    self.db.rollback()
+                    data = self._view(
+                        replay_row,
+                        include_result=replay_row["state"] in _TERMINAL,
+                    )
+                    data["idempotent_replay"] = True
+                    return data
+
+                if resource_key is not None:
+                    active = self._active_exclusive_job(op, resource_key)
+                    if active is not None:
+                        self.db.rollback()
+                        raise RuntimeError("BUILD already running for workspace")
+
+                if self.durable is not None:
+                    if run_id:
+                        durable_run = self.durable.run_status(run_id, owner)
+                    else:
+                        durable_run = self.durable.ensure_implicit_run(
+                            owner, workspace=workspace
+                        )
+                    durable_run_id = str(durable_run["run_id"])
+                    durable_operation = self.durable.create_operation(
+                        durable_run_id,
+                        owner,
+                        kind=f"repository.{op.lower()}",
+                        idempotency_key=key,
+                    )
+                    operation_id = str(durable_operation["operation_id"])
+                    if durable_operation.get("idempotent_replay"):
+                        row = self.db.execute(
+                            "SELECT * FROM jobs WHERE operation_id=? AND owner=? "
+                            "ORDER BY created DESC LIMIT 1",
+                            (operation_id, owner),
+                        ).fetchone()
+                        self.db.rollback()
+                        if row is not None:
+                            data = self._view(
+                                row,
+                                include_result=row["state"] in _TERMINAL,
+                            )
+                            data["idempotent_replay"] = True
+                            return data
+                        return {
+                            "run_id": durable_run_id,
+                            "operation_id": operation_id,
+                            "idempotency_key": key,
+                            "idempotent_replay": True,
+                            "state": durable_operation["state"],
+                            "semantic_status": (
+                                "OPERATION_STILL_RUNNING"
+                                if durable_operation["state"]
+                                not in {"SUCCEEDED", "FAILED", "CANCELLED", "UNCERTAIN"}
+                                else durable_operation["state"]
+                            ),
+                        }
+
+                self.db.execute(
+                    "INSERT INTO jobs(id,owner,principal,operation,target,workspace,resource_key,"
+                    "run_id,operation_id,idempotency_key,producer_pid,state,created,updated) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?, 'PENDING',?,?)",
+                    (
+                        job_id, owner, str(principal or "") or None, op, target or None,
+                        workspace, resource_key, durable_run_id, operation_id, key,
+                        os.getpid(), now, now,
+                    ),
+                )
+                self.db.commit()
+                self.done_events[job_id] = threading.Event()
+            except Exception:
+                if self.db.in_transaction:
+                    self.db.rollback()
+                raise
         if self.durable is not None and operation_id:
             try:
                 self.durable.update_operation(
@@ -374,7 +469,7 @@ class JobService:
         )
         with self.lock:
             self.tasks[job_id] = future
-        future.add_done_callback(lambda item, ident=job_id: self._job_done(ident, item))
+        future.add_done_callback(partial(self._job_done, job_id))
         self.audit.emit("job.start", "ok", {
             "job_id": job_id,
             "run_id": durable_run_id,
@@ -391,18 +486,30 @@ class JobService:
             "operation_id": operation_id,
             "idempotency_key": key,
             "state": "PENDING",
+            "execution_mode": "detached",
+            "accepted": True,
+            "result_ready": False,
             "operation": op,
             "target": target or None,
             "workspace": workspace,
         }
 
-    def _row(self, job_id: str, owner: str) -> sqlite3.Row:
+    def _row(
+        self,
+        job_id: str,
+        owner: str,
+        principal: str | None = None,
+    ) -> sqlite3.Row:
         row = self.db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
         if row is None:
             raise FileNotFoundError("job not found")
-        if row["owner"] != owner:
-            raise PermissionError("job belongs to another MCP session")
-        return row
+        if row["owner"] == owner:
+            return row
+        recorded = str(row["principal"] or "").strip()
+        supplied = str(principal or "").strip()
+        if recorded and supplied and recorded == supplied:
+            return row
+        raise PermissionError("job belongs to another MCP principal")
 
     @staticmethod
     def _view(row: sqlite3.Row, *, include_result: bool = False) -> dict[str, Any]:
@@ -415,6 +522,8 @@ class JobService:
             "target": row["target"],
             "workspace": row["workspace"],
             "state": row["state"],
+            "execution_mode": "detached",
+            "result_ready": row["state"] in _TERMINAL,
             "error": row["error"],
             "created": row["created"],
             "updated": row["updated"],
@@ -423,13 +532,23 @@ class JobService:
             data["result"] = json.loads(row["result_json"]) if row["result_json"] else None
         return data
 
-    def status(self, job_id: str, owner: str) -> dict[str, Any]:
+    def status(
+        self,
+        job_id: str,
+        owner: str,
+        principal: str | None = None,
+    ) -> dict[str, Any]:
         with self.lock:
-            return self._view(self._row(job_id, owner))
+            return self._view(self._row(job_id, owner, principal))
 
-    def result(self, job_id: str, owner: str) -> dict[str, Any]:
+    def result(
+        self,
+        job_id: str,
+        owner: str,
+        principal: str | None = None,
+    ) -> dict[str, Any]:
         with self.lock:
-            row = self._row(job_id, owner)
+            row = self._row(job_id, owner, principal)
             if row["state"] not in _TERMINAL:
                 raise RuntimeError("job is not finished")
             return self._view(row, include_result=True)
@@ -439,11 +558,12 @@ class JobService:
         job_id: str,
         owner: str,
         timeout_s: float = 5.0,
+        principal: str | None = None,
     ) -> dict[str, Any]:
         if not 0 < timeout_s <= 25:
             raise ValueError("timeout_s must be >0 and <=25")
         with self.lock:
-            row = self._row(job_id, owner)
+            row = self._row(job_id, owner, principal)
             if row["state"] in _TERMINAL:
                 data = self._view(row, include_result=True)
                 data["timed_out"] = False
@@ -451,7 +571,7 @@ class JobService:
             event = self.done_events.setdefault(job_id, threading.Event())
         finished = event.wait(timeout_s)
         with self.lock:
-            row = self._row(job_id, owner)
+            row = self._row(job_id, owner, principal)
             data = self._view(row, include_result=row["state"] in _TERMINAL)
         data["timed_out"] = not finished and row["state"] not in _TERMINAL
         data["next_poll_after_ms"] = (
@@ -461,9 +581,14 @@ class JobService:
             data["semantic_status"] = "OPERATION_STILL_RUNNING"
         return data
 
-    def cancel(self, job_id: str, owner: str) -> dict[str, Any]:
+    def cancel(
+        self,
+        job_id: str,
+        owner: str,
+        principal: str | None = None,
+    ) -> dict[str, Any]:
         with self.lock:
-            row = self._row(job_id, owner)
+            row = self._row(job_id, owner, principal)
             if row["state"] in _TERMINAL:
                 return self._view(row)
             self.db.execute(
@@ -478,7 +603,7 @@ class JobService:
             try:
                 self.durable.request_cancel(
                     str(row["operation_id"]),
-                    owner,
+                    str(row["owner"]),
                     side_effect_may_have_started=True,
                 )
             except Exception:
@@ -495,16 +620,24 @@ class JobService:
         owner: str,
         limit: int = 100,
         offset: int = 0,
+        principal: str | None = None,
     ) -> dict[str, Any]:
         if offset < 0 or not 1 <= limit <= 1000:
             raise ValueError("offset must be >=0 and limit must be 1..1000")
+        supplied = str(principal or "").strip()
         with self.lock:
+            if supplied:
+                where = "(owner=? OR principal=?)"
+                params: tuple[Any, ...] = (owner, supplied)
+            else:
+                where = "owner=?"
+                params = (owner,)
             total = int(self.db.execute(
-                "SELECT COUNT(*) FROM jobs WHERE owner=?", (owner,)
+                f"SELECT COUNT(*) FROM jobs WHERE {where}", params
             ).fetchone()[0])
             rows = self.db.execute(
-                "SELECT * FROM jobs WHERE owner=? ORDER BY created DESC LIMIT ? OFFSET ?",
-                (owner, limit, offset),
+                f"SELECT * FROM jobs WHERE {where} ORDER BY created DESC LIMIT ? OFFSET ?",
+                (*params, limit, offset),
             ).fetchall()
         items = [self._view(row) for row in rows]
         next_offset = offset + len(items)

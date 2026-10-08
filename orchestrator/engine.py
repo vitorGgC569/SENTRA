@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import statistics
 import time
 from pathlib import Path
@@ -38,6 +39,7 @@ from workspace.tool_gateway import ToolGateway
 from workspace.patch_manager import PatchManager
 from workspace.sandbox import fingerprint, source_files
 from .verification import CandidateVerifier
+from .integration import ProjectIntegrationCoordinator, integrate_engine_candidate
 from .budgets import TokenBudget
 from .convergence import ConvergencePolicy
 
@@ -170,6 +172,13 @@ class OMAEngine:
         transient_backoff_base_s: float = 30.0,
         shared_context_bridge=None,
         resource_manifest=None,
+        resource_manifests=None,
+        candidate_producers=None,
+        resource_lease_manager=None,
+        program_memory=None,
+        enforce_milestone_gate: bool = True,
+        milestone_budgets=None,
+        required_milestone_evidence=None,
         convergence_policy=None,
     ):
         self.run_id = run_id
@@ -214,6 +223,11 @@ class OMAEngine:
         self.task_token_budget = task_token_budget
         self.max_repair_rounds = max_repair_rounds
         self.compute_policy = compute_policy
+        self.enforce_milestone_gate = bool(enforce_milestone_gate)
+        self.milestone_budgets = dict(milestone_budgets or {})
+        self.required_milestone_evidence = [
+            str(item) for item in (required_milestone_evidence or [])
+        ]
         self._task_roles = {}
         if resource_manifest is None:
             extra_capabilities = {"browser", "persistent_conversations"} if fixed_conversations else set()
@@ -230,18 +244,57 @@ class OMAEngine:
             raise TypeError("resource_manifest must be a NodeCapabilityManifest or dict")
         self.resource_registry = ResourceCapabilityRegistry()
         self.resource_registry.upsert(self.resource_manifest)
+        for raw_manifest in list(resource_manifests or []):
+            manifest = (
+                raw_manifest
+                if isinstance(raw_manifest, NodeCapabilityManifest)
+                else NodeCapabilityManifest.from_dict(raw_manifest)
+                if isinstance(raw_manifest, dict)
+                else None
+            )
+            if manifest is None:
+                raise TypeError(
+                    "resource_manifests entries must be NodeCapabilityManifest or dict"
+                )
+            self.resource_registry.upsert(manifest)
+        self.candidate_producers = dict(candidate_producers or {})
+        unknown_producers = (
+            set(self.candidate_producers)
+            - {item["node_id"] for item in self.resource_registry.snapshot()}
+        )
+        if unknown_producers:
+            raise ValueError(
+                "candidate producer registered for unknown node(s): "
+                + ",".join(sorted(unknown_producers))
+            )
+        if self.resource_manifest.node_id in self.candidate_producers:
+            raise ValueError("local resource node cannot override the built-in executor")
+        self._node_inflight: dict[str, int] = {}
 
         # Core subsystems
         self.event_bus = EventBus()
         self.persistence = PersistenceStore(self.run_id, base_dir=persistence_base or self.workspace_path / "runs")
         self.anti_explosion = AntiExplosionGuard(anti_explosion_config)
-        self.task_queue = PriorityTaskQueue(self.anti_explosion)
+        self.task_queue = PriorityTaskQueue(
+            self.anti_explosion,
+            resource_lease_manager=resource_lease_manager,
+        )
         self.quality_gate = QualityGate(quorum_policy)
         self.memory = MemoryManager(self.run_id, self.workspace_path / "runs")
+        self.program_memory = program_memory
         self.metrics = MetricsCollector()
         self.tool_gateway = ToolGateway(self.workspace_path, execution=execution, profiles=command_profiles)
         self.verifier = CandidateVerifier(self.workspace_path, self.validation_commands, command_profiles, test_timeout,
                                           execution, allowed_patch_paths)
+        self.integration_coordinator = ProjectIntegrationCoordinator(
+            self.workspace_path,
+            self.verifier,
+            state_root=self.persistence.run_dir,
+            project_key="run:" + self.run_id,
+            resource_lease_manager=resource_lease_manager,
+        )
+        # Package/checkpoint bookkeeping is still serialized in-process; actual
+        # workspace writes are authorized by ProjectIntegrationCoordinator.
         self._promotion_lock = asyncio.Lock()
         budget_file = self.persistence.run_dir / "budgets.json"
         self.budget = TokenBudget(token_budget_master, token_budget_secondary,
@@ -451,6 +504,152 @@ class OMAEngine:
                     await asyncio.sleep(delay)
                 attempt += 1
                 continue
+
+    def _executable_nodes(self) -> list[NodeCapabilityManifest]:
+        """Return scheduler nodes that have a real candidate-production path."""
+        nodes = []
+        local_id = self.resource_manifest.node_id
+        for raw in self.resource_registry.snapshot():
+            node = NodeCapabilityManifest.from_dict(raw)
+            if node.health not in {"READY", "ONLINE", "IDLE"}:
+                continue
+            if node.node_id != local_id and node.node_id not in self.candidate_producers:
+                continue
+            current = int(self._node_inflight.get(node.node_id, 0))
+            if current >= max(1, int(node.max_concurrency)):
+                continue
+            nodes.append(node)
+        # Prefer the least-loaded node; preserve deterministic local tie-break.
+        nodes.sort(
+            key=lambda node: (
+                self._node_inflight.get(node.node_id, 0) / max(1, node.max_concurrency),
+                0 if node.node_id == local_id else 1,
+                -node.max_concurrency,
+                node.node_id,
+            )
+        )
+        return nodes
+
+    async def _produce_candidate(
+        self,
+        task: Task,
+        *,
+        context_summary: str,
+    ) -> Candidate:
+        node_id = str(
+            (task.metadata or {}).get("assigned_node_id")
+            or self.resource_manifest.node_id
+        )
+        if node_id == self.resource_manifest.node_id:
+            return await self.executor.execute_task(
+                task,
+                context_summary=context_summary,
+            )
+
+        producer = self.candidate_producers.get(node_id)
+        if producer is None:
+            raise RuntimeError(
+                f"REMOTE_EXECUTOR_UNAVAILABLE: no candidate producer for node {node_id}"
+            )
+        method = getattr(producer, "produce_candidate", None)
+        if method is None and callable(producer):
+            method = producer
+        if method is None or not callable(method):
+            raise TypeError(
+                f"candidate producer for node {node_id} is not callable"
+            )
+        candidate = await method(
+            task,
+            context_summary=context_summary,
+            workspace_path=self.workspace_path,
+        )
+        if not isinstance(candidate, Candidate):
+            raise TypeError(
+                f"candidate producer for node {node_id} returned "
+                f"{type(candidate).__name__}, expected Candidate"
+            )
+        if candidate.task_id != task.id:
+            raise ValueError(
+                f"REMOTE_CANDIDATE_TASK_MISMATCH: expected {task.id}, "
+                f"got {candidate.task_id}"
+            )
+        if candidate.run_id not in {"", self.run_id}:
+            raise ValueError(
+                f"REMOTE_CANDIDATE_RUN_MISMATCH: expected {self.run_id}, "
+                f"got {candidate.run_id}"
+            )
+        candidate.run_id = self.run_id
+        candidate.created_by = candidate.created_by or f"remote:{node_id}"
+        task.metadata["candidate_producer_node"] = node_id
+        return candidate
+
+    async def _process_task_on_node(
+        self,
+        task: Task,
+        node: NodeCapabilityManifest,
+    ) -> bool:
+        self._node_inflight[node.node_id] = (
+            int(self._node_inflight.get(node.node_id, 0)) + 1
+        )
+        try:
+            return await self.process_task(task)
+        finally:
+            remaining = max(
+                0,
+                int(self._node_inflight.get(node.node_id, 1)) - 1,
+            )
+            if remaining:
+                self._node_inflight[node.node_id] = remaining
+            else:
+                self._node_inflight.pop(node.node_id, None)
+
+    def _unrunnable_ready_tasks(self) -> dict[str, dict[str, Any]]:
+        """Explain why each ready task has no executable node.
+
+        Capabilities are checked per node, never by taking a union across nodes.
+        A compatible remote manifest without a registered candidate producer is
+        reported separately from a truly missing capability.
+        """
+        executable_ids = {
+            node.node_id for node in self._executable_nodes()
+        }
+        diagnostics: dict[str, dict[str, Any]] = {}
+        for task_id in list(self.task_queue._ready_queue):
+            task = self.task_queue._all_tasks[task_id]
+            required = {
+                str(item).strip().lower()
+                for item in task.required_capabilities
+                if str(item).strip()
+            }
+            compatible = self.resource_registry.compatible(required)
+            if any(node.node_id in executable_ids for node in compatible):
+                continue
+            unavailable = [
+                node.node_id
+                for node in compatible
+                if node.node_id != self.resource_manifest.node_id
+                and node.node_id not in self.candidate_producers
+            ]
+            if unavailable:
+                diagnostics[task_id] = {
+                    "code": "REMOTE_EXECUTOR_UNAVAILABLE",
+                    "required_capabilities": sorted(required),
+                    "compatible_nodes": unavailable,
+                }
+                continue
+            missing: set[str] = set(required)
+            for node in self.resource_registry.snapshot():
+                manifest = NodeCapabilityManifest.from_dict(node)
+                missing &= set(manifest.missing(required))
+            diagnostics[task_id] = {
+                "code": "CAPABILITY_MISSING",
+                "required_capabilities": sorted(required),
+                "missing_capabilities": sorted(missing or required),
+                "known_nodes": [
+                    item["node_id"] for item in self.resource_registry.snapshot()
+                ],
+            }
+        return diagnostics
 
     def _collect_task_errors(self) -> Dict[str, str]:
         """Per-task error map for partial runs. Siblings keep their own
@@ -739,13 +938,166 @@ class OMAEngine:
         """
         try:
             from .program_memory import ProgramMemory
-            hits = ProgramMemory(self.workspace_path).recall(self.objective, limit=5)
+            memory = self.program_memory or ProgramMemory(self.workspace_path)
+            hits = memory.recall(self.objective, limit=5)
         except Exception:
             return ""
         lines = [f"- [{h.get('kind', '?')}:{h.get('ref', '?')}] "
                  f"{h.get('snippet', '')}"[:400] for h in hits or []]
         brief = "\n".join(lines)[:2000]
         return f"\n\n## Program memory (decisoes e licoes de runs anteriores)\n{brief}\n" if brief else ""
+
+    def _record_program_candidate(
+        self,
+        task: Task,
+        candidate: Candidate | None,
+        outcome: str,
+        *,
+        notes: str = "",
+    ) -> None:
+        if self.program_memory is None or candidate is None:
+            return
+        try:
+            task_type = str(
+                task.metadata.get("task_type")
+                or task.validation_strategy
+                or task.side_effect_scope
+                or "task"
+            ).strip().lower()
+            patch_ref = (
+                f"run={self.run_id};task={task.id};candidate={candidate.candidate_id};"
+                f"patch_sha256={hashlib.sha256((candidate.patch or '').encode('utf-8')).hexdigest()}"
+            )
+            self.program_memory.record_candidate(
+                task_type,
+                patch_ref,
+                outcome,
+                run_id=self.run_id,
+                task_id=task.id,
+                notes=str(notes or "")[:4000],
+            )
+        except Exception as exc:
+            task.metadata["program_memory_error"] = str(exc)[:500]
+
+    def _record_program_learning(
+        self,
+        task: Task,
+        candidate: Candidate | None,
+        decision: MasterDecision | None,
+    ) -> None:
+        """Persist only evidence-backed learning from a settled task.
+
+        Candidate history records every outcome separately. Lessons are reserved
+        for deterministic execution facts worth reusing (repair/rebase), while
+        ADRs require an explicit planner-declared architecture decision that
+        survived tests, Quality Gate and Master review.
+        """
+        if self.program_memory is None or candidate is None:
+            return
+        evidence = (
+            f"run-id:{self.run_id} event QUALITY_GATE_PASSED "
+            f"task={task.id} candidate={candidate.candidate_id}"
+        )
+        try:
+            if task.current_repair_round > 0:
+                self.program_memory.record_lesson(
+                    (
+                        f"Task '{task.objective}' required "
+                        f"{task.current_repair_round} repair round(s) before approval."
+                    )[:4000],
+                    evidence,
+                )
+            rebase = dict((task.metadata or {}).get("optimistic_rebase") or {})
+            if rebase.get("applied"):
+                touched = ",".join(str(item) for item in rebase.get("touched_files", [])[:20])
+                self.program_memory.record_lesson(
+                    (
+                        f"Task '{task.objective}' was safely rebased after unrelated "
+                        f"project changes and deterministically reverified"
+                        + (f"; candidate scope={touched}" if touched else "")
+                        + "."
+                    )[:4000],
+                    evidence,
+                )
+
+            architecture_decision = str(
+                (task.metadata or {}).get("architecture_decision") or ""
+            ).strip()
+            if architecture_decision:
+                rationale = str(
+                    (task.metadata or {}).get("decision_rationale")
+                    or (getattr(decision, "reasoning", "") if decision is not None else "")
+                    or "Approved by deterministic task gate and final package review."
+                ).strip()
+                self.program_memory.record_adr(
+                    architecture_decision[:4000],
+                    rationale[:4000],
+                    {
+                        "run_id": self.run_id,
+                        "task_id": task.id,
+                        "candidate_id": candidate.candidate_id,
+                    },
+                )
+        except Exception as exc:
+            task.metadata["program_memory_error"] = str(exc)[:500]
+
+    def _evaluate_milestone_composition(self) -> dict[str, Any]:
+        from .milestones import check_budgets, evaluate_milestone
+
+        tasks = dict(self.task_queue._all_tasks)
+        validations = {package.task_id: package for package in self.completed_packages}
+        groups: dict[str, list[str]] = {}
+        for task_id, task in tasks.items():
+            name = str((task.metadata or {}).get("milestone") or "default").strip() or "default"
+            groups.setdefault(name, []).append(task_id)
+
+        verdicts = []
+        for name in sorted(groups):
+            verdicts.append(
+                evaluate_milestone(
+                    name,
+                    sorted(groups[name]),
+                    tasks,
+                    validations,
+                    min_bar=self.quality_gate.policy.min_release_score,
+                    required_evidence=self.required_milestone_evidence,
+                ).to_dict()
+            )
+        if tasks:
+            verdicts.append(
+                evaluate_milestone(
+                    "project-final",
+                    sorted(tasks),
+                    tasks,
+                    validations,
+                    min_bar=self.quality_gate.policy.min_release_score,
+                    required_evidence=self.required_milestone_evidence,
+                ).to_dict()
+            )
+        budget_violations = (
+            [
+                item.to_dict()
+                for item in check_budgets(
+                    self.workspace_path,
+                    self.milestone_budgets,
+                )
+            ]
+            if self.milestone_budgets
+            else []
+        )
+        passed = (
+            bool(verdicts)
+            and all(item["passed"] for item in verdicts)
+            and not budget_violations
+        )
+        return {
+            "passed": passed,
+            "milestones": verdicts,
+            "budget_violations": budget_violations,
+            "required_evidence": list(self.required_milestone_evidence),
+            "task_count": len(tasks),
+            "package_count": len(self.completed_packages),
+        }
 
     async def plan_initial_tasks(self) -> List[Task]:
         print(f"\n[+] [OMA Engine] Planning task decomposition for Run: {self.run_id}")
@@ -801,15 +1153,47 @@ class OMAEngine:
             if not targets:
                 evidence["visual_evidence"] = {"files": [], "note": "no HTML targets"}
                 return
+            from .milestones import evaluate_visual_evidence
+
             dest = self.persistence.run_dir / "evidence"
             recs = capture_task_renders(
                 [str(_Path(root) / t) for t in targets], dest)
             paths = [r["path"] for r in recs if r.get("path")]
             if paths:
                 task.metadata["images"] = paths
+
+            verified = []
+            accepted_ids = list((task.metadata or {}).get("evidence_ids") or [])
+            for index, rec in enumerate(recs):
+                raw_path = _Path(str(rec.get("path") or "")).resolve()
+                try:
+                    relative_path = raw_path.relative_to(self.persistence.run_dir.resolve()).as_posix()
+                except ValueError:
+                    relative_path = str(raw_path)
+                evidence_id = f"visual:{task.id}:{index + 1}"
+                item = {
+                    "evidence_id": evidence_id,
+                    "type": "visual",
+                    "png_path": relative_path,
+                    "viewpoint": targets[index] if index < len(targets) else "html-render",
+                    "sha256": str(rec.get("sha256") or ""),
+                    "captured_at": time.time(),
+                    "run_id": self.run_id,
+                    "task_id": task.id,
+                    "bytes": rec.get("bytes", 0),
+                }
+                verdict = evaluate_visual_evidence(item, self.persistence.run_dir)
+                item["integrity"] = verdict.to_dict()
+                verified.append(item)
+                if verdict.passed:
+                    accepted_ids.extend(["visual", evidence_id])
+            if accepted_ids:
+                task.metadata["evidence_ids"] = list(dict.fromkeys(accepted_ids))
             evidence["visual_evidence"] = {
-                "files": [{"path": r["path"], "sha256": r.get("sha256", ""),
-                           "bytes": r.get("bytes", 0)} for r in recs]}
+                "files": verified,
+                "integrity_passed": bool(verified)
+                and all(item["integrity"]["passed"] for item in verified),
+            }
         except Exception as exc:  # noqa: BLE001 - evidence must never break verification
             try:
                 evidence["visual_evidence"] = {"files": [], "error": str(exc)[:200]}
@@ -1023,7 +1407,8 @@ class OMAEngine:
                 await self._task_heartbeat(task, "executor")
                 context_summary = f"Objective: {task.objective}\nDescription: {task.description}"
                 candidate = await self._with_transient_retry(
-                    "executor", self.executor.execute_task, task, context_summary=context_summary)
+                    "executor", self._produce_candidate, task,
+                    context_summary=context_summary)
                 await self._task_heartbeat(task, "candidate_created")
             except asyncio.CancelledError:
                 if task.id not in self._timeout_cancellations:
@@ -1307,6 +1692,10 @@ class OMAEngine:
             )
 
         if not package:
+            self._record_program_candidate(
+                task, candidate, "FAILED_QUALITY_GATE",
+                notes="Quality gate not passed within repair rounds",
+            )
             await self.task_queue.mark_failed(task.id, "Quality gate not passed within repair rounds")
             self.metrics.record_task_failed()
             return False
@@ -1317,27 +1706,28 @@ class OMAEngine:
 
         if decision.decision == "APPROVED":
             print(f"[Task {task.id}] Internal reviewer approved; integrating verified candidate.")
+            test_results = await integrate_engine_candidate(
+                self, task, candidate, test_results
+            )
+            if test_results is None:
+                return False
             async with self._promotion_lock:
-                if fingerprint(source_files(self.workspace_path)) != test_results["base_hash"]:
-                    # A different task committed while this one was validating.
-                    # Re-execute against the new baseline (bounded by retry/dispatch budgets).
-                    await self.task_queue.mark_failed(task.id, "STALE_BASE: replan against updated integration workspace")
-                    return False
                 if not test_results["all_passed"]:
                     raise ValueError("candidate lacks passing objective evidence")
-                if candidate.patch:
-                    patch_res = await self.tool_gateway.execute_patch(
-                        role="master", patch_text=candidate.patch,
-                        idempotency_key=f"{task.id}_{candidate.candidate_id}")
-                    if not patch_res.get("success"):
-                        await self.task_queue.mark_failed(task.id, patch_res.get("error", "integration failed"))
-                        return False
                 self.completed_packages.append(package)
                 if self.checkpoint_callback is not None:
                     self.checkpoint_callback(self.completed_packages)
                 self.persistence._atomic_write_json(self.persistence.run_dir / "packages.json",
                                                      [p.to_dict() for p in self.completed_packages])
                 await self.task_queue.mark_completed(task.id)
+                self._record_program_candidate(
+                    task, candidate, "SUCCESS",
+                    notes=(
+                        f"quality_gate=passed;tests={test_results.get('checks_ran', 0)};"
+                        f"optimistic_rebase={bool(task.metadata.get('optimistic_rebase'))}"
+                    ),
+                )
+                self._record_program_learning(task, candidate, decision)
 
             latency = time.time() - start_time
             self.metrics.record_task_completed(latency)
@@ -1355,6 +1745,10 @@ class OMAEngine:
             return True
         else:
             print(f"[Task {task.id}] Master Model REJECTED candidate: {decision.reasoning}")
+            self._record_program_candidate(
+                task, candidate, "MASTER_REJECTED",
+                notes=decision.reasoning,
+            )
             await self.task_queue.mark_failed(task.id, f"Master rejected: {decision.reasoning}")
             self.metrics.record_task_failed()
             return False
@@ -1507,28 +1901,54 @@ class OMAEngine:
                 await self.initialize()
                 await self.plan_initial_tasks()
             while self.task_queue.has_pending_work() and not self._cancel_requested:
-                while len(self._running_futures) < self.max_parallel_workers and dispatched < self.max_rounds:
-                    task = await self.task_queue.pop_ready_task(
-                        available_capabilities=set(self.resource_manifest.capabilities),
-                        node_id=self.resource_manifest.node_id,
-                    )
-                    if task is None:
-                        break
-                    dispatched += 1
-                    self.persistence._atomic_write_json(dispatch_file, {"dispatched": dispatched})
-                    future = asyncio.create_task(self.process_task(task), name=f"oma-{task.id}")
-                    self._running_futures[future] = task.id
+                made_progress = True
+                while (
+                    made_progress
+                    and len(self._running_futures) < self.max_parallel_workers
+                    and dispatched < self.max_rounds
+                ):
+                    made_progress = False
+                    for node in self._executable_nodes():
+                        if (
+                            len(self._running_futures) >= self.max_parallel_workers
+                            or dispatched >= self.max_rounds
+                        ):
+                            break
+                        task = await self.task_queue.pop_ready_task(
+                            available_capabilities=set(node.capabilities),
+                            node_id=node.node_id,
+                        )
+                        if task is None:
+                            continue
+                        dispatched += 1
+                        made_progress = True
+                        self.persistence._atomic_write_json(
+                            dispatch_file, {"dispatched": dispatched}
+                        )
+                        future = asyncio.create_task(
+                            self._process_task_on_node(task, node),
+                            name=f"oma-{node.node_id}-{task.id}",
+                        )
+                        self._running_futures[future] = task.id
                 if not self._running_futures:
-                    missing_by_task = self.task_queue.unsatisfied_capabilities(
-                        set(self.resource_manifest.capabilities)
-                    )
-                    if missing_by_task:
-                        for task_id, missing in sorted(missing_by_task.items()):
-                            reason = (
-                                "CAPABILITY_MISSING: "
-                                + ",".join(missing)
-                                + f" on node {self.resource_manifest.node_id}"
-                            )
+                    unrunnable = self._unrunnable_ready_tasks()
+                    if unrunnable:
+                        for task_id, detail in sorted(unrunnable.items()):
+                            code = str(detail["code"])
+                            if code == "REMOTE_EXECUTOR_UNAVAILABLE":
+                                reason = (
+                                    code
+                                    + ": compatible node(s) "
+                                    + ",".join(detail["compatible_nodes"])
+                                    + " have no registered candidate producer"
+                                )
+                            else:
+                                reason = (
+                                    code
+                                    + ": "
+                                    + ",".join(detail["missing_capabilities"])
+                                    + " not satisfied by any single executable node"
+                                )
                             await self.task_queue.mark_escalated(task_id, reason=reason)
                             self.metrics.record_task_escalated()
                             await self.event_bus.publish(EventEnvelope(
@@ -1536,11 +1956,7 @@ class OMAEngine:
                                 correlation_id=self.run_id,
                                 task_id=task_id,
                                 producer="scheduler",
-                                payload={
-                                    "reason": reason,
-                                    "missing_capabilities": missing,
-                                    "node": self.resource_manifest.to_dict(),
-                                },
+                                payload={"reason": reason, **detail},
                             ))
                             errors.append(f"{task_id}: {reason}")
                         continue
@@ -1615,6 +2031,29 @@ class OMAEngine:
             errors.append(f"{tid}: {task_error_map[tid]}")
         completed_count = self.task_queue.completed_count
         total_tasks = self.metrics.tasks_total
+        milestone_composition = self._evaluate_milestone_composition()
+        if (
+            self.enforce_milestone_gate
+            and total_tasks > 0
+            and completed_count == total_tasks
+            and not milestone_composition["passed"]
+        ):
+            reasons = [
+                reason
+                for item in milestone_composition["milestones"]
+                if not item["passed"]
+                for reason in item["reasons"]
+            ]
+            reasons.extend(
+                (
+                    f"budget {item.get('kind')}: "
+                    f"{item.get('path') or item.get('detail') or 'violation'}"
+                )
+                for item in milestone_composition.get("budget_violations", [])
+            )
+            errors.append(
+                "MILESTONE_GATE_FAILED: " + "; ".join(reasons[:20])
+            )
         if self._cancel_requested:
             status = "CANCELLED"
             complete = False
@@ -1638,6 +2077,7 @@ class OMAEngine:
         metrics["budget_accounting"] = self.budget.to_dict()
         metrics["convergence_policy"] = self.convergence_policy.to_dict()
         metrics["convergence_stop"] = convergence_stop
+        metrics["milestone_composition"] = milestone_composition
         history = self.persistence.load_events()
         validations = [e.payload for e in history if e.event_type == EventType.VALIDATION_COMPLETED]
         actual = [r for r in validations if r.get("ran", True)]

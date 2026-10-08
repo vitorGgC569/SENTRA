@@ -19,6 +19,7 @@ from ..version import (
 )
 
 SEMANTIC_ERRORS = {
+    "CATALOG_STALE",
     "SCHEMA_MISMATCH",
     "PROTOCOL_MISMATCH",
     "CAPABILITY_MISMATCH",
@@ -157,7 +158,7 @@ def server_build_identity(project_root: Path) -> dict[str, Any]:
 def tool_schema_document(mcp: Any) -> dict[str, Any]:
     manager = getattr(mcp, "_tool_manager", None)
     tools = manager.list_tools() if manager is not None else []
-    canonical = []
+    canonical: list[dict[str, Any]] = []
     for tool in tools:
         metadata = getattr(tool, "fn_metadata", None)
         output_schema = getattr(metadata, "output_schema", {}) if metadata is not None else {}
@@ -167,12 +168,18 @@ def tool_schema_document(mcp: Any) -> dict[str, Any]:
             "parameters": getattr(tool, "parameters", {}) or {},
             "output_schema": output_schema or {},
         })
-    canonical.sort(key=lambda item: item["name"])
+    canonical.sort(key=lambda item: str(item["name"]))
+    tool_names = [item["name"] for item in canonical]
+    tool_schema_hash = _sha(canonical)
     return {
         "tool_count": len(canonical),
-        "tool_names": [item["name"] for item in canonical],
+        "tool_names": tool_names,
+        "tool_names_hash": _sha(tool_names),
         "tools": canonical,
-        "schema_hash": _sha(canonical),
+        # schema_hash is retained for backward compatibility. New clients use
+        # the explicit tool_schema_hash/tool_names_hash pair.
+        "schema_hash": tool_schema_hash,
+        "tool_schema_hash": tool_schema_hash,
     }
 
 
@@ -240,6 +247,9 @@ class CapabilityService:
             "readiness": True,
             "event_sourcing": True,
             "control_plane": True,
+            "durable_goals": True,
+            "goal_tree": True,
+            "codex_goal_passthrough": True,
             "shared_context": True,
             "typed_context_events": True,
             "context_cursors": True,
@@ -312,6 +322,8 @@ class CapabilityService:
             },
             "contract": {
                 "schema_hash": schema["schema_hash"],
+                "tool_schema_hash": schema["tool_schema_hash"],
+                "tool_names_hash": schema["tool_names_hash"],
                 "tool_count": schema["tool_count"],
                 "tool_names": schema["tool_names"],
                 "semantic_error_codes": sorted(SEMANTIC_ERRORS),
@@ -331,6 +343,8 @@ class CapabilityService:
         *,
         client_protocol_version: str | None = None,
         client_schema_hash: str | None = None,
+        client_tool_schema_hash: str | None = None,
+        client_tool_names_hash: str | None = None,
         client_capabilities: dict[str, Any] | list[str] | None = None,
         required_capabilities: list[str] | None = None,
         target: str | None = None,
@@ -349,13 +363,31 @@ class CapabilityService:
                 "actual": client_protocol_version,
             })
 
-        expected_schema = manifest["contract"]["schema_hash"]
-        if client_schema_hash is not None and client_schema_hash != expected_schema:
+        expected_schema = manifest["contract"]["tool_schema_hash"]
+        supplied_schema = (
+            client_tool_schema_hash
+            if client_tool_schema_hash is not None
+            else client_schema_hash
+        )
+        if supplied_schema is not None and supplied_schema != expected_schema:
             reasons.append({
-                "code": "SCHEMA_MISMATCH",
-                "message": "client tool schema does not match SENTRA",
+                "code": "CATALOG_STALE",
+                "detail_code": "SCHEMA_MISMATCH",
+                "message": "client tool schema does not match the live SENTRA catalog",
                 "expected": expected_schema,
-                "actual": client_schema_hash,
+                "actual": supplied_schema,
+            })
+        expected_names = manifest["contract"]["tool_names_hash"]
+        if (
+            client_tool_names_hash is not None
+            and client_tool_names_hash != expected_names
+        ):
+            reasons.append({
+                "code": "CATALOG_STALE",
+                "detail_code": "TOOL_NAMES_MISMATCH",
+                "message": "client tool names do not match the live SENTRA catalog",
+                "expected": expected_names,
+                "actual": client_tool_names_hash,
             })
 
         available = _flatten_capabilities(manifest["capabilities"])
@@ -391,8 +423,13 @@ class CapabilityService:
         else:
             negotiated = sorted(available)
 
+        catalog_stale = any(
+            item.get("code") == "CATALOG_STALE" for item in reasons
+        )
         return {
             "compatible": not reasons,
+            "catalog_stale": catalog_stale,
+            "error_code": "CATALOG_STALE" if catalog_stale else None,
             "manifest": manifest,
             "negotiated_capabilities": negotiated,
             "reasons": reasons,

@@ -64,10 +64,44 @@ class CommandRunner:
                 return [self._python(), "-m", "compileall", "-q", str(self.cwd)]
             return [self._python(), "-I", str(Path(__file__).with_name("syntax_check.py")), str(self.cwd)]
         if op == "BUILD":
+            windows_builder = self.cwd / "scripts" / "commander" / "build_windows.py"
+            if windows_builder.is_file():
+                if os.name != "nt":
+                    raise PermissionError(
+                        "registered Windows build requires a Windows host; "
+                        "test collection is not build evidence"
+                    )
+                return [
+                    self._python(),
+                    str(windows_builder.resolve()),
+                    "--clean-output",
+                    "--phase",
+                    "all",
+                ]
             return [self._python(), "-m", "pytest", "--collect-only", "-q", "--",
                     str(resolve_workspace_path(self.cwd, "tests"))]
         if op == "TYPECHECK":
-            return [self._python(), "-m", "mypy", "."]
+            baseline = self.cwd / "scripts" / "check_mypy_baseline.py"
+            if baseline.is_file():
+                # Keep local/SENTRA quality gates identical to CI. The baseline
+                # script is a ratchet: existing reviewed debt is tolerated, but
+                # any increase fails the operation.
+                return [self._python(), str(baseline.resolve())]
+            targets = [
+                "browser", "dashboard", "local_model", "native_bridge",
+                "orchestrator", "repository", "sentra_mcp",
+                "sentra_model_gateway", "sentra_remote", "workspace",
+                "main.py", "swarm.py", "swarm_poll.py", "sentra_version.py",
+            ]
+            existing = [
+                str(resolve_workspace_path(self.cwd, item))
+                for item in targets
+                if resolve_workspace_path(self.cwd, item).exists()
+            ]
+            return [
+                self._python(), "-m", "mypy", "--explicit-package-bases",
+                *existing,
+            ]
         if op == "BENCH":
             if "BENCH" in self.profiles:
                 return list(self.profiles["BENCH"])
@@ -83,7 +117,7 @@ class CommandRunner:
         return {"command": command, "passed": passed, "exit_code": code,
                 "stdout": stdout, "stderr": stderr, "refused": refused}
 
-    async def run_command(self, cmd: str, timeout: float = 120) -> Dict[str, Any]:
+    async def run_command(self, cmd: str, timeout: float | None = 120) -> Dict[str, Any]:
         try:
             argv = self.resolve_command(cmd)
         except (ValueError, PermissionError) as exc:
@@ -92,10 +126,10 @@ class CommandRunner:
         result["command"] = cmd
         return result
 
-    async def run_argv(self, argv: Sequence[str], timeout: float = 120) -> Dict[str, Any]:
+    async def run_argv(self, argv: Sequence[str], timeout: float | None = 120) -> Dict[str, Any]:
         """Internal/operator API. Never forward model text or split shell strings here."""
-        if isinstance(argv, (str, bytes)) or not argv or timeout <= 0:
-            raise ValueError("structured argv and positive timeout required")
+        if isinstance(argv, (str, bytes)) or not argv or (timeout is not None and timeout <= 0):
+            raise ValueError("structured argv and positive timeout or None required")
         process = None
         readers = []
         buffers = [bytearray(), bytearray()]
@@ -136,18 +170,28 @@ class CommandRunner:
                    if not any(word in k.upper() for word in ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "COOKIE"))
                    and k not in ("PYTHONPATH", "PYTHONSTARTUP", "PYTHONHOME")}
             env["PYTHONDONTWRITEBYTECODE"] = "1"
-            kwargs = {"start_new_session": True} if os.name != "nt" else {}
-            process = await asyncio.create_subprocess_exec(
-                *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.cwd), env=env, **kwargs)
+            common: dict[str, Any] = {
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+                "cwd": str(self.cwd),
+                "env": env,
+            }
+            if os.name != "nt":
+                process = await asyncio.create_subprocess_exec(
+                    *argv,
+                    **common,
+                    start_new_session=True,
+                )
+            else:
+                process = await asyncio.create_subprocess_exec(*argv, **common)
             readers = [asyncio.create_task(drain(process.stdout, 0)),
                        asyncio.create_task(drain(process.stderr, 1))]
             # Deadline includes pipe draining: descendants cannot hold them forever.
             async with asyncio.timeout(timeout):
-                await process.wait()
+                code = await process.wait()
                 await asyncio.gather(*readers)
             output = [b.decode("utf-8", errors="replace") for b in buffers]
-            result = self._result(list(argv), process.returncode == 0, process.returncode,
+            result = self._result(list(argv), code == 0, code,
                                   output[0], output[1])
             result["output_truncated"] = any(truncated)
             return result

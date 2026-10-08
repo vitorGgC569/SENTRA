@@ -35,7 +35,7 @@ function fmtDuration(seconds){
 function stateClass(state){
   state = String(state||"").toUpperCase();
   if(["COMPLETED","CANDIDATE_READY","APPLIED","READY","PASSED","OK"].includes(state)) return "ok";
-  if(["RUNNING","PENDING","QUEUED","CANCELLING","IN_PROGRESS"].includes(state)) return "active";
+  if(["RUNNING","PENDING","QUEUED","CANCELLING","IN_PROGRESS","VALIDATING","REPAIRING","IN_REVIEW","APPROVAL_REQUIRED","CHANGES_REQUESTED","READY_FOR_PROMOTION","RECOVERING","LEASED"].includes(state)) return "active";
   if(["FAILED","CANCELLED","INTERRUPTED","BLOCKED","REJECTED"].includes(state)) return "bad";
   return "";
 }
@@ -44,6 +44,9 @@ function stateLabel(state){
     COMPLETED:"Concluído",CANDIDATE_READY:"Candidato pronto",APPLIED:"Aplicado",
     RUNNING:"Em andamento",PENDING:"Pendente",QUEUED:"Na fila",FAILED:"Falhou",
     CANCELLED:"Cancelado",INTERRUPTED:"Interrompido",BLOCKED:"Bloqueado",
+    VALIDATING:"Validando",REPAIRING:"Reparando",IN_REVIEW:"Em revisão",
+    APPROVAL_REQUIRED:"Aguardando aprovação",CHANGES_REQUESTED:"Alterações solicitadas",
+    READY_FOR_PROMOTION:"Pronto para promoção",RECOVERING:"Recuperando",LEASED:"Em uso",
   };
   return map[String(state||"").toUpperCase()] || String(state||"Desconhecido");
 }
@@ -96,6 +99,7 @@ function updateChrome(){
 function render(){
   if(!ui.data) return;
   if(ui.page==="runs") return renderRuns();
+  if(ui.page==="control-plane") return renderControlPlane();
   if(ui.page==="workspaces") return renderWorkspaces();
   if(ui.page==="agents") return renderAgents();
   return renderConversations();
@@ -389,3 +393,45 @@ window.addEventListener("pywebviewready",async()=>{
   await refresh(true);
   setInterval(()=>refresh(false),1800);
 });
+
+function fmtCost(value){
+  const n=Number(value||0);
+  return new Intl.NumberFormat("en-US",{style:"currency",currency:"USD",maximumFractionDigits:4}).format(n);
+}
+function fmtCompact(value){
+  return new Intl.NumberFormat("pt-BR",{notation:"compact",maximumFractionDigits:1}).format(Number(value||0));
+}
+function renderControlPlane(){
+  const cp=ui.data.control_plane||{};
+  const s=cp.summary||{};
+  const q=ui.search.trim().toLowerCase();
+  const work=(cp.work_items||[]).filter(x=>!q || `${x.objective||""} ${x.state||""} ${x.assignee_agent_id||""}`.toLowerCase().includes(q));
+  const routines=(cp.routines||[]).filter(x=>!q || `${x.name||""} ${x.trigger_kind||""}`.toLowerCase().includes(q));
+  const plugins=(cp.plugins||[]).filter(x=>!q || `${x.name||""} ${x.version||""} ${x.state||""}`.toLowerCase().includes(q));
+  const budgets=cp.budgets||[];
+  const stat=(label,value,sub="")=>`<article class="workspace-card"><h3>${esc(label)}</h3><div class="workspace-path" style="font-size:22px;color:var(--text)">${esc(value)}</div>${sub?`<div class="chat-sub">${esc(sub)}</div>`:""}</article>`;
+  $("#view").innerHTML=`<section class="content-page page-column">
+    <div class="page-header"><div><h1>Control Plane</h1><p>Autoridade e governança persistidas. Esta tela apenas projeta estado real.</p></div></div>
+    <div class="workspace-grid">
+      ${stat("WorkItems ativos",s.work_items_active??0,`${s.work_items_blocked??0} bloqueados`)}
+      ${stat("Revisão",s.work_items_review??0,"review / approval")}
+      ${stat("Custo real",fmtCost(s.actual_cost),`mercado ${fmtCost(s.market_cost)}`)}
+      ${stat("Quota",Number(s.quota_usage||0).toFixed(2),`${fmtCompact((s.input_tokens||0)+(s.output_tokens||0)+(s.reasoning_tokens||0))} tokens`)}
+      ${stat("Routines",s.routines_enabled??0,`${s.routines_unbound??0} sem Run vinculado`)}
+      ${stat("Plugins",s.plugins_ready??0,`${s.active_grants??0} grants ativos`)}
+    </div>
+    <div class="page-header" style="margin-top:28px"><div><h1 style="font-size:20px">WorkItems</h1><p>Ownership, execução, revisão e recovery.</p></div></div>
+    ${work.length?`<div class="run-list">${work.map(w=>`<div class="run-row">
+      <span class="status-dot ${stateClass(w.state)}"></span>
+      <span class="run-main"><b>${esc(w.objective||w.work_item_id)}</b><span>${esc(stateLabel(w.state))}${w.assignee_agent_id?` · ${esc(w.assignee_agent_id)}`:""}${w.retry_count?` · retry ${esc(w.retry_count)}`:""}</span></span>
+      <span class="run-time">${fmtTime(w.updated_at)}</span>
+    </div>`).join("")}</div>`:`<div class="library-empty">Nenhum WorkItem persistido.</div>`}
+    <div class="page-header" style="margin-top:28px"><div><h1 style="font-size:20px">Automação & extensões</h1><p>Routines e plugins com autoridade explícita.</p></div></div>
+    <div class="workspace-grid">
+      ${routines.map(r=>`<article class="workspace-card"><h3>${esc(r.name)}</h3><div class="workspace-path">${esc(r.trigger_kind)} · ${r.enabled?"ativa":"desativada"}</div><div class="permission-row"><span class="permission">${esc(r.active_policy)}</span><span class="permission">${r.bound?"bound":"unbound"}</span></div><div class="chat-sub">Próxima: ${fmtTime(r.next_due_at)}</div></article>`).join("")}
+      ${plugins.map(p=>`<article class="workspace-card"><h3>${esc(p.name)} <small>${esc(p.version)}</small></h3><div class="workspace-path">${esc(p.state)}</div><div class="permission-row">${(p.effective_capabilities||[]).map(c=>`<span class="permission">${esc(c)}</span>`).join("")||`<span class="permission">sem capability efetiva</span>`}</div></article>`).join("")}
+    </div>
+    <div class="page-header" style="margin-top:28px"><div><h1 style="font-size:20px">Budget policies</h1><p>Hard-stop e warnings por escopo.</p></div></div>
+    ${budgets.length?`<div class="run-list">${budgets.map(b=>`<div class="run-row"><span class="status-dot ${b.mode==="hard_stop"?"active":""}"></span><span class="run-main"><b>${esc(b.scope_type)}${b.scope_id?` · ${esc(b.scope_id)}`:""}</b><span>${esc(b.mode)} · ${esc(JSON.stringify(b.limits||{}))}</span></span><span class="run-time">${fmtTime(b.updated_at)}</span></div>`).join("")}</div>`:`<div class="library-empty">Nenhuma política de budget.</div>`}
+  </section>`;
+}

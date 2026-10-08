@@ -111,9 +111,29 @@ class ControlPlaneContextBridge:
 
     @staticmethod
     def _consumer_id(seat: str, task_id: str | None) -> str:
-        raw = f"{seat}|{task_id or 'global'}"
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+        # Consumer progress belongs to the persistent logical Agent/seat.
+        # task_id changes every round; including it would replay old Context Bus
+        # history and eventually strand recent messages behind historical backlog.
+        del task_id
+        digest = hashlib.sha256(str(seat).encode("utf-8")).hexdigest()[:24]
         return f"oma:{digest}"
+
+    @staticmethod
+    def _render_goal(item: dict[str, Any]) -> str:
+        payload = {
+            "authority": "control_plane_goal",
+            "goal_id": item.get("goal_id"),
+            "parent_goal_id": item.get("parent_goal_id"),
+            "state": item.get("state"),
+            "priority": item.get("priority"),
+            "objective": str(item.get("objective") or "")[:5000],
+            "acceptance_criteria": list(item.get("acceptance_criteria") or [])[:30],
+            "constraints": list(item.get("constraints") or [])[:30],
+            "budget": item.get("budget") or {},
+            "deadline": item.get("deadline"),
+        }
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return text[:7000] + ("...[goal truncated]" if len(text) > 7000 else "")
 
     @staticmethod
     def _render_item(item: dict[str, Any]) -> str:
@@ -133,6 +153,51 @@ class ControlPlaneContextBridge:
             text = text[:1760] + "...[item truncated]"
         return text
 
+    @staticmethod
+    def _rehydration_memory(content: str, *, role: str, task_id: str | None) -> dict[str, Any]:
+        import re
+        text = str(content or "").strip()
+        sections: dict[str, str] = {}
+        heading = re.compile(
+            r"(?im)^\s*(CONFIRMED|REJECTED|NEEDS_TEST|IMPLEMENTATION|QUALITY_GATE|ANSWERS)\s*:?[ \t]*$"
+        )
+        matches = list(heading.finditer(text))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            value = " ".join(text[match.end():end].strip().split())
+            if value:
+                sections[match.group(1).upper()] = value[:1200]
+        questions = [
+            " ".join(line.strip().split())[:800]
+            for line in text.splitlines()
+            if line.strip().startswith("Q->")
+        ][:8]
+        return {
+            "role": str(role),
+            "last_task_id": task_id,
+            "last_response_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "last_response_excerpt": text[:4000],
+            "sections": sections,
+            "open_peer_questions": questions,
+        }
+
+    @staticmethod
+    def _render_memory(memory: Any) -> str:
+        if not isinstance(memory, dict) or not memory:
+            return ""
+        payload = {
+            key: memory.get(key)
+            for key in (
+                "role", "last_task_id", "last_response_sha256",
+                "sections", "open_peer_questions", "last_response_excerpt",
+            )
+            if memory.get(key)
+        }
+        text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+        if len(text) > 5000:
+            text = text[:4970] + "...[memory truncated]"
+        return "[AGENT_REHYDRATION_MEMORY] " + text
+
     def prepare(
         self, *, run_id: str, role: str, task_id: str | None, seat: str
     ) -> SharedContextBatch:
@@ -146,6 +211,52 @@ class ControlPlaneContextBridge:
             task_id=task_id,
             metadata={"seat": seat, "source": "oma-fixed-conversation"},
         )
+        snapshot = self.control_plane.durable.run_status(run_id, self.owner)
+        agent_record = next(
+            (item for item in snapshot.get("agents", []) if item.get("agent_id") == agent_id),
+            None,
+        )
+        memory_text = self._render_memory(
+            ((agent_record or {}).get("metadata") or {}).get("rehydration_memory")
+        )
+        skill_projection = self.control_plane.agent_skills(
+            run_id,
+            self.owner,
+            agent_id=agent_id,
+            max_chars=min(5000, max(1000, self.max_chars // 3)),
+        )
+        skill_text = str(skill_projection.get("text") or "")
+        goal_items = self.control_plane.list_goals(
+            run_id, self.owner, states=["ACTIVE", "BLOCKED"]
+        ).get("items", [])
+        goal_budget = min(
+            6000,
+            self.max_chars // 2,
+            max(0, self.max_chars - 1000),
+        )
+        goal_lines: list[str] = []
+        goals_truncated = False
+        for item in goal_items[:8]:
+            line = self._render_goal(item)
+            candidate = line if not goal_lines else "\n".join([*goal_lines, line])
+            if len(candidate) <= goal_budget:
+                goal_lines.append(line)
+                continue
+            if not goal_lines and goal_budget > 32:
+                goal_lines.append(line[: goal_budget - 24] + "...[goal truncated]")
+            goals_truncated = True
+            break
+        if len(goal_items) > len(goal_lines):
+            goals_truncated = True
+        goal_text = "\n".join(goal_lines)
+        prefix_parts = [part for part in (goal_text, skill_text, memory_text) if part]
+        prefix_text = "\n".join(prefix_parts)
+        if len(prefix_text) > self.max_chars - 1000:
+            prefix_text = (
+                prefix_text[: max(0, self.max_chars - 1030)]
+                + "...[prefix truncated]"
+            )
+
         pending: list[dict[str, Any]] = []
         after_seq: int | None = None
         initial_seq = 0
@@ -179,7 +290,13 @@ class ControlPlaneContextBridge:
                 return recipient in {agent_id, "*"}
             return item.get("task_id") in {None, task_id}
 
-        compiled = self.compiler.compile(
+        separator_chars = 1 if prefix_text else 0
+        context_budget = max(1000, self.max_chars - len(prefix_text) - separator_chars)
+        context_compiler = ContextCompiler(
+            max_chars=context_budget,
+            max_items=self.max_items,
+        )
+        compiled = context_compiler.compile(
             pending,
             run_id=run_id,
             seat=seat,
@@ -188,14 +305,30 @@ class ControlPlaneContextBridge:
             include=include,
             render=self._render_item,
         )
+        combined = prefix_text
+        if compiled.text:
+            combined = compiled.text if not combined else combined + "\n" + compiled.text
+        epoch = "ctx-" + hashlib.sha256(
+            (compiled.epoch + "|" + combined).encode("utf-8")
+        ).hexdigest()[:24]
         return SharedContextBatch(
-            text=compiled.text,
+            text=combined,
             last_seq=compiled.last_seq,
-            count=compiled.count,
+            count=(
+                compiled.count
+                + len(goal_lines)
+                + len(skill_projection.get("items") or [])
+                + (1 if memory_text else 0)
+            ),
             consumer_id=consumer_id,
-            epoch=compiled.epoch,
-            estimated_tokens=compiled.estimated_tokens,
-            truncated=compiled.truncated or more_pending,
+            epoch=epoch,
+            estimated_tokens=context_compiler.estimate_tokens(combined),
+            truncated=(
+                goals_truncated
+                or bool(skill_projection.get("truncated"))
+                or compiled.truncated
+                or more_pending
+            ),
         )
 
     def acknowledge(
@@ -227,7 +360,7 @@ class ControlPlaneContextBridge:
             key_name: metadata.get(key_name)
             for key_name in (
                 "conversation_id", "conversation_url", "worker",
-                "project_id", "project_url", "model",
+                "project_id", "project_url", "model", "provider", "web_model",
             )
             if metadata.get(key_name) is not None
         }
@@ -240,10 +373,30 @@ class ControlPlaneContextBridge:
             role=role,
             conversation_id=safe_meta.get("conversation_id"),
             conversation_url=safe_meta.get("conversation_url"),
+            provider=safe_meta.get("provider"),
             project_id=safe_meta.get("project_id"),
             project_url=safe_meta.get("project_url"),
             task_id=task_id,
-            metadata={"seat": seat, "source": "oma-fixed-conversation"},
+            metadata={
+                "seat": seat,
+                "source": "oma-fixed-conversation",
+                **{
+                    key_name: safe_meta[key_name]
+                    for key_name in ("provider", "web_model", "model", "worker")
+                    if key_name in safe_meta
+                },
+            },
+        )
+        self.control_plane.durable.update_agent(
+            agent_id,
+            self.owner,
+            task_id=task_id,
+            metadata={
+                "rehydration_memory": self._rehydration_memory(
+                    text, role=role, task_id=task_id
+                )
+            },
+            event_type="AGENT_MEMORY_UPDATED",
         )
         self.control_plane.publish_context(
             run_id,

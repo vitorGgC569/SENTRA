@@ -113,6 +113,12 @@ class RemoteStore:
                 created REAL NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS pairing_failures(
+                bucket TEXT PRIMARY KEY,
+                attempts INTEGER NOT NULL,
+                updated REAL NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
@@ -167,6 +173,34 @@ class RemoteStore:
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_operation ON jobs(operation_id)"
         )
+        # Older databases may already contain duplicate keys because the old
+        # index was non-unique. Preserve every job while keeping one row as the
+        # canonical replay target, then enforce uniqueness in SQLite.
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            indexes = {
+                str(row[1]): bool(row[2])
+                for row in self.db.execute("PRAGMA index_list(jobs)").fetchall()
+            }
+            if not indexes.get("idx_jobs_idempotency", False):
+                self.db.execute(
+                    "UPDATE jobs SET idempotency_key=NULL WHERE idempotency_key IS NOT NULL "
+                    "AND id IN (SELECT id FROM ("
+                    "SELECT id,ROW_NUMBER() OVER ("
+                    "PARTITION BY user_id,device_id,idempotency_key ORDER BY created,id"
+                    ") AS duplicate_rank FROM jobs WHERE idempotency_key IS NOT NULL"
+                    ") WHERE duplicate_rank > 1)"
+                )
+                self.db.execute("DROP INDEX IF EXISTS idx_jobs_idempotency")
+                self.db.execute(
+                    "CREATE UNIQUE INDEX idx_jobs_idempotency "
+                    "ON jobs(user_id,device_id,idempotency_key) "
+                    "WHERE idempotency_key IS NOT NULL"
+                )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
         self.db.commit()
 
     def close(self) -> None:
@@ -234,14 +268,41 @@ class RemoteStore:
             self.db.commit()
         return {"pairing_code": code, "expires_at": now + ttl_s, "device_name": name.strip()}
 
-    def pair_device(self, code: str, *, agent_name: str | None = None) -> dict[str, Any]:
+    def pair_device(
+        self,
+        code: str,
+        *,
+        agent_name: str | None = None,
+        rate_key: str | None = None,
+    ) -> dict[str, Any]:
         now = self.clock()
         with self.lock:
+            normalized_code = code.strip().upper()
+            digest = _hash_secret(normalized_code)
             row = self.db.execute(
                 "SELECT * FROM pairings WHERE code_hash=? AND used=0 AND expires>?",
-                (_hash_secret(code.strip().upper()), now),
+                (digest, now),
             ).fetchone()
             if row is None:
+                # Unknown codes cannot be tied to a user safely. Persist a
+                # per-origin bucket without storing the raw origin value.
+                window = int(now // 60)
+                origin = str(rate_key or "direct").strip() or "direct"
+                origin_hash = hashlib.sha256(origin.encode("utf-8")).hexdigest()[:24]
+                key = f"pairing-invalid:{origin_hash}:{window}"
+                failure = self.db.execute(
+                    "SELECT attempts FROM pairing_failures WHERE bucket=?", (key,)
+                ).fetchone()
+                attempts = int(failure["attempts"]) + 1 if failure else 1
+                self.db.execute(
+                    "INSERT INTO pairing_failures(bucket,attempts,updated) VALUES(?,?,?) "
+                    "ON CONFLICT(bucket) DO UPDATE SET attempts=excluded.attempts,updated=excluded.updated",
+                    (key, attempts, now),
+                )
+                self.db.execute("DELETE FROM pairing_failures WHERE updated<?", (now - 600,))
+                self.db.commit()
+                if attempts > 20:
+                    raise PermissionError("pairing temporarily rate limited")
                 raise PermissionError("invalid or expired pairing code")
             device_id = str(uuid.uuid4())
             token = secrets.token_urlsafe(48)
@@ -328,7 +389,8 @@ class RemoteStore:
             server = {}
         if not isinstance(contract, dict):
             reasons.append({
-                "code": "SCHEMA_MISMATCH",
+                "code": "CATALOG_STALE",
+                "detail_code": "SCHEMA_MISMATCH",
                 "field": "sentra.contract",
                 "message": "remote agent live schema identity is missing",
             })
@@ -368,21 +430,52 @@ class RemoteStore:
             })
 
         schema_hash = str(contract.get("schema_hash") or "")
+        tool_schema_hash = str(contract.get("tool_schema_hash") or "")
+        tool_names_hash = str(contract.get("tool_names_hash") or "")
         if len(schema_hash) != 64 or any(
             ch not in "0123456789abcdefABCDEF" for ch in schema_hash
         ):
             reasons.append({
-                "code": "SCHEMA_MISMATCH",
+                "code": "CATALOG_STALE",
+                "detail_code": "SCHEMA_MISMATCH",
                 "field": "sentra.contract.schema_hash",
                 "message": "remote agent did not publish a valid live tool schema hash",
+            })
+        if tool_schema_hash != schema_hash:
+            reasons.append({
+                "code": "CATALOG_STALE",
+                "detail_code": "TOOL_SCHEMA_HASH_MISMATCH",
+                "field": "sentra.contract.tool_schema_hash",
+                "expected": schema_hash or None,
+                "actual": tool_schema_hash or None,
+                "message": "remote agent tool schema hash is stale or inconsistent",
             })
         tool_names = contract.get("tool_names")
         if not isinstance(tool_names, list) or not tool_names:
             reasons.append({
-                "code": "SCHEMA_MISMATCH",
+                "code": "CATALOG_STALE",
+                "detail_code": "TOOL_NAMES_MISSING",
                 "field": "sentra.contract.tool_names",
                 "message": "remote agent live tool inventory is missing",
             })
+        else:
+            expected_names_hash = hashlib.sha256(
+                json.dumps(
+                    list(tool_names),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if tool_names_hash != expected_names_hash:
+                reasons.append({
+                    "code": "CATALOG_STALE",
+                    "detail_code": "TOOL_NAMES_HASH_MISMATCH",
+                    "field": "sentra.contract.tool_names_hash",
+                    "expected": expected_names_hash,
+                    "actual": tool_names_hash or None,
+                    "message": "remote agent tool inventory hash is stale or inconsistent",
+                })
         if not isinstance(advertised, dict):
             reasons.append({
                 "code": "CAPABILITY_MISSING",
@@ -425,6 +518,11 @@ class RemoteStore:
             and now - row["last_seen"] <= self.online_window_s
         )
         capabilities = json.loads(row["capabilities"] or "{}")
+        allowed_tools = json.loads(row["allowed_tools"])
+        broad_acl = any(
+            str(rule) == "*" or str(rule).endswith("*")
+            for rule in allowed_tools
+        )
         return {
             "device_id": row["id"],
             "name": row["name"],
@@ -432,7 +530,8 @@ class RemoteStore:
             "status": "ONLINE" if online else ("REVOKED" if row["revoked"] else "OFFLINE"),
             "last_seen": row["last_seen"],
             "token_expires_at": row["token_expires"],
-            "allowed_tools": json.loads(row["allowed_tools"]),
+            "allowed_tools": allowed_tools,
+            "broad_acl": broad_acl,
             "capabilities": capabilities,
             "compatibility": self.agent_compatibility(capabilities),
         }
@@ -552,6 +651,9 @@ class RemoteStore:
         raw_args = _json(arguments)
         if len(raw_args.encode("utf-8")) > 2 * 1024 * 1024:
             raise ValueError("remote arguments too large")
+        idem_key = str(idempotency_key or "").strip() or None
+        if idem_key is not None and len(idem_key) > 240:
+            raise ValueError("idempotency_key must be <= 240 characters")
         now = self.clock()
         with self.lock:
             self._expire_jobs()
@@ -571,20 +673,69 @@ class RemoteStore:
             permissions = tuple(json.loads(row["allowed_tools"]))
             if not self._tool_allowed(tool, permissions):
                 raise PermissionError("tool is not authorized for this device")
+            if idem_key is not None:
+                existing = self.db.execute(
+                    "SELECT id,tool,arguments,run_id,operation_id FROM jobs "
+                    "WHERE user_id=? AND device_id=? AND idempotency_key=? "
+                    "ORDER BY created ASC LIMIT 1",
+                    (user_id, device_id, idem_key),
+                ).fetchone()
+                if existing is not None:
+                    self._validate_idempotent_replay(
+                        existing, tool, raw_args, run_id, operation_id
+                    )
+                    return str(existing["id"])
             job_id = str(uuid.uuid4())
-            self.db.execute(
-                "INSERT INTO jobs(id,user_id,device_id,tool,arguments,run_id,operation_id,"
-                "idempotency_key,contract_required,state,deadline,created,updated) "
-                "VALUES(?,?,?,?,?,?,?,?,?, 'QUEUED',?,?,?)",
-                (
-                    job_id, user_id, device_id, tool, raw_args,
-                    run_id, operation_id, idempotency_key,
-                    1 if require_compatible_agent else 0,
-                    now + timeout_s, now, now,
-                ),
-            )
+            try:
+                self.db.execute(
+                    "INSERT INTO jobs(id,user_id,device_id,tool,arguments,run_id,operation_id,"
+                    "idempotency_key,contract_required,state,deadline,created,updated) "
+                    "VALUES(?,?,?,?,?,?,?,?,?, 'QUEUED',?,?,?)",
+                    (
+                        job_id, user_id, device_id, tool, raw_args,
+                        run_id, operation_id, idem_key,
+                        1 if require_compatible_agent else 0,
+                        now + timeout_s, now, now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                # A different RemoteStore/connection can win after our lookup.
+                # The unique index serializes that race; replay its canonical row.
+                if idem_key is None:
+                    raise
+                existing = self.db.execute(
+                    "SELECT id,tool,arguments,run_id,operation_id FROM jobs "
+                    "WHERE user_id=? AND device_id=? AND idempotency_key=?",
+                    (user_id, device_id, idem_key),
+                ).fetchone()
+                if existing is None:
+                    raise
+                self._validate_idempotent_replay(
+                    existing, tool, raw_args, run_id, operation_id
+                )
+                self.db.commit()
+                return str(existing["id"])
             self.db.commit()
             return job_id
+
+    @staticmethod
+    def _validate_idempotent_replay(
+        existing: sqlite3.Row,
+        tool: str,
+        raw_args: str,
+        run_id: str | None,
+        operation_id: str | None,
+    ) -> None:
+        if existing["tool"] != tool or existing["arguments"] != raw_args:
+            raise ValueError(
+                "idempotency_key was already used for a different remote request"
+            )
+        if existing["run_id"] != run_id:
+            raise ValueError("idempotency_key was already used for a different run")
+        if existing["operation_id"] != operation_id:
+            raise ValueError(
+                "idempotency_key was already used for a different operation"
+            )
 
     def poll_job(self, device_id: str, token: str) -> LeasedRemoteJob | None:
         device = self.authenticate_device(device_id, token)
@@ -775,6 +926,39 @@ class RemoteStore:
             ).fetchone()
         if row is None:
             return None
+        return self.job_result(user_id, str(row["id"]))
+
+    def job_for_idempotency(
+        self,
+        user_id: str,
+        device_id: str,
+        idempotency_key: str,
+        *,
+        tool: str | None = None,
+        arguments: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        key = str(idempotency_key or "").strip()
+        if not key:
+            return None
+        raw_args = _json(arguments) if arguments is not None else None
+        with self.lock:
+            self._expire_jobs()
+            row = self.db.execute(
+                "SELECT id,tool,arguments FROM jobs "
+                "WHERE user_id=? AND device_id=? AND idempotency_key=? "
+                "ORDER BY created ASC LIMIT 1",
+                (user_id, device_id, key),
+            ).fetchone()
+        if row is None:
+            return None
+        if tool is not None and row["tool"] != tool:
+            raise ValueError(
+                "idempotency_key was already used for a different remote tool"
+            )
+        if raw_args is not None and row["arguments"] != raw_args:
+            raise ValueError(
+                "idempotency_key was already used for different remote arguments"
+            )
         return self.job_result(user_id, str(row["id"]))
 
     def cancel_job(self, user_id: str, job_id: str) -> None:

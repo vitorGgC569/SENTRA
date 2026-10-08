@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from .secrets import protect_secret, unprotect_secret
@@ -18,6 +18,11 @@ class AgentConfig:
     allowed_roots: list[str]
     audit_log: str
     process_mode: str = "workspace"
+    state_root: str = ""
+    profile: str = "Developer"
+    access_scope: str = "workspace"
+    tool_surfaces: list[str] = field(default_factory=lambda: ["core", "developer", "browser"])
+    tool_allowlist: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path) -> "AgentConfig":

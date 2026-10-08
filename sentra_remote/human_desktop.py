@@ -10,6 +10,7 @@ from typing import Any
 from sentra_version import PRODUCT_VERSION
 
 from .human_store import HumanStore
+from .human_worker import WorkerLease
 from .product import ProductPaths, ProductSettings
 
 
@@ -42,6 +43,10 @@ class HumanAPI:
         self.store.settings = self.settings
 
     def ensure_worker(self) -> dict[str, Any]:
+        lease = WorkerLease(self.paths.state_dir / "human-worker.pid")
+        if lease.is_held():
+            return {"ok": True, "spawned": False}
+
         worker_exe = self.paths.install_dir / "sentra-human-worker.exe"
         if worker_exe.is_file():
             command = [
@@ -58,7 +63,7 @@ class HumanAPI:
                 "--install-dir", str(self.paths.install_dir),
             ]
         try:
-            subprocess.Popen(
+            process = subprocess.Popen(
                 command,
                 cwd=str(self.paths.install_dir if self.paths.install_dir.is_dir() else _install_dir()),
                 stdin=subprocess.DEVNULL,
@@ -66,7 +71,7 @@ class HumanAPI:
                 stderr=subprocess.DEVNULL,
                 creationflags=_hidden_flags(),
             )
-            return {"ok": True}
+            return {"ok": True, "spawned": True, "pid": process.pid}
         except OSError as exc:
             return {"ok": False, "error": str(exc)}
 

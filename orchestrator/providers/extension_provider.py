@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+from sentra_core.conversation import ConversationIdentity
 from browser.extension_transport import ExtensionTransport
 from browser.outcomes import classify_failure
 from native_bridge.protocol import MAX_IMAGES_PER_JOB, MAX_IMAGE_CHARS
@@ -50,15 +51,37 @@ def _load_image_attachments(spec: Any) -> Union[List[str], str, None]:
 
 
 class BrowserExtensionProvider:
-    """AgentProvider que fala com tabs reais do Edge via relay local."""
+    """AgentProvider that drives supported Web models through the durable Edge relay."""
 
     # Auditoria limitada: dicts sem teto vazam memória em runs longas.
     MAX_CONVERSATIONS = 1000
     persistent_conversations = True
 
-    def __init__(self, relay_base: str = "http://127.0.0.1:8765",
-                 model_name: str = "browser-extension", token: str | None = None):
+    def __init__(
+        self,
+        relay_base: str = "http://127.0.0.1:8765",
+        model_name: str = "browser-extension",
+        token: str | None = None,
+        *,
+        provider: str = "chatgpt",
+        web_model: str | None = None,
+    ):
+        normalized_provider = str(provider or "chatgpt").strip().lower()
+        if normalized_provider not in {"chatgpt", "gemini"}:
+            raise ValueError("provider must be chatgpt or gemini")
+        normalized_model = (
+            str(web_model).strip().lower() if web_model is not None else None
+        )
+        if normalized_provider == "gemini":
+            if normalized_model is None:
+                normalized_model = "flash"
+            if normalized_model not in {"flash-lite", "flash", "pro"}:
+                raise ValueError("Gemini web model must be flash-lite, flash or pro")
+        elif normalized_model is not None:
+            raise ValueError("web_model is only supported for Gemini")
         self.transport = ExtensionTransport(relay_base, token=token)
+        self.provider = normalized_provider
+        self.web_model = normalized_model
         self.model_name = model_name
         # Auditoria: task_id -> {conversation_id, conversation_url, worker}
         self.conversations: Dict[str, Dict[str, Any]] = {}
@@ -66,15 +89,19 @@ class BrowserExtensionProvider:
         # permite continuação entre processos sem aceitar URL arbitrária.
         self.adopted_urls: set = set()
 
+    def _conversation_id(self, url: Any) -> str | None:
+        identity = ConversationIdentity.maybe_parse(url)
+        if identity is None or identity.provider != self.provider:
+            return None
+        return identity.conversation_id
+
     def adopt_conversations(self, urls) -> int:
-        """Adota conversas criadas por runs anteriores (mesmo run-id, disco local).
-        A checagem exata de URL no resultado continua valendo."""
-        import re as _re
+        """Adopt exact provider-owned conversations from a persisted run."""
         n = 0
-        for u in urls or []:
-            if isinstance(u, str) and _re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", u):
-                if u not in self.adopted_urls:
-                    self.adopted_urls.add(u)
+        for url in urls or []:
+            if isinstance(url, str) and self._conversation_id(url):
+                if url not in self.adopted_urls:
+                    self.adopted_urls.add(url)
                     n += 1
         return n
 
@@ -83,6 +110,16 @@ class BrowserExtensionProvider:
         while len(self.conversations) > self.MAX_CONVERSATIONS:
             self.conversations.pop(next(iter(self.conversations)))
 
+    def render_prompt(self, request: AgentRequest) -> str:
+        new_chat = bool(request.metadata.get("new_chat", True))
+        sys_p = (request.system_prompt or "").strip()
+        usr_p = (request.user_prompt or "").strip()
+        if not new_chat and not request.metadata.get("refresh_system_prompt"):
+            return usr_p
+        if usr_p and (usr_p == sys_p or (sys_p and sys_p in usr_p)):
+            return usr_p
+        return f"{request.system_prompt}\n\n{request.user_prompt}"
+
     async def execute(self, request: AgentRequest) -> AgentResponse:
         start = time.time()
         task_id = request.metadata.get("task_id", "t-unknown")
@@ -90,14 +127,7 @@ class BrowserExtensionProvider:
         new_chat = bool(request.metadata.get("new_chat", True))
         conversation_url = request.metadata.get("conversation_url")
         timeout = max(5, min(int(request.timeout or 180), 900))
-        sys_p = (request.system_prompt or "").strip()
-        usr_p = (request.user_prompt or "").strip()
-        if not new_chat and not request.metadata.get("refresh_system_prompt"):
-            prompt = usr_p  # Instructions already live in this exact conversation.
-        elif usr_p and (usr_p == sys_p or (sys_p and sys_p in usr_p)):
-            prompt = usr_p  # evita duplicação quando system==user ou contido
-        else:
-            prompt = f"{request.system_prompt}\n\n{request.user_prompt}"
+        prompt = self.render_prompt(request)
         if len(prompt) > 20000:
             return AgentResponse(content="", success=False, model=self.model_name,
                                  error="[CONTEXT_BUDGET] prompt exceeds 20000 characters; no text was sent",
@@ -126,6 +156,8 @@ class BrowserExtensionProvider:
                 project_id=request.metadata.get("project_id"),
                 project_url=request.metadata.get("project_url"),
                 chat_title=request.metadata.get("chat_title"),
+                provider=self.provider,
+                model=self.web_model,
             )
         except asyncio.CancelledError:
             raise  # RF-017: nunca engolir cancelamento
@@ -153,6 +185,8 @@ class BrowserExtensionProvider:
                         project_id=request.metadata.get("project_id"),
                         project_url=request.metadata.get("project_url"),
                         chat_title=request.metadata.get("chat_title"),
+                        provider=self.provider,
+                        model=self.web_model,
                     )
                 except Exception:
                     pass
@@ -186,6 +220,8 @@ class BrowserExtensionProvider:
         info = {
             "conversation_id": res.get("conversation_id"),
             "conversation_url": res.get("conversation_url"),
+            "provider": self.provider,
+            "web_model": self.web_model,
             "worker": res.get("worker", ""),
             "delivery_state": "CONFIRMED",
             "images_attached": int(res.get("images_attached", 0) or 0),
@@ -194,8 +230,8 @@ class BrowserExtensionProvider:
             "chat_title": res.get("chat_title") or request.metadata.get("chat_title"),
             "title_updated": bool(res.get("title_updated", False)),
         }
-        match = re.fullmatch(r"https://chatgpt\.com/c/([A-Za-z0-9-]{1,128})", info["conversation_url"] or "")
-        if not match or match[1] != info["conversation_id"]:
+        conversation_id = self._conversation_id(info["conversation_url"])
+        if not conversation_id or conversation_id != info["conversation_id"]:
             return AgentResponse(content="", success=False, model=self.model_name,
                                  error="[CONVERSATION_MISMATCH] missing or inconsistent remote conversation identity",
                                  metadata={"delivery_state": "UNCERTAIN", "retry_safe": False})

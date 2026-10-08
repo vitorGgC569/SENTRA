@@ -87,7 +87,7 @@ class RuntimeConfigService:
         if safe:
             result["applied"] = self.apply_safe(safe)
         if privileged:
-            request_id = secrets.token_urlsafe(12)
+            request_id = "cfg_" + secrets.token_urlsafe(12)
             data = self._load()
             data["pending"][request_id] = {
                 "changes": privileged,
@@ -98,7 +98,12 @@ class RuntimeConfigService:
             result["approval_required"] = {
                 "request_id": request_id,
                 "changes": privileged,
-                "command": f"python -m sentra_remote.admin approve-config {request_id}",
+                "command": (
+                    'python -m sentra_remote.admin --state "'
+                    + str(self.state_path)
+                    + f'" approve-config {request_id}'
+                ),
+                "state_path": str(self.state_path),
                 "note": "Privileged changes are never approved through MCP.",
             }
         return result

@@ -15,11 +15,12 @@ from mcp.server.mcpserver.context import Context
 from pydantic import Field
 
 from ..errors import SentraSemanticError, error_envelope, sanitize_error
-from ..identity import resolve_owner
+from ..identity import authorization_principal, resolve_owner
 from ..models import ResponseEnvelope
 from ..services.browser import BrowserControlService
 from ..services.documents import DocumentService
 from ..services.jobs import JobService
+from ..services.maestri import MaestriService
 from ..services.research import ResearchService
 from ..services.runtime_config import RuntimeConfigService
 from ..services.search_sessions import SearchSessionService
@@ -90,6 +91,7 @@ def register_commander_tools(
     workspaces: WorkspaceRegistry,
     jobs: JobService,
     research: ResearchService,
+    maestri: MaestriService,
     durable: Any | None = None,
     surfaces: set[str] | None = None,
 ) -> None:
@@ -535,6 +537,96 @@ def register_commander_tools(
             owner = resolve_owner(ctx, session_token=session_token)
             return _sync(lambda: workspaces.list_workspaces(owner))
 
+        # The external Maestri adapter is legacy compatibility only.
+        # Default developer sessions use native SENTRA orchestration; enable
+        # the privileged admin surface explicitly to expose this bridge.
+        @mcp.tool() if "admin" in enabled else (lambda fn: fn)
+        @_guard_tool_errors
+        def sentra_maestri(
+            action: Literal[
+                "status", "list", "recruit", "send", "check", "connect", "dismiss"
+            ],
+            ctx: Context,
+            workspace: Annotated[
+                str | None,
+                Field(description="Optional Maestri workspace name/id. Defaults to the active workspace."),
+            ] = None,
+            name: Annotated[
+                str | None,
+                Field(description="Terminal/agent name for recruit, send, check or dismiss; source for connect."),
+            ] = None,
+            target: Annotated[
+                str | None,
+                Field(description="Destination terminal/agent name for connect."),
+            ] = None,
+            prompt: Annotated[
+                str | None,
+                Field(description="Prompt to submit when action=send."),
+            ] = None,
+            command: Annotated[
+                str | None,
+                Field(description="Custom terminal command for recruit. Defaults to .\\sentra-cli.cmd when no preset is given."),
+            ] = None,
+            preset: Annotated[
+                str | None,
+                Field(description="Optional Maestri preset for recruit."),
+            ] = None,
+            role: Annotated[
+                str | None,
+                Field(description="Optional Maestri role for recruit."),
+            ] = None,
+            confirm: Annotated[
+                bool,
+                Field(description="Required true for dismiss."),
+            ] = False,
+            allow_manager: Annotated[
+                bool,
+                Field(description="Allow dismissing the manager terminal. False by default."),
+            ] = False,
+            run_id: str | None = None,
+            idempotency_key: str | None = None,
+            session_token: str | None = None,
+        ) -> ResponseEnvelope:
+            """Control the live Maestri canvas directly through its local CLI/pipe.
+
+            status/list/check are observational. recruit/send/connect/dismiss are
+            durable and idempotent when idempotency_key is reused. dismiss requires
+            confirm=true and refuses the manager unless allow_manager=true.
+            """
+            owner = resolve_owner(
+                ctx,
+                session_token=session_token,
+                require_session=True,
+            )
+
+            def invoke() -> dict[str, Any]:
+                return maestri.execute(
+                    action,
+                    owner=owner,
+                    workspace=workspace,
+                    name=name,
+                    target=target,
+                    prompt=prompt,
+                    command=command,
+                    preset=preset,
+                    role=role,
+                    confirm=confirm,
+                    allow_manager=allow_manager,
+                )
+
+            if action in {"recruit", "send", "connect", "dismiss"}:
+                return _durable_sync_call(
+                    owner,
+                    f"maestri.{action}",
+                    invoke,
+                    run_id=run_id,
+                    idempotency_key=idempotency_key,
+                    workspace=workspace,
+                    readiness="PRODUCT_READY",
+                    stage="MAESTRI_COMMAND",
+                )
+            return _sync(invoke)
+
         @mcp.tool()
         @_guard_tool_errors
         def sentra_request_workspace(
@@ -764,8 +856,14 @@ def register_commander_tools(
             idempotency_key: str | None = None,
             session_token: str | None = None,
         ) -> ResponseEnvelope:
-            """Start a registered long-running repository operation asynchronously."""
+            """Start a repository job detached and return an immediate acceptance ACK.
+
+            For long BUILD jobs, do not hold the connector call open: retain the
+            returned job_id, query sentra_job_status later, then fetch
+            sentra_job_result only after a terminal state.
+            """
             owner = resolve_owner(ctx, session_token=session_token, require_session=True)
+            principal = authorization_principal(ctx)[0]
             return _sync(lambda: jobs.start(
                 operation,
                 owner,
@@ -773,6 +871,7 @@ def register_commander_tools(
                 workspace=workspace,
                 run_id=run_id,
                 idempotency_key=idempotency_key,
+                principal=principal,
             ))
 
         @mcp.tool()
@@ -787,6 +886,7 @@ def register_commander_tools(
         ) -> ResponseEnvelope:
             """Start pytest asynchronously and return immediately with a job_id."""
             owner = resolve_owner(ctx, session_token=session_token, require_session=True)
+            principal = authorization_principal(ctx)[0]
             return _sync(lambda: jobs.start(
                 "TEST",
                 owner,
@@ -794,6 +894,7 @@ def register_commander_tools(
                 workspace=workspace,
                 run_id=run_id,
                 idempotency_key=idempotency_key,
+                principal=principal,
             ))
 
         @mcp.tool()
@@ -803,7 +904,8 @@ def register_commander_tools(
         ) -> ResponseEnvelope:
             """Return status for a job owned by this MCP session."""
             owner = resolve_owner(ctx, session_token=session_token, require_session=True)
-            return _sync(lambda: jobs.status(job_id, owner))
+            principal = authorization_principal(ctx)[0]
+            return _sync(lambda: jobs.status(job_id, owner, principal))
 
         @mcp.tool()
         @_guard_tool_errors
@@ -813,13 +915,19 @@ def register_commander_tools(
             timeout_s: Annotated[float, Field(gt=0, le=25)] = 5.0,
             session_token: str | None = None,
         ) -> ResponseEnvelope:
-            """Wait connector-safely for an asynchronous repository job."""
+            """Optionally wait briefly for a detached job.
+
+            This is a bounded convenience poll, not the lifetime of the job.
+            Prefer sentra_job_status + sentra_job_result for long BUILD jobs.
+            """
             owner = resolve_owner(ctx, session_token=session_token, require_session=True)
+            principal = authorization_principal(ctx)[0]
             return await _async(lambda: asyncio.to_thread(
                 jobs.wait,
                 job_id,
                 owner,
                 timeout_s,
+                principal,
             ))
 
         @mcp.tool()
@@ -829,7 +937,8 @@ def register_commander_tools(
         ) -> ResponseEnvelope:
             """Return final output for a completed repository job."""
             owner = resolve_owner(ctx, session_token=session_token, require_session=True)
-            return _sync(lambda: jobs.result(job_id, owner))
+            principal = authorization_principal(ctx)[0]
+            return _sync(lambda: jobs.result(job_id, owner, principal))
 
         @mcp.tool()
         @_guard_tool_errors
@@ -838,7 +947,8 @@ def register_commander_tools(
         ) -> ResponseEnvelope:
             """Cancel an asynchronous job and its underlying registered operation."""
             owner = resolve_owner(ctx, session_token=session_token, require_session=True)
-            return _sync(lambda: jobs.cancel(job_id, owner))
+            principal = authorization_principal(ctx)[0]
+            return _sync(lambda: jobs.cancel(job_id, owner, principal))
 
         @mcp.tool()
         @_guard_tool_errors
@@ -850,7 +960,8 @@ def register_commander_tools(
         ) -> ResponseEnvelope:
             """List asynchronous jobs owned by this MCP session."""
             owner = resolve_owner(ctx, session_token=session_token, require_session=True)
-            return _sync(lambda: jobs.list_jobs(owner, limit, offset))
+            principal = authorization_principal(ctx)[0]
+            return _sync(lambda: jobs.list_jobs(owner, limit, offset, principal))
 
     if "browser" in enabled:
         @mcp.tool()
@@ -1159,6 +1270,8 @@ def register_commander_tools(
             contains: str = "",
             limit: Annotated[int, Field(ge=1, le=5000)] = 200,
             offset: Annotated[int, Field(ge=0)] = 0,
+            component: str = "",
+            correlation_id: str = "",
         ) -> ResponseEnvelope:
             """Query redacted audit records."""
             return _sync(lambda: telemetry.query(
@@ -1167,4 +1280,6 @@ def register_commander_tools(
                 contains=contains,
                 limit=limit,
                 offset=offset,
+                component=component,
+                correlation_id=correlation_id,
             ))

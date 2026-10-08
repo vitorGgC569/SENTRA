@@ -98,10 +98,21 @@ class CandidateVerifier:
             # saem das listas de passou/falhou e vão para refused_commands.
             ran_results = [r for r in results if not r.get("refused")]
             refused = [r["command"] for r in results if r.get("refused")]
+            touched_files = sorted(dry_run.get("files", []))
+            touched_base_hashes = {
+                path: (
+                    hashlib.sha256(sandbox.before[path]).hexdigest()
+                    if path in sandbox.before
+                    else None
+                )
+                for path in touched_files
+            }
             evidence = {
                 "candidate_id": candidate.candidate_id, "task_id": candidate.task_id,
                 "patch_hash": hashlib.sha256(candidate.patch.encode("utf-8")).hexdigest(),
                 "base_hash": sandbox.base_hash, "candidate_hash": after_hash,
+                "touched_files": touched_files,
+                "touched_base_hashes": touched_base_hashes,
                 "all_passed": bool(ran_results) and all(r["passed"] for r in ran_results),
                 "passed_commands": [r["command"] for r in ran_results if r["passed"]],
                 "failed_commands": [r["command"] for r in ran_results if not r["passed"]],

@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -27,6 +26,7 @@ def parser() -> argparse.ArgumentParser:
     cli.add_argument("--host")
     cli.add_argument("--port", type=int)
     cli.add_argument("--allowed-root", action="append", dest="allowed_roots")
+    cli.add_argument("--state-dir", help="Explicit persistent SENTRA state directory")
     cli.add_argument("--blocked-command", action="append", dest="blocked_commands")
     cli.add_argument("--max-read-bytes", type=int)
     cli.add_argument("--max-write-bytes", type=int)
@@ -71,14 +71,16 @@ def config_from_args(args: argparse.Namespace, base: MCPConfig | None = None) ->
         overrides["process_sandbox_memory_mb"] = args.sandbox_memory_mb
     if args.sandbox_pids is not None:
         overrides["process_sandbox_pids"] = args.sandbox_pids
+    if args.state_dir is not None:
+        overrides["state_root"] = Path(args.state_dir)
     if args.allowed_roots is not None:
         roots = tuple(Path(value) for value in args.allowed_roots)
         overrides["allowed_roots"] = roots
-        # A CLI-selected primary workspace is also the natural local state
-        # boundary unless the operator explicitly selected a global state dir.
-        # Without this, workspace approval may be written/read from a different
-        # .sentra tree than the running MCP instance.
-        if roots and "SENTRA_STATE_DIR" not in os.environ:
+        # A CLI-selected primary workspace is the natural local state boundary
+        # unless the launcher explicitly pins a separate state directory.
+        # Ambient/inherited SENTRA_STATE_DIR must not silently redirect approvals
+        # to a registry different from the one implied by --allowed-root.
+        if roots and args.state_dir is None:
             overrides["state_root"] = roots[0] / ".sentra"
     if args.blocked_commands is not None:
         overrides["blocked_commands"] = tuple(args.blocked_commands)

@@ -296,3 +296,82 @@ async def test_fixed_conversation_exposes_stable_logical_uri(tmp_path):
         pool._conversation_uri(pool._seat("validator.logic"))
         == "conversation://reviewer-logic"
     )
+
+
+@pytest.mark.asyncio
+async def test_confirmed_seat_rotation_opens_new_chat_with_brief_and_history(tmp_path):
+    class RotatingInner:
+        persistent_conversations = True
+
+        def __init__(self):
+            self.calls = []
+            self.providers = {}
+            self.counter = 0
+
+        async def execute(self, request, preferred_provider=None):
+            self.calls.append(request)
+            if request.metadata.get("new_chat", True):
+                self.counter += 1
+                conv = f"executor-{self.counter}"
+                return AgentResponse(
+                    content="opened",
+                    success=True,
+                    model="fake",
+                    token_usage=TokenUsage(model="fake"),
+                    metadata={
+                        "conversation_url": f"https://chatgpt.com/c/{conv}",
+                        "conversation_id": conv,
+                        "worker": "W1",
+                    },
+                )
+            return AgentResponse(
+                content="continued",
+                success=True,
+                model="fake",
+                token_usage=TokenUsage(model="fake"),
+                metadata={
+                    "conversation_url": request.metadata["conversation_url"],
+                    "conversation_id": request.metadata["conversation_id"],
+                    "worker": "W1",
+                },
+            )
+
+    inner = RotatingInner()
+    pool = FixedConversationRouter(inner, run_id="R1", store_dir=tmp_path)
+    assert (await pool.execute(_req("executor"))).success
+    prepared = pool.prepare_rotation(
+        "executor",
+        "# continuation brief\nDo not replay uncertain sends.",
+        reason="context ceiling",
+    )
+    assert prepared["state"] == "ROTATION_PREPARED"
+    assert prepared["prior_conversation_url"].endswith("/executor-1")
+
+    second = await pool.execute(_req("executor", task="T-2"))
+    assert second.success
+    assert inner.calls[-1].metadata["new_chat"] is True
+    assert inner.calls[-1].metadata.get("conversation_url") is None
+    assert inner.calls[-1].user_prompt.startswith("# continuation brief")
+
+    seat = pool.seats()["R1:executor"]
+    assert seat["url"].endswith("/executor-2")
+    assert seat["prior_urls"] == ["https://chatgpt.com/c/executor-1"]
+    assert seat["last_rotated_from"].endswith("/executor-1")
+    assert "rotation_brief" not in seat
+
+
+def test_rotation_refuses_uncertain_seat(tmp_path):
+    inner = FakeInner()
+    pool = FixedConversationRouter(inner, run_id="R1", store_dir=tmp_path)
+    seat = "R1:executor"
+    pool._map[seat] = {
+        "state": "UNCERTAIN",
+        "provider": None,
+        "role": "executor",
+        "conversation_uri": pool._conversation_uri(seat),
+        "url": "https://chatgpt.com/c/uncertain-1",
+        "conversation_id": "uncertain-1",
+    }
+    pool._save()
+    with pytest.raises(RuntimeError, match="reconcile delivery before rotation"):
+        pool.prepare_rotation("executor", "safe brief")

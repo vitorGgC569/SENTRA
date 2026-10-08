@@ -68,7 +68,7 @@ def _safe_extract(zip_path: Path, destination: Path) -> None:
 def verify_authenticode(executable: Path, thumbprint: str) -> None:
     expected = thumbprint.replace(" ", "").upper()
     command = (
-        "$s=Get-AuthenticodeSignature -LiteralPath " + repr(str(executable)) + ";"
+        "$s=Get-AuthenticodeSignature -LiteralPath " + _ps_literal(executable) + ";"
         "$o=[ordered]@{Status=$s.Status.ToString();Thumbprint=$s.SignerCertificate.Thumbprint};"
         "$o|ConvertTo-Json -Compress"
     )
@@ -88,7 +88,11 @@ def _version_key(value: str) -> tuple[tuple[int, int, int], int, str]:
     match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?", value.strip())
     if not match:
         raise ValueError("update version must be semantic X.Y.Z")
-    core = tuple(int(match.group(i)) for i in (1, 2, 3))
+    core = (
+        int(match.group(1)),
+        int(match.group(2)),
+        int(match.group(3)),
+    )
     prerelease = match.group(4) or ""
     return core, 1 if not prerelease else 0, prerelease
 

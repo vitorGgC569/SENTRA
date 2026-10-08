@@ -37,9 +37,9 @@ class BrowserControlService:
         self.sessions: dict[str, dict[str, Any]] = {}
         self.edge_sessions: dict[str, dict[str, Any]] = {}
         self.lock = asyncio.Lock()
-        self.screenshot_root = config.state_root / "screenshots"
+        self.screenshot_root = config.resolved_state_root / "screenshots"
         self.relay_url = self._configured_relay_url()
-        self.relay_token_path = config.state_root / "browser" / "relay-token"
+        self.relay_token_path = config.resolved_state_root / "browser" / "relay-token"
 
     @staticmethod
     def _configured_relay_url() -> str:
@@ -107,6 +107,26 @@ class BrowserControlService:
         except ValueError:
             return False
         return parsed.scheme == "https" and parsed.hostname == "chatgpt.com"
+
+    @staticmethod
+    def _is_gemini_url(url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+        return parsed.scheme == "https" and parsed.hostname == "gemini.google.com"
+
+    @classmethod
+    def _chat_provider_for_url(cls, url: str) -> str | None:
+        if cls._is_chatgpt_url(url):
+            return "chatgpt"
+        if cls._is_gemini_url(url):
+            return "gemini"
+        return None
+
+    @classmethod
+    def _is_supported_web_model_url(cls, url: str) -> bool:
+        return cls._chat_provider_for_url(url) is not None
 
     async def _install_network_guard(self, session: BrowserSession) -> None:
         if session.context is None:
@@ -297,6 +317,9 @@ class BrowserControlService:
         prompt: str = "",
         conversation_url: str | None = None,
         timeout_s: int = 180,
+        queue_timeout_s: float = 60.0,
+        provider: str = "chatgpt",
+        model: str | None = None,
     ) -> dict[str, Any]:
         task_id = "mcp-research-" + uuid.uuid4().hex
         payload: dict[str, Any] = {
@@ -305,6 +328,8 @@ class BrowserControlService:
             "timeout_s": max(10, min(int(timeout_s), 600)),
             "new_chat": kind == "CHAT_START",
             "kind": kind,
+            "provider": provider,
+            "model": model,
         }
         if worker:
             payload["target_worker"] = worker
@@ -317,10 +342,23 @@ class BrowserControlService:
             timeout=5.0,
         )
         job_id = str(submitted["job_id"])
-        deadline = time.monotonic() + payload["timeout_s"]
+        queue_deadline = time.monotonic() + max(
+            5.0, min(float(queue_timeout_s), 900.0)
+        )
+        execution_deadline: float | None = None
+        last_state = "QUEUED"
         try:
-            while time.monotonic() < deadline:
-                remaining = max(0.1, min(20.0, deadline - time.monotonic()))
+            while True:
+                now = time.monotonic()
+                active_deadline = execution_deadline or queue_deadline
+                if now >= active_deadline:
+                    if execution_deadline is None:
+                        raise RuntimeError(
+                            f"QUEUE_TIMEOUT: no worker claimed {kind} within "
+                            f"{max(5.0, min(float(queue_timeout_s), 900.0)):.0f}s"
+                        )
+                    raise TimeoutError(f"{kind} timed out after worker claim")
+                remaining = max(0.1, min(20.0, active_deadline - now))
                 query = urllib.parse.urlencode(
                     {"job_id": job_id, "timeout_s": remaining}
                 )
@@ -329,6 +367,15 @@ class BrowserControlService:
                     timeout=remaining + 2,
                 )
                 if result.get("pending"):
+                    state = str(result.get("state") or last_state)
+                    last_state = state
+                    if state == "LEASED" and execution_deadline is None:
+                        relay_deadline = result.get("deadline")
+                        if isinstance(relay_deadline, (int, float)):
+                            seconds_left = max(0.1, float(relay_deadline) - time.time())
+                            execution_deadline = time.monotonic() + seconds_left + 3.0
+                        else:
+                            execution_deadline = time.monotonic() + payload["timeout_s"] + 3.0
                     continue
                 if result.get("status") != "COMPLETED":
                     raise RuntimeError(
@@ -345,17 +392,22 @@ class BrowserControlService:
                     pass
                 raw = result.get("result")
                 decoded: dict[str, Any] = {}
-                if kind == "CHAT_START" and isinstance(raw, str) and raw:
+                if kind in {"CHAT_START", "CHAT_PEEK"} and isinstance(raw, str) and raw:
                     try:
                         value = json.loads(raw)
                     except json.JSONDecodeError:
                         value = {}
                     if isinstance(value, dict):
                         decoded = value
+                text = (
+                    str(decoded.get("text") or "")
+                    if kind == "CHAT_PEEK"
+                    else ("" if kind == "CHAT_START" else str(raw or ""))
+                )
                 return {
                     "job_id": job_id,
                     "worker": result.get("worker") or worker,
-                    "text": "" if kind == "CHAT_START" else str(raw or ""),
+                    "text": text,
                     "conversation_url": (
                         result.get("conversation_url")
                         or decoded.get("conversation_url")
@@ -366,18 +418,32 @@ class BrowserControlService:
                         or decoded.get("conversation_id")
                     ),
                     **({"started": bool(decoded.get("started"))} if kind == "CHAT_START" else {}),
+                    **({
+                        "ready": bool(decoded.get("ready")),
+                        "finished": bool(decoded.get("finished")),
+                        "additional_checks": decoded.get("additional_checks"),
+                        "additional_checks_recovery_attempts": int(
+                            decoded.get("additional_checks_recovery_attempts") or 0
+                        ),
+                        "additional_checks_recovery_active": bool(
+                            decoded.get("additional_checks_recovery_active")
+                        ),
+                    } if kind == "CHAT_PEEK" else {}),
                 }
-            raise TimeoutError(f"{kind} timed out")
         except Exception:
-            try:
-                self._relay_request_sync(
-                    "/jobs/cancel",
-                    method="POST",
-                    payload={"job_id": job_id},
-                    timeout=3.0,
-                )
-            except Exception:
-                pass
+            # Cancelling an already leased chat job can orphan a generation whose
+            # side effect already happened. Only queued jobs are provably safe
+            # to cancel from this client-side timeout/error path.
+            if last_state == "QUEUED":
+                try:
+                    self._relay_request_sync(
+                        "/jobs/cancel",
+                        method="POST",
+                        payload={"job_id": job_id},
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
             raise
 
     async def chat_start(
@@ -386,8 +452,10 @@ class BrowserControlService:
         prompt: str,
         *,
         timeout_s: int = 90,
+        provider: str = "chatgpt",
+        model: str | None = None,
     ) -> dict[str, Any]:
-        """Start a fresh ChatGPT conversation and return its id without waiting.
+        """Start a fresh supported Web-model conversation without waiting.
 
         A single READY Edge controller tab can start many conversations
         sequentially; generations continue server-side and are collected later
@@ -395,12 +463,21 @@ class BrowserControlService:
         """
         if not prompt or len(prompt) > 200_000:
             raise ValueError("research prompt must be 1..200000 characters")
+        provider = str(provider or "chatgpt").strip().lower()
+        if provider not in {"chatgpt", "gemini"}:
+            raise ValueError("provider must be chatgpt or gemini")
+        if model is not None:
+            model = str(model).strip().lower()
+            if provider != "gemini" or model not in {"flash-lite", "flash", "pro"}:
+                raise ValueError("Gemini model must be flash-lite, flash or pro")
         result = await asyncio.to_thread(
             self._chat_phase_sync,
             None,
             kind="CHAT_START",
             prompt=prompt,
             timeout_s=timeout_s,
+            provider=provider,
+            model=model,
         )
         if not result.get("conversation_id") or not result.get("conversation_url"):
             raise RuntimeError("CHAT_START returned no conversation identity")
@@ -421,27 +498,60 @@ class BrowserControlService:
         conversation_url: str,
         *,
         timeout_s: int = 180,
+        provider: str | None = None,
     ) -> dict[str, Any]:
         """Collect one server-side generation by conversation id/URL."""
-        if not self._is_chatgpt_url(conversation_url):
-            raise ValueError("conversation_url must target https://chatgpt.com")
-        result = await asyncio.to_thread(
-            self._chat_phase_sync,
-            None,
-            kind="CHAT_COLLECT",
-            conversation_url=conversation_url,
-            timeout_s=timeout_s,
+        inferred_provider = self._chat_provider_for_url(conversation_url)
+        if inferred_provider is None:
+            raise ValueError("conversation_url must target ChatGPT or Gemini Web")
+        if provider is not None and str(provider).strip().lower() != inferred_provider:
+            raise ValueError("conversation_url does not match requested provider")
+        provider = inferred_provider
+        deadline = time.monotonic() + max(5, int(timeout_s))
+        last: dict[str, Any] = {}
+        last_error = ""
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            peek_timeout = max(5, min(15, int(remaining)))
+            try:
+                result = await asyncio.to_thread(
+                    self._chat_phase_sync,
+                    None,
+                    kind="CHAT_PEEK",
+                    conversation_url=conversation_url,
+                    timeout_s=peek_timeout,
+                    queue_timeout_s=min(15.0, max(5.0, remaining)),
+                    provider=provider,
+                )
+            except RuntimeError as exc:
+                message = str(exc)
+                last_error = message
+                if "QUEUE_TIMEOUT" in message and time.monotonic() < deadline:
+                    await asyncio.sleep(min(1.0, max(0.05, deadline - time.monotonic())))
+                    continue
+                raise
+            last = result
+            if result.get("ready") and result.get("text"):
+                self.audit.emit(
+                    "research.chat_collect",
+                    "ok",
+                    {
+                        "owner": owner,
+                        "worker": result.get("worker"),
+                        "conversation_id": result.get("conversation_id"),
+                    },
+                )
+                return result
+            await asyncio.sleep(min(1.0, max(0.05, deadline - time.monotonic())))
+        detail = last_error or (
+            "finished=" + str(bool(last.get("finished")))
+            + ", text_chars=" + str(len(str(last.get("text") or "")))
+            + ", additional_checks=" + str(bool(last.get("additional_checks")))
+            + ", recovery_active=" + str(bool(last.get("additional_checks_recovery_active")))
+            + ", recovery_attempts="
+            + str(int(last.get("additional_checks_recovery_attempts") or 0))
         )
-        self.audit.emit(
-            "research.chat_collect",
-            "ok",
-            {
-                "owner": owner,
-                "worker": result.get("worker"),
-                "conversation_id": result.get("conversation_id"),
-            },
-        )
-        return result
+        raise TimeoutError(f"CHAT_COLLECT timed out after bounded peeks ({detail})")
 
     def _delete_chat_sync(
         self,
@@ -450,10 +560,11 @@ class BrowserControlService:
         timeout_s: int = 30,
     ) -> dict[str, Any]:
         task_id = "mcp-delete-chat-" + uuid.uuid4().hex
-        payload = {
+        bounded_timeout = max(10, min(int(timeout_s), 120))
+        payload: dict[str, Any] = {
             "task_id": task_id,
             "prompt": "",
-            "timeout_s": max(10, min(int(timeout_s), 120)),
+            "timeout_s": bounded_timeout,
             "new_chat": False,
             "conversation_url": conversation_url,
             "kind": "DELETE_CHAT",
@@ -464,7 +575,7 @@ class BrowserControlService:
             "/jobs/submit", method="POST", payload=payload, timeout=5.0
         )
         job_id = str(submitted["job_id"])
-        deadline = time.monotonic() + payload["timeout_s"]
+        deadline = time.monotonic() + bounded_timeout
         while time.monotonic() < deadline:
             remaining = max(0.1, min(10.0, deadline - time.monotonic()))
             query = urllib.parse.urlencode({"job_id": job_id, "timeout_s": remaining})
@@ -603,7 +714,7 @@ class BrowserControlService:
             }
 
         url = status.get("url")
-        if isinstance(url, str) and url and not self._is_chatgpt_url(url):
+        if isinstance(url, str) and url and not self._is_supported_web_model_url(url):
             return {
                 "worker": worker,
                 "worker_state": "CONNECTED",
@@ -612,7 +723,7 @@ class BrowserControlService:
                 "status": status,
                 "last_seen": cached.get("last_seen"),
                 "error_code": "SESSION_WRONG_PLACE",
-                "error": "SESSION_WRONG_PLACE: controller is not on chatgpt.com",
+                "error": "SESSION_WRONG_PLACE: controller is not on a supported Web-model site",
                 "plugin_identity": {
                     "expected": expected,
                     "actual": actual_versions,
@@ -632,7 +743,7 @@ class BrowserControlService:
         )
         ready = bool(
             isinstance(url, str)
-            and self._is_chatgpt_url(url)
+            and self._is_supported_web_model_url(url)
             and composer_found
             and not status.get("error")
         )
@@ -775,7 +886,7 @@ class BrowserControlService:
             raise ValueError("backend must be auto, playwright or edge")
         await self._validate_url(url)
 
-        if backend in {"auto", "edge"} and self._is_chatgpt_url(url):
+        if backend in {"auto", "edge"} and self._is_supported_web_model_url(url):
             inventory = await self._edge_worker_inventory()
 
             # A browser session can outlive its connector owner when the client
@@ -950,7 +1061,7 @@ class BrowserControlService:
             )
             raise SentraSemanticError(
                 "CAPABILITY_MISSING",
-                "principal Edge bridge is required for chatgpt.com but is not ready",
+                "principal Edge bridge is required for the selected Web-model site but is not ready",
                 category="readiness",
                 retryable=True,
                 details={
@@ -962,7 +1073,7 @@ class BrowserControlService:
                 },
             )
         elif backend == "edge":
-            raise ValueError("Edge backend is restricted to https://chatgpt.com; use Playwright for other sites")
+            raise ValueError("Edge backend is restricted to ChatGPT/Gemini Web; use Playwright for other sites")
 
         if cdp_url:
             parsed_cdp = urlparse(cdp_url)
@@ -1036,7 +1147,11 @@ class BrowserControlService:
             sid_item = by_worker.get(worker)
             reserved_by_caller = bool(sid_item and sid_item[1]["owner"] == owner)
             result.append({
-                "session_id": sid_item[0] if reserved_by_caller else "edge:" + worker,
+                "session_id": (
+                    sid_item[0]
+                    if reserved_by_caller and sid_item is not None
+                    else "edge:" + worker
+                ),
                 "backend": "edge",
                 "worker": worker,
                 "url": worker_info.get("url"),
@@ -1057,11 +1172,15 @@ class BrowserControlService:
             for worker in edge_health.get("workers_online", [])
             if isinstance(worker, str) and worker.startswith("TAB-")
         ] if isinstance(edge_health, dict) else []
+        extension = edge_health.get("extension") if isinstance(edge_health, dict) else {}
+        if not isinstance(extension, dict):
+            extension = {}
+        extension_online = bool(extension.get("online"))
         if edge_health.get("ok") is False:
             bridge_state = "UNHEALTHY"
         elif workers_online:
             bridge_state = "CONNECTED"
-        elif pool.get("active"):
+        elif extension_online or pool.get("active"):
             bridge_state = "IDLE"
         else:
             bridge_state = "DISCONNECTED"
@@ -1082,6 +1201,10 @@ class BrowserControlService:
                 "max_controller_tabs": 1,
                 "pool_active": bool(pool.get("active")),
                 "workers_online": workers_online,
+                "extension_online": extension_online,
+                "extension_last_seen": extension.get("last_seen"),
+                "extension_age_s": extension.get("age_s"),
+                "extension_status": extension.get("status") or {},
                 **(
                     {"error": edge_health.get("error")}
                     if edge_health.get("error")
@@ -1094,8 +1217,8 @@ class BrowserControlService:
         await self._validate_url(url)
         if session_id.startswith("edge:"):
             item = self._owned_edge(session_id, owner)
-            if not self._is_chatgpt_url(url):
-                raise ValueError("Edge backend is restricted to https://chatgpt.com")
+            if not self._is_supported_web_model_url(url):
+                raise ValueError("Edge backend is restricted to ChatGPT/Gemini Web")
             result = await self._edge_action(item["worker"], "navigate", {"url": url})
             self.audit.emit("browser.navigate", "ok", {"session_id": session_id, "owner": owner, "url": result.get("url", url), "backend": "edge"})
             return {"session_id": session_id, "backend": "edge", **result}

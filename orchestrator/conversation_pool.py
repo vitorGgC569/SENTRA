@@ -19,11 +19,12 @@ from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from typing import Any, Dict
+
+from sentra_core.conversation import ConversationIdentity
 
 from .providers.base import AgentResponse
 from .shared_context import SharedContextBatch
-
-_URL = re.compile(r"https://chatgpt\.com/c/([A-Za-z0-9-]{1,128})")
 _ALIASES = {"planner": "master", "judge": "master", "repair": "executor"}
 _ROLES = {"master", "executor", "validator.logic", "validator.requirements",
           "validator.adversarial", "validator.edge_cases", "validator.security",
@@ -221,9 +222,16 @@ class FixedConversationRouter:
                 if entry.get("provider") is not None and not isinstance(entry["provider"], str):
                     raise ValueError("invalid conversation provider")
                 url = entry.get("url")
-                match = _URL.fullmatch(url) if isinstance(url, str) else None
-                if url is not None and (not match or match[1] != entry.get("conversation_id")):
-                    raise ValueError("invalid conversation URL/identity")
+                if url is not None:
+                    try:
+                        identity = ConversationIdentity.parse(url)
+                    except ValueError as exc:
+                        raise ValueError("invalid conversation URL/identity") from exc
+                    if identity.conversation_id != entry.get("conversation_id"):
+                        raise ValueError("invalid conversation URL/identity")
+                    entry["url"] = identity.canonical_url
+                    entry["conversation_provider"] = identity.provider
+                    url = identity.canonical_url
                 expected_uri = self._conversation_uri(seat)
                 stored_uri = entry.get("conversation_uri")
                 if stored_uri is not None and stored_uri != expected_uri:
@@ -385,7 +393,21 @@ class FixedConversationRouter:
         else:
             metadata.pop("conversation_url", None)
             metadata.pop("conversation_id", None)
-        request = replace(request, metadata=metadata)
+        rotation_brief = str(known.get("rotation_brief") or "").strip()
+        if rotation_brief:
+            rotated_metadata = dict(metadata)
+            if rotated_metadata.get("messages"):
+                messages = [dict(item) for item in rotated_metadata["messages"]]
+                insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+                messages.insert(insert_at, {"role": "user", "content": rotation_brief})
+                rotated_metadata["messages"] = messages
+            request = replace(
+                request,
+                user_prompt=rotation_brief + "\n\n" + request.user_prompt,
+                metadata=rotated_metadata,
+            )
+        else:
+            request = replace(request, metadata=metadata)
         # Persisted wall time carries pacing across restarts. Clock rollback
         # waits one full delay, never an unbounded interval.
         wait = min(self._delay, max(0.0, self._last_dispatch + self._delay - time.time()))
@@ -450,14 +472,48 @@ class FixedConversationRouter:
         info = response.metadata or {}
         url = info.get("conversation_url")
         if response.success and url:
-            match = _URL.fullmatch(url) if isinstance(url, str) else None
-            if (not match or match[1] != info.get("conversation_id") or
-                    (known.get("url") and known["url"] != url) or
-                    any(k != seat and v.get("url") == url for k, v in self._map.items())):
+            try:
+                identity = ConversationIdentity.parse(str(url))
+                declared_provider = str(
+                    info.get("provider") or getattr(provider, "provider", "") or ""
+                ).strip().lower()
+                if declared_provider and declared_provider != identity.provider:
+                    raise ValueError("provider does not match conversation URL")
+                if str(info.get("conversation_id") or "") != identity.conversation_id:
+                    raise ValueError("conversation_id does not match conversation URL")
+                known_identity = (
+                    ConversationIdentity.parse(str(known["url"]))
+                    if known.get("url") else None
+                )
+                duplicate = any(
+                    k != seat
+                    and v.get("url")
+                    and ConversationIdentity.parse(str(v["url"])) == identity
+                    for k, v in self._map.items()
+                )
+                if known_identity is not None and known_identity != identity:
+                    raise ValueError("persistent seat changed conversation identity")
+                if duplicate:
+                    raise ValueError("independent seats cannot share a conversation")
+            except ValueError:
                 response = self._blocked("provider returned a mismatched conversation identity", "UNCERTAIN")
             else:
-                entry.update(url=url, conversation_id=info["conversation_id"],
-                             worker=info.get("worker", ""), state="CONFIRMED")
+                url = identity.canonical_url
+                entry.update(
+                    url=url,
+                    conversation_id=identity.conversation_id,
+                    conversation_provider=identity.provider,
+                    worker=info.get("worker", ""),
+                    state="CONFIRMED",
+                    turn_count=int(known.get("turn_count") or 0) + 1,
+                )
+                if known.get("rotated_from"):
+                    entry["last_rotated_from"] = known.get("rotated_from")
+                    entry["last_rotated_at"] = time.time()
+                    entry.pop("rotation_brief", None)
+                    entry.pop("rotated_from", None)
+                    entry.pop("rotation_reason", None)
+                    entry.pop("rotation_prepared_at", None)
         elif response.success and (known.get("url") or getattr(provider, "persistent_conversations", False)):
             response = self._blocked("persistent provider returned no conversation URL", "UNCERTAIN")
         elif response.success:
@@ -530,6 +586,68 @@ class FixedConversationRouter:
     def seats(self):
         return deepcopy(self._map)
 
+    def prepare_rotation(self, role: str, brief: str, *, reason: str = "") -> dict[str, Any]:
+        """Prepare a confirmed seat to continue in a brand-new chat.
+
+        This never rotates IN_FLIGHT/UNCERTAIN/BLOCKED delivery because doing so
+        could replay an external side effect. The next normal execute() opens
+        the replacement chat and carries the bounded rotation brief.
+        """
+        seat = self._seat(role)
+        text = str(brief or "").strip()
+        if not text:
+            raise ValueError("rotation brief is required")
+        if len(text) > 20000:
+            raise ValueError("rotation brief exceeds 20000 characters")
+        if self._path:
+            from .runtime import RunLock
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            process_lock = RunLock(self._path.with_suffix(".lock"))
+        else:
+            process_lock = nullcontext()
+        with process_lock:
+            self._load()
+            entry = dict(self._map.get(seat) or {})
+            state = str(entry.get("state") or "NOT_SENT")
+            if state in _BLOCKING:
+                raise RuntimeError(
+                    f"seat {seat} is {state}; reconcile delivery before rotation"
+                )
+            url = str(entry.get("url") or "").strip()
+            if state != "CONFIRMED" or not url:
+                raise RuntimeError(
+                    f"seat {seat} has no confirmed conversation to rotate"
+                )
+            prior_urls = [
+                str(item) for item in (entry.get("prior_urls") or [])
+                if str(item).strip()
+            ]
+            if url not in prior_urls:
+                prior_urls.append(url)
+            replacement = {
+                key: value
+                for key, value in entry.items()
+                if key not in {"url", "conversation_id", "worker", "request_sha256"}
+            }
+            replacement.update({
+                "state": "NOT_SENT",
+                "prior_urls": prior_urls[-50:],
+                "rotated_from": url,
+                "rotation_brief": text,
+                "rotation_reason": str(reason or "")[:500],
+                "rotation_prepared_at": time.time(),
+                "updated": time.time(),
+            })
+            self._map[seat] = replacement
+            self._save()
+            return {
+                "seat": seat,
+                "state": "ROTATION_PREPARED",
+                "prior_conversation_url": url,
+                "prior_urls": list(replacement["prior_urls"]),
+                "reason": replacement["rotation_reason"],
+            }
+
     async def clear_conversations(self, transport=None) -> Dict[str, Any]:
         """Exclui todas as conversas confirmadas gerenciadas por este pool para manter a conta limpa."""
         results = {"cleared": [], "failed": [], "skipped": []}
@@ -557,20 +675,64 @@ class FixedConversationRouter:
                 if not url and not conv_id:
                     results["skipped"].append({"seat": seat, "reason": "no_url"})
                     continue
-                target = conv_id or url
+                target = url or conv_id
+                identity = ConversationIdentity.maybe_parse(url)
+                conversation_provider = (
+                    identity.provider
+                    if identity is not None
+                    else str(entry.get("conversation_provider") or "").strip().lower()
+                )
                 if transport and hasattr(transport, "delete_chat"):
                     try:
-                        res = await transport.delete_chat(target)
+                        delete_chat = transport.delete_chat
+                        if "provider" in inspect.signature(delete_chat).parameters:
+                            res = await delete_chat(
+                                target,
+                                provider=conversation_provider or None,
+                            )
+                        else:
+                            # Legacy transports historically received only the
+                            # provider conversation id.
+                            res = await delete_chat(conv_id or target)
                         if res.get("status") == "COMPLETED":
                             entry["state"] = "CLEARED"
                             entry["cleared_at"] = time.time()
-                            results["cleared"].append({"seat": seat, "target": target, "result": res.get("result")})
+                            results["cleared"].append({
+                                "seat": seat,
+                                "target": target,
+                                "provider": conversation_provider,
+                                "result": res.get("result"),
+                            })
+                        elif res.get("status") == "UNSUPPORTED" and res.get("retained"):
+                            entry["cleanup_policy"] = "RETAIN_UNTIL_SUPPORTED"
+                            results["skipped"].append({
+                                "seat": seat,
+                                "target": target,
+                                "provider": conversation_provider,
+                                "reason": res.get("reason") or "provider cleanup unsupported",
+                                "retained": True,
+                            })
                         else:
-                            results["failed"].append({"seat": seat, "target": target, "error": res.get("error")})
+                            results["failed"].append({
+                                "seat": seat,
+                                "target": target,
+                                "provider": conversation_provider,
+                                "error": res.get("error") or res.get("reason"),
+                            })
                     except Exception as exc:
-                        results["failed"].append({"seat": seat, "target": target, "error": str(exc)})
+                        results["failed"].append({
+                            "seat": seat,
+                            "target": target,
+                            "provider": conversation_provider,
+                            "error": str(exc),
+                        })
                 else:
-                    results["failed"].append({"seat": seat, "target": target, "error": "no_active_transport"})
+                    results["failed"].append({
+                        "seat": seat,
+                        "target": target,
+                        "provider": conversation_provider,
+                        "error": "no_active_transport",
+                    })
 
             self._save()
         return results

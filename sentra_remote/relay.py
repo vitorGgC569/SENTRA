@@ -90,7 +90,7 @@ def make_handler(store: RemoteStore):
                     if not pairing_allowed(str(self.client_address[0])):
                         return self._send({"error": "pairing rate limit exceeded"}, 429)
                     data = _read_json(self)
-                    result = store.pair_device(str(data.get("pairing_code", "")), agent_name=data.get("name"))
+                    result = store.pair_device(str(data.get("pairing_code", "")), agent_name=data.get("name"), rate_key=str(self.client_address[0]))
                     return self._send(result, 201)
 
                 device_id, token = self._device_auth()

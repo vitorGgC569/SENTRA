@@ -168,7 +168,8 @@ class ExecutionCommand:
         runner = create_runner(ctx.session.repository_root,
                                profiles=getattr(ctx.gateway, "profiles", None),
                                execution=getattr(ctx.gateway, "execution", None))
-        res = await runner.run_command(directive.raw, timeout=600)
+        timeout = None if directive.operation in {"BUILD", "BENCH"} else 600
+        res = await runner.run_command(directive.raw, timeout=timeout)
         status = "PASS" if res["passed"] else "FAIL"
         target = directive.args[0] if directive.args else ("all" if directive.operation == "TEST" else "")
         return (f"{directive.operation} {target} {status} exit={res['exit_code']}\n"

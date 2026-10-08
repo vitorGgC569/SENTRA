@@ -137,6 +137,8 @@ def build_resource_manifest(config: AgentConfig, schema: dict[str, Any]) -> dict
                 "capabilities": {
                     "remote_node": True,
                     "process_mode": config.process_mode,
+                    "profile": config.profile,
+                    "access_scope": config.access_scope,
                     "os": platform.system().lower(),
                     "architecture": platform.machine().lower(),
                     "python": platform.python_version(),
@@ -157,11 +159,19 @@ class AgentRuntime:
         self.config_path = config_path
         self.relay = RelayClient(config)
         audit_path = Path(config.audit_log)
+        state_root = (
+            Path(config.state_root).expanduser().resolve()
+            if config.state_root
+            else audit_path.parent.resolve()
+        )
         mcp_config = MCPConfig(
             allowed_roots=tuple(Path(item) for item in config.allowed_roots),
             audit_log=audit_path,
             remote_store_path=audit_path.with_name("agent-remote.sqlite3"),
             process_mode=config.process_mode,
+            state_root=state_root,
+            tool_surfaces=tuple(config.tool_surfaces),
+            tool_allowlist=tuple(config.tool_allowlist),
         )
         self.server = SentraMCPServer(mcp_config)
         self.client = Client(self.server.mcp)
@@ -179,11 +189,19 @@ class AgentRuntime:
         }
         contract = {
             "schema_hash": schema["schema_hash"],
+            "tool_schema_hash": schema.get("tool_schema_hash") or schema["schema_hash"],
+            "tool_names_hash": schema.get("tool_names_hash"),
             "tool_count": schema["tool_count"],
             "tool_names": list(schema.get("tool_names") or []),
         }
         advertised = self.server.capabilities.server_capabilities()
         resources = build_resource_manifest(self.config, schema)
+        workspace_views = self.server.workspaces.list_workspaces(None)
+        workspace_aliases = [
+            str(item.get("alias") or "").strip()
+            for item in (workspace_views.get("items") or [])
+            if str(item.get("alias") or "").strip()
+        ]
         return {
             "sentra": {
                 "server": server_contract,
@@ -197,6 +215,8 @@ class AgentRuntime:
             "capability_version": CAPABILITY_VERSION,
             "build_identity": build,
             "schema_hash": schema["schema_hash"],
+            "tool_schema_hash": schema.get("tool_schema_hash") or schema["schema_hash"],
+            "tool_names_hash": schema.get("tool_names_hash"),
             "tool_count": schema["tool_count"],
             "server_capabilities": advertised,
             "resource_manifest": resources,
@@ -205,6 +225,7 @@ class AgentRuntime:
             "hostname": platform.node(),
             "mcp": PROTOCOL_VERSION,
             "process_mode": self.config.process_mode,
+            "workspaces": workspace_aliases,
         }
 
     async def _heartbeat_loop(self) -> None:
@@ -313,6 +334,12 @@ def pair_agent(
     config_path: Path,
     roots: list[str],
     process_mode: str = "workspace",
+    *,
+    state_root: str | None = None,
+    profile: str = "Developer",
+    access_scope: str = "workspace",
+    tool_surfaces: list[str] | None = None,
+    tool_allowlist: list[str] | None = None,
 ) -> AgentConfig:
     base = _safe_relay_url(relay_url)
     body = json.dumps({"pairing_code": pairing_code, "name": name}).encode("utf-8")
@@ -324,14 +351,22 @@ def pair_agent(
     )
     with urllib.request.urlopen(req, timeout=15) as response:
         data = json.loads(response.read(1024 * 1024))
+    resolved_state_root = Path(
+        state_root or (Path.home() / ".sentra")
+    ).expanduser().resolve()
     config = AgentConfig(
         relay_url=base,
         device_id=str(data["device_id"]),
         device_token=str(data["device_token"]),
         name=name,
         allowed_roots=roots or [str(Path.cwd())],
-        audit_log=str(Path.home() / ".sentra" / "agent-audit.jsonl"),
+        audit_log=str(resolved_state_root / "agent-audit.jsonl"),
         process_mode=process_mode,
+        state_root=str(resolved_state_root),
+        profile=profile,
+        access_scope=access_scope,
+        tool_surfaces=list(tool_surfaces or ["core", "developer", "browser"]),
+        tool_allowlist=list(tool_allowlist or []),
     )
     config.save(config_path)
     return config
@@ -352,6 +387,15 @@ def main(argv: list[str] | None = None) -> int:
         default="workspace",
         help="Local process privilege ceiling for this remote device.",
     )
+    pair.add_argument("--state-root", default=str(Path.home() / ".sentra"))
+    pair.add_argument("--profile", default="Developer")
+    pair.add_argument(
+        "--access-scope",
+        choices=("workspace", "user", "computer"),
+        default="workspace",
+    )
+    pair.add_argument("--surface", action="append", default=[])
+    pair.add_argument("--tool-allow", action="append", default=[])
     sub.add_parser("run")
     rotate = sub.add_parser("rotate-token")
     args = parser.parse_args(argv)
@@ -364,6 +408,11 @@ def main(argv: list[str] | None = None) -> int:
             path,
             args.allowed_root,
             args.process_mode,
+            state_root=args.state_root,
+            profile=args.profile,
+            access_scope=args.access_scope,
+            tool_surfaces=args.surface or None,
+            tool_allowlist=args.tool_allow,
         )
         print(json.dumps({"device_id": config.device_id, "name": config.name}))
         return 0

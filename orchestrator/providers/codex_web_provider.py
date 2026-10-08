@@ -35,8 +35,12 @@ class CodexChatGPTWebProvider:
             raise ValueError("codex_web.base_url must be loopback-only")
         if not model:
             raise ValueError("codex_web.model_name is required")
-        if require_web_namespace and not model.startswith("sentra/chatgpt-web/"):
-            raise ValueError("codex_web model must use the sentra/chatgpt-web/ namespace")
+        web_prefixes = ("sentra/chatgpt-web/", "sentra/gemini-web/")
+        if require_web_namespace and not model.startswith(web_prefixes):
+            raise ValueError(
+                "codex_web model must use a SENTRA Web namespace "
+                "(sentra/chatgpt-web/ or sentra/gemini-web/)"
+            )
         self.base_url = base
         self.model_name = model
         self.model_provider = ChatGPTWebModelProvider(
@@ -64,7 +68,10 @@ class CodexChatGPTWebProvider:
             "model": self.model_name,
             "available": available,
             "catalog_size": len(ids),
-            "web_models": [item for item in ids if item.startswith("sentra/chatgpt-web/")],
+            "web_models": [
+                item for item in ids
+                if item.startswith(("sentra/chatgpt-web/", "sentra/gemini-web/"))
+            ],
         }
 
     async def _ensure_model_available(self) -> None:

@@ -19,16 +19,35 @@ from dataclasses import asdict, dataclass, field
 from urllib.parse import urlparse
 from typing import Any, Dict, List, Optional
 
+from sentra_core.conversation import ConversationIdentity
+
 OPS_TO_EXTENSION = {"CREATE_CHAT", "SEND_MESSAGE", "WAIT_RESPONSE", "READ_RESPONSE",
                     "GET_CONVERSATION_ID", "GET_CONVERSATION_URL", "STOP_GENERATION",
-                    "GET_STATUS", "NEW_CHAT", "DELETE_CONVERSATION",
+                    "GET_STATUS", "NEW_CHAT", "DELETE_CONVERSATION", "SET_MODEL",
                     "SET_CONVERSATION_TITLE"}
 # Job que o OMA submete ao relay (a extensão traduz para ops primitivas).
 # STATUS_PROBE só lê o DOM (envio disponível? banner de cap?) — nunca envia
 # mensagem, nunca consome quota. É a forma segura de vigiar rate-limit.
 # DELETE_CHAT instrui a exclusão remota de conversas para manter a conta limpa.
-JOB_TYPES = {"CHAT_TASK", "CHAT_START", "CHAT_COLLECT", "STATUS_PROBE", "DELETE_CHAT", "BROWSER_ACTION"}
+JOB_TYPES = {"CHAT_TASK", "CHAT_START", "CHAT_SEND", "CHAT_COLLECT", "CHAT_PEEK", "STATUS_PROBE", "DELETE_CHAT", "BROWSER_ACTION"}
 BROWSER_ACTIONS = {"navigate", "extract", "click", "type", "screenshot", "close"}
+CHAT_PROVIDERS = {"chatgpt", "gemini"}
+GEMINI_MODELS = {"flash-lite", "flash", "pro"}
+
+
+def _canonical_conversation_url(provider: str, value: str) -> tuple[str, str | None]:
+    normalized = str(provider or "").strip().lower()
+    if normalized not in CHAT_PROVIDERS:
+        raise ValueError("unsupported chat provider")
+    try:
+        identity = ConversationIdentity.parse(value)
+    except ValueError as exc:
+        label = "ChatGPT" if normalized == "chatgpt" else "Gemini"
+        raise ValueError(f"invalid {label} conversation URL") from exc
+    if identity.provider != normalized:
+        label = "ChatGPT" if normalized == "chatgpt" else "Gemini"
+        raise ValueError(f"invalid {label} conversation URL")
+    return identity.canonical_url, identity.conversation_id
 
 
 # Visual evidence attachments: screenshots travel as data URLs inside the job
@@ -46,7 +65,7 @@ LEASE_WINDOW_S = 900.0
 PROGRESS_WINDOW_S = 900.0
 MAX_REQUEUES_DEFAULT = 1
 # Fases que provam que nada foi enviado (antes de qualquer SEND_MESSAGE).
-PRE_SEND_PHASES = frozenset({"preparing", "navigating", "settling", "ready"})
+PRE_SEND_PHASES = frozenset({"preparing", "navigating", "settling", "ready", "peeking"})
 # Todas as fases validas; tudo fora de PRE_SEND e considerado pos-send/incerto.
 PROGRESS_PHASES = frozenset(PRE_SEND_PHASES | {"sending", "sent", "waiting", "reading"})
 
@@ -73,6 +92,8 @@ class ChatJob:
     project_id: Optional[str] = None
     project_url: Optional[str] = None
     chat_title: Optional[str] = None
+    provider: str = "chatgpt"
+    model: Optional[str] = None
 
     def validate(self) -> None:
         if not isinstance(self.task_id, str) or not 1 <= len(self.task_id) <= 128:
@@ -84,23 +105,40 @@ class ChatJob:
                 raise ValueError("image must be a data:image/png|jpeg URL within size cap")
         if sum(len(u) for u in self.images) > MAX_IMAGES_TOTAL_CHARS:
             raise ValueError("images exceed total size cap")
+        self.provider = str(self.provider or "chatgpt").strip().lower()
+        if self.provider not in CHAT_PROVIDERS:
+            raise ValueError(f"unsupported chat provider {self.provider!r}")
+        if self.model is not None:
+            self.model = str(self.model).strip().lower()
+            if self.provider != "gemini":
+                raise ValueError("model selection is only supported for Gemini jobs")
+            if self.model not in GEMINI_MODELS:
+                raise ValueError("Gemini model must be flash-lite, flash or pro")
+        prompt_max = 180000 if self.provider == "gemini" else 20000
         if self.kind not in JOB_TYPES:
             raise ValueError(f"unknown job kind {self.kind!r}")
         if self.kind == "STATUS_PROBE":
             self.new_chat = False
-            if self.prompt and len(self.prompt) > 20000:
-                raise ValueError("prompt max 20000 chars")
-        elif self.kind == "CHAT_START":
-            self.new_chat = True
-            self.conversation_url = None
-            if not isinstance(self.prompt, str) or not self.prompt or len(self.prompt) > 20000:
-                raise ValueError("CHAT_START requires prompt (max 20000 chars)")
-        elif self.kind == "CHAT_COLLECT":
+            if self.prompt and len(self.prompt) > prompt_max:
+                raise ValueError(f"prompt max {prompt_max} chars")
+        elif self.kind in {"CHAT_START", "CHAT_SEND"}:
+            if self.kind == "CHAT_START":
+                self.new_chat = True
+                self.conversation_url = None
+            if (
+                not isinstance(self.prompt, str)
+                or not self.prompt
+                or len(self.prompt) > prompt_max
+            ):
+                raise ValueError(
+                    f"{self.kind} requires prompt (max {prompt_max} chars)"
+                )
+        elif self.kind in {"CHAT_COLLECT", "CHAT_PEEK"}:
             self.new_chat = False
             if self.prompt:
-                raise ValueError("CHAT_COLLECT does not accept prompt")
+                raise ValueError(f"{self.kind} does not accept prompt")
             if not self.conversation_url:
-                raise ValueError("CHAT_COLLECT requires conversation_url")
+                raise ValueError(f"{self.kind} requires conversation_url")
         elif self.kind == "DELETE_CHAT":
             self.new_chat = False
             if not self.conversation_url and not self.prompt:
@@ -118,16 +156,19 @@ class ChatJob:
             # lazy principal-Edge controller. Once BrowserControlService learns
             # the TAB-* identity it reserves that worker and targets every
             # subsequent action explicitly.
-        elif not isinstance(self.prompt, str) or not self.prompt or len(self.prompt) > 20000:
-            raise ValueError("prompt required (max 20000 chars)")
+        elif (
+            not isinstance(self.prompt, str)
+            or not self.prompt
+            or len(self.prompt) > prompt_max
+        ):
+            raise ValueError(f"prompt required (max {prompt_max} chars)")
         if type(self.new_chat) is not bool or type(self.timeout_s) is not int or not (5 <= self.timeout_s <= 900):
             raise ValueError("timeout_s must be 5..900")
         if self.conversation_url is not None:
-            m = re.search(r"https?://chatgpt\.com/c/([A-Za-z0-9-]+)", self.conversation_url)
-            if m:
-                self.conversation_url = f"https://chatgpt.com/c/{m.group(1)}"
-            elif not re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
-                raise ValueError("invalid conversation URL")
+            self.conversation_url, _ = _canonical_conversation_url(
+                self.provider,
+                self.conversation_url,
+            )
         if self.target_worker and len(self.target_worker) > 100:
             raise ValueError("target_worker max 100 chars")
         if self.project_id is not None:
@@ -136,6 +177,8 @@ class ChatJob:
             ):
                 raise ValueError("project_id must be a safe 1..128 character identifier")
         if self.project_url is not None:
+            if self.provider != "chatgpt":
+                raise ValueError("project routing is only supported for ChatGPT")
             if not isinstance(self.project_url, str) or len(self.project_url) > 2048:
                 raise ValueError("project_url must be an absolute ChatGPT URL")
             parsed_project = urlparse(self.project_url)
@@ -149,13 +192,17 @@ class ChatJob:
             ):
                 raise ValueError("project_url must target https://chatgpt.com")
         if self.chat_title is not None:
+            if self.provider != "chatgpt":
+                raise ValueError("chat title updates are only supported for ChatGPT")
             if (
                 not isinstance(self.chat_title, str)
                 or not self.chat_title.strip()
                 or len(self.chat_title) > 200
             ):
                 raise ValueError("chat_title must be 1..200 characters")
-        passive_kinds = {"STATUS_PROBE", "CHAT_COLLECT", "DELETE_CHAT", "BROWSER_ACTION"}
+        if self.provider == "gemini" and self.kind == "DELETE_CHAT":
+            raise ValueError("Gemini DELETE_CHAT is not supported")
+        passive_kinds = {"STATUS_PROBE", "CHAT_COLLECT", "CHAT_PEEK", "DELETE_CHAT", "BROWSER_ACTION"}
         if self.kind not in passive_kinds and not self.new_chat and not self.conversation_url:
             raise ValueError("continuation requires an explicit conversation URL")
         if self.kind not in passive_kinds and self.new_chat and self.conversation_url:
@@ -189,13 +236,20 @@ class ChatResult:
         if not isinstance(self.result, str) or len(self.result) > 200000:
             raise ValueError("result must be text (max 200000 chars)")
         if self.conversation_url:
-            m = re.search(r"https?://chatgpt\.com/c/([A-Za-z0-9-]+)", self.conversation_url)
-            if m:
-                self.conversation_url = f"https://chatgpt.com/c/{m.group(1)}"
-                if not self.conversation_id:
-                    self.conversation_id = m.group(1)
-            elif not re.fullmatch(r"https://chatgpt\.com/c/[A-Za-z0-9-]{1,128}", self.conversation_url):
+            parsed = urlparse(self.conversation_url)
+            provider = (
+                "chatgpt" if parsed.hostname == "chatgpt.com"
+                else "gemini" if parsed.hostname == "gemini.google.com"
+                else ""
+            )
+            if not provider:
                 raise ValueError("invalid conversation URL")
+            self.conversation_url, parsed_id = _canonical_conversation_url(
+                provider,
+                self.conversation_url,
+            )
+            if not self.conversation_id:
+                self.conversation_id = parsed_id
         if self.project_url is not None:
             parsed_project = urlparse(self.project_url)
             if parsed_project.scheme != "https" or parsed_project.hostname != "chatgpt.com":

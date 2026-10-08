@@ -13,11 +13,13 @@ import http.client
 import io
 import json
 import os
+import re
 import secrets
 import signal
 import socket
 import subprocess
 import threading
+import time
 import zstandard as zstd
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,10 +34,58 @@ from .turn_authority import TurnAuthority
 
 PREFIX = "sentra/chatgpt-web/"
 UPSTREAM_PREFIX = "chatgpt-web/"
-EXPECTED_UPSTREAM_VERSION = "6.0.0"
+GEMINI_PREFIX = "sentra/gemini-web/"
+GEMINI_UPSTREAM_PREFIX = "gemini-web/"
+WEB_MODEL_PREFIXES = (
+    (PREFIX, UPSTREAM_PREFIX),
+    (GEMINI_PREFIX, GEMINI_UPSTREAM_PREFIX),
+)
+_UPSTREAM_REF_RE = re.compile(r"^v?(?P<version>\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$")
+
+
+def _upstream_version_from_ref(ref: str) -> str:
+    match = _UPSTREAM_REF_RE.fullmatch(str(ref or "").strip())
+    if match is None:
+        raise ValueError("Web Models upstream ref must be an exact semantic version")
+    return match.group("version")
+
+
 MAX_REQUEST_BYTES = 128 * 1024 * 1024
 HOP_HEADERS = {"connection", "content-length", "transfer-encoding", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "host"}
 REQUEST_REWRITE_HEADERS = {"content-encoding"}
+_SSE_TERMINAL_EVENT_RE = re.compile(
+    rb"(?:^|\r?\n)event:\s*response\.(?:completed|failed|incomplete)\s*(?:\r?\n|$)",
+    re.IGNORECASE,
+)
+_SSE_DONE_RE = re.compile(
+    rb"(?:^|\r?\n)data:\s*\[DONE\]\s*(?:\r?\n|$)",
+    re.IGNORECASE,
+)
+
+
+def _sse_terminal_seen(data: bytes) -> bool:
+    """Return True only for a complete terminal SSE field line."""
+    return bool(
+        _SSE_TERMINAL_EVENT_RE.search(data)
+        or _SSE_DONE_RE.search(data)
+    )
+
+
+def _web_model_route(model: str) -> tuple[str, str, bool] | None:
+    """Return canonical/upstream prefixes and whether *model* is canonical SENTRA."""
+    for canonical, upstream in WEB_MODEL_PREFIXES:
+        if model.startswith(canonical):
+            return canonical, upstream, True
+        if model.startswith(upstream):
+            return canonical, upstream, False
+    return None
+
+
+def _canonical_web_model_name(value: str) -> str:
+    for canonical, upstream in WEB_MODEL_PREFIXES:
+        if value.startswith(upstream):
+            return canonical + value[len(upstream):]
+    return value
 
 
 def _decode_json_request_bytes(raw: bytes, content_encoding: str) -> bytes:
@@ -52,6 +102,163 @@ def _decode_json_request_bytes(raw: bytes, content_encoding: str) -> bytes:
     if len(decoded) > MAX_REQUEST_BYTES:
         raise ValueError("decoded request body exceeds limit")
     return decoded
+
+
+
+def _extract_codex_goal_signal(value: Any) -> tuple[bool, str | None]:
+    """Return whether the Codex harness supplied goal context and its value.
+
+    SENTRA never interprets the user's slash command. It observes only the
+    harness-produced context. Presence is tracked separately from text so an
+    explicit empty goal context can pause/clear steering without treating an
+    omitted context during compaction as a clear operation.
+    """
+    texts: list[str] = []
+
+    def visit(item: Any) -> None:
+        if isinstance(item, str):
+            texts.append(item)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+        elif isinstance(item, dict):
+            for child in item.values():
+                visit(child)
+
+    visit(value)
+    patterns = (
+        re.compile(r"<goal_context(?:\s[^>]*)?>(.*?)</goal_context>", re.I | re.S),
+        re.compile(
+            r"<codex_internal_context\b[^>]*\bsource=[\"']goal[\"'][^>]*>"
+            r"(.*?)</codex_internal_context>",
+            re.I | re.S,
+        ),
+    )
+    latest: tuple[int, int, str | None] | None = None
+    for text_index, text in enumerate(texts):
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                goal = match.group(1).strip()
+                candidate = (
+                    text_index,
+                    match.start(),
+                    goal[:100_000] if goal else None,
+                )
+                if latest is None or candidate[:2] > latest[:2]:
+                    latest = candidate
+    if latest is None:
+        return False, None
+    return True, latest[2]
+
+
+def _extract_codex_goal_context(value: Any) -> str | None:
+    """Compatibility projection returning only non-empty harness goal text."""
+    return _extract_codex_goal_signal(value)[1]
+
+
+def _extract_codex_task_text(value: Any) -> str | None:
+    """Extract a bounded human/task instruction from a Codex child-turn payload.
+
+    This is descriptive metadata only. It never authorizes tools or interprets
+    slash commands; native Codex remains the owner of agent lifecycle semantics.
+    """
+    if not isinstance(value, list):
+        return None
+    candidates: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind == "agent_message":
+            for key in ("message", "text", "content"):
+                raw = item.get(key)
+                if isinstance(raw, str) and raw.strip():
+                    candidates.append(raw.strip())
+                    break
+            continue
+        if kind != "message" or item.get("role") != "user":
+            continue
+        content = item.get("content")
+        if isinstance(content, str):
+            values = [content]
+        elif isinstance(content, list):
+            values = [
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict)
+                and part.get("type") in {"input_text", "text"}
+            ]
+        else:
+            values = []
+        for raw in values:
+            text = raw.strip()
+            if not text:
+                continue
+            lowered = text.casefold()
+            if lowered.startswith((
+                "<goal_context",
+                "<codex_internal_context",
+                "<environment_context",
+                "<recommended_plugins",
+                "<subagent_notification",
+            )):
+                continue
+            candidates.append(text)
+    return candidates[-1][:20_000] if candidates else None
+
+
+def _extract_codex_subagent_notifications(value: Any) -> list[dict[str, Any]]:
+    """Extract native Codex subagent lifecycle notifications conservatively."""
+    if not isinstance(value, list):
+        return []
+    notifications: list[dict[str, Any]] = []
+    pattern = re.compile(
+        r"^<subagent_notification>\s*(\{[\s\S]*\})\s*</subagent_notification>$"
+    )
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message" or item.get("role") != "user":
+            continue
+        passthrough = item.get("internal_chat_message_metadata_passthrough")
+        if not isinstance(passthrough, dict) or not isinstance(
+            passthrough.get("turn_id"), str
+        ):
+            continue
+        content = item.get("content")
+        parts = content if isinstance(content, list) else []
+        for part in parts:
+            if not isinstance(part, dict) or part.get("type") not in {
+                "input_text", "text"
+            }:
+                continue
+            raw = part.get("text")
+            if not isinstance(raw, str):
+                continue
+            match = pattern.fullmatch(raw.strip())
+            if match is None:
+                continue
+            try:
+                payload = json.loads(match.group(1))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            agent_path = payload.get("agent_path")
+            status = payload.get("status")
+            if (
+                not isinstance(agent_path, str)
+                or not agent_path
+                or len(agent_path) > 512
+                or not isinstance(status, dict)
+            ):
+                continue
+            notifications.append({
+                "agent_path": agent_path,
+                "status": status,
+                "turn_id": passthrough["turn_id"],
+            })
+    return notifications
 
 
 def _load_or_create_private_token(state_root: Path, filename: str) -> str:
@@ -77,6 +284,16 @@ def _load_or_create_private_token(state_root: Path, filename: str) -> str:
 
 def load_or_create_gateway_admin_token(state_root: Path) -> str:
     return _load_or_create_private_token(state_root, "gateway-admin.token")
+
+
+def resolve_gateway_state_root() -> Path:
+    """Resolve the same runtime authority used by the active SENTRA install.
+
+    In source/dev runs this adopts <repo>/.sentra when it owns tunnel state;
+    installed builds still honor SENTRA_STATE_DIR and ProductPaths authority.
+    """
+    install_root = Path(__file__).resolve().parent.parent
+    return ProductPaths.default(install_root).state_dir
 
 
 def _load_or_create_turn_authority_token(state_root: Path) -> str:
@@ -106,9 +323,23 @@ def _codex_turn_identity(raw: object, *, path: str, model: str) -> str | None:
     request_kind = metadata.get("request_kind")
     if not isinstance(request_kind, str) or not request_kind or len(request_kind) > 64:
         request_kind = "turn"
+    identity: dict[str, str] = {
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "request_kind": request_kind,
+        "path": path,
+        "model": model,
+    }
+    for key, limit in (
+        ("parent_thread_id", 256),
+        ("agent_name", 256),
+        ("subagent_kind", 64),
+    ):
+        item = metadata.get(key)
+        if isinstance(item, str) and item and len(item) <= limit:
+            identity[key] = item
     return json.dumps(
-        {"thread_id": thread_id, "turn_id": turn_id, "request_kind": request_kind,
-         "path": path, "model": model},
+        identity,
         sort_keys=True, separators=(",", ":"), ensure_ascii=True,
     )
 
@@ -148,7 +379,6 @@ class LauncherSupervisor:
         self.process: subprocess.Popen | None = None
         self.authority_port = config.port
         self.turn_authority_token = ""
-        self.upstream_control_token = ""
         self.upstream_control_token = ""
 
     @staticmethod
@@ -200,9 +430,9 @@ class LauncherSupervisor:
 
     def status(self) -> dict:
         with self.lock:
-            running = self.process is not None and self.process.poll() is None
-            if running:
-                return {"running": True, "pid": self.process.pid, "source": "owned"}
+            process = self.process
+            if process is not None and process.poll() is None:
+                return {"running": True, "pid": process.pid, "source": "owned"}
             adopted = self._adopted_status()
             return adopted or {"running": False, "pid": None, "source": "none"}
 
@@ -211,6 +441,10 @@ class LauncherSupervisor:
         environment["SENTRA_TURN_AUTHORITY_URL"] = f"http://{self.config.host}:{self.authority_port}"
         environment["SENTRA_WEB_GATEWAY_URL"] = f"http://{self.config.host}:{self.authority_port}/v1"
         environment["SENTRA_CONNECTOR_NAME"] = self.config.connector_name.strip()
+        # The SENTRA Gateway owns the OpenAI tunnel. The embedded Web Models
+        # launcher must keep its Responses/browser runtime but must never publish
+        # a second MCP worker for the same ChatGPT connector.
+        environment["SENTRA_MANAGED_TUNNEL"] = "1"
         payload = self.validate_payload()
         if payload.get("packaged"):
             environment["SENTRA_INTEGRATION_PATCH_SHA256"] = str(payload["patch_sha256"])
@@ -220,6 +454,13 @@ class LauncherSupervisor:
             environment["SENTRA_TURN_AUTHORITY_TOKEN"] = self.turn_authority_token
         if self.upstream_control_token:
             environment["SENTRA_WEB_CONTROL_TOKEN"] = self.upstream_control_token
+        state_root = Path(
+            self.config.state_root or ProductPaths.default().state_dir
+        ).expanduser().resolve()
+        relay_token = state_root / "browser" / "relay-token"
+        if relay_token.is_file():
+            environment["SENTRA_GEMINI_WEB_ENABLED"] = "1"
+            environment["SENTRA_BROWSER_RELAY_TOKEN_FILE"] = str(relay_token)
         return environment
 
     def _browser_descriptor_path(self) -> Path:
@@ -244,6 +485,49 @@ class LauncherSupervisor:
         if development.is_file():
             return development.resolve()
         return installed.resolve()
+
+    def _integration_manifest(self) -> dict[str, Any]:
+        checkout = self.config.checkout.resolve()
+        source_manifest = (
+            checkout.parents[1]
+            / "integrations"
+            / "codex_chatgpt_web"
+            / "upstream.json"
+        )
+        candidates = [source_manifest]
+        packaged = self._packaged_launcher_path()
+        if packaged.is_file():
+            candidates.append(
+                packaged.parent.parent
+                / "licenses"
+                / "codex-chatgpt-web"
+                / "upstream.json"
+            )
+        for candidate in candidates:
+            if not candidate.is_file():
+                continue
+            try:
+                value = json.loads(candidate.read_text(encoding="utf-8-sig"))
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                raise RuntimeError("Web Models integration manifest is invalid") from exc
+            if not isinstance(value, dict):
+                raise RuntimeError("Web Models integration manifest is invalid")
+            return value
+        raise RuntimeError("Web Models integration manifest is missing")
+
+    def expected_upstream_version(self) -> str:
+        return _upstream_version_from_ref(str(self._integration_manifest().get("ref") or ""))
+
+    def patched_source_path(self) -> Path:
+        checkout = self.config.checkout.resolve()
+        return (
+            checkout.parents[1]
+            / ".sentra"
+            / "integrations"
+            / "codex-chatgpt-web"
+            / "source"
+            / self.expected_upstream_version()
+        )
 
     def validate_payload(self) -> dict[str, Any]:
         packaged = self._packaged_launcher_path()
@@ -360,7 +644,7 @@ class LauncherSupervisor:
             bun = shutil.which("bun") or str(checkout.parents[1] / ".sentra" / "toolchain" / "node_modules" / "bun" / "bin" / "bun.exe")
             if not Path(bun).is_file():
                 raise FileNotFoundError("Bun is required to inspect the Codex route")
-            patched = checkout.parents[1] / ".sentra" / "integrations" / "codex-chatgpt-web" / "source" / "6.0.0"
+            patched = self.patched_source_path()
             if patched.is_dir():
                 checkout = patched
             command = [bun, "run", "src/cli.ts"]
@@ -432,7 +716,7 @@ class LauncherSupervisor:
                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 else:
-                    os.killpg(self.process.pid, signal.SIGTERM)
+                    getattr(os, "killpg")(self.process.pid, signal.SIGTERM)
                 try:
                     self.process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
@@ -462,6 +746,8 @@ class GatewayServer(ThreadingHTTPServer):
         else:
             install_root = config.checkout.resolve().parents[1]
         self.product_paths = ProductPaths(install_root, state_root)
+        from sentra_mcp.audit import AuditLogger
+        self.audit=AuditLogger(self.product_paths.audit_log,component="gateway")
         try:
             self.product_settings = ProductSettings.load(self.product_paths.settings)
         except (OSError, ValueError, json.JSONDecodeError):
@@ -473,6 +759,7 @@ class GatewayServer(ThreadingHTTPServer):
             or _load_or_create_private_token(state_root, "upstream-control.token")
         )
         self.launcher = LauncherSupervisor(config)
+        self.expected_upstream_version = self.launcher.expected_upstream_version()
         self.launcher.turn_authority_token = self.turn_authority_token
         self.launcher.upstream_control_token = self.upstream_control_token
         self.resources = ResourceRegistry()
@@ -485,6 +772,257 @@ class GatewayServer(ThreadingHTTPServer):
         self.turn_authority = TurnAuthority(state_root, descriptor)
         super().__init__((config.host, config.port), GatewayHandler)
         self.launcher.authority_port = self.server_port
+        self.model_catalog_cache_path = state_root / "web-models" / "model-catalog.json"
+        self._model_catalog_lock = threading.RLock()
+        self._upstream_watchdog_stop = threading.Event()
+        self._upstream_watchdog_thread: threading.Thread | None = None
+        self._upstream_failure_since: float | None = None
+        self._upstream_last_restart = 0.0
+        self._upstream_restart_attempts = 0
+        self._upstream_supervision: dict[str, Any] = {
+            "state": "IDLE",
+            "restart_attempts": 0,
+        }
+
+    def _upstream_health(self) -> tuple[bool, dict[str, Any]]:
+        parsed = urlsplit(self.config.upstream)
+        hostname = parsed.hostname
+        if not hostname:
+            return False, {}
+        try:
+            connection = http.client.HTTPConnection(hostname, parsed.port, timeout=2)
+            connection.request("GET", "/healthz")
+            response = connection.getresponse()
+            payload = json.loads(response.read() or b"{}")
+            connection.close()
+        except (OSError, ValueError, json.JSONDecodeError, http.client.HTTPException):
+            return False, {}
+        healthy = (
+            response.status == 200
+            and isinstance(payload, dict)
+            and payload.get("service") == "codex-chatgpt-web"
+            and payload.get("version") == self.expected_upstream_version
+            and payload.get("status") == "ok"
+            and payload.get("accepting_turns", True) is True
+        )
+        return healthy, payload if isinstance(payload, dict) else {}
+
+    def reap_orphan_turns(self) -> dict[str, Any]:
+        """Cancel browser leases only when no HTTP request can still own them."""
+        _healthy, health = self._upstream_health()
+        http_turns = health.get("active_http_turns")
+        browser_turns = health.get("active_browser_turns")
+        if not isinstance(http_turns, int) or not isinstance(browser_turns, int):
+            raise RuntimeError(
+                "cannot prove upstream turn ownership before orphan cleanup"
+            )
+        if http_turns > 0:
+            raise RuntimeError(
+                "refusing orphan cleanup while HTTP turns are active "
+                f"(http={http_turns}, browser={browser_turns})"
+            )
+        if browser_turns <= 0:
+            return {
+                "status": "ok",
+                "reaped": False,
+                "cancelled_http_turns": 0,
+                "cancelled_browser_turns": 0,
+                "active_http_turns": http_turns,
+                "active_browser_turns": browser_turns,
+            }
+        if not self.upstream_control_token:
+            raise RuntimeError("upstream control token is unavailable")
+
+        parsed = urlsplit(self.config.upstream)
+        hostname = parsed.hostname
+        if not hostname:
+            raise RuntimeError("upstream URL has no hostname")
+        connection = http.client.HTTPConnection(
+            hostname,
+            parsed.port,
+            timeout=5,
+        )
+        try:
+            connection.request(
+                "POST",
+                "/admin/cancel-turns",
+                b"",
+                {
+                    "Authorization": "Bearer " + self.upstream_control_token,
+                    "Content-Length": "0",
+                },
+            )
+            response = connection.getresponse()
+            raw = response.read()
+        finally:
+            connection.close()
+
+        if response.status < 200 or response.status >= 300:
+            raise RuntimeError(
+                "upstream orphan cleanup failed: "
+                f"HTTP {response.status}: {raw[:300]!r}"
+            )
+        result = json.loads(raw or b"{}")
+        if not isinstance(result, dict):
+            raise RuntimeError("upstream orphan cleanup returned invalid JSON")
+        remaining_http = result.get("active_http_turns")
+        remaining_browser = result.get("active_browser_turns")
+        if remaining_http != 0 or remaining_browser != 0:
+            raise RuntimeError(
+                "upstream did not acknowledge complete orphan cleanup "
+                f"(http={remaining_http}, browser={remaining_browser})"
+            )
+        return {
+            **result,
+            "reaped": True,
+        }
+
+    def supervise_upstream_once(self, *, now: float | None = None) -> dict[str, Any]:
+        stamp = time.monotonic() if now is None else float(now)
+        healthy, _payload = self._upstream_health()
+        launcher = self.launcher.status()
+        if healthy:
+            self._upstream_failure_since = None
+            self._upstream_restart_attempts = 0
+            self._upstream_supervision = {
+                "state": "HEALTHY",
+                "restart_attempts": 0,
+            }
+            return dict(self._upstream_supervision)
+
+        if self._upstream_failure_since is None:
+            self._upstream_failure_since = stamp
+            self._upstream_supervision = {
+                "state": "DEGRADED",
+                "reason": "upstream_unreachable",
+                "launcher_running": bool(launcher.get("running")),
+                "restart_attempts": self._upstream_restart_attempts,
+            }
+            return dict(self._upstream_supervision)
+
+        if stamp - self._upstream_failure_since < 6.0:
+            return dict(self._upstream_supervision)
+
+        backoff = min(5.0 * (2 ** self._upstream_restart_attempts), 60.0)
+        if self._upstream_last_restart and stamp - self._upstream_last_restart < backoff:
+            self._upstream_supervision = {
+                "state": "BACKOFF",
+                "reason": "upstream_unreachable",
+                "retry_after_s": round(backoff - (stamp - self._upstream_last_restart), 3),
+                "restart_attempts": self._upstream_restart_attempts,
+            }
+            return dict(self._upstream_supervision)
+
+        if launcher.get("running"):
+            self.launcher.stop()
+        started = self.launcher.start(hidden=True)
+        self._upstream_last_restart = stamp
+        self._upstream_restart_attempts += 1
+        self._upstream_failure_since = stamp
+        self._upstream_supervision = {
+            "state": "RECOVERING" if started.get("running") else "DEGRADED",
+            "action": "restart_launcher",
+            "launcher_pid": started.get("pid"),
+            "restart_attempts": self._upstream_restart_attempts,
+        }
+        return dict(self._upstream_supervision)
+
+    def start_upstream_watchdog(self, interval_s: float = 3.0) -> None:
+        if self._upstream_watchdog_thread and self._upstream_watchdog_thread.is_alive():
+            return
+        self._upstream_watchdog_stop.clear()
+
+        def worker() -> None:
+            while not self._upstream_watchdog_stop.wait(interval_s):
+                try:
+                    self.supervise_upstream_once()
+                except Exception as exc:
+                    self._upstream_supervision = {
+                        "state": "ERROR",
+                        "detail": str(exc)[:300],
+                        "restart_attempts": self._upstream_restart_attempts,
+                    }
+
+        self._upstream_watchdog_thread = threading.Thread(
+            target=worker,
+            name="sentra-model-upstream-watchdog",
+            daemon=True,
+        )
+        self._upstream_watchdog_thread.start()
+
+    def stop_upstream_watchdog(self) -> None:
+        self._upstream_watchdog_stop.set()
+        thread = self._upstream_watchdog_thread
+        if thread is not None:
+            thread.join(timeout=5)
+        self._upstream_watchdog_thread = None
+
+    def cache_model_catalog(self, catalog: dict[str, Any]) -> dict[str, Any]:
+        """Persist only safe Web-model metadata from an authenticated Codex catalog."""
+        web_models: list[dict[str, str]] = []
+        for collection in ("models", "data"):
+            values = catalog.get(collection)
+            if not isinstance(values, list):
+                continue
+            for model in values:
+                if not isinstance(model, dict):
+                    continue
+                identifier = str(model.get("slug") or model.get("id") or "")
+                if _web_model_route(identifier) is None:
+                    continue
+                safe: dict[str, str] = {}
+                for key in ("slug", "id", "display_name", "description"):
+                    value = model.get(key)
+                    if isinstance(value, str) and value:
+                        safe[key] = (
+                            _canonical_web_model_name(value)
+                            if key in {"slug", "id"} and _web_model_route(value) is not None
+                            else value
+                        )
+                if safe:
+                    web_models.append(safe)
+            break
+
+        payload: dict[str, Any] = {
+            "status": "ready" if web_models else "empty",
+            "updated_at": time.time(),
+            "models": web_models,
+        }
+        with self._model_catalog_lock:
+            self.model_catalog_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temp = self.model_catalog_cache_path.with_suffix(".tmp")
+            temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            try:
+                os.chmod(temp, 0o600)
+            except OSError:
+                pass
+            temp.replace(self.model_catalog_cache_path)
+        return payload
+
+    def cached_model_catalog(self) -> dict[str, Any]:
+        """Return the last authenticated Web-model catalog without exposing Codex auth."""
+        with self._model_catalog_lock:
+            if not self.model_catalog_cache_path.is_file():
+                return {
+                    "status": "awaiting_codex_catalog",
+                    "updated_at": None,
+                    "models": [],
+                }
+            try:
+                payload = json.loads(self.model_catalog_cache_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                return {
+                    "status": "invalid_cache",
+                    "updated_at": None,
+                    "models": [],
+                }
+        if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+            return {
+                "status": "invalid_cache",
+                "updated_at": None,
+                "models": [],
+            }
+        return payload
 
     def sentra_doctor(self, *, verify_connector: bool = False) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
@@ -528,8 +1066,9 @@ class GatewayServer(ThreadingHTTPServer):
             str(relay.get("detail") or "") if isinstance(relay, dict) else "",
         )
 
-        tunnel = product.get("tunnel") if isinstance(product, dict) else {}
-        tunnel_configured = isinstance(tunnel, dict) and bool(tunnel.get("configured"))
+        raw_tunnel = product.get("tunnel") if isinstance(product, dict) else None
+        tunnel: dict[str, Any] = raw_tunnel if isinstance(raw_tunnel, dict) else {}
+        tunnel_configured = bool(tunnel.get("configured"))
         tunnel_ok = tunnel_configured and bool(tunnel.get("ok"))
         add(
             "sentra-tunnel",
@@ -686,9 +1225,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
         headers: dict | None = None,
         *,
         body_reencoded: bool = False,
+        timeout: float = 900.0,
     ) -> http.client.HTTPResponse:
         parsed = urlsplit(self.server.config.upstream)
-        connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=900)
+        hostname = parsed.hostname
+        if not hostname:
+            raise ValueError("upstream host is missing")
+        connection = http.client.HTTPConnection(hostname, parsed.port or 80, timeout=timeout)
         excluded = HOP_HEADERS | {"cookie", "content-type", "accept"}
         if body_reencoded:
             excluded |= REQUEST_REWRITE_HEADERS
@@ -702,8 +1245,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
             outbound.update(headers)
         connection.request(method, path, body=body, headers=outbound)
         response = connection.getresponse()
-        response._sentra_connection = connection
+        setattr(response, "_sentra_connection", connection)
         return response
+
+    @staticmethod
+    def _close_upstream(response: http.client.HTTPResponse) -> None:
+        connection = getattr(response, "_sentra_connection", None)
+        if connection is not None:
+            connection.close()
 
     def _proxy(
         self,
@@ -754,12 +1303,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
             self.end_headers()
             if body_allowed:
+                is_sse = content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
+                sse_tail = bytearray()
                 while data := response.read1(65536):
                     if rewrite_web_model_namespace:
-                        data = data.replace(
-                            b'"chatgpt-web/',
-                            b'"sentra/chatgpt-web/',
-                        )
+                        for canonical, upstream in WEB_MODEL_PREFIXES:
+                            data = data.replace(
+                                ('"' + upstream).encode("utf-8"),
+                                ('"' + canonical).encode("utf-8"),
+                            )
                     if os.getenv("SENTRA_GATEWAY_DEBUG_STREAM", "").strip() == "1":
                         preview = data[:4096].decode("utf-8", errors="replace")
                         events = [
@@ -789,6 +1341,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     else:
                         self.wfile.write(data)
                     self.wfile.flush()
+
+                    if is_sse:
+                        sse_tail.extend(data)
+                        if len(sse_tail) > 8192:
+                            del sse_tail[:-8192]
+                        if _sse_terminal_seen(bytes(sse_tail)):
+                            break
                 if downstream_chunked:
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
@@ -798,7 +1357,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json(502, {"error": {"type": "upstream_error", "message": str(exc)}})
         finally:
             if response is not None:
-                response._sentra_connection.close()
+                self._close_upstream(response)
+        return None
 
     def _read_chunked_body(self) -> bytes:
         body = bytearray()
@@ -909,23 +1469,28 @@ class GatewayHandler(BaseHTTPRequestHandler):
         path = parsed_request.path
         if path == "/healthz":
             try:
-                response = self._upstream("GET", "/healthz")
+                response = self._upstream("GET", "/healthz", timeout=1.5)
                 upstream = json.loads(response.read())
-                response._sentra_connection.close()
+                self._close_upstream(response)
                 healthy = (
                     response.status == 200
                     and upstream.get("service") == "codex-chatgpt-web"
-                    and upstream.get("version") == EXPECTED_UPSTREAM_VERSION
+                    and upstream.get("version") == self.server.expected_upstream_version
                     and upstream.get("status") == "ok"
                     and upstream.get("accepting_turns", True) is True
                 )
             except (OSError, ValueError, http.client.HTTPException):
                 upstream, healthy = {}, False
+            catalog = self.server.cached_model_catalog()
+            catalog_ready = (
+                catalog.get("status") == "ready"
+                and bool(catalog.get("models"))
+            )
             self.server.resources.ingest_manifest({
                 "resource_type": "model_browser",
                 "resources": [{
                     "resource_id": "model:chatgpt-web:primary",
-                    "state": "READY" if healthy else "OFFLINE",
+                    "state": "READY" if healthy and catalog_ready else ("DEGRADED" if healthy else "OFFLINE"),
                     "capacity": 5,
                     "capabilities": {"responses": True, "sse": True, "compaction": True, "browser_host": "electron"},
                     "labels": {"provider": "chatgpt-web", "version": str(upstream.get("version") or "")},
@@ -933,7 +1498,18 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "accepting_turns": upstream.get("accepting_turns") is True,
                 }],
             })
-            self._json(200 if healthy else 503, {"status": "ok" if healthy else "unavailable", "service": "sentra-model-gateway", "upstream": upstream, "launcher": self.server.launcher.status()})
+            self._json(
+                200 if healthy else 503,
+                {
+                    "status": "ok" if healthy else "unavailable",
+                    "service": "sentra-model-gateway",
+                    "ready": bool(healthy and catalog_ready),
+                    "catalog": catalog,
+                    "upstream": upstream,
+                    "launcher": self.server.launcher.status(),
+                    "supervisor": dict(self.server._upstream_supervision),
+                },
+            )
             return
         if path == "/sentra/doctor":
             if not (self._authorized_internal() or self._authorized_admin()):
@@ -961,6 +1537,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             self._json(200, {"launcher": self.server.launcher.status(), "upstream": self.server.config.upstream})
             return
+        if path == "/sentra/model-catalog":
+            if not (self._authorized_admin() or self._authorized_internal()):
+                self._json(401, {"error": "unauthorized"})
+                return
+            self._json(200, self.server.cached_model_catalog())
+            return
         if path == "/sentra/codex/status":
             if not self._authorized_admin():
                 self._json(401, {"error": "unauthorized"})
@@ -971,31 +1553,60 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json(503, {"error": str(exc)})
             return
         if path == "/v1/models":
+            authorization = self.headers.get("Authorization", "")
+            if not authorization.startswith("Bearer ") or len(authorization) <= len("Bearer "):
+                self._json(401, {
+                    "error": {
+                        "type": "authentication_error",
+                        "message": "Codex model catalog requires incoming Bearer authorization",
+                    }
+                })
+                return
             try:
-                response = self._upstream("GET", self.path)
+                response = self._upstream("GET", self.path, timeout=3.0)
                 payload = response.read()
                 status = response.status
-                response._sentra_connection.close()
-                if status != 200:
-                    self._json(502, {"error": {"type": "upstream_error", "message": "model catalog unavailable"}})
+                self._close_upstream(response)
+                if status == 200:
+                    catalog = json.loads(payload)
+                    for collection in ("models", "data"):
+                        if isinstance(catalog.get(collection), list):
+                            catalog[collection] = [
+                                {
+                                    **model,
+                                    **{
+                                        key: _canonical_web_model_name(str(model[key]))
+                                        for key in ("slug", "id")
+                                        if _web_model_route(str(model.get(key, ""))) is not None
+                                    },
+                                }
+                                for model in catalog[collection] if isinstance(model, dict)
+                            ]
+                    self.server.cache_model_catalog(catalog)
+                    self._json(200, catalog)
                     return
-                catalog = json.loads(payload)
-                for collection in ("models", "data"):
-                    if isinstance(catalog.get(collection), list):
-                        catalog[collection] = [
-                            {
-                                **model,
-                                **{
-                                    key: PREFIX + str(model[key])[len(UPSTREAM_PREFIX):]
-                                    for key in ("slug", "id")
-                                    if str(model.get(key, "")).startswith(UPSTREAM_PREFIX)
-                                },
-                            }
-                            for model in catalog[collection] if isinstance(model, dict)
-                        ]
-                self._json(200, catalog)
-            except (OSError, ValueError, KeyError, http.client.HTTPException) as exc:
-                self._json(502, {"error": {"type": "upstream_error", "message": str(exc)}})
+            except (OSError, ValueError, KeyError, http.client.HTTPException):
+                pass
+
+            # Upstream unavailable or returned error: fallback to cached catalog or defaults
+            cached = self.server.cached_model_catalog()
+            cached_models = cached.get("models") if isinstance(cached, dict) else []
+            if cached_models:
+                data = [
+                    {"id": m.get("id") or m.get("slug"), "object": "model", "owned_by": "sentra"}
+                    for m in cached_models if isinstance(m, dict) and (m.get("id") or m.get("slug"))
+                ]
+            else:
+                data = [
+                    {"id": "sentra/chatgpt-web/high", "object": "model", "owned_by": "sentra"},
+                    {"id": "sentra/chatgpt-web/medium", "object": "model", "owned_by": "sentra"},
+                    {"id": "sentra/chatgpt-web/low", "object": "model", "owned_by": "sentra"},
+                    {"id": "sentra/chatgpt-web/mini", "object": "model", "owned_by": "sentra"},
+                    {"id": "gpt-6.1-sol", "object": "model", "owned_by": "system"},
+                    {"id": "gpt-4o", "object": "model", "owned_by": "system"},
+                    {"id": "o3-mini", "object": "model", "owned_by": "system"},
+                ]
+            self._json(200, {"object": "list", "data": data, "models": data})
             return
         if path == "/v1/responses":
             self._proxy("GET", self.path)
@@ -1031,6 +1642,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 )
             try:
                 result = self.server.turn_authority.authorize(action, value)
+                self.server.audit.emit("model.browser." + action, "ok", {
+                    **self.server.turn_authority.telemetry_metadata(value["capability"]),
+                    "revision": value.get("revision"),
+                })
                 if os.getenv("SENTRA_GATEWAY_DEBUG_TURN", "").strip() == "1":
                     print(
                         "SENTRA_TURN_AUTH "
@@ -1039,7 +1654,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                             "action": action,
                             "trace_id": value.get("traceId"),
                             "revision": value.get("revision"),
-                            "result": result,
+                            "result": {key: result[key] for key in (
+                                "authorized", "run_id", "operation_id", "prepared", "idempotent_replay"
+                            ) if key in result},
                         }, separators=(",", ":")),
                         flush=True,
                     )
@@ -1054,7 +1671,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
                             "trace_id": value.get("traceId"),
                             "revision": value.get("revision"),
                             "error_type": type(exc).__name__,
-                            "error": str(exc),
                         }, separators=(",", ":")),
                         flush=True,
                     )
@@ -1073,24 +1689,26 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     self._json(200, self.server.launcher.route("sentra"))
                 elif path == "/sentra/codex/disconnect":
                     self._json(200, self.server.launcher.route("disconnect"))
+                elif path == "/sentra/upstream/reap-orphans":
+                    self._json(200, self.server.reap_orphan_turns())
                 elif path in {"/sentra/upstream/drain", "/sentra/upstream/resume", "/sentra/upstream/interrupt-turn"}:
                     action = path.rsplit("/", 1)[-1]
-                    value: dict[str, Any] | None = None
+                    control_value: dict[str, Any] | None = None
                     if action == "interrupt-turn":
-                        value = self._body()
-                        if value is None:
+                        control_value = self._body()
+                        if control_value is None:
                             return
                     try:
-                        self._json(200, self.server.launcher.runtime_control(action, value))
+                        self._json(200, self.server.launcher.runtime_control(action, control_value))
                     except (OSError, PermissionError, ValueError, RuntimeError, http.client.HTTPException) as launcher_error:
-                        token = self.server.config.upstream_control_token
+                        token = self.server.upstream_control_token
                         if not token:
                             self._json(409, {
                                 "error": "launcher runtime control is unavailable",
                                 "detail": str(launcher_error)[:500],
                             })
                             return
-                        body = json.dumps(value).encode("utf-8") if value is not None else b""
+                        body = json.dumps(control_value).encode("utf-8") if control_value is not None else b""
                         response = self._upstream(
                             "POST",
                             "/admin/" + action,
@@ -1099,7 +1717,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         )
                         payload = response.read()
                         status = response.status
-                        response._sentra_connection.close()
+                        self._close_upstream(response)
                         self._json(status, json.loads(payload))
                 else:
                     self._json(404, {"error": "not found"})
@@ -1118,19 +1736,24 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if value is None:
             return
         model = value.get("model")
-        canonical_web_model = isinstance(model, str) and model.startswith(PREFIX)
-        legacy_web_model = isinstance(model, str) and model.startswith(UPSTREAM_PREFIX)
+        web_route = _web_model_route(model) if isinstance(model, str) else None
+        canonical_web_model = bool(web_route and web_route[2])
+        legacy_web_model = bool(web_route and not web_route[2])
+        managed_web_model = canonical_web_model or legacy_web_model
+        bare_web_prefixes = {prefix for pair in WEB_MODEL_PREFIXES for prefix in pair}
         if (not isinstance(model, str) or not model
                 or (model.startswith("sentra/") and not canonical_web_model)
-                or model in {PREFIX, UPSTREAM_PREFIX}):
+                or model in bare_web_prefixes):
             self._json(400, {"error": {"type": "invalid_request_error", "message": "invalid model namespace"}})
             return
-        # Codex may keep the model selected before its route was moved behind the SENTRA
-        # Gateway. Treat that legacy chatgpt-web/* spelling as the same managed Web model
-        # so it cannot bypass TurnCapability/lease authority during the migration window.
-        if canonical_web_model or legacy_web_model:
-            if canonical_web_model:
-                value["model"] = UPSTREAM_PREFIX + model[len(PREFIX):]
+        # Codex may keep a Web model selected before its route was moved behind the SENTRA
+        # Gateway. Treat upstream chatgpt-web/* and gemini-web/* spellings as managed
+        # migration aliases so neither can bypass TurnCapability/lease authority.
+        if managed_web_model:
+            assert web_route is not None
+            canonical_prefix, upstream_prefix, is_canonical = web_route
+            if is_canonical:
+                value["model"] = upstream_prefix + model[len(canonical_prefix):]
             metadata = value.get("client_metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
             conversation_uri = metadata.get("sentra_conversation_uri")
@@ -1144,10 +1767,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 path=path,
                 model=model,
             )
+            native_identity=json.loads(request_identity) if request_identity else {}
+            correlation=native_identity.get("turn_id") if isinstance(native_identity,dict) else None
+            self.server.audit.emit("model.request.started","ok",{
+                "correlation_id":correlation,"thread_id":native_identity.get("thread_id"),"model":model,
+            })
+            goal_present, goal_text = _extract_codex_goal_signal(value.get("input"))
             try:
                 capability = self.server.turn_authority.issue(
                     conversation_uri=conversation_uri,
                     request_identity=request_identity,
+                    goal_text=goal_text,
+                    goal_present=goal_present,
+                    task_text=_extract_codex_task_text(value.get("input")),
+                    subagent_notifications=_extract_codex_subagent_notifications(
+                        value.get("input")
+                    ),
                 )
             except DurableStateConflict as exc:
                 self._json(409, {
@@ -1166,18 +1801,29 @@ class GatewayHandler(BaseHTTPRequestHandler):
         else:
             capability = None
         body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-        status = None
+        proxy_failed = True
         try:
-            status = self._proxy(
+            proxy_status = self._proxy(
                 "POST",
                 self.path,
                 body,
                 body_reencoded=True,
-                rewrite_web_model_namespace=canonical_web_model,
+                rewrite_web_model_namespace=managed_web_model,
             )
+            proxy_failed = proxy_status is None or proxy_status >= 400
         finally:
             if capability:
-                self.server.turn_authority.retire(capability, failed=status is None or status >= 400)
+                try:
+                    evidence = self.server.turn_authority.telemetry_metadata(capability)
+                    self.server.audit.emit("model.request.finished", (
+                        "completed" if evidence["completion_verified"] else
+                        "failed" if proxy_failed else "unverified"
+                    ), {
+                        **evidence, "model": model, "transport_ok": not proxy_failed,
+                    })
+                finally:
+                    # A full audit disk must not retain a browser or conversation lease.
+                    self.server.turn_authority.retire(capability, failed=proxy_failed)
 
 
 def main() -> None:
@@ -1187,7 +1833,7 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=17842)
     parser.add_argument("--launch-upstream", action="store_true")
     args = parser.parse_args()
-    state_root = ProductPaths.default().state_dir
+    state_root = resolve_gateway_state_root()
     admin_token = os.getenv("SENTRA_GATEWAY_ADMIN_TOKEN", "").strip() or load_or_create_gateway_admin_token(state_root)
     config = GatewayConfig(upstream=args.upstream, port=args.port, state_root=state_root,
                            admin_token=admin_token,
@@ -1197,11 +1843,13 @@ def main() -> None:
     try:
         if args.launch_upstream:
             server.launcher.start()
+            server.start_upstream_watchdog()
         print(f"SENTRA Model Gateway listening on http://127.0.0.1:{server.server_port}/v1", flush=True)
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        server.stop_upstream_watchdog()
         server.shutdown() if threading.current_thread() is not threading.main_thread() else None
         server.launcher.stop()
         server.server_close()

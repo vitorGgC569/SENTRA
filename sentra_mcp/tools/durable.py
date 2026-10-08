@@ -63,6 +63,9 @@ def register_durable_tools(
     capabilities: CapabilityService,
     filesystem: FilesystemService,
     processes: Any | None = None,
+    control_plane: Any | None = None,
+    *,
+    governance_specialized: bool = False,
 ) -> None:
     """Register the compact durable execution/control surface."""
 
@@ -72,6 +75,7 @@ def register_durable_tools(
             "contract_manifest", "contract_negotiate",
             "create", "status", "resume", "transition", "list",
             "events", "events_wait", "checkpoint", "reconcile", "capabilities_used",
+            "goal_create", "goal_get", "goal_list", "goal_update",
             "agent_assign", "agent_update",
             "chat_bind", "chat_update", "chat_rebind"
         ],
@@ -83,8 +87,22 @@ def register_durable_tools(
         target: Literal["edge", "browser", "chatgpt"] | None = None,
         client_protocol_version: str | None = None,
         client_schema_hash: str | None = None,
+        client_tool_schema_hash: str | None = None,
+        client_tool_names_hash: str | None = None,
         client_capabilities: dict[str, Any] | list[str] | None = None,
         capabilities_used: list[str] | None = None,
+        goal_id: str | None = None,
+        parent_goal_id: str | None = None,
+        objective: str | None = None,
+        acceptance_criteria: list[str] | None = None,
+        constraints: list[str] | None = None,
+        goal_priority: Literal["LOW", "MEDIUM", "HIGH", "CRITICAL"] | None = None,
+        goal_budget: dict[str, Any] | None = None,
+        goal_deadline: float | None = None,
+        goal_state: Literal[
+            "ACTIVE", "PAUSED", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"
+        ] | None = None,
+        goal_external_key: str | None = None,
         agent_id: str | None = None,
         chat_id: str | None = None,
         role: str | None = None,
@@ -136,6 +154,8 @@ def register_durable_tools(
                 return _ok(await capabilities.negotiate(
                     client_protocol_version=client_protocol_version,
                     client_schema_hash=client_schema_hash,
+                    client_tool_schema_hash=client_tool_schema_hash,
+                    client_tool_names_hash=client_tool_names_hash,
                     client_capabilities=client_capabilities,
                     required_capabilities=required_capabilities,
                     target=target,
@@ -146,6 +166,8 @@ def register_durable_tools(
                 negotiation = await capabilities.negotiate(
                     client_protocol_version=client_protocol_version,
                     client_schema_hash=client_schema_hash,
+                    client_tool_schema_hash=client_tool_schema_hash,
+                    client_tool_names_hash=client_tool_names_hash,
                     client_capabilities=client_capabilities,
                     required_capabilities=required_capabilities,
                     target=target,
@@ -203,12 +225,53 @@ def register_durable_tools(
                 return _ok(durable.record_capabilities_used(
                     rid, owner, capabilities_used or []
                 ))
+            goal_authority = control_plane or durable
+            if action == "goal_create":
+                return _ok(goal_authority.create_goal(
+                    rid,
+                    owner,
+                    objective=str(_required("objective", objective)),
+                    acceptance_criteria=acceptance_criteria,
+                    constraints=constraints,
+                    priority=goal_priority or "MEDIUM",
+                    budget=goal_budget,
+                    deadline=goal_deadline,
+                    parent_goal_id=parent_goal_id,
+                    goal_id=goal_id,
+                    external_key=goal_external_key,
+                    metadata=metadata,
+                ))
+            if action == "goal_get":
+                item = goal_authority.goal_info(str(_required("goal_id", goal_id)), owner)
+                if item.get("run_id") != rid:
+                    raise ValueError("goal belongs to another run")
+                return _ok(item)
+            if action == "goal_list":
+                return _ok(goal_authority.list_goals(rid, owner))
+            if action == "goal_update":
+                item = goal_authority.goal_info(str(_required("goal_id", goal_id)), owner)
+                if item.get("run_id") != rid:
+                    raise ValueError("goal belongs to another run")
+                return _ok(goal_authority.update_goal(
+                    str(goal_id),
+                    owner,
+                    objective=objective,
+                    acceptance_criteria=acceptance_criteria,
+                    constraints=constraints,
+                    priority=goal_priority,
+                    budget=goal_budget,
+                    deadline=goal_deadline,
+                    state=goal_state,
+                    reason=reason,
+                    metadata=metadata,
+                ))
             if action == "agent_assign":
                 return _ok(durable.assign_agent(
                     rid,
                     owner,
                     role=str(_required("role", role)),
                     task_id=task_id,
+                    goal_id=goal_id,
                     agent_id=agent_id,
                     state=agent_state or "ACTIVE",
                     desired_state=agent_desired_state or agent_state or "ACTIVE",
@@ -221,6 +284,7 @@ def register_durable_tools(
                     state=agent_state,
                     desired_state=agent_desired_state,
                     task_id=task_id,
+                    goal_id=goal_id,
                     chat_id=chat_id,
                     metadata=metadata,
                 ))
@@ -475,3 +539,12 @@ def register_durable_tools(
             raise ValueError("unsupported artifact action")
         except Exception as exc:
             return _fail(exc)
+
+
+    if control_plane is not None:
+        from .governance import register_governance_tools
+        from ..services.conversation_memory import ConversationMemoryService
+        register_governance_tools(
+            mcp, control_plane, specialized=governance_specialized,
+            conversation_memory=ConversationMemoryService(filesystem),
+        )

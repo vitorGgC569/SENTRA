@@ -465,7 +465,12 @@ class HumanStore:
                     except json.JSONDecodeError:
                         continue
                     if isinstance(item, dict):
-                        payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+                        payload_value = item.get("payload")
+                        payload: dict[str, Any] = (
+                            payload_value
+                            if isinstance(payload_value, dict)
+                            else {}
+                        )
                         events.append({
                             "type": item.get("event_type"),
                             "producer": item.get("producer"),
@@ -586,6 +591,147 @@ class HumanStore:
             "conversation": selected,
             "runs": self.unified_runs(),
             "activity": self.activity(),
+            "control_plane": self.control_plane_dashboard(),
             "logs": self.logs(),
             "now": time.time(),
+        }
+
+
+    def control_plane_dashboard(self) -> dict[str, Any]:
+        """Read-only local projection of governance state for SENTRA Human."""
+        durable_root = self.paths.state_dir / "durable"
+        governance_path = durable_root / "governance.sqlite3"
+        budget_path = durable_root / "budget-policies.sqlite3"
+        auth_path = durable_root / "authorization.sqlite3"
+        workspace_path = durable_root / "execution-workspaces.sqlite3"
+
+        def rows(path: Path, sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+            if not path.is_file():
+                return []
+            try:
+                db = sqlite3.connect(path, timeout=1)
+                db.row_factory = sqlite3.Row
+                try:
+                    return [dict(row) for row in db.execute(sql, params).fetchall()]
+                finally:
+                    db.close()
+            except (sqlite3.Error, OSError):
+                return []
+
+        work_items = rows(
+            governance_path,
+            "SELECT work_item_id,run_id,goal_id,objective,state,assignee_agent_id,"
+            "checkout_run_id,execution_run_id,retry_count,recovery_class,updated_at "
+            "FROM work_items ORDER BY updated_at DESC LIMIT 100",
+        )
+        routines = rows(
+            governance_path,
+            "SELECT routine_id,name,trigger_kind,active_policy,missed_policy,enabled,"
+            "next_due_at,last_fired_at,active_work_item_id,metadata_json,updated_at "
+            "FROM routines ORDER BY updated_at DESC LIMIT 100",
+        )
+        plugins = rows(
+            governance_path,
+            "SELECT plugin_id,name,version,state,effective_capabilities_json,trusted_ui,"
+            "updated_at FROM plugins ORDER BY updated_at DESC LIMIT 100",
+        )
+        skills = rows(
+            governance_path,
+            "SELECT skill_id,name,version,content_sha256,source,created_at "
+            "FROM skills ORDER BY created_at DESC LIMIT 100",
+        )
+        activity = rows(
+            governance_path,
+            "SELECT event_id,created_at,actor_type,actor_id,work_item_id,run_id,"
+            "operation_id,agent_id,action,outcome,payload_json "
+            "FROM activity_events ORDER BY created_at DESC LIMIT 100",
+        )
+        cost_rows = rows(
+            governance_path,
+            "SELECT COALESCE(SUM(actual_cost),0) AS actual_cost,"
+            "COALESCE(SUM(market_cost),0) AS market_cost,"
+            "COALESCE(SUM(quota_usage),0) AS quota_usage,"
+            "COALESCE(SUM(input_tokens),0) AS input_tokens,"
+            "COALESCE(SUM(output_tokens),0) AS output_tokens,"
+            "COALESCE(SUM(reasoning_tokens),0) AS reasoning_tokens "
+            "FROM cost_events",
+        )
+        budgets = rows(
+            budget_path,
+            "SELECT budget_policy_id,scope_type,scope_id,mode,limits_json,"
+            "window_seconds,enabled,updated_at FROM budget_policies "
+            "ORDER BY updated_at DESC LIMIT 100",
+        )
+        grants = rows(
+            auth_path,
+            "SELECT grant_id,principal_type,principal_id,capability,scope_type,scope_id,"
+            "expires_at,revoked,updated_at FROM authorization_grants "
+            "ORDER BY updated_at DESC LIMIT 100",
+        )
+        execution_workspaces = rows(
+            workspace_path,
+            "SELECT execution_workspace_id,authority_run_id,work_item_id,backend,state,"
+            "physical_ref,device_id,current_revision,lease_run_id,fencing_token,updated_at "
+            "FROM execution_workspaces ORDER BY updated_at DESC LIMIT 100",
+        )
+
+        for item in routines:
+            meta = _loads(item.pop("metadata_json", None), {})
+            item["bound"] = bool(meta.get("_runtime_authority_run_id"))
+            item["goal_bound"] = bool(meta.get("_runtime_goal_id"))
+            item["enabled"] = bool(item["enabled"])
+        for item in plugins:
+            item["effective_capabilities"] = _loads(
+                item.pop("effective_capabilities_json", None), []
+            )
+            item["trusted_ui"] = bool(item["trusted_ui"])
+        for item in activity:
+            item["payload"] = _loads(item.pop("payload_json", None), {})
+        for item in budgets:
+            item["limits"] = _loads(item.pop("limits_json", None), {})
+            item["enabled"] = bool(item["enabled"])
+        for item in grants:
+            item["revoked"] = bool(item["revoked"])
+
+        costs = cost_rows[0] if cost_rows else {
+            "actual_cost": 0.0,
+            "market_cost": 0.0,
+            "quota_usage": 0.0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+        review_states = {"IN_REVIEW", "APPROVAL_REQUIRED", "CHANGES_REQUESTED"}
+        active_states = {
+            "PENDING", "QUEUED", "RUNNING", "VALIDATING", "REPAIRING",
+            "IN_REVIEW", "APPROVAL_REQUIRED", "CHANGES_REQUESTED",
+            "READY_FOR_PROMOTION", "RECOVERING", "BLOCKED",
+        }
+        summary = {
+            "work_items_total": len(work_items),
+            "work_items_active": sum(1 for item in work_items if item["state"] in active_states),
+            "work_items_blocked": sum(1 for item in work_items if item["state"] == "BLOCKED"),
+            "work_items_review": sum(1 for item in work_items if item["state"] in review_states),
+            "routines_enabled": sum(1 for item in routines if item["enabled"]),
+            "routines_unbound": sum(1 for item in routines if item["enabled"] and not item["bound"]),
+            "plugins_ready": sum(1 for item in plugins if item["state"] == "VERIFIED"),
+            "budget_hard_stops": sum(
+                1 for item in budgets if item["enabled"] and item["mode"] == "hard_stop"
+            ),
+            "active_grants": sum(1 for item in grants if not item["revoked"]),
+            "execution_workspaces_leased": sum(
+                1 for item in execution_workspaces if item["state"] == "LEASED"
+            ),
+            **costs,
+        }
+        return {
+            "summary": summary,
+            "work_items": work_items,
+            "routines": routines,
+            "plugins": plugins,
+            "skills": skills,
+            "budgets": budgets,
+            "grants": grants,
+            "execution_workspaces": execution_workspaces,
+            "activity": activity,
         }

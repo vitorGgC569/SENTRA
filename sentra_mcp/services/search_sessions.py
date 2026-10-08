@@ -14,6 +14,7 @@ from workspace.paths import iter_workspace_files, resolve_workspace_path
 
 from ..audit import AuditLogger
 from ..config import MCPConfig
+from .durable import DurableRunService
 from .workspaces import WorkspaceRegistry
 
 
@@ -24,14 +25,14 @@ class SearchSessionService:
         audit: AuditLogger,
         workspaces: WorkspaceRegistry | None = None,
         *,
-        durable: object | None = None,
+        durable: DurableRunService | None = None,
         db_path: Path | None = None,
     ) -> None:
         self.config = config
         self.audit = audit
         self.workspaces = workspaces
         self.durable = durable
-        self.db_path = Path(db_path or (config.state_root / "searches.sqlite3"))
+        self.db_path = Path(db_path or (config.resolved_state_root / "searches.sqlite3"))
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
@@ -138,16 +139,16 @@ class SearchSessionService:
         event_type: str = "SEARCH_PROGRESS",
         result: dict[str, Any] | None = None,
         error: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         if self.durable is None:
-            return
+            return True
         with self.lock:
             row = self.db.execute(
                 "SELECT owner,operation_id FROM searches WHERE id=?",
                 (search_id,),
             ).fetchone()
         if row is None or not row["operation_id"]:
-            return
+            return True
         progress: dict[str, Any] = {"stage": stage, "search_id": search_id}
         if files_scanned is not None:
             progress["files_scanned"] = int(files_scanned)
@@ -164,8 +165,9 @@ class SearchSessionService:
                 result=result,
                 error=error,
             )
+            return True
         except Exception:
-            pass
+            return False
 
     @staticmethod
     def _summary(row: sqlite3.Row) -> dict[str, Any]:
@@ -542,15 +544,8 @@ class SearchSessionService:
             state = "FAILED"
             error = str(exc)[:1000]
         finally:
-            with self.lock:
-                self.db.execute(
-                    "UPDATE searches SET state=?,files_scanned=?,matches=?,error=?,updated=? WHERE id=?",
-                    (state, scanned, matches, error, time.time(), search_id),
-                )
-                self.db.commit()
-
             if state in {"COMPLETED", "LIMIT_REACHED"}:
-                self._durable_update(
+                durable_finalized = self._durable_update(
                     search_id,
                     state="SUCCEEDED",
                     readiness="PRODUCT_READY",
@@ -566,7 +561,7 @@ class SearchSessionService:
                     },
                 )
             elif state == "CANCELLED":
-                self._durable_update(
+                durable_finalized = self._durable_update(
                     search_id,
                     state="CANCELLED",
                     stage="CANCELLED",
@@ -575,7 +570,7 @@ class SearchSessionService:
                     event_type="SEARCH_CANCELLED",
                 )
             else:
-                self._durable_update(
+                durable_finalized = self._durable_update(
                     search_id,
                     state="FAILED",
                     stage="FAILED",
@@ -587,6 +582,21 @@ class SearchSessionService:
                         "message": str(error or "search failed")[:1000],
                     },
                 )
+
+            if not durable_finalized and self.durable is not None:
+                state = "INTERRUPTED"
+                error = "durable operation finalization failed; reconcile before replay"
+
+            # Publish the local terminal search state only after its correlated
+            # Durable Operation has reached the matching terminal state. This
+            # prevents observers from seeing search=COMPLETED while the
+            # authoritative operation is still RUNNING.
+            with self.lock:
+                self.db.execute(
+                    "UPDATE searches SET state=?,files_scanned=?,matches=?,error=?,updated=? WHERE id=?",
+                    (state, scanned, matches, error, time.time(), search_id),
+                )
+                self.db.commit()
             self.stops.pop(search_id, None)
             self.threads.pop(search_id, None)
 
@@ -626,8 +636,8 @@ class SearchSessionService:
                 "SELECT COUNT(*) FROM search_results WHERE search_id=?",
                 (search_id,),
             ).fetchone()[0])
-            next_offset = offset + len(payloads)
-            next_offset = next_offset if next_offset < total else None
+            next_candidate = offset + len(payloads)
+            next_offset: int | None = next_candidate if next_candidate < total else None
             return {
                 "search_id": search_id,
                 "run_id": row["run_id"],

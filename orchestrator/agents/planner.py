@@ -37,6 +37,12 @@ JSON Schema:
       "target_files": [],
       "side_effect_scope": "ISOLATED",
       "resource_locks": [],
+      "provides": [{"name": "artifact.name", "schema_version": "1"}],
+      "requires": [],
+      "milestone": "implementation",
+      "task_type": "implementation",
+      "architecture_decision": "",
+      "decision_rationale": "",
       "timeout_s": 900,
       "heartbeat_timeout_s": 120
     }
@@ -158,6 +164,18 @@ REPOSITORY CONTEXT:
                 resource_locks=d.get("resource_locks", []),
                 timeout_s=float(d.get("timeout_s", 900)),
                 heartbeat_timeout_s=float(d.get("heartbeat_timeout_s", 120)),
+                metadata={
+                    "provides": d.get("provides", []),
+                    "requires": d.get("requires", []),
+                    "milestone": str(d.get("milestone", "") or "").strip()[:120],
+                    "task_type": str(d.get("task_type", "") or "").strip()[:120],
+                    "architecture_decision": str(
+                        d.get("architecture_decision", "") or ""
+                    ).strip()[:1000],
+                    "decision_rationale": str(
+                        d.get("decision_rationale", "") or ""
+                    ).strip()[:2000],
+                },
             )
             tasks.append(t)
 
@@ -175,6 +193,16 @@ REPOSITORY CONTEXT:
                 for lock in task.resource_locks
             ):
                 raise ValueError("invalid resource_locks in planner DAG")
+            for contract_name in ("provides", "requires"):
+                entries = task.metadata.get(contract_name, [])
+                if not isinstance(entries, list) or len(entries) > 50:
+                    raise ValueError(f"invalid {contract_name} contracts in planner DAG")
+            if len(str(task.metadata.get("milestone") or "")) > 120:
+                raise ValueError("invalid milestone in planner DAG")
+            if len(str(task.metadata.get("architecture_decision") or "")) > 1000:
+                raise ValueError("architecture_decision exceeds 1000 chars")
+            if len(str(task.metadata.get("decision_rationale") or "")) > 2000:
+                raise ValueError("decision_rationale exceeds 2000 chars")
             if not 1 <= task.timeout_s <= 86400:
                 raise ValueError("task timeout_s must be 1..86400")
             if not 1 <= task.heartbeat_timeout_s <= task.timeout_s:

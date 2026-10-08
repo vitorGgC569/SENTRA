@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import mimetypes
 import os
 import re
@@ -35,6 +36,15 @@ AGENT_STATES = {
 CHAT_STATES = {
     "READY", "GENERATING", "TOOL_WAIT", "PLATFORM_HOLD",
     "WAITING_USER", "IDLE", "DISCONNECTED",
+}
+GOAL_STATES = {"ACTIVE", "PAUSED", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"}
+TERMINAL_GOAL_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
+GOAL_PRIORITIES = {"LOW", "MEDIUM", "HIGH", "CRITICAL"}
+GOAL_TRANSITIONS = {
+    "ACTIVE": {"PAUSED", "BLOCKED", "SUCCEEDED", "FAILED", "CANCELLED"},
+    "PAUSED": {"ACTIVE", "BLOCKED", "FAILED", "CANCELLED"},
+    "BLOCKED": {"ACTIVE", "PAUSED", "FAILED", "CANCELLED"},
+    "SUCCEEDED": set(), "FAILED": set(), "CANCELLED": set(),
 }
 TERMINAL_RUN_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
 TERMINAL_OPERATION_STATES = {"SUCCEEDED", "FAILED", "CANCELLED"}
@@ -103,6 +113,21 @@ def _validate_id(name: str, value: str) -> str:
     return text
 
 
+def _goal_string_list(name: str, value: list[str] | tuple[str, ...] | None) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, (list, tuple)) or len(value) > 100:
+        raise ValueError(f"{name} must contain at most 100 strings")
+    out: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text or len(text) > 4000:
+            raise ValueError(f"{name} entries must be 1..4000 characters")
+        if text not in out:
+            out.append(text)
+    return out
+
+
 class DurableStateConflict(RuntimeError):
     pass
 
@@ -155,12 +180,31 @@ class DurableRunService:
                     last_seq INTEGER NOT NULL DEFAULT 0,
                     UNIQUE(owner,idempotency_key)
                 );
+                CREATE TABLE IF NOT EXISTS goals(
+                    goal_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL REFERENCES runs(run_id),
+                    owner TEXT NOT NULL,
+                    parent_goal_id TEXT REFERENCES goals(goal_id),
+                    external_key TEXT,
+                    objective TEXT NOT NULL,
+                    acceptance_criteria_json TEXT NOT NULL DEFAULT '[]',
+                    constraints_json TEXT NOT NULL DEFAULT '[]',
+                    priority TEXT NOT NULL,
+                    budget_json TEXT NOT NULL DEFAULT '{}',
+                    deadline REAL,
+                    state TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    UNIQUE(run_id,external_key)
+                );
                 CREATE TABLE IF NOT EXISTS agents(
                     agent_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL REFERENCES runs(run_id),
                     owner TEXT NOT NULL,
                     role TEXT NOT NULL,
                     task_id TEXT,
+                    goal_id TEXT REFERENCES goals(goal_id),
                     state TEXT NOT NULL,
                     desired_state TEXT NOT NULL,
                     chat_id TEXT,
@@ -236,6 +280,10 @@ class DurableRunService:
                     lease_until REAL NOT NULL,
                     updated_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS lease_fences(
+                    resource_key TEXT PRIMARY KEY,
+                    fencing_token INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS events(
                     event_id TEXT PRIMARY KEY,
                     run_id TEXT NOT NULL,
@@ -247,6 +295,7 @@ class DurableRunService:
                     payload_json TEXT NOT NULL,
                     UNIQUE(run_id,seq)
                 );
+                CREATE INDEX IF NOT EXISTS idx_goals_run ON goals(run_id,updated_at);
                 CREATE INDEX IF NOT EXISTS idx_agents_run ON agents(run_id,updated_at);
                 CREATE INDEX IF NOT EXISTS idx_chats_run ON chats(run_id,updated_at);
                 CREATE INDEX IF NOT EXISTS idx_operations_run ON operations(run_id,updated_at);
@@ -265,6 +314,12 @@ class DurableRunService:
                     "ALTER TABLE runs ADD COLUMN capabilities_used_json "
                     "TEXT NOT NULL DEFAULT '[]'"
                 )
+            agent_columns = {
+                str(row["name"])
+                for row in self.db.execute("PRAGMA table_info(agents)").fetchall()
+            }
+            if "goal_id" not in agent_columns:
+                self.db.execute("ALTER TABLE agents ADD COLUMN goal_id TEXT")
             self.db.commit()
 
     def close(self) -> None:
@@ -277,6 +332,14 @@ class DurableRunService:
             raise FileNotFoundError("run not found")
         if owner is not None and row["owner"] != owner:
             raise PermissionError("run belongs to another owner")
+        return row
+
+    def _goal_row(self, goal_id: str, owner: str | None = None) -> sqlite3.Row:
+        row = self.db.execute("SELECT * FROM goals WHERE goal_id=?", (goal_id,)).fetchone()
+        if row is None:
+            raise FileNotFoundError("goal not found")
+        if owner is not None and row["owner"] != owner:
+            raise PermissionError("goal belongs to another owner")
         return row
 
     def _operation_row(self, operation_id: str, owner: str | None = None) -> sqlite3.Row:
@@ -494,6 +557,193 @@ class DurableRunService:
             self.db.commit()
             return self._project_locked(run_id)
 
+
+    def create_goal(
+        self,
+        run_id: str,
+        owner: str,
+        *,
+        objective: str,
+        acceptance_criteria: list[str] | None = None,
+        constraints: list[str] | None = None,
+        priority: str = "MEDIUM",
+        budget: dict[str, Any] | None = None,
+        deadline: float | None = None,
+        parent_goal_id: str | None = None,
+        goal_id: str | None = None,
+        external_key: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        objective = str(objective or "").strip()
+        if not objective or len(objective) > 100_000:
+            raise ValueError("goal objective must be 1..100000 characters")
+        priority = str(priority or "").strip().upper()
+        if priority not in GOAL_PRIORITIES:
+            raise ValueError("invalid goal priority")
+        criteria = _goal_string_list("acceptance_criteria", acceptance_criteria)
+        limits = _goal_string_list("constraints", constraints)
+        if budget is not None and not isinstance(budget, dict):
+            raise ValueError("goal budget must be an object")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise ValueError("goal metadata must be an object")
+        if deadline is not None:
+            if not isinstance(deadline, (int, float)) or not math.isfinite(float(deadline)):
+                raise ValueError("goal deadline must be a finite unix timestamp")
+            deadline = float(deadline)
+        external = str(external_key or "").strip() or None
+        if external and (len(external) > 200 or any(ch in external for ch in "\r\n\x00")):
+            raise ValueError("external_key must be at most 200 safe text characters")
+        now = self.clock()
+        with self.lock:
+            self._run_row(run_id, owner)
+            if external:
+                existing = self.db.execute(
+                    "SELECT * FROM goals WHERE run_id=? AND external_key=?",
+                    (run_id, external),
+                ).fetchone()
+                if existing is not None:
+                    info = self._goal_info_locked(existing)
+                    info["idempotent_replay"] = True
+                    return info
+            parent = None
+            if parent_goal_id:
+                parent = self._goal_row(parent_goal_id, owner)
+                if parent["run_id"] != run_id:
+                    raise ValueError("parent goal belongs to another run")
+            gid = _validate_id("goal_id", goal_id or ("goal-" + uuid.uuid4().hex))
+            if self.db.execute("SELECT 1 FROM goals WHERE goal_id=?", (gid,)).fetchone():
+                raise FileExistsError("goal_id already exists")
+            self.db.execute(
+                "INSERT INTO goals(goal_id,run_id,owner,parent_goal_id,external_key,objective,"
+                "acceptance_criteria_json,constraints_json,priority,budget_json,deadline,state,"
+                "created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    gid, run_id, owner, parent_goal_id, external, objective,
+                    _json(criteria), _json(limits), priority, _json(budget or {}),
+                    deadline, "ACTIVE", now, now, _json(metadata or {}),
+                ),
+            )
+            self._append_event_locked(
+                run_id, "GOAL_CREATED", state="ACTIVE",
+                payload={
+                    "goal_id": gid, "parent_goal_id": parent_goal_id,
+                    "priority": priority, "external_key": external,
+                    "acceptance_criteria_count": len(criteria),
+                    "constraints_count": len(limits),
+                },
+            )
+            self.db.commit()
+            self._project_locked(run_id)
+            return self._goal_info_locked(self._goal_row(gid))
+
+    def goal_info(self, goal_id: str, owner: str) -> dict[str, Any]:
+        with self.lock:
+            return self._goal_info_locked(self._goal_row(goal_id, owner))
+
+    def list_goals(
+        self,
+        run_id: str,
+        owner: str,
+        *,
+        states: list[str] | None = None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            self._run_row(run_id, owner)
+            wanted = None
+            if states is not None:
+                wanted = {str(item).upper() for item in states}
+                if not wanted <= GOAL_STATES:
+                    raise ValueError("invalid goal state filter")
+            rows = self.db.execute(
+                "SELECT * FROM goals WHERE run_id=? ORDER BY created_at,goal_id",
+                (run_id,),
+            ).fetchall()
+            items = [
+                self._goal_info_locked(row)
+                for row in rows
+                if wanted is None or row["state"] in wanted
+            ]
+            return {"run_id": run_id, "items": items, "count": len(items)}
+
+    def update_goal(
+        self,
+        goal_id: str,
+        owner: str,
+        *,
+        objective: str | None = None,
+        acceptance_criteria: list[str] | None = None,
+        constraints: list[str] | None = None,
+        priority: str | None = None,
+        budget: dict[str, Any] | None = None,
+        deadline: float | None = None,
+        state: str | None = None,
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        with self.lock:
+            row = self._goal_row(goal_id, owner)
+            current_state = str(row["state"])
+            target_state = str(state or current_state).upper()
+            if target_state not in GOAL_STATES:
+                raise ValueError("invalid goal state")
+            if target_state != current_state and target_state not in GOAL_TRANSITIONS.get(current_state, set()):
+                raise DurableStateConflict(
+                    f"invalid goal transition {current_state} -> {target_state}"
+                )
+            new_objective = row["objective"] if objective is None else str(objective).strip()
+            if not new_objective or len(new_objective) > 100_000:
+                raise ValueError("goal objective must be 1..100000 characters")
+            criteria = (
+                _load(row["acceptance_criteria_json"], [])
+                if acceptance_criteria is None
+                else _goal_string_list("acceptance_criteria", acceptance_criteria)
+            )
+            limits = (
+                _load(row["constraints_json"], [])
+                if constraints is None
+                else _goal_string_list("constraints", constraints)
+            )
+            new_priority = str(priority or row["priority"]).upper()
+            if new_priority not in GOAL_PRIORITIES:
+                raise ValueError("invalid goal priority")
+            new_budget = _load(row["budget_json"], {}) if budget is None else budget
+            if not isinstance(new_budget, dict):
+                raise ValueError("goal budget must be an object")
+            new_deadline = row["deadline"] if deadline is None else deadline
+            if new_deadline is not None and (
+                not isinstance(new_deadline, (int, float))
+                or not math.isfinite(float(new_deadline))
+            ):
+                raise ValueError("goal deadline must be a finite unix timestamp")
+            merged_meta = _load(row["metadata_json"], {})
+            if metadata:
+                if not isinstance(metadata, dict):
+                    raise ValueError("goal metadata must be an object")
+                merged_meta.update(metadata)
+            now = self.clock()
+            self.db.execute(
+                "UPDATE goals SET objective=?,acceptance_criteria_json=?,constraints_json=?,"
+                "priority=?,budget_json=?,deadline=?,state=?,updated_at=?,metadata_json=? "
+                "WHERE goal_id=?",
+                (
+                    new_objective, _json(criteria), _json(limits), new_priority,
+                    _json(new_budget), new_deadline, target_state, now,
+                    _json(merged_meta), goal_id,
+                ),
+            )
+            self._append_event_locked(
+                row["run_id"],
+                "GOAL_STATE_CHANGED" if target_state != current_state else "GOAL_UPDATED",
+                state=target_state,
+                payload={
+                    "goal_id": goal_id, "from": current_state, "to": target_state,
+                    "priority": new_priority, "reason": str(reason or "")[:1000],
+                },
+            )
+            self.db.commit()
+            self._project_locked(row["run_id"])
+            return self._goal_info_locked(self._goal_row(goal_id))
+
     def assign_agent(
         self,
         run_id: str,
@@ -501,6 +751,7 @@ class DurableRunService:
         *,
         role: str,
         task_id: str | None = None,
+        goal_id: str | None = None,
         agent_id: str | None = None,
         state: str = "ACTIVE",
         desired_state: str = "ACTIVE",
@@ -515,6 +766,10 @@ class DurableRunService:
         now = self.clock()
         with self.lock:
             self._run_row(run_id, owner)
+            if goal_id is not None:
+                goal = self._goal_row(goal_id, owner)
+                if goal["run_id"] != run_id:
+                    raise ValueError("goal belongs to another run")
             existing = self.db.execute(
                 "SELECT * FROM agents WHERE agent_id=?", (aid,)
             ).fetchone()
@@ -523,10 +778,10 @@ class DurableRunService:
                     raise FileExistsError("agent_id already belongs to another run")
                 return self._agent_info_locked(existing)
             self.db.execute(
-                "INSERT INTO agents(agent_id,run_id,owner,role,task_id,state,desired_state,"
-                "heartbeat_at,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO agents(agent_id,run_id,owner,role,task_id,goal_id,state,desired_state,"
+                "heartbeat_at,created_at,updated_at,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    aid, run_id, owner, role, task_id, state, desired_state,
+                    aid, run_id, owner, role, task_id, goal_id, state, desired_state,
                     now, now, now, _json(metadata or {}),
                 ),
             )
@@ -538,6 +793,7 @@ class DurableRunService:
                     "agent_id": aid,
                     "role": role,
                     "task_id": task_id,
+                    "goal_id": goal_id,
                     "desired_state": desired_state,
                 },
             )
@@ -553,6 +809,7 @@ class DurableRunService:
         state: str | None = None,
         desired_state: str | None = None,
         task_id: str | None = None,
+        goal_id: str | None = None,
         chat_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         heartbeat: bool = True,
@@ -570,6 +827,10 @@ class DurableRunService:
                 raise DurableStateConflict(
                     f"invalid agent transition {current} -> {target}"
                 )
+            if goal_id is not None:
+                goal = self._goal_row(goal_id, owner)
+                if goal["run_id"] != row["run_id"]:
+                    raise ValueError("goal belongs to another run")
             if chat_id is not None:
                 chat = self._chat_row(chat_id, owner)
                 if chat["run_id"] != row["run_id"]:
@@ -580,12 +841,13 @@ class DurableRunService:
             now = self.clock()
             self.db.execute(
                 "UPDATE agents SET state=?,desired_state=?,task_id=COALESCE(?,task_id),"
-                "chat_id=COALESCE(?,chat_id),metadata_json=?,heartbeat_at=?,updated_at=? "
-                "WHERE agent_id=?",
+                "goal_id=COALESCE(?,goal_id),chat_id=COALESCE(?,chat_id),"
+                "metadata_json=?,heartbeat_at=?,updated_at=? WHERE agent_id=?",
                 (
                     target,
                     desired_state or row["desired_state"],
                     task_id,
+                    goal_id,
                     chat_id,
                     _json(merged_meta),
                     now if heartbeat else row["heartbeat_at"],
@@ -603,6 +865,7 @@ class DurableRunService:
                     "to": target,
                     "desired_state": desired_state or row["desired_state"],
                     "task_id": task_id if task_id is not None else row["task_id"],
+                    "goal_id": goal_id if goal_id is not None else row["goal_id"],
                     "chat_id": chat_id if chat_id is not None else row["chat_id"],
                 },
             )
@@ -644,6 +907,8 @@ class DurableRunService:
             if existing is not None:
                 if existing["owner"] != owner or existing["run_id"] != run_id:
                     raise FileExistsError("chat_id already belongs to another run")
+                if existing["agent_id"] != agent_id:
+                    raise FileExistsError("chat_id already belongs to another agent")
                 return self._chat_info_locked(existing)
             now = self.clock()
             effective_title = title or f"[SENTRA] {run_id} - {role}"
@@ -1014,13 +1279,17 @@ class DurableRunService:
         operation_id: str | None = None,
         mime_type: str | None = None,
         metadata: dict[str, Any] | None = None,
+        artifact_id: str | None = None,
+        expected_sha256: str | None = None,
     ) -> dict[str, Any]:
         target = Path(path).resolve()
         if not target.is_file():
             raise FileNotFoundError("artifact file does not exist")
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        if expected_sha256 is not None and digest!=expected_sha256:
+            raise ValueError("artifact content does not match expected SHA-256")
         size = target.stat().st_size
-        aid = "artifact-" + uuid.uuid4().hex
+        aid = _validate_id("artifact_id",artifact_id) if artifact_id else "artifact-" + uuid.uuid4().hex
         mime = mime_type or mimetypes.guess_type(target.name)[0] or "application/octet-stream"
         with self.lock:
             self._run_row(run_id, owner)
@@ -1028,6 +1297,13 @@ class DurableRunService:
                 op = self._operation_row(operation_id, owner)
                 if op["run_id"] != run_id:
                     raise ValueError("operation belongs to another run")
+            previous=self.db.execute("SELECT * FROM artifacts WHERE artifact_id=?",(aid,)).fetchone()
+            if previous is not None:
+                expected={"run_id":run_id,"operation_id":operation_id,"owner":owner,"path":str(target),
+                    "mime_type":mime,"sha256":digest,"size_bytes":size,"metadata_json":_json(metadata or {})}
+                if any(previous[key]!=value for key,value in expected.items()):
+                    raise ValueError("artifact identity collision")
+                return {**self.artifact_info(aid,owner),"idempotent_replay":True}
             now = self.clock()
             self.db.execute(
                 "INSERT INTO artifacts(artifact_id,run_id,operation_id,owner,path,mime_type,"
@@ -1111,8 +1387,21 @@ class DurableRunService:
                         "idempotent_replay": True,
                     }
                 raise DurableStateConflict("resource lease is already held")
-            token = (int(row["fencing_token"]) + 1) if row is not None else 1
+            fence_row = self.db.execute(
+                "SELECT fencing_token FROM lease_fences WHERE resource_key=?",
+                (key,),
+            ).fetchone()
+            previous_token = max(
+                int(row["fencing_token"]) if row is not None else 0,
+                int(fence_row["fencing_token"]) if fence_row is not None else 0,
+            )
+            token = previous_token + 1
             until = now + ttl_s
+            self.db.execute(
+                "INSERT INTO lease_fences(resource_key,fencing_token) VALUES(?,?) "
+                "ON CONFLICT(resource_key) DO UPDATE SET fencing_token=excluded.fencing_token",
+                (key, token),
+            )
             self.db.execute(
                 "INSERT INTO leases(resource_key,run_id,operation_id,owner,fencing_token,lease_until,updated_at)"
                 " VALUES(?,?,?,?,?,?,?) ON CONFLICT(resource_key) DO UPDATE SET "
@@ -1623,9 +1912,30 @@ class DurableRunService:
                 },
             }
 
-    def run_status(self, run_id: str, owner: str) -> dict[str, Any]:
+    def run_status(self, run_id: str, owner: str, *, include_details: bool = True) -> dict[str, Any]:
         with self.lock:
-            return self._run_info_locked(self._run_row(run_id, owner), include_details=True)
+            return self._run_info_locked(self._run_row(run_id, owner), include_details=include_details)
+
+
+    def _goal_info_locked(self, row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "goal_id": row["goal_id"],
+            "run_id": row["run_id"],
+            "owner": row["owner"],
+            "parent_goal_id": row["parent_goal_id"],
+            "external_key": row["external_key"],
+            "objective": row["objective"],
+            "acceptance_criteria": _load(row["acceptance_criteria_json"], []),
+            "constraints": _load(row["constraints_json"], []),
+            "priority": row["priority"],
+            "budget": _load(row["budget_json"], {}),
+            "deadline": row["deadline"],
+            "state": row["state"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "metadata": _load(row["metadata_json"], {}),
+            "terminal": row["state"] in TERMINAL_GOAL_STATES,
+        }
 
     def _agent_info_locked(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -1634,6 +1944,7 @@ class DurableRunService:
             "owner": row["owner"],
             "role": row["role"],
             "task_id": row["task_id"],
+            "goal_id": row["goal_id"],
             "state": row["state"],
             "desired_state": row["desired_state"],
             "chat_id": row["chat_id"],
@@ -1693,6 +2004,10 @@ class DurableRunService:
         }
         if not include_details:
             return data
+        goals = self.db.execute(
+            "SELECT * FROM goals WHERE run_id=? ORDER BY created_at,goal_id",
+            (row["run_id"],),
+        ).fetchall()
         agents = self.db.execute(
             "SELECT * FROM agents WHERE run_id=? ORDER BY created_at",
             (row["run_id"],),
@@ -1717,6 +2032,7 @@ class DurableRunService:
             "SELECT * FROM leases WHERE run_id=? ORDER BY updated_at",
             (row["run_id"],),
         ).fetchall()
+        data["goals"] = [self._goal_info_locked(item) for item in goals]
         data["agents"] = [self._agent_info_locked(item) for item in agents]
         data["chats"] = [self._chat_info_locked(item) for item in chats]
         data["operations"] = [self._operation_info_locked(item) for item in operations]

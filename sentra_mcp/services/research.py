@@ -1,6 +1,9 @@
 """Bounded temporary-chat research orchestration over SENTRA Edge workers."""
 from __future__ import annotations
 
+from orchestrator.rate_governor import ProviderRateGovernor
+from orchestrator.turn_scheduler import ConversationTurnScheduler
+
 import asyncio
 import json
 import re
@@ -13,8 +16,19 @@ from typing import Any
 from ..audit import AuditLogger
 from ..config import MCPConfig
 from .browser import BrowserControlService
+from .control_plane import ControlPlaneService
+from .durable import DurableRunService
 
 _TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"}
+
+
+
+class ResearchPartialFailure(RuntimeError):
+    """A research run failed after producing durable branch evidence."""
+
+    def __init__(self, message: str, *, nodes: list[dict[str, Any]]) -> None:
+        super().__init__(message)
+        self.nodes = list(nodes)
 
 
 def _bounded(text: str, limit: int = 12000) -> str:
@@ -52,8 +66,8 @@ class ResearchService:
         audit: AuditLogger,
         browser: BrowserControlService,
         *,
-        durable: object | None = None,
-        control_plane: object | None = None,
+        durable: DurableRunService | None = None,
+        control_plane: ControlPlaneService | None = None,
         db_path: Path | None = None,
     ) -> None:
         self.config = config
@@ -61,8 +75,24 @@ class ResearchService:
         self.browser = browser
         self.durable = durable
         self.control_plane = control_plane
+        # Real browser control shares the process-wide provider governor with
+        # PersistentSwarm. Injected/fake browser adapters are deterministic
+        # test harnesses and must not inherit wall-clock production throttling.
+        live_intervals = (
+            {"chatgpt": 30.0, "gemini": 15.0}
+            if isinstance(browser, BrowserControlService)
+            else {"chatgpt": 0.0, "gemini": 0.0}
+        )
+        self.rate_governor = ProviderRateGovernor(
+            live_intervals,
+            state_path=(
+                config.resolved_state_root / "provider-rate.json"
+                if isinstance(browser, BrowserControlService)
+                else None
+            ),
+        )
         self.db_path = Path(
-            db_path or (config.state_root / "research.sqlite3")
+            db_path or (config.resolved_state_root / "research.sqlite3")
         )
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
@@ -81,6 +111,7 @@ class ResearchService:
                 max_depth INTEGER NOT NULL,
                 beam_width INTEGER NOT NULL,
                 operation_id TEXT,
+                goal_id TEXT,
                 idempotency_key TEXT,
                 state TEXT NOT NULL,
                 result_json TEXT,
@@ -96,7 +127,7 @@ class ResearchService:
             str(row["name"])
             for row in self.db.execute("PRAGMA table_info(research_runs)").fetchall()
         }
-        for column in ("operation_id", "idempotency_key"):
+        for column in ("operation_id", "goal_id", "idempotency_key"):
             if column not in existing_columns:
                 self.db.execute(
                     f"ALTER TABLE research_runs ADD COLUMN {column} TEXT"
@@ -112,6 +143,65 @@ class ResearchService:
 
     def update_config(self, config: MCPConfig) -> None:
         self.config = config
+
+    def _goal_authority(
+        self,
+    ) -> ControlPlaneService | DurableRunService | None:
+        return self.control_plane or self.durable
+
+    def _create_research_goal(
+        self,
+        run_id: str,
+        owner: str,
+        *,
+        objective: str,
+        external_key: str,
+        parent_goal_id: str | None = None,
+        priority: str = "MEDIUM",
+        metadata: dict[str, Any] | None = None,
+        acceptance_criteria: list[str] | None = None,
+        constraints: list[str] | None = None,
+    ) -> str | None:
+        authority = self._goal_authority()
+        if authority is None:
+            return None
+        item = authority.create_goal(
+            run_id,
+            owner,
+            objective=objective,
+            acceptance_criteria=acceptance_criteria,
+            constraints=constraints,
+            priority=priority,
+            parent_goal_id=parent_goal_id,
+            external_key=external_key,
+            metadata=metadata,
+        )
+        return str(item["goal_id"])
+
+    def _transition_goal(
+        self,
+        goal_id: str | None,
+        owner: str,
+        state: str,
+        *,
+        reason: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        if not goal_id:
+            return None
+        authority = self._goal_authority()
+        if authority is None:
+            return None
+        current = authority.goal_info(goal_id, owner)
+        if current.get("state") == state or current.get("terminal"):
+            return current
+        return authority.update_goal(
+            goal_id,
+            owner,
+            state=state,
+            reason=reason,
+            metadata=metadata,
+        )
 
     def _set(
         self,
@@ -206,14 +296,27 @@ class ResearchService:
         deadline = time.monotonic() + availability_timeout_s
         while True:
             try:
-                return await self.browser.chat_start(
+                await self.rate_governor.wait("chatgpt")
+                self.rate_governor.record_dispatch("chatgpt")
+                result = await self.browser.chat_start(
                     owner,
                     prompt,
-                    timeout_s=min(timeout_s, 120),
+                    timeout_s=min(timeout_s, 45),
                 )
+                self.rate_governor.record_outcome("chatgpt", "COMPLETED")
+                return result
             except RuntimeError as exc:
+                lowered = str(exc).casefold()
+                if any(marker in lowered for marker in (
+                    "additional checks", "rate limit", "usage cap",
+                    "too many", "slow down", "limite",
+                )):
+                    self.rate_governor.record_outcome("chatgpt", "PLATFORM_HOLD")
                 if (
-                    "no READY Edge worker" not in str(exc)
+                    all(
+                        marker not in str(exc)
+                        for marker in ("no READY Edge worker", "QUEUE_TIMEOUT")
+                    )
                     or time.monotonic() >= deadline
                 ):
                     raise
@@ -242,6 +345,7 @@ class ResearchService:
                 lowered = message.casefold()
                 transient = (
                     "no READY Edge worker" in message
+                    or "QUEUE_TIMEOUT" in message
                     or "back/forward cache" in lowered
                     or "message channel is closed" in lowered
                     or "receiving end does not exist" in lowered
@@ -286,36 +390,57 @@ class ResearchService:
         *,
         timeout_s: int,
     ) -> list[dict[str, Any]]:
-        """Start every branch first, then collect by conversation id.
+        """Use the canonical split-phase scheduler for parallel research chats.
 
-        Only one controller tab is required. Each generation continues
-        server-side after CHAT_START, so logical parallelism does not require
-        one browser tab per subagent.
+        START remains sequential because one principal Edge controller owns
+        browser mutations. Collection is read-only and concurrent, so one slow
+        server-side generation cannot monopolize the controller.
         """
-        started: list[dict[str, Any]] = []
-        for prompt in prompts:
-            started.append(
-                await self._chat_start_retry(
-                    owner,
-                    prompt,
-                    timeout_s=timeout_s,
-                )
+
+        async def start(prompt: str) -> dict[str, Any]:
+            return await self._chat_start_retry(
+                owner,
+                prompt,
+                timeout_s=timeout_s,
             )
 
-        results: list[dict[str, Any]] = []
-        for item in started:
+        async def collect(item: dict[str, Any]) -> dict[str, Any]:
             url = str(item.get("conversation_url") or "")
             if not url:
                 raise RuntimeError("CHAT_START returned no conversation_url")
-            collected = await self._chat_collect_retry(
+            result = await self._chat_collect_retry(
                 owner,
                 url,
                 timeout_s=timeout_s,
             )
-            collected.setdefault("conversation_url", url)
-            collected.setdefault("conversation_id", item.get("conversation_id"))
-            results.append(collected)
-        return results
+            result.setdefault("conversation_url", url)
+            result.setdefault("conversation_id", item.get("conversation_id"))
+            return result
+
+        scheduler = ConversationTurnScheduler(
+            start=start,
+            collect=collect,
+            collect_concurrency=min(8, max(1, len(prompts))),
+        )
+        scheduled = await scheduler.run_batch(prompts)
+        outputs: list[dict[str, Any]] = []
+        for item in scheduled:
+            if item.get("_scheduler_error"):
+                phase = str(item.get("_scheduler_phase") or "collect")
+                started_url = item.get("conversation_url")
+                outputs.append({
+                    "text": "",
+                    "error": str(item["_scheduler_error"])[:2000],
+                    "phase": phase,
+                    "conversation_url": started_url,
+                    "conversation_id": item.get("conversation_id"),
+                })
+                continue
+            item = dict(item)
+            item.pop("_scheduler_item", None)
+            item["error"] = None
+            outputs.append(item)
+        return outputs
 
     async def _delete_chat_retry(
         self,
@@ -378,6 +503,7 @@ class ResearchService:
         role: str,
         conversation_id: str | None,
         conversation_url: str | None,
+        goal_id: str | None = None,
     ) -> tuple[str | None, str | None]:
         if self.durable is None:
             return None, None
@@ -385,29 +511,59 @@ class ResearchService:
         safe_node = "".join(ch for ch in node_id if ch.isalnum() or ch in "_.:-")[:40]
         agent_id = f"agent-{safe_run}-{safe_node}"
         chat_id = f"chat-{safe_run}-{safe_node}"
-        agent = self.durable.assign_agent(
-            run_id,
-            owner,
-            role=role,
-            task_id=f"research:{node_id}",
-            agent_id=agent_id,
-            state="ACTIVE",
-            desired_state="ACTIVE",
-            metadata={"research_node_id": node_id},
-        )
-        chat = self.durable.bind_chat(
-            run_id,
-            owner,
-            agent_id=agent["agent_id"],
-            provider="chatgpt",
-            conversation_id=str(conversation_id) if conversation_id else None,
-            conversation_url=str(conversation_url) if conversation_url else None,
-            title=f"[SENTRA] {node_id} - {role}",
-            chat_id=chat_id,
-            state="READY",
-            desired_state="READY",
-            metadata={"research_node_id": node_id},
-        )
+        metadata = {"research_node_id": node_id, "goal_id": goal_id}
+        if self.control_plane is not None:
+            chat = self.control_plane.bind_agent_chat(
+                run_id,
+                owner,
+                agent_id=agent_id,
+                chat_id=chat_id,
+                role=role,
+                conversation_id=str(conversation_id) if conversation_id else None,
+                conversation_url=str(conversation_url) if conversation_url else None,
+                task_id=f"research:{node_id}",
+                goal_id=goal_id,
+                metadata=metadata,
+            )
+            agent = self.durable.update_agent(
+                agent_id,
+                owner,
+                chat_id=chat_id,
+                goal_id=goal_id,
+                metadata=metadata,
+            )
+        else:
+            agent = self.durable.assign_agent(
+                run_id,
+                owner,
+                role=role,
+                task_id=f"research:{node_id}",
+                goal_id=goal_id,
+                agent_id=agent_id,
+                state="ACTIVE",
+                desired_state="ACTIVE",
+                metadata=metadata,
+            )
+            chat = self.durable.bind_chat(
+                run_id,
+                owner,
+                agent_id=agent["agent_id"],
+                provider="chatgpt",
+                conversation_id=str(conversation_id) if conversation_id else None,
+                conversation_url=str(conversation_url) if conversation_url else None,
+                title=f"[SENTRA] {node_id} - {role}",
+                chat_id=chat_id,
+                state="READY",
+                desired_state="READY",
+                metadata=metadata,
+            )
+            self.durable.update_agent(
+                agent_id,
+                owner,
+                chat_id=chat_id,
+                goal_id=goal_id,
+                metadata=metadata,
+            )
         return str(agent["agent_id"]), str(chat["chat_id"])
 
     async def _parallel(
@@ -418,6 +574,7 @@ class ResearchService:
         branches: int,
         timeout_s: int,
         urls: list[str],
+        root_goal_id: str | None,
     ) -> tuple[list[dict[str, Any]], str]:
         roles = [
             "evidence-focused researcher",
@@ -425,10 +582,38 @@ class ResearchService:
             "implementation and practicality researcher",
             "alternative-hypothesis researcher",
         ]
+        branch_goal_ids = [
+            self._create_research_goal(
+                run_id,
+                owner,
+                objective=(
+                    f"{roles[index % len(roles)]}: independently investigate "
+                    f"the research objective and return falsifiable evidence."
+                ),
+                external_key=f"research:branch-{index + 1}",
+                parent_goal_id=root_goal_id,
+                priority="HIGH",
+                acceptance_criteria=[
+                    "Return a concrete result or a durable failure record.",
+                    "Separate evidence, assumptions, uncertainty, and failure modes.",
+                ],
+                constraints=[
+                    "Work independently from sibling branches.",
+                    "Do not silently replace the parent objective.",
+                ],
+                metadata={
+                    "source": "sentra-research",
+                    "node_id": f"branch-{index + 1}",
+                    "role": roles[index % len(roles)],
+                },
+            )
+            for index in range(branches)
+        ]
         prompts = [
             (
                 f"You are independent subagent {index + 1}/{branches}, acting as a "
                 f"{roles[index % len(roles)]}.\n\n"
+                f"Authoritative subgoal id: {branch_goal_ids[index] or 'unavailable'}\n"
                 f"Research objective:\n{objective}\n\n"
                 "Work independently. State concrete evidence, assumptions, uncertainties, "
                 "failure modes, and what another agent should verify. Do not coordinate "
@@ -446,12 +631,15 @@ class ResearchService:
             url = item.get("conversation_url")
             if url:
                 urls.append(str(url))
-            node = {
+            node: dict[str, Any] = {
                 "id": f"branch-{index + 1}",
                 "depth": 1,
                 "kind": "branch",
                 "role": roles[index % len(roles)],
+                "goal_id": branch_goal_ids[index],
                 "text": str(item.get("text") or ""),
+                "error": str(item.get("error") or "") or None,
+                "phase": item.get("phase"),
                 "conversation_url": url,
                 "conversation_id": item.get("conversation_id"),
             }
@@ -462,19 +650,39 @@ class ResearchService:
                 role=node["role"],
                 conversation_id=node["conversation_id"],
                 conversation_url=node["conversation_url"],
+                goal_id=node["goal_id"],
             )
             node["agent_id"] = agent_id
             node["chat_id"] = chat_id
+            self._transition_goal(
+                node["goal_id"],
+                owner,
+                "FAILED" if node.get("error") else "SUCCEEDED",
+                reason=(
+                    str(node.get("error") or "")[:500]
+                    if node.get("error")
+                    else "research branch produced a result"
+                ),
+                metadata={
+                    "research_run_id": run_id,
+                    "agent_id": agent_id,
+                    "chat_id": chat_id,
+                    "phase": node.get("phase"),
+                },
+            )
             if self.control_plane is not None:
                 published = self.control_plane.publish_context(
                     run_id,
                     owner,
-                    event_type="RESULT",
+                    event_type="FAILURE" if node.get("error") else "RESULT",
                     subject=f"research.branch.{index + 1}",
                     payload={
                         "node_id": node["id"],
                         "role": node["role"],
+                        "goal_id": node["goal_id"],
                         "text": node["text"],
+                        "error": node.get("error"),
+                        "phase": node.get("phase"),
                         "conversation_id": node["conversation_id"],
                         "conversation_url": node["conversation_url"],
                     },
@@ -494,7 +702,7 @@ class ResearchService:
                 run_id,
                 owner,
                 after_seq=0,
-                types=["RESULT"],
+                types=["RESULT", "FAILURE"],
                 subject_prefixes=["research.branch."],
                 limit=max(1, branches),
             )
@@ -509,34 +717,77 @@ class ResearchService:
                 shared_nodes.append({
                     **node,
                     "text": str(payload.get("text") or node["text"]),
+                    "error": str(payload.get("error") or node.get("error") or "") or None,
                     "role": str(payload.get("role") or node["role"]),
                 })
 
+        successful = [node for node in shared_nodes if node.get("text") and not node.get("error")]
+        if not successful:
+            raise ResearchPartialFailure(
+                "all research branches failed before synthesis",
+                nodes=nodes,
+            )
+
+        synthesis_goal_id = self._create_research_goal(
+            run_id,
+            owner,
+            objective="Synthesize successful and failed research branches into one bounded result.",
+            external_key="research:synthesis",
+            parent_goal_id=root_goal_id,
+            priority="HIGH",
+            acceptance_criteria=[
+                "Reconcile branch agreement, disagreement, failures, and evidence gaps.",
+                "Produce one concrete integrated answer with explicit uncertainty.",
+            ],
+            constraints=["Do not hide failed branches or unsupported claims."],
+            metadata={"source": "sentra-research", "node_id": "synthesis"},
+        )
         synthesis_prompt = (
             "Act as the master research synthesizer. Reconcile the independent "
-            "branches below. Separate agreement, disagreement, evidence gaps, and "
-            "uncertainty. Produce a concrete integrated answer rather than concatenating "
-            "the branch outputs.\n\nOBJECTIVE:\n"
+            "branches below. Separate agreement, disagreement, evidence gaps, failed "
+            "branches, and uncertainty. Produce a concrete integrated answer rather "
+            "than concatenating the branch outputs.\n\nOBJECTIVE:\n"
             + objective
             + "\n\nSHARED CONTEXT BRANCH RESULTS:\n"
             + "\n\n".join(
-                f"[{node['id']} | {node.get('role', 'agent')}]\n{_bounded(node['text'])}"
+                (
+                    f"[{node['id']} | {node.get('role', 'agent')}]\n"
+                    + (
+                        "BRANCH FAILED: " + _bounded(str(node.get("error") or "unknown error"))
+                        if node.get("error")
+                        else _bounded(node["text"])
+                    )
+                )
                 for node in shared_nodes
             )
         )
-        synthesis = await self._chat_retry(
-            owner,
-            synthesis_prompt,
-            timeout_s=timeout_s,
-        )
+        try:
+            synthesis = await self._chat_retry(
+                owner,
+                synthesis_prompt,
+                timeout_s=timeout_s,
+            )
+        except Exception as exc:
+            self._transition_goal(
+                synthesis_goal_id,
+                owner,
+                "FAILED",
+                reason=str(exc)[:500],
+                metadata={"research_run_id": run_id},
+            )
+            raise ResearchPartialFailure(
+                f"research synthesis failed after {len(successful)} successful branch(es): {exc}",
+                nodes=nodes,
+            ) from exc
         url = synthesis.get("conversation_url")
         if url:
             urls.append(str(url))
-        synthesis_node = {
+        synthesis_node: dict[str, Any] = {
             "id": "synthesis",
             "depth": 2,
             "kind": "synthesis",
             "role": "master research synthesizer",
+            "goal_id": synthesis_goal_id,
             "text": str(synthesis.get("text") or ""),
             "conversation_url": url,
             "conversation_id": synthesis.get("conversation_id"),
@@ -548,9 +799,21 @@ class ResearchService:
             role=synthesis_node["role"],
             conversation_id=synthesis_node["conversation_id"],
             conversation_url=synthesis_node["conversation_url"],
+            goal_id=synthesis_goal_id,
         )
         synthesis_node["agent_id"] = synthesis_agent_id
         synthesis_node["chat_id"] = synthesis_chat_id
+        self._transition_goal(
+            synthesis_goal_id,
+            owner,
+            "SUCCEEDED",
+            reason="research synthesis produced a result",
+            metadata={
+                "research_run_id": run_id,
+                "agent_id": synthesis_agent_id,
+                "chat_id": synthesis_chat_id,
+            },
+        )
         if self.control_plane is not None:
             published = self.control_plane.publish_context(
                 run_id,
@@ -559,6 +822,7 @@ class ResearchService:
                 subject="research.synthesis",
                 payload={
                     "node_id": "synthesis",
+                    "goal_id": synthesis_goal_id,
                     "text": synthesis_node["text"],
                     "conversation_id": synthesis_node["conversation_id"],
                     "conversation_url": synthesis_node["conversation_url"],
@@ -580,6 +844,7 @@ class ResearchService:
 
     async def _mcts(
         self,
+        run_id: str,
         objective: str,
         owner: str,
         branches: int,
@@ -587,6 +852,7 @@ class ResearchService:
         beam_width: int,
         timeout_s: int,
         urls: list[str],
+        root_goal_id: str | None,
     ) -> tuple[list[dict[str, Any]], str]:
         nodes: list[dict[str, Any]] = []
         active: list[dict[str, Any]] = [{"id": "root", "text": objective}]
@@ -595,14 +861,42 @@ class ResearchService:
         for depth in range(1, max_depth + 1):
             prompts: list[str] = []
             parents: list[dict[str, Any]] = []
+            candidate_goal_ids: list[str | None] = []
             for index in range(branches):
                 parent = active[index % len(active)]
                 parents.append(parent)
+                node_id = f"node-{node_counter + index + 1}"
+                parent_goal_id = parent.get("goal_id") or root_goal_id
+                candidate_goal_id = self._create_research_goal(
+                    run_id,
+                    owner,
+                    objective=(
+                        f"Explore distinct MCTS research path {node_id} at depth {depth} "
+                        "and return falsifiable evidence or a durable failure."
+                    ),
+                    external_key=f"research:mcts:depth-{depth}:variant-{index + 1}",
+                    parent_goal_id=parent_goal_id,
+                    priority="HIGH",
+                    acceptance_criteria=[
+                        "Return evidence, weaknesses, next checks, and a candidate conclusion.",
+                    ],
+                    constraints=[
+                        "Treat the parent path as context, not authority to copy blindly.",
+                    ],
+                    metadata={
+                        "source": "sentra-research",
+                        "node_id": node_id,
+                        "depth": depth,
+                        "variant": index + 1,
+                    },
+                )
+                candidate_goal_ids.append(candidate_goal_id)
                 prompts.append(
                     "Explore one distinct research path for the objective below. Treat "
                     "the parent path as context, but actively search for a better, competing, "
                     "or falsifying explanation. Return evidence, weaknesses, next checks, "
                     "and a concise candidate conclusion.\n\n"
+                    f"AUTHORITATIVE SUBGOAL ID: {candidate_goal_id or 'unavailable'}\n"
                     f"OBJECTIVE:\n{objective}\n\n"
                     f"PARENT PATH:\n{_bounded(parent['text'], 10000)}\n\n"
                     f"DEPTH: {depth}; VARIANT: {index + 1}/{branches}"
@@ -615,7 +909,9 @@ class ResearchService:
             )
 
             candidates: list[dict[str, Any]] = []
-            for parent, item in zip(parents, outputs):
+            for parent, item, candidate_goal_id in zip(
+                parents, outputs, candidate_goal_ids
+            ):
                 node_counter += 1
                 url = item.get("conversation_url")
                 if url:
@@ -625,15 +921,96 @@ class ResearchService:
                     "parent": parent["id"],
                     "depth": depth,
                     "kind": "branch",
+                    "goal_id": candidate_goal_id,
                     "text": str(item.get("text") or ""),
+                    "error": str(item.get("error") or "") or None,
+                    "phase": item.get("phase"),
                     "conversation_url": url,
                     "conversation_id": item.get("conversation_id"),
                 }
+                agent_id, chat_id = self._bind_research_chat(
+                    run_id,
+                    owner,
+                    node_id=node["id"],
+                    role=f"mcts branch depth {depth}",
+                    conversation_id=node["conversation_id"],
+                    conversation_url=node["conversation_url"],
+                    goal_id=candidate_goal_id,
+                )
+                node["agent_id"] = agent_id
+                node["chat_id"] = chat_id
+                self._transition_goal(
+                    candidate_goal_id,
+                    owner,
+                    "FAILED" if node.get("error") else "SUCCEEDED",
+                    reason=(
+                        str(node.get("error") or "")[:500]
+                        if node.get("error")
+                        else "MCTS branch produced a result"
+                    ),
+                    metadata={
+                        "research_run_id": run_id,
+                        "agent_id": agent_id,
+                        "chat_id": chat_id,
+                    },
+                )
+                if self.control_plane is not None:
+                    published = self.control_plane.publish_context(
+                        run_id,
+                        owner,
+                        event_type="FAILURE" if node.get("error") else "RESULT",
+                        subject=f"research.mcts.{node['id']}",
+                        payload={
+                            "node_id": node["id"],
+                            "goal_id": candidate_goal_id,
+                            "parent": node["parent"],
+                            "depth": depth,
+                            "text": node["text"],
+                            "error": node.get("error"),
+                        },
+                        evidence=[],
+                        confidence=None,
+                        supersedes=[],
+                        task_id=f"research:{node['id']}",
+                        agent_id=agent_id,
+                        idempotency_key=f"research-mcts-{node['id']}",
+                    )
+                    node["context_event_id"] = published["event_id"]
                 nodes.append(node)
                 candidates.append(node)
 
+            successful_candidates = [
+                node for node in candidates
+                if node.get("text") and not node.get("error")
+            ]
+            if not successful_candidates:
+                raise ResearchPartialFailure(
+                    f"all MCTS branches failed at depth {depth}",
+                    nodes=nodes,
+                )
+            candidates = successful_candidates
             select_count = min(beam_width, len(candidates))
+            judge_goal_id = self._create_research_goal(
+                run_id,
+                owner,
+                objective=f"Judge MCTS candidate paths at depth {depth}.",
+                external_key=f"research:mcts:judge-depth-{depth}",
+                parent_goal_id=root_goal_id,
+                priority="HIGH",
+                acceptance_criteria=[
+                    f"Select exactly {select_count} distinct strongest candidate path(s).",
+                ],
+                constraints=[
+                    "Prefer evidence, novelty, falsifiability, and relevance over confidence.",
+                ],
+                metadata={
+                    "source": "sentra-research",
+                    "node_id": f"judge-depth-{depth}",
+                    "depth": depth,
+                },
+            )
             judge_prompt = (
+                f"Authoritative subgoal id: {judge_goal_id or 'unavailable'}\n"
                 "You are a research tree judge. Select the strongest candidate paths "
                 "for further expansion. Return STRICT JSON only in this shape: "
                 "{\"selected\":[0,1],\"reason\":\"...\"}. "
@@ -646,14 +1023,48 @@ class ResearchService:
                     for idx, node in enumerate(candidates)
                 )
             )
-            judge = await self._chat_retry(
-                owner,
-                judge_prompt,
-                timeout_s=timeout_s,
-            )
+            try:
+                judge = await self._chat_retry(
+                    owner,
+                    judge_prompt,
+                    timeout_s=timeout_s,
+                )
+            except Exception as exc:
+                self._transition_goal(
+                    judge_goal_id,
+                    owner,
+                    "FAILED",
+                    reason=str(exc)[:500],
+                    metadata={"research_run_id": run_id, "depth": depth},
+                )
+                raise ResearchPartialFailure(
+                    f"MCTS judge failed at depth {depth}: {exc}",
+                    nodes=nodes,
+                ) from exc
             judge_url = judge.get("conversation_url")
             if judge_url:
                 urls.append(str(judge_url))
+            judge_agent_id, judge_chat_id = self._bind_research_chat(
+                run_id,
+                owner,
+                node_id=f"judge-depth-{depth}",
+                role="mcts research judge",
+                conversation_id=judge.get("conversation_id"),
+                conversation_url=judge_url,
+                goal_id=judge_goal_id,
+            )
+            self._transition_goal(
+                judge_goal_id,
+                owner,
+                "SUCCEEDED",
+                reason="MCTS judge selected candidate paths",
+                metadata={
+                    "research_run_id": run_id,
+                    "depth": depth,
+                    "agent_id": judge_agent_id,
+                    "chat_id": judge_chat_id,
+                },
+            )
             parsed = _extract_json_object(str(judge.get("text") or "")) or {}
             selected = parsed.get("selected")
             valid: list[int] = []
@@ -681,6 +1092,9 @@ class ResearchService:
                     "id": f"judge-depth-{depth}",
                     "depth": depth,
                     "kind": "judge",
+                    "goal_id": judge_goal_id,
+                    "agent_id": judge_agent_id,
+                    "chat_id": judge_chat_id,
                     "text": str(judge.get("text") or ""),
                     "selected_indices": valid,
                     "conversation_url": judge_url,
@@ -688,7 +1102,21 @@ class ResearchService:
                 }
             )
 
+        final_goal_id = self._create_research_goal(
+            run_id,
+            owner,
+            objective="Produce the final synthesis from the surviving MCTS research paths.",
+            external_key="research:mcts:final-synthesis",
+            parent_goal_id=root_goal_id,
+            priority="HIGH",
+            acceptance_criteria=[
+                "Synthesize surviving paths with uncertainty, conflicts, evidence, and next steps.",
+            ],
+            constraints=["Do not overstate evidence or hide unresolved conflicts."],
+            metadata={"source": "sentra-research", "node_id": "final-synthesis"},
+        )
         final_prompt = (
+            f"Authoritative subgoal id: {final_goal_id or 'unavailable'}\n"
             "Synthesize the final research result from the surviving paths of a "
             "bounded MCTS-inspired beam search. Explicitly state uncertainty, unresolved "
             "conflicts, strongest evidence, and concrete next steps.\n\n"
@@ -698,19 +1126,55 @@ class ResearchService:
                 for node in active
             )
         )
-        final = await self._chat_retry(
-            owner,
-            final_prompt,
-            timeout_s=timeout_s,
-        )
+        try:
+            final = await self._chat_retry(
+                owner,
+                final_prompt,
+                timeout_s=timeout_s,
+            )
+        except Exception as exc:
+            self._transition_goal(
+                final_goal_id,
+                owner,
+                "FAILED",
+                reason=str(exc)[:500],
+                metadata={"research_run_id": run_id},
+            )
+            raise ResearchPartialFailure(
+                f"MCTS final synthesis failed: {exc}",
+                nodes=nodes,
+            ) from exc
         final_url = final.get("conversation_url")
         if final_url:
             urls.append(str(final_url))
+        final_agent_id, final_chat_id = self._bind_research_chat(
+            run_id,
+            owner,
+            node_id="final-synthesis",
+            role="mcts final synthesizer",
+            conversation_id=final.get("conversation_id"),
+            conversation_url=final_url,
+            goal_id=final_goal_id,
+        )
+        self._transition_goal(
+            final_goal_id,
+            owner,
+            "SUCCEEDED",
+            reason="MCTS final synthesis produced a result",
+            metadata={
+                "research_run_id": run_id,
+                "agent_id": final_agent_id,
+                "chat_id": final_chat_id,
+            },
+        )
         nodes.append(
             {
                 "id": "final-synthesis",
                 "depth": max_depth + 1,
                 "kind": "synthesis",
+                "goal_id": final_goal_id,
+                "agent_id": final_agent_id,
+                "chat_id": final_chat_id,
                 "text": str(final.get("text") or ""),
                 "conversation_url": final_url,
                 "conversation_id": final.get("conversation_id"),
@@ -730,25 +1194,73 @@ class ResearchService:
         max_depth: int,
         beam_width: int,
         timeout_s: int,
+        goal_id: str | None,
     ) -> None:
         urls: list[str] = []
         cleanup: list[dict[str, Any]] = []
         self._set(run_id, "RUNNING")
         try:
             if strategy == "single":
-                item = await self._chat_retry(
+                single_goal_id = self._create_research_goal(
+                    run_id,
                     owner,
-                    objective,
-                    timeout_s=timeout_s,
+                    objective="Execute the research objective in one bounded independent branch.",
+                    external_key="research:single-1",
+                    parent_goal_id=goal_id,
+                    priority="HIGH",
+                    acceptance_criteria=["Return one concrete research result or durable failure."],
+                    constraints=["Preserve the parent objective and report uncertainty."],
+                    metadata={"source": "sentra-research", "node_id": "single-1"},
                 )
+                try:
+                    item = await self._chat_retry(
+                        owner,
+                        (
+                            f"Authoritative subgoal id: {single_goal_id or 'unavailable'}\n\n"
+                            + objective
+                        ),
+                        timeout_s=timeout_s,
+                    )
+                except Exception as exc:
+                    self._transition_goal(
+                        single_goal_id,
+                        owner,
+                        "FAILED",
+                        reason=str(exc)[:500],
+                        metadata={"research_run_id": run_id},
+                    )
+                    raise
                 url = item.get("conversation_url")
                 if url:
                     urls.append(str(url))
+                agent_id, chat_id = self._bind_research_chat(
+                    run_id,
+                    owner,
+                    node_id="single-1",
+                    role="single research agent",
+                    conversation_id=item.get("conversation_id"),
+                    conversation_url=url,
+                    goal_id=single_goal_id,
+                )
+                self._transition_goal(
+                    single_goal_id,
+                    owner,
+                    "SUCCEEDED",
+                    reason="single research branch produced a result",
+                    metadata={
+                        "research_run_id": run_id,
+                        "agent_id": agent_id,
+                        "chat_id": chat_id,
+                    },
+                )
                 nodes = [
                     {
                         "id": "single-1",
                         "depth": 1,
                         "kind": "branch",
+                        "goal_id": single_goal_id,
+                        "agent_id": agent_id,
+                        "chat_id": chat_id,
                         "text": str(item.get("text") or ""),
                         "conversation_url": url,
                         "conversation_id": item.get("conversation_id"),
@@ -764,10 +1276,12 @@ class ResearchService:
                     branches,
                     timeout_s,
                     urls,
+                    goal_id,
                 )
                 algorithm = "bounded-parallel-subagents"
             else:
                 nodes, answer = await self._mcts(
+                    run_id,
                     objective,
                     owner,
                     branches,
@@ -775,6 +1289,7 @@ class ResearchService:
                     beam_width,
                     timeout_s,
                     urls,
+                    goal_id,
                 )
                 algorithm = "bounded-mcts-inspired-beam-search"
 
@@ -782,6 +1297,7 @@ class ResearchService:
                 cleanup = await self._cleanup_chats(owner, urls)
             result = {
                 "run_id": run_id,
+                "goal_id": goal_id,
                 "objective": objective,
                 "strategy": strategy,
                 "algorithm": algorithm,
@@ -791,6 +1307,17 @@ class ResearchService:
                 "conversations_created": len(dict.fromkeys(urls)),
                 "cleanup": cleanup,
             }
+            self._transition_goal(
+                goal_id,
+                owner,
+                "SUCCEEDED",
+                reason="research acceptance path completed",
+                metadata={
+                    "research_run_id": run_id,
+                    "algorithm": algorithm,
+                    "nodes": len(nodes),
+                },
+            )
             self._set(run_id, "COMPLETED", result=result)
             self.audit.emit(
                 "research.complete",
@@ -809,6 +1336,13 @@ class ResearchService:
                     cleanup = await self._cleanup_chats(owner, urls)
                 except Exception:
                     pass
+            self._transition_goal(
+                goal_id,
+                owner,
+                "CANCELLED",
+                reason="research cancelled",
+                metadata={"research_run_id": run_id},
+            )
             self._set(
                 run_id,
                 "CANCELLED",
@@ -822,10 +1356,37 @@ class ResearchService:
                     cleanup = await self._cleanup_chats(owner, urls)
                 except Exception:
                     pass
+            partial_nodes = (
+                list(exc.nodes)
+                if isinstance(exc, ResearchPartialFailure)
+                else []
+            )
+            partial_result = None
+            if partial_nodes or cleanup:
+                partial_result = {
+                    "run_id": run_id,
+                    "objective": objective,
+                    "strategy": strategy,
+                    "temporary": temporary,
+                    "answer": "",
+                    "nodes": partial_nodes,
+                    "cleanup": cleanup,
+                    "partial": True,
+                }
+            self._transition_goal(
+                goal_id,
+                owner,
+                "FAILED",
+                reason=str(exc)[:500],
+                metadata={
+                    "research_run_id": run_id,
+                    "partial_nodes": len(partial_nodes),
+                },
+            )
             self._set(
                 run_id,
                 "FAILED",
-                result={"cleanup": cleanup} if cleanup else None,
+                result=partial_result,
                 error=str(exc)[:4000],
             )
 
@@ -864,6 +1425,7 @@ class ResearchService:
             "research:" + uuid.uuid4().hex
         )
         operation_id: str | None = None
+        goal_id: str | None = None
         if self.durable is not None:
             durable_run = self.durable.create_run(
                 owner,
@@ -886,6 +1448,28 @@ class ResearchService:
                     )
                     data["idempotent_replay"] = True
                     return data
+            goal_id = self._create_research_goal(
+                run_id,
+                owner,
+                objective=objective,
+                external_key="research:root",
+                priority="CRITICAL",
+                acceptance_criteria=[
+                    "Complete the requested research strategy with durable branch evidence.",
+                    "Preserve successful partial results if sibling branches fail.",
+                    "Produce a synthesis when at least one branch succeeds.",
+                ],
+                constraints=[
+                    "Control Plane owns authority; Context Bus is knowledge only.",
+                    "Never replay an uncertain message-send side effect automatically.",
+                ],
+                metadata={
+                    "source": "sentra-research",
+                    "strategy": strategy,
+                    "branches": branches,
+                    "idempotency_key": key,
+                },
+            )
             durable_operation = self.durable.create_operation(
                 run_id,
                 owner,
@@ -908,8 +1492,8 @@ class ResearchService:
         self.db.execute(
             "INSERT INTO research_runs("
             "id,owner,objective,strategy,temporary,branches,max_depth,beam_width,"
-            "operation_id,idempotency_key,state,created,updated) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?, 'PENDING',?,?)",
+            "operation_id,goal_id,idempotency_key,state,created,updated) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?, 'PENDING',?,?)",
             (
                 run_id,
                 owner,
@@ -920,6 +1504,7 @@ class ResearchService:
                 max_depth,
                 beam_width,
                 operation_id,
+                goal_id,
                 key,
                 now,
                 now,
@@ -954,6 +1539,7 @@ class ResearchService:
                 max_depth=max_depth,
                 beam_width=beam_width,
                 timeout_s=timeout_s,
+                goal_id=goal_id,
             ),
             name=f"sentra-research-{run_id[:8]}",
         )
@@ -981,6 +1567,7 @@ class ResearchService:
         return {
             "run_id": run_id,
             "operation_id": operation_id,
+            "goal_id": goal_id,
             "idempotency_key": key,
             "state": "PENDING",
             "strategy": strategy,
@@ -1006,6 +1593,7 @@ class ResearchService:
         data = {
             "run_id": row["id"],
             "operation_id": row["operation_id"],
+            "goal_id": row["goal_id"],
             "idempotency_key": row["idempotency_key"],
             "strategy": row["strategy"],
             "temporary": bool(row["temporary"]),

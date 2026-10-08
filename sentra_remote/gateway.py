@@ -126,6 +126,8 @@ class RemoteGatewayService:
             "source_hash": server.get("source_hash"),
             "executable_sha256": server.get("executable_sha256"),
             "schema_hash": contract.get("schema_hash"),
+            "tool_schema_hash": contract.get("tool_schema_hash") or contract.get("schema_hash"),
+            "tool_names_hash": contract.get("tool_names_hash"),
             "tool_count": contract.get("tool_count"),
             "tool_verified": tool is None or tool == "system.shutdown_agent" or tool in tool_names,
         }
@@ -296,6 +298,19 @@ class RemoteGatewayService:
         context: dict[str, Any] | None = None
         try:
             contract = self._device_contract(user_id, device_id, tool=tool)
+            replay_key = str(idempotency_key or "").strip()
+            if replay_key:
+                existing = self.store.job_for_idempotency(
+                    user_id,
+                    device_id,
+                    replay_key,
+                    tool=tool,
+                    arguments=arguments,
+                )
+                if existing is not None:
+                    projected = self._project_remote(user_id, existing)
+                    projected["idempotent_replay"] = True
+                    return projected
             context, replay = self._begin_operation(
                 user_id,
                 device_id,

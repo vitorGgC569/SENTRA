@@ -1,7 +1,6 @@
 """Loopback HTTP relay: bearer authentication, durable leases, bounded requests."""
 from __future__ import annotations
 
-import hashlib
 import json
 import secrets
 import threading
@@ -10,12 +9,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from .bootstrap import bootstrap_proof, extension_identity, write_extension_bootstrap
 from .protocol import ChatJob, ChatResult
 from .job_store import JobStore
 
 
 class RelayState(JobStore):
     WORKER_ONLINE_WINDOW_S = 45.0
+    EXTENSION_ONLINE_WINDOW_S = 90.0
     POOL_LEASE_WINDOW_S = 45.0
 
     def __init__(self, extension_dir=None, db_path=":memory:"):
@@ -23,8 +24,13 @@ class RelayState(JobStore):
         self.extension_dir = extension_dir
         self._last_poll = {}
         self._worker_status = {}
+        self._extension_seen = 0.0
+        self._extension_status = {}
         self._pool_owner = None
         self._pool_seen = 0.0
+        self._bootstrap_successes = 0
+        self._bootstrap_failures = 0
+        self._bootstrap_last_seen = None
         self.started_at = time.time()
 
     def extension_version(self):
@@ -32,29 +38,45 @@ class RelayState(JobStore):
         if not root:
             return {"version": None}
         try:
-            manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
-            files = {
-                name: {
-                    "sha256": hashlib.sha256((root / name).read_bytes()).hexdigest()
-                }
-                for name in (
-                    "service-worker.js",
-                    "content-script.js",
-                    "selectors.js",
-                    "observer.js",
-                )
-            }
-            source_hash = hashlib.sha256(
-                json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
+            return extension_identity(root)
+        except (OSError, ValueError, KeyError):
+            return {"version": None, "error": "extension manifest unavailable or stale"}
+
+    def note_bootstrap(self, success: bool) -> None:
+        with self.lock:
+            self._bootstrap_last_seen = time.time()
+            if success:
+                self._bootstrap_successes += 1
+            else:
+                self._bootstrap_failures += 1
+
+    def bootstrap_status(self) -> dict:
+        with self.lock:
             return {
-                "version": manifest["version"],
-                "build_id": manifest.get("sentra_build_id"),
-                "source_hash": source_hash,
-                "files": files,
+                "successes": self._bootstrap_successes,
+                "failures": self._bootstrap_failures,
+                "last_seen": self._bootstrap_last_seen,
             }
-        except (OSError, ValueError):
-            return {"version": None, "error": "extension manifest unavailable"}
+
+    def mark_extension(self, status=None):
+        if status is not None and not isinstance(status, dict):
+            raise ValueError("extension status must be an object")
+        with self.lock:
+            self._extension_seen = time.time()
+            if isinstance(status, dict):
+                self._extension_status = dict(status)
+
+    def extension_status(self):
+        with self.lock:
+            last_seen = float(self._extension_seen or 0.0)
+            status = dict(self._extension_status or {})
+        age_s = (time.time() - last_seen) if last_seen else None
+        return {
+            "online": bool(last_seen and age_s is not None and age_s <= self.EXTENSION_ONLINE_WINDOW_S),
+            "last_seen": last_seen or None,
+            "age_s": round(age_s, 3) if age_s is not None else None,
+            "status": status,
+        }
 
     def mark_worker(self, worker="", status=None):
         if not isinstance(worker, str) or not worker.startswith("TAB-"):
@@ -188,16 +210,76 @@ def make_handler(state, token):
                 return False
             return True
 
+        def _read_json(self, maximum=1048576):
+            length = int(self.headers.get("Content-Length", 0))
+            if not 0 < length <= int(maximum):
+                self._send({"error": f"body must be 1..{int(maximum)} bytes"}, 413)
+                return None
+            data = json.loads(self.rfile.read(length))
+            if not isinstance(data, dict):
+                raise ValueError("JSON object required")
+            return data
+
+        def _bootstrap(self, data):
+            origin = self.headers.get("Origin", "")
+            extension_id = (
+                origin.removeprefix("chrome-extension://")
+                if origin.startswith("chrome-extension://")
+                else ""
+            )
+            if (
+                len(extension_id) != 32
+                or any(ch < "a" or ch > "p" for ch in extension_id)
+            ):
+                state.note_bootstrap(False)
+                return self._send({"error": "forbidden extension origin"}, 403)
+            if self.headers.get("Host") not in {f"127.0.0.1:{self.server.server_port}",
+                                                 f"localhost:{self.server.server_port}"}:
+                state.note_bootstrap(False)
+                return self._send({"error": "invalid host"}, 403)
+            identity = state.extension_version()
+            if not identity.get("version"):
+                state.note_bootstrap(False)
+                return self._send({"error": "extension identity unavailable"}, 503)
+            supplied = {
+                "schema_version": data.get("schema_version"),
+                "extension_version": data.get("extension_version"),
+                "build_id": data.get("build_id"),
+                "source_hash": data.get("source_hash"),
+            }
+            expected_identity = {
+                "schema_version": 1,
+                "extension_version": identity.get("version"),
+                "build_id": identity.get("build_id"),
+                "source_hash": identity.get("source_hash"),
+            }
+            if supplied != expected_identity:
+                state.note_bootstrap(False)
+                return self._send({"error": "extension identity mismatch",
+                                   "expected": expected_identity}, 409)
+            proof = str(data.get("proof") or "")
+            expected_proof = bootstrap_proof(token, identity)
+            if not proof or not secrets.compare_digest(proof, expected_proof):
+                state.note_bootstrap(False)
+                return self._send({"error": "extension bootstrap proof required"}, 401)
+            state.note_bootstrap(True)
+            return self._send({"ok": True, "token": token, **expected_identity})
+
         def do_POST(self):
-            if not self._authorized():
-                return
             try:
-                length = int(self.headers.get("Content-Length", 0))
-                if not 0 < length <= 1048576:
-                    return self._send({"error": "body must be 1..1048576 bytes"}, 413)
-                data = json.loads(self.rfile.read(length))
-                if not isinstance(data, dict):
-                    raise ValueError("JSON object required")
+                if self.path == "/auth/bootstrap":
+                    data = self._read_json(8192)
+                    if data is None:
+                        return
+                    return self._bootstrap(data)
+                if not self._authorized():
+                    return
+                data = self._read_json()
+                if data is None:
+                    return
+                if self.path == "/extension/heartbeat":
+                    state.mark_extension(data.get("status"))
+                    return self._send({"ok": True, "extension": state.extension_status()})
                 if self.path == "/workers/heartbeat":
                     worker = str(data.get("worker") or "")
                     status = data.get("status")
@@ -215,7 +297,7 @@ def make_handler(state, token):
                         "task_id", "prompt", "timeout_s", "new_chat",
                         "conversation_url", "kind", "images", "target_worker",
                         "browser_action", "browser_args", "project_id",
-                        "project_url", "chat_title",
+                        "project_url", "chat_title", "provider", "model",
                     }
                     if set(data) - allowed:
                         raise ValueError("unknown job fields")
@@ -244,10 +326,23 @@ def make_handler(state, token):
                 return self._send({"ok": True, "authentication": "bearer",
                                    **state.counts(), "workers_online": state.workers_online(),
                                    "workers_ever_seen": state.workers_ever_seen(),
+                                   "extension": state.extension_status(),
                                    "pool": state.pool_status(),
+                                   "bootstrap": state.bootstrap_status(),
                                    "uptime_s": round(time.time()-state.started_at, 1)})
             if parsed.path == "/extension/version":
-                return self._send(state.extension_version())
+                identity = state.extension_version()
+                bootstrap_refreshed = None
+                if state.extension_dir:
+                    try:
+                        write_extension_bootstrap(Path(state.extension_dir), token)
+                        bootstrap_refreshed = True
+                    except (OSError, ValueError, KeyError):
+                        bootstrap_refreshed = False
+                return self._send({
+                    **identity,
+                    "bootstrap_refreshed": bootstrap_refreshed,
+                })
             if not self._authorized():
                 return
             qs = parse_qs(parsed.query)
@@ -262,7 +357,11 @@ def make_handler(state, token):
                 if parsed.path == "/jobs/wait":
                     jid = (qs.get("job_id") or [""])[0]
                     timeout = float((qs.get("timeout_s") or ["20"])[0])
-                    return self._send(state.wait(jid, timeout) or {"pending": True})
+                    result = state.wait(jid, timeout)
+                    if result is not None:
+                        return self._send(result)
+                    status = state.pending_status(jid)
+                    return self._send({"pending": True, **status})
                 return self._send({"error": "not found"}, 404)
             except ValueError as exc:
                 return self._send({"error": str(exc)}, 400)
@@ -302,6 +401,8 @@ class RelayServer:
         self.token = token or secrets.token_urlsafe(32)
         if len(self.token) < 32:
             raise ValueError("relay token must contain at least 32 characters")
+        if extension_dir is not None:
+            write_extension_bootstrap(Path(extension_dir), self.token)
         self.state = RelayState(extension_dir, db_path)
         try:
             self.server = BoundedHTTPServer((host, port), make_handler(self.state, self.token))

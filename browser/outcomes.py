@@ -8,6 +8,13 @@ def classify_failure(error):
     # Only failures raised by prompt preparation establish NOT_SENT. Generic
     # browser/identity errors may occur after SEND_MESSAGE (e.g. stale chat
     # detected after WAIT_RESPONSE), so they must not authorize replay.
+    if "PRE_SEND_NOT_READY" in text:
+        return {"delivery_state": "NOT_SENT", "error_kind": "PRE_SEND_NOT_READY", "retry_safe": True}
+    # Gemini model selection runs before SEND_MESSAGE in both CHAT_START and
+    # continuation paths. Failure here is deterministic proof that the prompt
+    # was not delivered, so replay after UI repair is safe.
+    if "MODEL_SELECTION_FAILED" in text:
+        return {"delivery_state": "NOT_SENT", "error_kind": "PRE_SEND_MODEL_SELECTION", "retry_safe": True}
     if any(code in text for code in ("PROMPT_MISMATCH", "FILL_FAILED", "CLEAR_FAILED", "STALE_DRAFT")):
         return {"delivery_state": "NOT_SENT", "error_kind": "PROMPT_INTEGRITY", "retry_safe": True}
     return {"delivery_state": "UNCERTAIN", "error_kind": "DELIVERY_UNCERTAIN", "retry_safe": False}

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SENTRA — Canvas</title>
+  <link rel="stylesheet" href="/native.css">
+  <link rel="stylesheet" href="/vendor/xterm.css">
+  <script src="/vendor/xterm.js" defer></script>
+  <script src="/vendor/addon-fit.js" defer></script>
+  <script src="/native.js" defer></script>
+</head>
+<body>
+<header class="native-titlebar">
+  <div class="title-drag pywebview-drag-region"><span class="title-mark">S</span><span>SENTRA</span><span class="native-caption-sub">CANVAS</span></div>
+  <div class="title-buttons"><button id="window-minimize" title="Minimizar" aria-label="Minimizar">−</button><button id="window-maximize" title="Restaurar ou maximizar" aria-label="Maximizar">□</button><button id="window-close" class="title-close" title="Fechar SENTRA" aria-label="Fechar">×</button></div>
+</header>
+<div id="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="side-top">
+      <div class="logo"><span class="logo-shape">S</span><strong>SENTRA</strong><span class="version">DESKTOP</span></div>
+      <div class="filter-row"><span class="icon-search">⌕</span><input id="workspace-filter" placeholder="Filtrar workspaces" aria-label="Filtrar workspaces" autocomplete="off"><button id="new-workspace" title="Criar workspace" aria-label="Novo workspace">＋</button></div>
+      <div class="side-label">WORKSPACES <span id="ws-total">0</span></div>
+    </div>
+    <nav id="workspace-list" aria-label="Workspaces"></nav>
+    <div class="side-footer"><button id="show-overview" title="Visão geral do workspace">◫ <span>Visão geral</span></button><button id="show-settings" title="Configurações e informações">⚙</button></div>
+  </aside>
+
+  <section class="main">
+    <div class="canvas-top-left">
+      <button class="glass round" id="toggle-sidebar" title="Exibir ou ocultar barra lateral">☰</button>
+      <div class="project-breadcrumb"><span class="project-dot"></span><span id="current-project">Seu espaço</span><span id="project-state">LOCAL</span></div>
+    </div>
+    <div class="toolbar glass" role="toolbar" aria-label="Ferramentas do canvas">
+      <button class="tool active" data-tool="select" title="Selecionar (V)" aria-label="Selecionar">⌁</button>
+      <span class="bar-separator"></span>
+      <button class="tool" data-tool="terminal" title="Novo terminal (T)" aria-label="Criar terminal">▣</button>
+      <button class="tool" data-tool="agent" title="Novo agente (A)" aria-label="Criar agente">♧</button>
+      <button class="tool" data-tool="team" title="Nova equipe (E)" aria-label="Criar equipe">◎</button>
+      <button class="tool" data-tool="note" title="Nova nota (N)" aria-label="Criar nota">▤</button>
+      <span class="bar-separator"></span>
+      <button class="tool" data-tool="link" title="Conectar dois nós (L)" aria-label="Conectar nós">⤳</button>
+      <button class="tool" data-tool="pan" title="Mover canvas (Espaço)" aria-label="Mover canvas">✥</button>
+    </div>
+    <div class="canvas-top-right">
+      <button class="glass narrow" id="events-button" title="Eventos e auditoria">◷ <span>Atividade</span></button>
+      <button class="glass narrow" id="help-button" title="Ajuda e atalhos">?</button>
+    </div>
+
+    <div class="viewport" id="viewport" tabindex="0" aria-label="Canvas visual SENTRA" aria-describedby="navigation-hint">
+      <div class="grid-layer" id="grid-layer"></div>
+      <div id="world" class="world">
+        <svg class="edges" id="edges" aria-label="Conexões entre nós">
+          <defs><marker id="arrow-tip" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 1 1 L 9 5 L 1 9" fill="none" stroke="#85909f" stroke-width="1.7"/></marker></defs>
+          <g id="edge-paths"></g>
+        </svg>
+        <div class="node-layer" id="node-layer"></div>
+      </div>
+      <div id="onboarding" class="onboarding" hidden>
+        <div class="onboarding-symbol">S</div>
+        <h1 id="onboarding-title">Tudo começa com um workspace</h1>
+        <p id="onboarding-description">Crie seu primeiro projeto para visualizar terminais, agentes e equipes em um canvas conectado.</p>
+        <button class="action" id="onboarding-action">Criar workspace</button>
+      </div>
+      <div id="connection-hint" hidden>Clique em um segundo nó para conectar <button id="cancel-link">Cancelar</button></div>
+    </div>
+
+    <section id="terminal-stage" class="terminal-stage" hidden aria-label="Terminal ampliado"></section>
+
+    <div class="bottom-left glass status"><span class="status-led"></span><span id="runtime-status">SENTRA local</span><span class="status-sep">·</span><span id="canvas-count">0 nós</span><span id="navigation-hint">Arraste o fundo para navegar · Duplo clique no cabeçalho para ampliar</span></div>
+    <div class="bottom-right">
+      <button class="glass small" id="fit-nodes" title="Enquadrar todos os nós">⛶</button>
+      <button class="glass small" id="reset-view" title="Centralizar origem">⌖</button>
+      <div class="zoom glass"><button id="zoom-out" aria-label="Diminuir zoom">−</button><button id="zoom-label" title="Zoom de 100%" aria-label="Zoom de 100%">100%</button><button id="zoom-in" aria-label="Aumentar zoom">＋</button></div>
+    </div>
+  </section>
+
+  <aside class="inspector" id="inspector" hidden>
+    <div class="inspector-head"><div><div class="micro-title" id="inspector-label">INSPECTOR</div><h2 id="inspector-title">Detalhes</h2></div><button id="close-inspector" title="Fechar inspetor">×</button></div>
+    <div id="inspector-content"></div>
+  </aside>
+</div>
+
+<div class="modal-shade" id="modal-shade" hidden>
+  <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <header class="modal-heading"><div class="micro-title" id="modal-kicker">SENTRA CANVAS</div><h2 id="modal-title">Criar</h2><button id="modal-close" aria-label="Fechar">×</button></header>
+    <form id="modal-form" autocomplete="off"><div id="modal-fields"></div><div class="modal-actions"><button type="button" id="modal-cancel">Cancelar</button><button type="submit" class="action" id="modal-submit">Criar</button></div></form>
+  </section>
+</div>
+<div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

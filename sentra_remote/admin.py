@@ -19,6 +19,7 @@ def _workspace_service(path: Path) -> WorkspaceRegistry:
     # are still loaded so attempts to remove the primary SENTRA root remain
     # protected consistently with the running MCP.
     from sentra_mcp.config import MCPConfig
+
     return WorkspaceRegistry(
         MCPConfig(),
         state_path=path,
@@ -53,21 +54,23 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     if args.command in {"approve-config", "reject-config", "pending-config"}:
-        service = _config_service(Path(args.state).expanduser())
+        config_service = _config_service(Path(args.state).expanduser())
         if args.command == "approve-config":
-            result = service.approve_local(args.request_id)
+            result = config_service.approve_local(args.request_id)
         elif args.command == "reject-config":
-            result = service.reject_local(args.request_id)
+            result = config_service.reject_local(args.request_id)
         else:
-            result = service.list_pending()
+            result = config_service.list_pending()
     else:
-        service = _workspace_service(Path(args.workspace_state).expanduser())
+        workspace_service = _workspace_service(
+            Path(args.workspace_state).expanduser()
+        )
         if args.command == "approve-workspace":
-            result = service.approve_local(args.request_id)
+            result = workspace_service.approve_local(args.request_id)
         elif args.command == "reject-workspace":
-            result = service.reject_local(args.request_id)
+            result = workspace_service.reject_local(args.request_id)
         else:
-            result = service.pending()
+            result = workspace_service.pending()
 
     print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0

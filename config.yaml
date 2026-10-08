@@ -22,8 +22,15 @@ codex_web:
   require_web_namespace: true
   upstream:
     repository: "https://github.com/miuuyy/codex-chatgpt-web.git"
-    ref: "v6.0.0"
+    ref: "v6.1.1"
     path: "third_party/codex-chatgpt-web"
+
+# Gemini Web through the same durable principal-Edge relay.
+# This route is opt-in and never replaces the default ChatGPT extension provider.
+gemini_web:
+  enabled: false
+  relay_base: "http://127.0.0.1:8765"
+  model: "flash"  # flash-lite | flash | pro
 
 browser:
   # Alvo oficial: chatgpt.com no Microsoft Edge, modo NÃO-privado, mantendo infos do navegador.
@@ -38,10 +45,11 @@ browser:
   stable_samples: 3
   # provider: "playwright" (protótipo/E2E) | "extension" (uso live via Edge real)
   provider: "extension"
-  # Pool de tabs reais (extensão): poucas tabs servem muitas conversas por reutilização
+  # Principal Edge: um único controller reutiliza várias conversas por URL/ID.
+  # Não abra tabs adicionais no fluxo normal; o swarm é paralelo logicamente.
   tab_pool:
     min_tabs: 1
-    max_tabs: 4
+    max_tabs: 1
   relay_base: "http://127.0.0.1:8765"
   # Perfil dedicado do bot ("nosso próprio navegador", isolado das abas pessoais).
   bot_profile_dir: "browser_profiles/edge-bot"
@@ -60,7 +68,7 @@ routing:
 
 validation:
   execution:
-    backend: host  # CLI: --sandbox docker (no host fallback; recommended for candidate code)
+    backend: docker  # fail-closed default; host requires explicit --trust-workspace
   commands: ["[[TEST|all]]"]
   timeout_seconds: 120
   profiles: {}  # Operator-only argv lists, e.g. all: ["node", "--test"]
@@ -71,7 +79,9 @@ orchestrator:
   max_parallel_sessions: 1  # Start small; --workers overrides actual task concurrency
   repeated_failure_limit: 3
   no_progress_limit: 3
-  worktree_isolation: true
+  # Candidate execution uses filesystem snapshots today. Git worktrees are not
+  # claimed unless a future backend explicitly selects them.
+  candidate_isolation: "filesystem_snapshot"
 
 oma:
   validators_required: 3
@@ -111,10 +121,10 @@ oma:
       disagreement:
         add_agents: 3
       low_confidence:
-        add_agents: 5
+        add_agents: 3
       critical_task:
-        add_agents: 10
-    max_agents: 500
+        add_agents: 3
+    max_agents: 8
 
 # Optional typed decision layer (Kev/Jev/System One compatible).
 # Disabled by default: with enabled=false, SENTRA behavior is unchanged.

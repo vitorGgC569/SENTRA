@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sentra_mcp.services.context import ContextBusService
+from sentra_mcp.services.control_plane import ControlPlaneService
 from sentra_mcp.services.durable import DurableRunService, DurableStateConflict, StaleFenceError
 
 
@@ -33,20 +35,677 @@ class TurnCapability:
     conversation_fence: int | None = None
     completed_revision: int | None = None
     allowed_tools: frozenset[str] | None = None
+    goal_run_id: str | None = None
+    goal_id: str | None = None
+    agent_id: str | None = None
+    codex_thread_id: str | None = None
+    native_turn_id: str | None = None
 
 
 class TurnAuthority:
     def __init__(self, state_root: Path, descriptor: Path, *, clock=time.time) -> None:
-        self.durable = DurableRunService(state_root)
+        self.state_root = Path(state_root).resolve()
+        self.durable = DurableRunService(self.state_root)
         self.descriptor = descriptor
         self.clock = clock
         self.lock = threading.RLock()
         self.capabilities: dict[str, TurnCapability] = {}
 
-    def issue(self, *, conversation_uri: str | None = None, request_identity: str | None = None) -> str:
+    @staticmethod
+    def _goal_scope(
+        conversation_uri: str | None,
+        request_identity: str | None,
+    ) -> str | None:
+        if request_identity:
+            try:
+                metadata = json.loads(request_identity)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                metadata = None
+            thread_id = metadata.get("thread_id") if isinstance(metadata, dict) else None
+            if isinstance(thread_id, str) and thread_id:
+                # The Codex thread is the logical task identity. A physical
+                # ChatGPT conversation may be rebound during recovery and must
+                # not fork the durable Goal authority when that happens.
+                return "codex-thread://" + thread_id
+        if conversation_uri:
+            return conversation_uri
+        return None
+
+    @staticmethod
+    def _request_metadata(request_identity: str | None) -> dict[str, Any]:
+        if not request_identity:
+            return {}
+        try:
+            value = json.loads(request_identity)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _authority_run_for_scope(
+        self,
+        owner: str,
+        scope: str,
+        conversation_uri: str | None,
+    ) -> tuple[dict[str, Any], str]:
+        scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
+        authority_run = self.durable.create_run(
+            owner,
+            idempotency_key="codex-goal-authority:" + scope_hash,
+            required_capabilities=[],
+            capability_snapshot={
+                "kind": "codex-goal-authority",
+                "scope_hash": scope_hash,
+                "conversation_uri": conversation_uri,
+            },
+        )
+        return authority_run, scope_hash
+
+    def _find_codex_agent_binding(
+        self,
+        owner: str,
+        thread_id: str | None = None,
+        *,
+        agent_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not thread_id and not agent_name:
+            return None
+        runs = self.durable.list_runs(owner, offset=0, limit=1000)
+        for item in runs.get("items", []):
+            snapshot = item.get("capability_snapshot") or {}
+            if snapshot.get("kind") != "codex-goal-authority":
+                continue
+            detail = self.durable.run_status(str(item["run_id"]), owner)
+            for agent in detail.get("agents", []):
+                metadata = agent.get("metadata") or {}
+                if metadata.get("source") != "codex-native-subagent":
+                    continue
+                matches_thread = bool(
+                    thread_id and metadata.get("codex_thread_id") == thread_id
+                )
+                matches_name = bool(
+                    agent_name and metadata.get("agent_name") == agent_name
+                )
+                if not (matches_thread or matches_name):
+                    continue
+                return {
+                    "goal_run_id": str(item["run_id"]),
+                    "goal_id": agent.get("goal_id"),
+                    "agent_id": str(agent["agent_id"]),
+                    "agent_state": agent.get("state"),
+                    "parent_goal_id": metadata.get("parent_goal_id"),
+                    "parent_thread_id": metadata.get("parent_thread_id"),
+                    "agent_name": metadata.get("agent_name"),
+                    "last_native_notification_key": metadata.get(
+                        "last_native_notification_key"
+                    ),
+                    "scope_hash": snapshot.get("scope_hash"),
+                }
+        return None
+
+    def _bind_codex_subagent(
+        self,
+        *,
+        owner: str,
+        request_identity: str | None,
+        goal_text: str | None,
+        task_text: str | None,
+    ) -> dict[str, Any] | None:
+        metadata = self._request_metadata(request_identity)
+        thread_id = metadata.get("thread_id")
+        if not isinstance(thread_id, str) or not thread_id:
+            return None
+
+        existing = self._find_codex_agent_binding(owner, thread_id)
+        if existing is not None:
+            updates: dict[str, Any] = {
+                "heartbeat": True,
+                "metadata": {"last_turn_at": self.clock()},
+            }
+            if existing.get("agent_state") == "AVAILABLE":
+                updates["state"] = "ACTIVE"
+                updates["desired_state"] = "ACTIVE"
+
+            # A native child may have been observed before the parent acquired
+            # a durable /goal. Attach the existing Agent to a subgoal later
+            # instead of leaving it permanently unscoped.
+            if existing.get("goal_id") is None:
+                parent_thread = existing.get("parent_thread_id")
+                stored_agent_name = existing.get("agent_name")
+                if (
+                    isinstance(parent_thread, str)
+                    and parent_thread
+                    and isinstance(stored_agent_name, str)
+                    and stored_agent_name
+                ):
+                    parent_scope = "codex-thread://" + parent_thread
+                    authority_run, scope_hash = self._authority_run_for_scope(
+                        owner, parent_scope, None
+                    )
+                    authority_run_id = str(authority_run["run_id"])
+                    goals = self.durable.list_goals(
+                        authority_run_id, owner
+                    ).get("items", [])
+                    roots = [
+                        item for item in goals
+                        if (item.get("metadata") or {}).get("source")
+                        == "codex-native-goal"
+                        and not item.get("terminal")
+                    ]
+                    parent_goal = roots[-1] if roots else None
+                    if parent_goal is None and str(goal_text or "").strip():
+                        _, root_goal_id = self._sync_codex_goal(
+                            owner=owner,
+                            scope=parent_scope,
+                            conversation_uri=None,
+                            goal_present=True,
+                            goal_text=goal_text,
+                        )
+                        parent_goal = (
+                            self.durable.goal_info(root_goal_id, owner)
+                            if root_goal_id
+                            else None
+                        )
+                    if parent_goal is not None:
+                        existing_parent_goal_id = str(parent_goal["goal_id"])
+                        child_goal = self.durable.create_goal(
+                            authority_run_id,
+                            owner,
+                            objective=(
+                                str(task_text or "").strip()
+                                or "Execute native Codex subagent task for "
+                                + stored_agent_name
+                            ),
+                            acceptance_criteria=[
+                                "Return a bounded result to the native Codex parent agent.",
+                            ],
+                            constraints=[
+                                "Native Codex owns spawn, wait, follow-up, and terminal lifecycle.",
+                                "SENTRA records authority and evidence without emulating collaboration tools.",
+                            ],
+                            priority="HIGH",
+                            parent_goal_id=existing_parent_goal_id,
+                            external_key=(
+                                "codex-subagent:"
+                                + hashlib.sha256(
+                                    thread_id.encode("utf-8")
+                                ).hexdigest()[:24]
+                            ),
+                            metadata={
+                                "source": "codex-native-subgoal",
+                                "harness_owned": True,
+                                "codex_thread_id": thread_id,
+                                "parent_thread_id": parent_thread,
+                                "agent_name": stored_agent_name,
+                                "scope_hash": scope_hash,
+                            },
+                        )
+                        existing_child_goal_id = str(child_goal["goal_id"])
+                        updates["goal_id"] = existing_child_goal_id
+                        updates["metadata"] = {
+                            "last_turn_at": self.clock(),
+                            "parent_goal_id": existing_parent_goal_id,
+                        }
+                        existing["goal_run_id"] = authority_run_id
+                        existing["goal_id"] = existing_child_goal_id
+                        existing["parent_goal_id"] = existing_parent_goal_id
+
+            current_goal_id = (
+                str(updates.get("goal_id") or existing.get("goal_id"))
+                if updates.get("goal_id") or existing.get("goal_id")
+                else None
+            )
+            current_goal = (
+                self.durable.goal_info(current_goal_id, owner)
+                if current_goal_id is not None
+                else None
+            )
+            if current_goal is not None and current_goal.get("terminal"):
+                turn_id = metadata.get("turn_id")
+                successor = self.durable.create_goal(
+                    str(existing["goal_run_id"]),
+                    owner,
+                    objective=(
+                        str(task_text or "").strip()
+                        or "Continue native Codex subagent task"
+                    ),
+                    acceptance_criteria=[
+                        "Return the requested native Codex follow-up result to the parent agent.",
+                    ],
+                    constraints=[
+                        "Native Codex owns follow-up and terminal lifecycle.",
+                        "SENTRA preserves Agent identity and versions the subgoal.",
+                    ],
+                    priority="HIGH",
+                    parent_goal_id=(
+                        str(existing["parent_goal_id"])
+                        if isinstance(existing.get("parent_goal_id"), str)
+                        else None
+                    ),
+                    external_key=(
+                        "codex-subagent-followup:"
+                        + hashlib.sha256(
+                            (
+                                thread_id
+                                + ":"
+                                + str(turn_id or "")
+                                + ":"
+                                + str(task_text or "")
+                            ).encode("utf-8")
+                        ).hexdigest()[:24]
+                    ),
+                    metadata={
+                        "source": "codex-native-subgoal",
+                        "harness_owned": True,
+                        "codex_thread_id": thread_id,
+                        "parent_thread_id": existing.get("parent_thread_id"),
+                        "agent_name": existing.get("agent_name"),
+                        "successor_of": current_goal_id,
+                        "turn_id": turn_id,
+                    },
+                )
+                successor_id = str(successor["goal_id"])
+                updates["goal_id"] = successor_id
+                updates["metadata"] = {
+                    **dict(updates.get("metadata") or {}),
+                    "previous_goal_id": current_goal_id,
+                    "last_turn_at": self.clock(),
+                }
+                existing["goal_id"] = successor_id
+
+            self.durable.update_agent(
+                str(existing["agent_id"]),
+                owner,
+                **updates,
+            )
+            return existing
+
+        parent_thread_id = metadata.get("parent_thread_id")
+        agent_name = metadata.get("agent_name")
+        subagent_kind = metadata.get("subagent_kind")
+        if (
+            subagent_kind != "thread_spawn"
+            or not isinstance(parent_thread_id, str)
+            or not parent_thread_id
+            or not isinstance(agent_name, str)
+            or not agent_name
+        ):
+            return None
+
+        parent_binding = self._find_codex_agent_binding(owner, parent_thread_id)
+        parent_goal = None
+        if parent_binding is not None and isinstance(parent_binding.get("goal_id"), str):
+            goal_run_id = str(parent_binding["goal_run_id"])
+            parent_goal = self.durable.goal_info(
+                str(parent_binding["goal_id"]),
+                owner,
+            )
+            scope_hash = str(parent_binding.get("scope_hash") or "")
+        else:
+            parent_scope = "codex-thread://" + parent_thread_id
+            authority_run, scope_hash = self._authority_run_for_scope(
+                owner, parent_scope, None
+            )
+            goal_run_id = str(authority_run["run_id"])
+            goals = self.durable.list_goals(goal_run_id, owner).get("items", [])
+            root_goals = [
+                item for item in goals
+                if (item.get("metadata") or {}).get("source") == "codex-native-goal"
+                and not item.get("terminal")
+            ]
+            parent_goal = root_goals[-1] if root_goals else None
+            if parent_goal is None and str(goal_text or "").strip():
+                _, synced_parent_goal_id = self._sync_codex_goal(
+                    owner=owner,
+                    scope=parent_scope,
+                    conversation_uri=None,
+                    goal_present=True,
+                    goal_text=goal_text,
+                )
+                parent_goal = (
+                    self.durable.goal_info(synced_parent_goal_id, owner)
+                    if synced_parent_goal_id
+                    else None
+                )
+
+        spawned_parent_goal_id = (
+            str(parent_goal["goal_id"]) if parent_goal is not None else None
+        )
+        spawned_child_goal_id: str | None = None
+        if spawned_parent_goal_id is not None:
+            objective = str(task_text or "").strip() or (
+                "Execute native Codex subagent task for " + agent_name
+            )
+            child_goal = self.durable.create_goal(
+                goal_run_id,
+                owner,
+                objective=objective,
+                acceptance_criteria=[
+                    "Return a bounded result to the native Codex parent agent.",
+                ],
+                constraints=[
+                    "Native Codex owns spawn, wait, follow-up, and terminal lifecycle.",
+                    "SENTRA records authority and evidence without emulating collaboration tools.",
+                ],
+                priority="HIGH",
+                parent_goal_id=spawned_parent_goal_id,
+                external_key=(
+                    "codex-subagent:"
+                    + hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:24]
+                ),
+                metadata={
+                    "source": "codex-native-subgoal",
+                    "harness_owned": True,
+                    "codex_thread_id": thread_id,
+                    "parent_thread_id": parent_thread_id,
+                    "agent_name": agent_name,
+                    "scope_hash": scope_hash,
+                },
+            )
+            spawned_child_goal_id = str(child_goal["goal_id"])
+
+        agent_id = (
+            "agent-codex-"
+            + hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:24]
+        )
+        agent = self.durable.assign_agent(
+            goal_run_id,
+            owner,
+            role=agent_name[:120],
+            task_id=(
+                "codex:"
+                + hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:24]
+            ),
+            goal_id=spawned_child_goal_id,
+            agent_id=agent_id,
+            state="ACTIVE",
+            desired_state="ACTIVE",
+            metadata={
+                "source": "codex-native-subagent",
+                "codex_thread_id": thread_id,
+                "parent_thread_id": parent_thread_id,
+                "parent_goal_id": spawned_parent_goal_id,
+                "agent_name": agent_name,
+                "subagent_kind": subagent_kind,
+            },
+        )
+        self.durable.update_agent(
+            agent_id,
+            owner,
+            goal_id=spawned_child_goal_id,
+            heartbeat=True,
+            metadata={"last_turn_at": self.clock()},
+        )
+        return {
+            "goal_run_id": goal_run_id,
+            "goal_id": spawned_child_goal_id,
+            "agent_id": str(agent["agent_id"]),
+            "parent_goal_id": spawned_parent_goal_id,
+        }
+
+    @staticmethod
+    def _codex_notification_outcome(
+        status: dict[str, Any],
+    ) -> tuple[str, str, Any] | None:
+        if "completed" in status:
+            return "SUCCEEDED", "RESULT", status.get("completed")
+        for key in ("failed", "errored", "error"):
+            if key in status:
+                return "FAILED", "FAILURE", status.get(key)
+        for key in ("cancelled", "canceled"):
+            if key in status:
+                return "CANCELLED", "FAILURE", status.get(key)
+        return None
+
+    def apply_codex_subagent_notifications(
+        self,
+        notifications: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        """Project native Codex terminal notifications into Goal/Context state.
+
+        The notification is authoritative only for native agent lifecycle. It
+        cannot grant tools or filesystem authority.
+        """
+        owner = "sentra:web-model-gateway"
+        applied: list[dict[str, Any]] = []
+        for notification in notifications or []:
+            if not isinstance(notification, dict):
+                continue
+            agent_path = notification.get("agent_path")
+            status = notification.get("status")
+            if not isinstance(agent_path, str) or not agent_path:
+                continue
+            if not isinstance(status, dict):
+                continue
+            outcome = self._codex_notification_outcome(status)
+            if outcome is None:
+                continue
+            target_goal_state, event_type, result_value = outcome
+            binding = self._find_codex_agent_binding(
+                owner,
+                agent_path,
+                agent_name=agent_path,
+            )
+            if binding is None:
+                continue
+
+            notification_key = hashlib.sha256(
+                json.dumps(
+                    notification,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            if binding.get("last_native_notification_key") == notification_key:
+                continue
+
+            goal_run_id = str(binding["goal_run_id"])
+            goal_id = (
+                str(binding["goal_id"])
+                if isinstance(binding.get("goal_id"), str)
+                else None
+            )
+            agent_id = str(binding["agent_id"])
+            goal = (
+                self.durable.goal_info(goal_id, owner)
+                if goal_id is not None
+                else None
+            )
+
+            agent = next(
+                (
+                    item
+                    for item in self.durable.run_status(goal_run_id, owner).get("agents", [])
+                    if item.get("agent_id") == agent_id
+                ),
+                None,
+            )
+            agent_changes: dict[str, Any] = {
+                "heartbeat": True,
+                "metadata": {
+                    "native_terminal_status": status,
+                    "native_terminal_at": self.clock(),
+                    "last_native_notification_key": notification_key,
+                },
+                "event_type": "CODEX_SUBAGENT_TERMINAL",
+            }
+            if isinstance(agent, dict) and agent.get("state") in {"ACTIVE", "WAITING"}:
+                agent_changes["state"] = "AVAILABLE"
+                agent_changes["desired_state"] = "AVAILABLE"
+            self.durable.update_agent(
+                agent_id,
+                owner,
+                **agent_changes,
+            )
+
+            context = ContextBusService(self.state_root, clock=self.clock)
+            try:
+                control = ControlPlaneService(self.durable, context)
+                if goal_id is not None and goal is not None and not goal.get("terminal"):
+                    control.update_goal(
+                        goal_id,
+                        owner,
+                        state=target_goal_state,
+                        reason="native Codex subagent terminal notification",
+                        metadata={
+                            "native_terminal_status": status,
+                            "native_terminal_at": self.clock(),
+                        },
+                    )
+                event = control.publish_context(
+                    goal_run_id,
+                    owner,
+                    event_type=event_type,
+                    subject="codex.subagent." + hashlib.sha256(
+                        agent_path.encode("utf-8")
+                    ).hexdigest()[:24],
+                    payload={
+                        "agent_path": agent_path,
+                        "goal_id": goal_id,
+                        "agent_id": agent_id,
+                        "status": status,
+                        "result": result_value,
+                    },
+                    evidence=[],
+                    confidence=None,
+                    supersedes=[],
+                    task_id="codex:" + hashlib.sha256(
+                        agent_path.encode("utf-8")
+                    ).hexdigest()[:24],
+                    agent_id=agent_id,
+                    idempotency_key=(
+                        "codex-subagent-terminal:" + notification_key[:32]
+                    ),
+                )
+            finally:
+                context.close()
+
+            self.durable.checkpoint(
+                goal_run_id,
+                owner,
+                {
+                    "goal_id": goal_id,
+                    "agent_id": agent_id,
+                    "agent_path": agent_path,
+                    "status": status,
+                    "context_event_id": event["event_id"],
+                },
+                label="codex-subagent-terminal",
+            )
+            applied.append({
+                "goal_run_id": goal_run_id,
+                "goal_id": goal_id,
+                "agent_id": agent_id,
+                "context_event_id": event["event_id"],
+                "state": target_goal_state,
+            })
+        return applied
+
+    def _sync_codex_goal(
+        self,
+        *,
+        owner: str,
+        scope: str,
+        conversation_uri: str | None,
+        goal_present: bool,
+        goal_text: str | None,
+    ) -> tuple[str, str | None]:
+        scope_hash = hashlib.sha256(scope.encode("utf-8")).hexdigest()
+        authority_run = self.durable.create_run(
+            owner,
+            idempotency_key="codex-goal-authority:" + scope_hash,
+            required_capabilities=[],
+            capability_snapshot={
+                "kind": "codex-goal-authority",
+                "scope_hash": scope_hash,
+                "conversation_uri": conversation_uri,
+            },
+        )
+        run_id = str(authority_run["run_id"])
+        goals = self.durable.list_goals(run_id, owner).get("items", [])
+        harness_goals = [
+            item for item in goals
+            if (item.get("metadata") or {}).get("source") == "codex-native-goal"
+        ]
+        current = harness_goals[-1] if harness_goals else None
+
+        if goal_present:
+            normalized = str(goal_text or "").strip()
+            if normalized:
+                if current is None or current.get("terminal"):
+                    external_key = (
+                        "codex-native-goal"
+                        if current is None
+                        else "codex-native-goal:" + hashlib.sha256(
+                            (normalized + scope_hash).encode("utf-8")
+                        ).hexdigest()[:16]
+                    )
+                    current = self.durable.create_goal(
+                        run_id,
+                        owner,
+                        objective=normalized,
+                        priority="HIGH",
+                        external_key=external_key,
+                        metadata={
+                            "source": "codex-native-goal",
+                            "harness_owned": True,
+                            "conversation_uri": conversation_uri,
+                            "scope_hash": scope_hash,
+                        },
+                    )
+                else:
+                    changes: dict[str, Any] = {
+                        "objective": normalized,
+                        "metadata": {
+                            "source": "codex-native-goal",
+                            "harness_owned": True,
+                            "conversation_uri": conversation_uri,
+                            "scope_hash": scope_hash,
+                            "cleared": False,
+                        },
+                    }
+                    if current.get("state") in {"PAUSED", "BLOCKED"}:
+                        changes["state"] = "ACTIVE"
+                        changes["reason"] = "Codex harness supplied active goal context"
+                    current = self.durable.update_goal(
+                        str(current["goal_id"]),
+                        owner,
+                        **changes,
+                    )
+            elif current is not None and not current.get("terminal"):
+                if current.get("state") != "PAUSED":
+                    current = self.durable.update_goal(
+                        str(current["goal_id"]),
+                        owner,
+                        state="PAUSED",
+                        reason="Codex harness cleared goal context",
+                        metadata={
+                            "source": "codex-native-goal",
+                            "harness_owned": True,
+                            "cleared": True,
+                        },
+                    )
+
+        goal_id = str(current["goal_id"]) if current is not None else None
+        return run_id, goal_id
+
+    def issue(
+        self,
+        *,
+        conversation_uri: str | None = None,
+        request_identity: str | None = None,
+        goal_text: str | None = None,
+        goal_present: bool | None = None,
+        task_text: str | None = None,
+        subagent_notifications: list[dict[str, Any]] | None = None,
+    ) -> str:
         token = "stc_" + secrets.token_urlsafe(36)
         key = hashlib.sha256(token.encode()).hexdigest()
         identity_hash = hashlib.sha256(request_identity.encode()).hexdigest() if request_identity else None
+        identity_metadata = self._request_metadata(request_identity)
+        native_turn_id = identity_metadata.get("turn_id")
+        if not isinstance(native_turn_id, str) or len(native_turn_id) > 256:
+            native_turn_id = None
         owner = "sentra:web-model-gateway"
         run = self.durable.create_run(
             owner,
@@ -57,18 +716,153 @@ class TurnAuthority:
                 "token_hash": key,
                 "conversation_uri": conversation_uri,
                 "request_identity_hash": identity_hash,
+                "native_turn_id": native_turn_id,
             },
         )
         if run.get("idempotent_replay"):
             raise DurableStateConflict("duplicate Web turn identity; automatic replay is disabled")
+
+        effective_goal_present = (
+            goal_text is not None if goal_present is None else bool(goal_present)
+        )
+        identity_metadata = self._request_metadata(request_identity)
+        codex_thread_id = (
+            str(identity_metadata.get("thread_id"))
+            if isinstance(identity_metadata.get("thread_id"), str)
+            else None
+        )
+        goal_run_id: str | None = None
+        goal_id: str | None = None
+        agent_id: str | None = None
+        parent_goal_id: str | None = None
+
+        subagent = self._bind_codex_subagent(
+            owner=owner,
+            request_identity=request_identity,
+            goal_text=goal_text,
+            task_text=task_text,
+        )
+        if subagent is not None:
+            goal_run_id = str(subagent["goal_run_id"])
+            goal_id = (
+                str(subagent["goal_id"])
+                if isinstance(subagent.get("goal_id"), str)
+                else None
+            )
+            agent_id = str(subagent["agent_id"])
+            parent_goal_id = (
+                str(subagent["parent_goal_id"])
+                if isinstance(subagent.get("parent_goal_id"), str)
+                else None
+            )
+            self.durable.checkpoint(
+                str(run["run_id"]),
+                owner,
+                {
+                    "goal_run_id": goal_run_id,
+                    "goal_id": goal_id,
+                    "parent_goal_id": parent_goal_id,
+                    "agent_id": agent_id,
+                    "codex_thread_id": codex_thread_id,
+                    "goal_context_present": effective_goal_present,
+                    "native_subagent": True,
+                },
+                label="codex-goal-link",
+            )
+        else:
+            goal_scope = self._goal_scope(conversation_uri, request_identity)
+            if goal_scope is not None:
+                goal_run_id, goal_id = self._sync_codex_goal(
+                    owner=owner,
+                    scope=goal_scope,
+                    conversation_uri=conversation_uri,
+                    goal_present=effective_goal_present,
+                    goal_text=goal_text,
+                )
+                self.durable.checkpoint(
+                    str(run["run_id"]),
+                    owner,
+                    {
+                        "goal_run_id": goal_run_id,
+                        "goal_id": goal_id,
+                        "goal_scope_hash": hashlib.sha256(
+                            goal_scope.encode("utf-8")
+                        ).hexdigest(),
+                        "goal_context_present": effective_goal_present,
+                    },
+                    label="codex-goal-link",
+                )
+            elif effective_goal_present and str(goal_text or "").strip():
+                fallback = self.durable.create_goal(
+                    str(run["run_id"]),
+                    owner,
+                    objective=str(goal_text).strip(),
+                    priority="HIGH",
+                    external_key="codex-native-goal",
+                    metadata={
+                        "source": "codex-native-goal",
+                        "harness_owned": True,
+                        "conversation_uri": conversation_uri,
+                        "scope": "turn-local-fallback",
+                    },
+                )
+                goal_run_id = str(run["run_id"])
+                goal_id = str(fallback["goal_id"])
+
+        applied_notifications = self.apply_codex_subagent_notifications(
+            subagent_notifications
+        )
+        if applied_notifications:
+            self.durable.checkpoint(
+                str(run["run_id"]),
+                owner,
+                {"items": applied_notifications},
+                label="codex-subagent-notifications",
+            )
+
         operation = self.durable.create_operation(
             run["run_id"], owner, kind="chatgpt-web-turn",
             idempotency_key="turn:" + run["run_id"], initial_state="RUNNING",
         )
+        self.durable.heartbeat(
+            str(operation["operation_id"]),
+            owner,
+            progress={
+                "goal_run_id": goal_run_id,
+                "goal_id": goal_id,
+                "agent_id": agent_id,
+                "codex_thread_id": codex_thread_id,
+            },
+        )
         with self.lock:
-            self.capabilities[key] = TurnCapability(key, run["run_id"], operation["operation_id"], owner,
-                                                     conversation_uri=conversation_uri)
+            self.capabilities[key] = TurnCapability(
+                key,
+                run["run_id"],
+                operation["operation_id"],
+                owner,
+                conversation_uri=conversation_uri,
+                goal_run_id=goal_run_id,
+                goal_id=goal_id,
+                agent_id=agent_id,
+                codex_thread_id=codex_thread_id,
+                native_turn_id=native_turn_id,
+            )
         return token
+
+    def telemetry_metadata(self, token: str) -> dict[str, Any]:
+        """Link browser phases to the originating turn without exporting grants."""
+        with self.lock:
+            cap = self._capability(token)
+            state = self.durable.operation_status(cap.operation_id, cap.owner)["state"]
+            return {
+                "correlation_id": cap.native_turn_id or cap.run_id,
+                "thread_id": cap.codex_thread_id,
+                "run_id": cap.run_id,
+                "operation_id": cap.operation_id,
+                "trace_id": cap.trace_id,
+                "operation_state": state,
+                "completion_verified": state == "SUCCEEDED",
+            }
 
     def active_leases(self) -> list[dict[str, Any]]:
         with self.lock:
@@ -118,10 +912,35 @@ class TurnAuthority:
                     else None
                 ),
                 trace_id=trace_id,
+                native_turn_id=(
+                    snapshot.get("native_turn_id")
+                    if isinstance(snapshot.get("native_turn_id"), str)
+                    else None
+                ),
                 completed_revision=completed_revision,
                 allowed_tools=(
                     frozenset(str(item) for item in progress.get("allowed_tools", []) if isinstance(item, str))
                     if isinstance(progress.get("allowed_tools"), list)
+                    else None
+                ),
+                goal_run_id=(
+                    str(progress["goal_run_id"])
+                    if isinstance(progress.get("goal_run_id"), str)
+                    else None
+                ),
+                goal_id=(
+                    str(progress["goal_id"])
+                    if isinstance(progress.get("goal_id"), str)
+                    else None
+                ),
+                agent_id=(
+                    str(progress["agent_id"])
+                    if isinstance(progress.get("agent_id"), str)
+                    else None
+                ),
+                codex_thread_id=(
+                    str(progress["codex_thread_id"])
+                    if isinstance(progress.get("codex_thread_id"), str)
                     else None
                 ),
             )
@@ -214,6 +1033,8 @@ class TurnAuthority:
             cap.physical_key = key
             cap.physical_fence = lease["fencing_token"]
         else:
+            if cap.physical_fence is None:
+                raise StaleFenceError("physical browser lease fence is missing")
             self.durable.renew_lease(key, cap.owner, cap.physical_fence, ttl_s=120)
         if cap.conversation_uri:
             logical_key = "conversation-uri:" + hashlib.sha256(cap.conversation_uri.encode()).hexdigest()
@@ -227,6 +1048,8 @@ class TurnAuthority:
                 cap.logical_key = logical_key
                 cap.logical_fence = lease["fencing_token"]
             else:
+                if cap.logical_fence is None:
+                    raise StaleFenceError("logical conversation lease fence is missing")
                 self.durable.renew_lease(logical_key, cap.owner, cap.logical_fence, ttl_s=120)
         conversation = tab.get("conversationKey")
         if isinstance(conversation, str) and conversation:
@@ -239,6 +1062,8 @@ class TurnAuthority:
                 cap.conversation_key = conversation_key
                 cap.conversation_fence = lease["fencing_token"]
             else:
+                if cap.conversation_fence is None:
+                    raise StaleFenceError("conversation lease fence is missing")
                 self.durable.renew_lease(conversation_key, cap.owner, cap.conversation_fence, ttl_s=120)
 
     def _advance_phase(self, cap: TurnCapability, trace_id: str) -> None:
@@ -272,6 +1097,8 @@ class TurnAuthority:
     def authorize(self, action: str, payload: dict[str, Any]) -> dict[str, Any]:
         token = payload.get("capability")
         trace_id = payload.get("traceId")
+        if not isinstance(token, str) or not token:
+            raise ValueError("invalid turn capability")
         if not isinstance(trace_id, str) or not trace_id or len(trace_id) > 128:
             raise ValueError("invalid turn trace")
         with self.lock:
@@ -420,6 +1247,31 @@ class TurnAuthority:
             delivered = state == "SUCCEEDED" and not failed
             if state == "SUCCEEDED" and failed:
                 self.durable.checkpoint(cap.run_id, cap.owner, {"operation_id": cap.operation_id, "delivery_state": "UNCERTAIN"}, label="web-response-delivery")
+            if cap.agent_id is not None and cap.goal_run_id is not None:
+                self.durable.update_agent(
+                    cap.agent_id,
+                    cap.owner,
+                    heartbeat=True,
+                    metadata={
+                        "last_turn_run_id": cap.run_id,
+                        "last_turn_operation_id": cap.operation_id,
+                        "last_turn_delivery": "DELIVERED" if delivered else "UNCERTAIN",
+                        "last_turn_at": self.clock(),
+                    },
+                )
+                self.durable.checkpoint(
+                    cap.goal_run_id,
+                    cap.owner,
+                    {
+                        "goal_id": cap.goal_id,
+                        "agent_id": cap.agent_id,
+                        "codex_thread_id": cap.codex_thread_id,
+                        "turn_run_id": cap.run_id,
+                        "turn_operation_id": cap.operation_id,
+                        "delivery_state": "DELIVERED" if delivered else "UNCERTAIN",
+                    },
+                    label="codex-subagent-turn",
+                )
             self.durable.transition_run(cap.run_id, cap.owner,
                                         "SUCCEEDED" if delivered else "BLOCKED",
                                         reason="Web turn completed and response delivery was confirmed" if delivered else "Web model execution or response delivery is uncertain")

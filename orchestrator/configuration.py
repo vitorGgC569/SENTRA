@@ -205,9 +205,9 @@ def build_router(config, *, worker=None, reviewer=None, mock=False, root=None):
         browser_bot_settings(config.get("browser", {}) or {})
     providers = {}
     for name in selected:
-        if name not in {"local", "extension", "openai", "browser", "codex_web"}:
+        if name not in {"local", "extension", "gemini_web", "openai", "browser", "codex_web"}:
             raise ValueError(
-                f"unknown provider '{name}'; choose local, extension, openai, browser or codex_web"
+                f"unknown provider '{name}'; choose local, extension, gemini_web, openai, browser or codex_web"
             )
         if mock:
             from .providers.mock_provider import MockProvider
@@ -260,6 +260,21 @@ def build_router(config, *, worker=None, reviewer=None, mock=False, root=None):
                 gateway_admin_token=resolve_gateway_admin_token(cfg),
                 require_web_namespace=cfg.get("require_web_namespace", True),
             )
+        elif name == "gemini_web":
+            from .providers.gemini_web_provider import GeminiWebProvider
+            cfg = config.get("gemini_web", {}) or {}
+            if not isinstance(cfg, dict):
+                raise ValueError("gemini_web must be a mapping")
+            providers[name] = GeminiWebProvider(
+                relay_base=cfg.get(
+                    "relay_base",
+                    config.get("browser", {}).get(
+                        "relay_base",
+                        "http://127.0.0.1:8765",
+                    ),
+                ),
+                web_model=cfg.get("model", "flash"),
+            )
         elif name == "local":
             from .providers.local_provider import LocalModelProvider
             cfg = config.get("local_model", {})
@@ -298,6 +313,14 @@ def engine_options(config, max_rounds=None, workers=None):
     from .compute_policy import from_config as compute_policy_from_config
     oma, orch = config.get("oma", {}), config.get("orchestrator", {})
     validation = config.get("validation", {})
+    candidate_isolation = str(
+        orch.get("candidate_isolation", "filesystem_snapshot") or ""
+    ).strip().lower()
+    if candidate_isolation != "filesystem_snapshot":
+        raise ValueError(
+            "orchestrator.candidate_isolation currently supports only "
+            "'filesystem_snapshot'; git_worktree is not implemented"
+        )
     commands = validation.get("commands", ["[[TEST|all]]"])
     profiles = validation.get("profiles", {})
     allowed_paths = validation.get("allowed_patch_paths")
@@ -334,6 +357,37 @@ def engine_options(config, max_rounds=None, workers=None):
     transient_backoff = oma.get("transient_backoff_base_s", 30.0)
     if not isinstance(transient_backoff, (int, float)) or not 0 <= float(transient_backoff) <= 600:
         raise ValueError("oma.transient_backoff_base_s must be 0..600 seconds (exponential backoff base for transient retries)")
+    enforce_milestone_gate = oma.get("enforce_milestone_gate", True)
+    if not isinstance(enforce_milestone_gate, bool):
+        raise ValueError("oma.enforce_milestone_gate must be a boolean")
+    milestone_budgets = oma.get("milestone_budgets", {}) or {}
+    if not isinstance(milestone_budgets, dict):
+        raise ValueError("oma.milestone_budgets must be a mapping")
+    for key in ("max_file_lines", "max_file_bytes"):
+        value = milestone_budgets.get(key)
+        if value is not None and (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or value < 0
+        ):
+            raise ValueError(f"oma.milestone_budgets.{key} must be a number >= 0")
+    if "max_test_seconds" in milestone_budgets:
+        raise ValueError(
+            "oma.milestone_budgets.max_test_seconds is not wired to a dedicated "
+            "milestone benchmark command; use validation timeout instead"
+        )
+    required_milestone_evidence = oma.get("required_milestone_evidence", []) or []
+    if (
+        not isinstance(required_milestone_evidence, list)
+        or len(required_milestone_evidence) > 50
+        or any(
+            not isinstance(item, str) or not item.strip() or len(item) > 160
+            for item in required_milestone_evidence
+        )
+    ):
+        raise ValueError(
+            "oma.required_milestone_evidence must contain at most 50 non-empty strings"
+        )
     if not isinstance(profiles, dict) or any(not isinstance(argv, list) or not argv or
             any(not isinstance(arg, str) or not arg for arg in argv) for argv in profiles.values()):
         raise ValueError("validation.profiles must map names to nonempty argv lists (never shell strings)")
@@ -364,6 +418,9 @@ def engine_options(config, max_rounds=None, workers=None):
         "chat_project": chat_project.strip() if isinstance(chat_project, str) else None,
         "transient_max_retries": transient_max_retries,
         "transient_backoff_base_s": float(transient_backoff),
+        "enforce_milestone_gate": enforce_milestone_gate,
+        "milestone_budgets": dict(milestone_budgets),
+        "required_milestone_evidence": list(required_milestone_evidence),
     }
 
 

@@ -813,17 +813,30 @@ class ContextBusService:
             types=["MESSAGE"],
             limit=min(500, max(int(limit) * 4, int(limit))),
         )
-        items = [
-            item
-            for item in delta["items"]
-            if item.get("payload", {}).get("to_agent_id") in {agent, "*"}
-        ][: max(1, min(int(limit), 500))]
+        delivery_limit = max(1, min(int(limit), 500))
+        items: list[dict[str, Any]] = []
+        scanned_seq = int(after_seq or 0)
+        delivered_last_seq = int(after_seq or 0)
+        for item in delta["items"]:
+            seq = int(item.get("seq") or scanned_seq)
+            recipient = item.get("payload", {}).get("to_agent_id")
+            if recipient in {agent, "*"}:
+                if len(items) >= delivery_limit:
+                    break
+                items.append(item)
+                delivered_last_seq = seq
+            scanned_seq = max(scanned_seq, seq)
         return {
             "run_id": run_id,
             "agent_id": agent,
             "after_seq": int(after_seq or 0),
             "items": items,
-            "last_seq": items[-1]["seq"] if items else int(after_seq or 0),
+            # Cursor semantics are scan-based: irrelevant MESSAGE events must
+            # not pin a consumer forever, but we never advance past a relevant
+            # item that was not delivered because of the requested limit.
+            "last_seq": scanned_seq,
+            "scanned_seq": scanned_seq,
+            "delivered_last_seq": delivered_last_seq,
         }
 
     def _claim_info(self, row: sqlite3.Row) -> dict[str, Any]:

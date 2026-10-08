@@ -6,7 +6,8 @@
 # - Inseguro: qualquer fase pos-send (ou ausencia total de progresso em job LEASED)
 #   significa envio incerto (pode ter enviado sem reportar); re-enfileirar duplicaria
 #   mensagem no ChatGPT. Por isso vira FAILED/WORKER_LOST ou DELIVERY_SLOW, nunca QUEUED.
-# - Teto: requeue preserva deadline original (created+timeout); lease novo nunca passa dele.
+# - Fila e execução têm relógios separados: esperar um worker não consome o budget do job.
+# - Ao leasear/releasear com segurança, o deadline de execução nasce/reinicia no claim.
 # - Limite: no maximo max_requeues (default 1) retornos a QUEUED; depois FAILED definitivo.
 from __future__ import annotations
 
@@ -45,6 +46,16 @@ def _workers_match(expected: str, actual: str) -> bool:
 class JobStore:
     LEASE_WINDOW_S = LEASE_WINDOW_S
     PROGRESS_WINDOW_S = PROGRESS_WINDOW_S
+    QUEUE_MIN_WINDOW_S = 900.0
+    QUEUE_MAX_WINDOW_S = 3600.0
+    QUEUE_TIMEOUT_MULTIPLIER = 4.0
+
+    @classmethod
+    def _queue_window(cls, timeout_s: int | float) -> float:
+        return min(
+            float(cls.QUEUE_MAX_WINDOW_S),
+            max(float(cls.QUEUE_MIN_WINDOW_S), float(timeout_s) * float(cls.QUEUE_TIMEOUT_MULTIPLIER)),
+        )
 
     def __init__(self, path=":memory:", clock=time.time, max_requeues=MAX_REQUEUES_DEFAULT):
         self.clock = clock
@@ -128,9 +139,12 @@ class JobStore:
                 # Lease + progresso ambos vencidos, mas ainda ha orcamento de deadline.
                 safe = (not may_sent) and progress_at > 0 and phase in PRE_SEND_PHASES
                 if safe and requeues < self.max_requeues:
+                    timeout_s = int(job.get("timeout_s") or 180)
+                    queue_deadline = now + self._queue_window(timeout_s)
                     self.db.execute(
                         "UPDATE jobs SET state='QUEUED',worker='',lease='',lease_until=0,"
-                        "updated=?,requeues=? WHERE id=?", (now, requeues + 1, jid))
+                        "deadline=?,updated=?,requeues=? WHERE id=?",
+                        (queue_deadline, now, requeues + 1, jid))
                 else:
                     reason = "uncertain execution" if may_sent or not progress_at else \
                         f"last phase '{phase}' not provably pre-send"
@@ -151,7 +165,10 @@ class JobStore:
                 raise ValueError("QUEUE_FULL")
             now = self.clock()
             created = now
-            deadline = created + job.timeout_s
+            # Queue wait is capacity pressure, not execution time. Give queued
+            # work its own bounded window; the execution deadline is created
+            # only when a worker actually claims the job.
+            deadline = created + self._queue_window(job.timeout_s)
             self.db.execute(
                 "INSERT INTO jobs (id,payload,state,worker,lease,lease_until,deadline,"
                 "result,ack,updated,phase,progress_at,created,requeues,may_have_sent) "
@@ -187,13 +204,19 @@ class JobStore:
                 row = fallback
             if row is None:
                 return None
-            jid, raw, deadline, created, requeues, phase = row
+            jid, raw, _queue_deadline, created, requeues, phase = row
+            payload = json.loads(raw)
+            now = self.clock()
+            timeout_s = int(payload.get("timeout_s") or 180)
+            deadline = now + timeout_s
             lease = secrets.token_urlsafe(32)
-            until = min(deadline, self.clock() + float(self.LEASE_WINDOW_S))
-            self.db.execute("UPDATE jobs SET state='LEASED',worker=?,lease=?,lease_until=?,updated=? WHERE id=?",
-                            (worker, lease, until, self.clock(), jid))
+            until = min(deadline, now + float(self.LEASE_WINDOW_S))
+            self.db.execute(
+                "UPDATE jobs SET state='LEASED',worker=?,lease=?,lease_until=?,deadline=?,updated=? WHERE id=?",
+                (worker, lease, until, deadline, now, jid),
+            )
             self.db.commit()
-            return {**json.loads(raw), "lease_token": lease, "deadline": deadline, "lease_until": until,
+            return {**payload, "lease_token": lease, "deadline": deadline, "lease_until": until,
                     "requeues": requeues or 0, "phase": phase or ""}
 
     def lease(self, jid, worker, token):
@@ -257,10 +280,42 @@ class JobStore:
     def result(self, jid):
         with self.lock:
             self._expire()
-            row = self.db.execute("SELECT result FROM jobs WHERE id=?", (jid,)).fetchone()
+            row = self.db.execute(
+                "SELECT result,phase,may_have_sent,state FROM jobs WHERE id=?", (jid,)
+            ).fetchone()
             if not row:
                 raise ValueError("UNKNOWN_JOB")
-            return json.loads(row[0]) if row[0] else None
+            if not row[0]:
+                return None
+            value = json.loads(row[0])
+            if isinstance(value, dict):
+                # Terminal delivery evidence is part of the relay contract.
+                # Clients use this to decide whether a failed START is replay-safe.
+                value["_delivery_phase"] = row[1] or ""
+                value["_may_have_sent"] = bool(row[2])
+                value["_relay_state"] = row[3]
+            return value
+
+    def pending_status(self, jid):
+        with self.lock:
+            self._expire()
+            row = self.db.execute(
+                "SELECT state,worker,deadline,phase,requeues,may_have_sent,created,updated "
+                "FROM jobs WHERE id=?",
+                (jid,),
+            ).fetchone()
+            if not row:
+                raise ValueError("UNKNOWN_JOB")
+            return {
+                "state": row[0],
+                "worker": row[1] or "",
+                "deadline": row[2],
+                "phase": row[3] or "",
+                "requeues": int(row[4] or 0),
+                "may_have_sent": bool(row[5]),
+                "created": row[6],
+                "updated": row[7],
+            }
 
     def acknowledge(self, jid):
         with self.lock:

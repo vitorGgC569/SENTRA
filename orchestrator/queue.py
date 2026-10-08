@@ -31,6 +31,7 @@ class PriorityTaskQueue:
         self,
         anti_explosion: Optional[AntiExplosionGuard] = None,
         max_queue_size: int = 10000,
+        resource_lease_manager: Any | None = None,
     ):
         self.anti_explosion = anti_explosion or AntiExplosionGuard()
         self.max_queue_size = max_queue_size
@@ -46,6 +47,8 @@ class PriorityTaskQueue:
         self._dlq: List[Dict[str, Any]] = []
         self._resource_holders: Dict[str, str] = {}
         self._task_locks: Dict[str, Set[str]] = {}
+        self.resource_lease_manager = resource_lease_manager
+        self._durable_task_leases: Dict[str, List[Dict[str, Any]]] = {}
         self.dropped_due_to_backpressure: int = 0
 
     @staticmethod
@@ -97,19 +100,46 @@ class PriorityTaskQueue:
         resources = self._resources_for_task(task)
         if self._resource_conflict_locked(resources):
             return False
+        durable_leases: List[Dict[str, Any]] = []
+        if resources and self.resource_lease_manager is not None:
+            acquired = self.resource_lease_manager.acquire(task, resources)
+            if acquired is None:
+                return False
+            durable_leases = list(acquired)
         for resource in resources:
             self._resource_holders[resource] = task.id
         self._task_locks[task.id] = resources
+        if durable_leases:
+            self._durable_task_leases[task.id] = durable_leases
+            task.metadata["durable_resource_leases"] = [
+                {
+                    "logical_resource": item.get("logical_resource"),
+                    "resource_key": item.get("resource_key"),
+                    "fencing_token": item.get("fencing_token"),
+                    "lease_until": item.get("lease_until"),
+                }
+                for item in durable_leases
+            ]
         task.metadata["resource_locks_held"] = sorted(resources)
         return True
 
     def _release_resources_locked(self, task_id: str) -> None:
+        durable_leases = self._durable_task_leases.pop(task_id, [])
+        if durable_leases and self.resource_lease_manager is not None:
+            self.resource_lease_manager.release(durable_leases)
         for resource in self._task_locks.pop(task_id, set()):
             if self._resource_holders.get(resource) == task_id:
                 self._resource_holders.pop(resource, None)
         task = self._all_tasks.get(task_id)
         if task is not None:
             task.metadata.pop("resource_locks_held", None)
+            task.metadata.pop("durable_resource_leases", None)
+
+    def _sync_task_locked(self, task: Task, *, recovery: bool = False) -> None:
+        manager = self.resource_lease_manager
+        if manager is None or not hasattr(manager, "sync_task"):
+            return
+        manager.sync_task(task, recovery=recovery)
 
     def _sort_ready_queue(self) -> None:
         def sort_key(task_id: str):
@@ -216,6 +246,7 @@ class PriorityTaskQueue:
                 self._blocked_tasks[task.id] = unfulfilled
                 task.status = TaskStatus.PENDING
 
+            self._sync_task_locked(task)
             return True
 
     async def pop_ready_task(
@@ -255,6 +286,7 @@ class PriorityTaskQueue:
             self._ready_queue.pop(selected_index)
             TaskStateMachine.transition(task, TaskStatus.RUNNING, reason="Dispatched to worker")
             self._running_tasks[task.id] = task
+            self._sync_task_locked(task)
             return task
 
     def unsatisfied_capabilities(self, available_capabilities: Set[str]) -> Dict[str, List[str]]:
@@ -286,6 +318,7 @@ class PriorityTaskQueue:
             self._release_resources_locked(task_id)
             TaskStateMachine.transition(task, TaskStatus.COMPLETED, reason="Task finished successfully")
             self._completed_tasks[task_id] = task
+            self._sync_task_locked(task)
 
             # Check newly unblocked tasks
             newly_ready = []
@@ -299,6 +332,7 @@ class PriorityTaskQueue:
                 ready_task = self._all_tasks[ready_id]
                 TaskStateMachine.transition(ready_task, TaskStatus.QUEUED, reason="All dependencies completed")
                 self._ready_queue.append(ready_id)
+                self._sync_task_locked(ready_task)
 
             if newly_ready:
                 self._sort_ready_queue()
@@ -325,13 +359,17 @@ class PriorityTaskQueue:
 
             if retryable and task.retry_count <= task.max_retries:
                 TaskStateMachine.transition(task, TaskStatus.FAILED, reason=error_msg)
+                self._sync_task_locked(task)
                 TaskStateMachine.transition(task, TaskStatus.RETRYING, reason=f"Attempt {task.retry_count}/{task.max_retries}")
+                self._sync_task_locked(task)
                 TaskStateMachine.transition(task, TaskStatus.QUEUED, reason="Re-queued for retry")
+                self._sync_task_locked(task)
                 self._ready_queue.append(task.id)
                 self._sort_ready_queue()
                 return True
             else:
                 TaskStateMachine.transition(task, TaskStatus.FAILED, reason=f"Max retries exceeded: {error_msg}")
+                self._sync_task_locked(task)
                 self._dlq.append({
                     "task_id": task.id,
                     "task": task.to_dict(),
@@ -375,6 +413,7 @@ class PriorityTaskQueue:
                 except Exception:
                     blocked.status = TaskStatus.FAILED
                 self._failed_tasks[blocked_id] = blocked
+                self._sync_task_locked(blocked)
                 self._dlq.append({
                     "task_id": blocked_id,
                     "task": blocked.to_dict(),
@@ -412,6 +451,7 @@ class PriorityTaskQueue:
                             except Exception:
                                 blocked.status = TaskStatus.FAILED
                             self._failed_tasks[blocked_id] = blocked
+                            self._sync_task_locked(blocked)
                             out.append(blocked_id)
             return out
 
@@ -477,6 +517,7 @@ class PriorityTaskQueue:
         recovered: List[str] = []
         self._resource_holders.clear()
         self._task_locks.clear()
+        self._durable_task_leases.clear()
         for task_id, task in self._all_tasks.items():
             if task.status in (
                 TaskStatus.RUNNING,

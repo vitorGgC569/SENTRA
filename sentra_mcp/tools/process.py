@@ -34,6 +34,13 @@ def _collection(key: str, items: list[dict[str, object]]) -> dict[str, object]:
 def _failure(exc: Exception) -> ResponseEnvelope:
     if isinstance(exc, SentraSemanticError):
         return error_envelope(exc)
+    if isinstance(exc, RuntimeError) and str(exc).startswith("DOCKER_UNAVAILABLE:"):
+        return ResponseEnvelope.failure(
+            "docker_unavailable",
+            sanitize_error(exc),
+            category="dependency",
+            retryable=True,
+        )
     if isinstance(exc, PermissionError):
         code = "forbidden"
     elif isinstance(exc, KeyError):

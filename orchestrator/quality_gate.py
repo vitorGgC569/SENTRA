@@ -126,19 +126,42 @@ class QualityGate:
             return False, "Duplicate or missing validator identity", None
         if len({r.report_id for r in reports}) != len(reports):
             return False, "Duplicate validation report", None
-        if any(r.status not in {"APPROVED", "REJECTED", "DISPUTED"}
-               or not math.isfinite(r.confidence) or not 0 <= r.confidence <= 1 for r in reports):
+        invalid_report = False
+        for report in reports:
+            confidence = report.confidence
+            if (
+                report.status not in {"APPROVED", "REJECTED", "DISPUTED"}
+                or confidence is None
+                or not math.isfinite(confidence)
+                or not 0 <= confidence <= 1
+            ):
+                invalid_report = True
+                break
+        if invalid_report:
             return False, "Invalid validation report status/confidence", None
         # Relatórios com ran=False não são evidência (validador não executou:
         # budget, timeout, transporte). Excluídos do quorum — jamais contam
         # como voto contra o candidato.
         abstained = [r.validator_role for r in reports if not r.ran]
         effective = [r for r in reports if r.ran]
-        if self.policy.require_explicit_scores and any(
-                type(r.score) not in (int, float) or not math.isfinite(r.score)
-                or not 0 <= r.score <= 10 for r in effective):
+        invalid_explicit_score = False
+        if self.policy.require_explicit_scores:
+            for report in effective:
+                score = report.score
+                if (
+                    score is None
+                    or type(score) not in (int, float)
+                    or not math.isfinite(score)
+                    or not 0 <= score <= 10
+                ):
+                    invalid_explicit_score = True
+                    break
+        if invalid_explicit_score:
             return False, "INSUFFICIENT_VALIDATION: missing/invalid explicit quality score", None
-        if self.policy.require_explicit_scores and any(r.score < self.policy.min_release_score for r in effective):
+        if self.policy.require_explicit_scores and any(
+            r.score is None or r.score < self.policy.min_release_score
+            for r in effective
+        ):
             return False, "Below release threshold: explicit score below required bar", None
         if abstained and not effective:
             return (
@@ -262,6 +285,21 @@ class QualityGate:
         ]
 
         mean_score = round(sum(scores) / len(scores), 2) if scores else 0.0
+        evidence_ids = [
+            str(item)
+            for item in (task.metadata.get("evidence_ids") or [])
+            if str(item).strip()
+        ]
+        visual = dict((test_results or {}).get("visual_evidence") or {})
+        if visual.get("integrity_passed"):
+            evidence_ids.append("visual")
+            for item in visual.get("files") or []:
+                evidence_id = str((item or {}).get("evidence_id") or "").strip()
+                integrity = dict((item or {}).get("integrity") or {})
+                if evidence_id and integrity.get("passed") is True:
+                    evidence_ids.append(evidence_id)
+        evidence_ids = list(dict.fromkeys(evidence_ids))
+
         package = CandidatePackage(
             candidate_id=candidate.candidate_id,
             task_id=task.id,
@@ -283,6 +321,7 @@ class QualityGate:
             repair_rounds=task.current_repair_round,
             critical_risks=[f.description for f in critical_findings],
             remaining_risks=remaining_risks,
+            evidence_ids=evidence_ids,
             status="READY_FOR_MASTER",
         )
 

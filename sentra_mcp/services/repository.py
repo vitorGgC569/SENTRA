@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 from typing import Any
@@ -145,6 +146,16 @@ class RepositoryService:
         if not Path(item["path"]).is_dir():
             raise FileNotFoundError("allowlisted workspace directory does not exist")
         return item
+
+    def execution_resource_key(
+        self,
+        workspace: str | None,
+        owner: str | None,
+    ) -> str:
+        """Return a canonical host resource key for exclusive repository jobs."""
+        view = self._resolve_workspace(workspace, owner, "execute")
+        root = str(Path(view["path"]).resolve())
+        return os.path.normcase(root) if os.name == "nt" else root
 
     def _gateway(
         self,

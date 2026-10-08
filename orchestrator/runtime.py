@@ -11,6 +11,7 @@ import os
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 from repository.policy import PROTECTED_COMPONENTS
 from workspace.patch_manager import PatchManager
@@ -85,7 +86,11 @@ class IntegratedRun:
             "patch": patch, "packages": [p.to_dict() for p in packages], "tasks": tasks})
 
     async def run(self):
-        with RunLock(self.store.run_dir.parent / ".workspace.lock"):
+        # Different Runs never mutate the user's checkout: each owns a baseline
+        # and candidate workspace. Serialize only duplicate execution of the
+        # SAME Run here; cross-Run publication remains guarded by the project
+        # promotion lock in promote_candidate().
+        with RunLock(self.store.run_dir / ".run.lock"):
             return await self._run_locked()
 
     async def _run_locked(self):
@@ -170,6 +175,25 @@ class IntegratedRun:
                 owner=f"oma:{self.run_id}",
             )
 
+        owned_resource_leases = None
+        if self.options.get("resource_lease_manager") is None:
+            from .durable_resources import DurableResourceLeaseManager
+
+            owned_resource_leases = DurableResourceLeaseManager(
+                self.source / ".sentra",
+                workspace=self.source,
+                logical_run_id=self.run_id,
+            )
+            self.options["resource_lease_manager"] = owned_resource_leases
+
+        if self.options.get("program_memory") is None:
+            from .program_memory import ProgramMemory
+
+            # Project memory is runtime state, not product source. Keeping it
+            # under .sentra prevents memory writes from contaminating candidate
+            # diffs or invalidating source fingerprints.
+            self.options["program_memory"] = ProgramMemory(self.source / ".sentra")
+
         self.engine = OMAEngine(self.run_id, self.objective, self.work, self.router,
                                 persistence_base=self.source / "runs", checkpoint_callback=self._checkpoint,
                                 **self.options)
@@ -178,6 +202,8 @@ class IntegratedRun:
         finally:
             if owned_context is not None:
                 owned_context.close()
+            if owned_resource_leases is not None:
+                owned_resource_leases.close()
         patch = diff_files(self.before, source_files(self.work))
         patch_path = self.store.run_dir / "candidate.patch"
         patch_path.write_text(patch, encoding="utf-8", newline="\n")
@@ -244,8 +270,28 @@ async def promote_candidate(workspace, run_id, *, allow_protected=False, command
             raise ValueError("promotion must use the recorded validation policy")
         if handoff["protected_changes"] and not allow_protected:
             raise ValueError("protected changes require explicit --allow-protected approval")
-        if fingerprint(source_files(root)) != handoff["base_hash"]:
-            raise ValueError("STALE_BASE: original workspace changed; create a new run")
+        current_base_hash = fingerprint(source_files(root))
+        rebased = current_base_hash != handoff["base_hash"]
+        if rebased:
+            integration_evidence = dict(handoff.get("integration_tests") or {})
+            touched_base_hashes = dict(integration_evidence.get("touched_base_hashes") or {})
+            current_files = source_files(root)
+            conflicts = []
+            for path, expected_hash in touched_base_hashes.items():
+                current = current_files.get(path)
+                current_hash = (
+                    hashlib.sha256(current).hexdigest()
+                    if current is not None
+                    else None
+                )
+                if current_hash != expected_hash:
+                    conflicts.append(path)
+            if conflicts or not touched_base_hashes:
+                detail = ",".join(conflicts[:20]) or "candidate scope unavailable"
+                raise ValueError(
+                    "STALE_BASE_CONFLICT: project changed in candidate scope: " + detail
+                )
+        promotion_base_hash = current_base_hash
         patch = (store.run_dir / "candidate.patch").read_bytes().decode("utf-8")
         if hashlib.sha256(patch.encode()).hexdigest() != handoff["patch_sha256"]:
             raise ValueError("candidate patch was changed after verification")
@@ -254,13 +300,69 @@ async def promote_candidate(workspace, run_id, *, allow_protected=False, command
         store._atomic_write_json(store.run_dir / "promotion-tests.json", evidence)
         if not evidence["all_passed"] or not evidence["source_unchanged"]:
             raise ValueError("promotion verification failed; checkout unchanged")
-        if evidence["candidate_hash"] != handoff["candidate_hash"]:
+        if not rebased and evidence["candidate_hash"] != handoff["candidate_hash"]:
             raise ValueError("verified candidate hash mismatch")
-        if fingerprint(source_files(root)) != handoff["base_hash"]:
+        if fingerprint(source_files(root)) != promotion_base_hash:
             raise ValueError("workspace changed during promotion verification")
-        result = PatchManager.apply_patch(root, patch) if patch else {"success": True}
-        if not result["success"]:
-            raise ValueError(result.get("error", "promotion patch failed"))
-        handoff.update(status="APPLIED", requires_external_promotion=False, promoted_at=time.time())
+        from .durable_resources import DurableResourceLeaseManager
+        from .integration import ProjectIntegrationCoordinator
+
+        promotion_verifier = CandidateVerifier(
+            root, commands, profiles, timeout, execution, allowed_patch_paths
+        )
+        lease_manager = DurableResourceLeaseManager(
+            root / ".sentra",
+            workspace=root,
+            logical_run_id="promotion:" + run_id,
+        )
+        project_key = "project:" + hashlib.sha256(
+            str(root).encode("utf-8")
+        ).hexdigest()[:24]
+        coordinator = ProjectIntegrationCoordinator(
+            root,
+            promotion_verifier,
+            state_root=root / ".sentra",
+            project_key=project_key,
+            resource_lease_manager=lease_manager,
+        )
+        promotion_task = SimpleNamespace(
+            run_id=run_id,
+            id="PROMOTION",
+            timeout_s=float(timeout),
+            heartbeat_timeout_s=120.0,
+        )
+
+        async def apply_project_patch(patch_text):
+            return (
+                PatchManager.apply_patch(root, patch_text)
+                if patch_text
+                else {"success": True}
+            )
+
+        try:
+            integration = await coordinator.integrate(
+                promotion_task,
+                candidate,
+                evidence,
+                apply_project_patch,
+            )
+        finally:
+            lease_manager.close()
+        if not integration.ok:
+            raise ValueError(
+                f"{integration.code}: {integration.error or 'promotion failed'}"
+            )
+        evidence = integration.evidence
+        handoff.update(
+            status="APPLIED",
+            requires_external_promotion=False,
+            promoted_at=time.time(),
+            promotion_rebased=rebased or integration.rebased,
+            promotion_base_hash=promotion_base_hash,
+            promoted_candidate_hash=evidence.get("candidate_hash"),
+            project_revision=integration.revision_after,
+            project_revision_before=integration.revision_before,
+            integration_fencing_token=integration.fencing_token,
+        )
         store._atomic_write_json(store.run_dir / "handoff.json", handoff)
         return handoff

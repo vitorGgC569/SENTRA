@@ -21,6 +21,15 @@ def estimate_tokens(text: str) -> int:
     return (len(text or "") + 3) // 4
 
 
+def execution_deadline(operation: str) -> float | None:
+    op = str(operation).upper()
+    if op in {"BUILD", "BENCH"}:
+        return None
+    if op in {"TEST", "LINT", "TYPECHECK"}:
+        return 605
+    return 60
+
+
 class AgentConsoleBridge:
     @staticmethod
     def show(agent_id: str, directive: Directive, status: str, extra: str = "") -> None:
@@ -141,8 +150,11 @@ class CommandGateway:
             if directive.operation in {"PATCH", "W", "ROLLBACK"}:
                 session.transaction_id = None
             ctx = CommandContext(session, agent_id, task_id, gateway=self)
-            timeout = 605 if directive.operation in {"TEST", "BUILD", "LINT", "TYPECHECK", "BENCH"} else 60
-            result = await asyncio.wait_for(handler.execute(directive, ctx), timeout)
+            timeout = execution_deadline(directive.operation)
+            if timeout is None:
+                result = await handler.execute(directive, ctx)
+            else:
+                result = await asyncio.wait_for(handler.execute(directive, ctx), timeout)
             if result.startswith("CACHE_HIT"):
                 self.cache_hits += 1
             if result.startswith("ERROR") or " FAIL " in result.split("\n", 1)[0] or result.startswith("PATCH FAIL"):

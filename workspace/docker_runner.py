@@ -149,9 +149,9 @@ class DockerCommandRunner(CommandRunner):
                 "PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/tmp", "TMPDIR=/tmp",
                 "PYTHONDONTWRITEBYTECODE=1", "PYTEST_ADDOPTS=-p no:cacheprovider", *argv]
 
-    async def run_argv(self, argv, timeout=120):
-        if isinstance(argv, (str, bytes)) or not argv or timeout <= 0:
-            raise ValueError("structured argv and positive timeout required")
+    async def run_argv(self, argv, timeout: float | None = 120):
+        if isinstance(argv, (str, bytes)) or not argv or (timeout is not None and timeout <= 0):
+            raise ValueError("structured argv and positive timeout or None required")
         snapshot = None
         name = "oma-check-" + uuid.uuid4().hex
         attempted_create = False

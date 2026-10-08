@@ -197,6 +197,13 @@ class MCPConfig:
                 )
 
     @property
+    def resolved_state_root(self) -> Path:
+        """State root is normalized in __post_init__; expose it as non-optional."""
+        if self.state_root is None:
+            raise ConfigurationError("state_root was not initialized")
+        return self.state_root
+
+    @property
     def oauth_enabled(self) -> bool:
         return bool(
             self.oauth_issuer_url

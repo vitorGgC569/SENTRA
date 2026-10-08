@@ -71,7 +71,7 @@ class ComputePolicy:
     disagreement_add: List[ValidatorRole] = field(default_factory=lambda: list(DEFAULT_STANDBY))
     low_confidence_add: List[ValidatorRole] = field(default_factory=lambda: list(DEFAULT_STANDBY))
     critical_add: List[ValidatorRole] = field(default_factory=lambda: list(DEFAULT_STANDBY))
-    max_agents: int = 500
+    max_agents: int = 8
 
     def agent_count(self, validator_roles: List[ValidatorRole]) -> int:
         return len(validator_roles) + 2  # executor + master
@@ -105,9 +105,9 @@ def from_config(data: Optional[Dict[str, Any]]) -> Optional[ComputePolicy]:
         return None
     if not isinstance(data, dict):
         raise ValueError("oma.compute_policy must be a mapping")
-    max_agents = data.get("max_agents", 500)
-    if type(max_agents) is not int or max_agents < 5 or max_agents > 5000:
-        raise ValueError("compute_policy.max_agents must be an int 5..5000")
+    max_agents = data.get("max_agents", 8)
+    if type(max_agents) is not int or max_agents < 5 or max_agents > 8:
+        raise ValueError("compute_policy.max_agents must be an int 5..8 for the current role catalog")
     initial_roles = parse_roles(data.get("initial_roles"), DEFAULT_INITIAL)
     if len(initial_roles) + 2 > max_agents:
         raise ValueError("compute_policy initial agents exceed max_agents")

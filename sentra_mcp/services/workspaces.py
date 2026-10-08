@@ -76,7 +76,7 @@ class WorkspaceRegistry:
         self.audit = audit
         self.clock = clock
         self.state_path = Path(
-            state_path or (config.state_root / "workspaces.json")
+            state_path or (config.resolved_state_root / "workspaces.json")
         )
         self._lock = threading.RLock()
         self._cached_mtime_ns: int | None = None
@@ -244,13 +244,31 @@ class WorkspaceRegistry:
                 candidate = Path(value).expanduser()
                 resolved = candidate.resolve() if candidate.is_absolute() else None
                 folded = value.casefold()
+                path_matches: list[tuple[int, dict[str, Any], int]] = []
                 for index, item in enumerate(grants):
                     if (
                         str(item["workspace_id"]).casefold() == folded
                         or str(item["alias"]).casefold() == folded
-                        or (resolved is not None and Path(item["path"]).resolve() == resolved)
                     ):
                         matches.append((index, item))
+                        continue
+                    if resolved is None:
+                        continue
+                    root = Path(item["path"]).resolve()
+                    try:
+                        resolved.relative_to(root)
+                    except ValueError:
+                        continue
+                    if permission not in set(item["permissions"]):
+                        continue
+                    path_matches.append((index, item, len(root.parts)))
+                # For an absolute directory selector choose the narrowest
+                # containing grant. This lets access_scope=user/computer accept
+                # arbitrary folders while preserving explicit workspace
+                # permission overrides for nested roots.
+                if not matches and path_matches:
+                    index, item, _ = max(path_matches, key=lambda value: value[2])
+                    matches.append((index, item))
         if not matches:
             raise PermissionError("workspace is not allowlisted for this session")
         if len(matches) > 1:
@@ -374,7 +392,7 @@ class WorkspaceRegistry:
         if alias.casefold() in all_aliases:
             raise ValueError("workspace alias is already in use")
 
-        request_id = secrets.token_urlsafe(12)
+        request_id = "ws_" + secrets.token_urlsafe(12)
         workspace_id = (
             str(existing_item["workspace_id"])
             if existing_item is not None and existing_item.get("source") != "configured"
@@ -419,7 +437,12 @@ class WorkspaceRegistry:
             "requested_workspace": grant,
             "approval_required": {
                 "request_id": request_id,
-                "command": f"python -m sentra_remote.admin approve-workspace {request_id}",
+                "command": (
+                    'python -m sentra_remote.admin --workspace-state "'
+                    + str(self.state_path)
+                    + f'" approve-workspace {request_id}'
+                ),
+                "state_path": str(self.state_path),
                 "note": "Workspace grants are never self-approved through MCP.",
             },
         }
@@ -428,7 +451,7 @@ class WorkspaceRegistry:
         index, item = self._resolve_item(selector, owner, "read")
         if item.get("source") == "configured":
             raise PermissionError("configured workspaces cannot be removed through runtime approval")
-        request_id = secrets.token_urlsafe(12)
+        request_id = "ws_" + secrets.token_urlsafe(12)
         now = self.clock()
         data = self._load(force=True)
         data["pending"][request_id] = {
@@ -451,7 +474,12 @@ class WorkspaceRegistry:
             "workspace": self._view(item, index),
             "approval_required": {
                 "request_id": request_id,
-                "command": f"python -m sentra_remote.admin approve-workspace {request_id}",
+                "command": (
+                    'python -m sentra_remote.admin --workspace-state "'
+                    + str(self.state_path)
+                    + f'" approve-workspace {request_id}'
+                ),
+                "state_path": str(self.state_path),
                 "note": "Workspace removals require local approval.",
             },
         }

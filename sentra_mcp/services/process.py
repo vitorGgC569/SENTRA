@@ -18,16 +18,50 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO, Sequence
+from typing import Any, BinaryIO, Sequence
 
 from workspace.paths import PathAccessError, resolve_workspace_path
+from workspace.sandbox import WorkspaceSandbox
 
 from ..audit import AuditLogger
 from ..config import MCPConfig
+from .durable import DurableRunService
 from .process_sandbox import DockerProcessSandbox, PreparedProcess
 from .workspaces import WorkspaceRegistry
 
-_SENSITIVE_ENV_PARTS = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "COOKIE")
+_SENSITIVE_ENV_PARTS = (
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "API_KEY",
+    "COOKIE",
+    "CREDENTIAL",
+    "PRIVATE_KEY",
+    "ACCESS_KEY",
+    "CONNECTION_STRING",
+)
+_SENSITIVE_ENV_EXACT = {
+    "SSH_AUTH_SOCK",
+    "SSH_AGENT_PID",
+    "GPG_AGENT_INFO",
+    "DOCKER_CONFIG",
+    "KUBECONFIG",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AZURE_CONFIG_DIR",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "GIT_SSH_COMMAND",
+    "NETRC",
+    "_NETRC",
+    "PIP_INDEX_URL",
+    "PIP_EXTRA_INDEX_URL",
+    "DATABASE_URL",
+}
 _SENSITIVE_PYTHON_ENV = {"PYTHONPATH", "PYTHONHOME", "PYTHONSTARTUP"}
 _TERMINATE_GRACE_SECONDS = 0.5
 _MODE_LEVEL = {"sandbox": 0, "workspace": 1, "unrestricted": 2}
@@ -55,7 +89,7 @@ class _ProcessRecord:
     image_id: str | None = None
     source_readonly: bool = False
     network: str = "host"
-    snapshot: object | None = None
+    snapshot: WorkspaceSandbox | None = None
     sandbox_backend: DockerProcessSandbox | None = None
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
@@ -79,7 +113,7 @@ class ProcessService:
         config: MCPConfig,
         audit: AuditLogger | None = None,
         workspaces: WorkspaceRegistry | None = None,
-        durable: object | None = None,
+        durable: DurableRunService | None = None,
     ) -> None:
         self.config = config
         self.audit = audit
@@ -154,7 +188,7 @@ class ProcessService:
             )
         return mode
 
-    def _legacy_workspace(self) -> dict[str, object]:
+    def _legacy_workspace(self) -> dict[str, Any]:
         root = Path(self.config.allowed_roots[0]).resolve()
         return {
             "id": "root:0",
@@ -202,7 +236,9 @@ class ProcessService:
         clean: dict[str, str] = {}
         for key, value in os.environ.items():
             upper = key.upper()
-            if upper in _SENSITIVE_PYTHON_ENV:
+            if upper in _SENSITIVE_PYTHON_ENV or upper in _SENSITIVE_ENV_EXACT:
+                continue
+            if upper.startswith("GIT_CONFIG_") or upper.endswith(("_PAT", "_DSN")):
                 continue
             if any(part in upper for part in _SENSITIVE_ENV_PARTS):
                 continue
@@ -251,7 +287,8 @@ class ProcessService:
             )
         else:
             backend = self._sandbox_backend(image)
-            writable = "write" in set(view.get("permissions") or [])
+            permissions = view.get("permissions")
+            writable = isinstance(permissions, (list, tuple, set)) and "write" in permissions
             prepared = backend.prepare(
                 argv,
                 workspace_root=root,
@@ -441,7 +478,7 @@ class ProcessService:
             if host not in {"127.0.0.1", "localhost", "::1"}:
                 raise PermissionError("readiness tcp_host must be loopback")
             try:
-                port = int(port_raw)
+                port = int(str(port_raw))
             except (TypeError, ValueError) as exc:
                 raise ValueError("readiness tcp_port must be an integer") from exc
             if not 1 <= port <= 65535:
@@ -465,7 +502,7 @@ class ProcessService:
             normalized["stdout_contains"] = marker
 
         try:
-            timeout_s = float(probe.get("timeout_s", 60.0))
+            timeout_s = float(str(probe.get("timeout_s", 60.0)))
         except (TypeError, ValueError) as exc:
             raise ValueError("readiness timeout_s must be numeric") from exc
         if not 1 <= timeout_s <= 3600:
@@ -492,7 +529,7 @@ class ProcessService:
 
         if "tcp_port" in probe:
             host = str(probe["tcp_host"])
-            port = int(probe["tcp_port"])
+            port = int(str(probe["tcp_port"]))
             try:
                 with socket.create_connection((host, port), timeout=0.35):
                     details["tcp"] = {"ready": True, "host": host, "port": port}
@@ -549,7 +586,7 @@ class ProcessService:
         record: _ProcessRecord,
         probe: dict[str, object],
     ) -> None:
-        deadline = time.monotonic() + float(probe["timeout_s"])
+        deadline = time.monotonic() + float(str(probe["timeout_s"]))
         last_emit = 0.0
         while True:
             if record.process.poll() is not None:
@@ -694,7 +731,7 @@ class ProcessService:
                 image=image,
             )
 
-            popen_kwargs: dict[str, object] = {}
+            popen_kwargs: dict[str, Any] = {}
             if os.name == "nt":
                 popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
             else:
@@ -1000,7 +1037,7 @@ class ProcessService:
         if pgid is None:
             return
         try:
-            os.killpg(pgid, signal.SIGTERM)
+            getattr(os, "killpg")(pgid, signal.SIGTERM)
         except ProcessLookupError:
             return
         if process.poll() is None:
@@ -1009,7 +1046,7 @@ class ProcessService:
             except subprocess.TimeoutExpired:
                 pass
         try:
-            os.killpg(pgid, signal.SIGKILL)
+            getattr(os, "killpg")(pgid, getattr(signal, "SIGKILL", signal.SIGTERM))
         except ProcessLookupError:
             pass
         if process.poll() is None:
@@ -1097,9 +1134,9 @@ class ProcessService:
             except (json.JSONDecodeError, TypeError):
                 return {}
             return {
-                int(row["ProcessId"]): {
-                    "pid": int(row["ProcessId"]),
-                    "parent_pid": int(row.get("ParentProcessId") or 0),
+                int(str(row["ProcessId"])): {
+                    "pid": int(str(row["ProcessId"])),
+                    "parent_pid": int(str(row.get("ParentProcessId") or 0)),
                     "name": str(row.get("Name") or ""),
                     "command_line": str(row.get("CommandLine") or ""),
                     "created": str(row.get("CreationDate") or ""),
@@ -1152,7 +1189,7 @@ class ProcessService:
         snapshot = self._host_process_snapshot()
         children: dict[int, list[int]] = {}
         for pid, row in snapshot.items():
-            parent = int(row.get("parent_pid") or 0)
+            parent = int(str(row.get("parent_pid") or 0))
             children.setdefault(parent, []).append(pid)
 
         def descendants(pid: int, seen: set[int] | None = None) -> list[dict[str, object]]:
@@ -1168,7 +1205,7 @@ class ProcessService:
             return out
 
         items: list[dict[str, object]] = []
-        for pid, info in sorted(root_info.items(), key=lambda pair: pair[1]["created_at"]):
+        for pid, info in sorted(root_info.items(), key=lambda pair: str(pair[1]["created_at"])):
             item = dict(info)
             item["parent_pid"] = (snapshot.get(pid) or {}).get("parent_pid")
             item["children"] = descendants(pid)

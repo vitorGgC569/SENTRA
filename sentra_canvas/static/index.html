@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SENTRA — Canvas nativo</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="nav">
+    <div class="brand"><span class="brandmark">S</span><div><strong>SENTRA</strong><small>CANVAS NATIVO</small></div></div>
+    <div class="section-head">Workspaces <span id="ws-count">0</span></div>
+    <nav id="workspaces"><p class="muted">Carregando…</p></nav>
+    <form id="new-ws" class="stack">
+      <label class="muted" for="ws-name">Novo workspace</label>
+      <input id="ws-name" placeholder="meu_projeto" maxlength="48" required pattern="[A-Za-z][A-Za-z0-9_-]*">
+      <button class="primary" type="submit">+ Criar workspace</button>
+    </form>
+    <div class="nav-bottom"><span class="online">●</span> Conectado ao runtime local
+      <p>Não depende do Maestri</p></div>
+  </aside>
+  <main>
+    <header class="top">
+      <div><div class="eyebrow">AMBIENTE DE EXECUÇÃO</div><h1 id="ws-title">Selecione um workspace</h1>
+        <p id="ws-path" class="muted">Terminais, agentes e equipes em uma única janela.</p></div>
+      <div class="top-actions"><span id="counts">0 terminais • 0 agentes</span><button id="refresh" type="button">↻ Atualizar</button></div>
+    </header>
+    <div id="empty" class="welcome">
+      <div class="brandmark huge">S</div><h2>Seu espaço de trabalho começa aqui</h2>
+      <p>Crie um workspace à esquerda para iniciar sessões independentes.</p>
+    </div>
+    <div id="dashboard" hidden>
+      <div class="section-heading"><div><div class="eyebrow">SESSÕES ATIVAS</div><h2>Terminais</h2></div>
+        <form id="new-terminal" class="inline">
+          <input id="terminal-name" placeholder="terminal_1" maxlength="48" required>
+          <select id="terminal-shell"><option value="powershell">PowerShell</option><option value="cmd">CMD</option><option value="pwsh">PowerShell 7</option></select>
+          <button class="primary" type="submit">+ Terminal</button>
+        </form>
+      </div>
+      <div class="hint">Arraste os painéis para reorganizar. Cada terminal utiliza um processo ConPTY próprio.</div>
+      <div id="terminals" class="terminal-grid"></div>
+      <div class="lower">
+        <section class="surface"><div class="eyebrow">COLABORAÇÃO</div><h2>Agentes</h2>
+          <form id="new-agent" class="stack">
+            <div class="pair"><input id="agent-name" placeholder="nome_do_agente" required maxlength="48">
+              <input id="agent-model" value="sentra/chatgpt-web/high" placeholder="modelo" required></div>
+            <div class="pair"><select id="agent-role"><option value="worker">Trabalhador</option><option value="coordinator">Coordenador</option><option value="reviewer">Revisor</option></select>
+            <label class="check"><input id="agent-start" type="checkbox"> Iniciar CLI no terminal</label></div>
+            <button type="submit">+ Adicionar agente</button>
+          </form>
+          <div class="hint">Processo iniciado ≠ modelo autenticado. Teste a conexão no próprio CLI.</div>
+          <div id="agents"></div>
+        </section>
+        <section class="surface"><div class="eyebrow">ORQUESTRAÇÃO</div><h2>Equipes</h2>
+          <form id="new-team" class="stack">
+            <input id="team-name" placeholder="nome_da_equipe" required maxlength="48">
+            <label>Coordenador<select id="team-coordinator" required></select></label>
+            <label>Trabalhadores (Ctrl + clique para selecionar vários)
+            <select id="team-workers" multiple size="3"></select></label>
+            <button type="submit">+ Criar equipe</button>
+          </form>
+          <div id="teams"></div>
+        </section>
+        <section class="surface"><div class="eyebrow">JOBS DURÁVEIS</div><h2>Delegação</h2>
+          <form id="new-task" class="stack">
+            <label>Equipe<select id="task-team" required></select></label>
+            <label>Trabalhador<select id="task-worker" required></select></label>
+            <label>Provedor<select id="task-provider"><option value="test">Teste local (sem IA)</option><option value="sentra-cli">SENTRA CLI real (requer aprovação)</option></select></label>
+            <textarea id="task-prompt" required maxlength="4000" placeholder="Descreva a tarefa…"></textarea>
+            <button class="primary" type="submit">Delegar tarefa</button>
+          </form>
+          <div id="tasks"></div>
+        </section>
+      </div>
+      <section class="surface audit"><div class="eyebrow">OBSERVABILIDADE</div><h2>Eventos e auditoria</h2><input id="event-search" aria-label="Buscar eventos" maxlength="120" placeholder="Buscar por evento, recurso ou detalhe…"><div id="events"></div></section>
+    </div>
+    <div id="notice" role="status" aria-live="polite"></div>
+  </main>
+</div>
+</body>
+</html>

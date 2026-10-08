@@ -72,11 +72,14 @@ class ContextBusSharedContextBridge:
     @staticmethod
     def _consumer_id(run_id: str, role: str, task_id: str | None, seat: str) -> str:
         import hashlib
+        # Context progress belongs to the persistent logical seat. A transient
+        # task id must not create a fresh consumer and replay old project
+        # history every time the same Agent receives new work.
+        del task_id
         raw = "|".join([
             str(run_id or ""),
             str(seat or ""),
             str(role or ""),
-            str(task_id or ""),
         ])
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
         return f"oma:{str(seat or role or 'agent')[:48]}:{digest}"

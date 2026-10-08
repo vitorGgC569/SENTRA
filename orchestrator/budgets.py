@@ -34,7 +34,9 @@ class TokenBudget:
             raise ValueError("token budgets must be positive")
         self.limits = {"master": master, "secondary": secondary}
         self.used = {"master": 0, "secondary": 0}
-        self.task_limits, self.task_used, self.reservations = {}, {}, {}
+        self.task_limits: dict[str, int] = {}
+        self.task_used: dict[str, int] = {}
+        self.reservations: dict[str, Reservation] = {}
         self.save = save
         self.accounting = {"provider": 0, "estimated": 0, "uncertain": 0}
         if state:

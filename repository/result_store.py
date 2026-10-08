@@ -54,7 +54,7 @@ class ResultStore:
         start = r.cursor if offset is None else offset
         if start < 0 or start > len(r.lines):
             return "ERROR: result offset outside range", False
-        chunk = []
+        chunk: list[str] = []
         size = 0
         for line in r.lines[start:start + MAX_RETURN_LINES]:
             if chunk and size + len(line) + 1 > MAX_PAGE_CHARS - 512:

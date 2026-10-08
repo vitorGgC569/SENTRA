@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import replace
+import asyncio
 import os
 from typing import Any
 
@@ -21,6 +22,7 @@ from .models import ResponseEnvelope, SERVER_NAME, SERVER_VERSION
 from .prompts import register_prompts
 from .resources import capability_document, register_resources
 from .services.browser import BrowserControlService
+from .services.candidate import CandidateGenerationService
 from .services.capabilities import CapabilityService
 from .services.context import ContextBusService
 from .services.control_plane import ControlPlaneService
@@ -28,16 +30,20 @@ from .services.documents import DocumentService
 from .services.durable import DurableRunService
 from .services.filesystem import FilesystemService
 from .services.jobs import JobService
+from .services.maestri import MaestriService
+from .services.native_canvas import NativeCanvasService
 from .services.oma import OmaService
 from .services.process import ProcessService
 from .services.repository import RepositoryService
 from .services.research import ResearchService
+from .services.routine_scheduler import RoutineSchedulerService
 from .services.runtime_config import RuntimeConfigService
 from .services.search_sessions import SearchSessionService
 from .services.telemetry import TelemetryService
 from .services.workspace_ops import WorkspaceOpsService
 from .services.workspaces import WorkspaceRegistry
 from .tools.commander import register_commander_tools
+from .tools.native_canvas import register_native_canvas_tools
 from .tools.context import register_context_tools
 from .tools.durable import register_durable_tools
 from .tools.filesystem import register_filesystem_tools
@@ -55,14 +61,19 @@ class SentraMCPServer:
         self.audit = AuditLogger(self.config.audit_log)
         self.workspaces = WorkspaceRegistry(self.config, self.audit)
         self.filesystem = FilesystemService(self.config, self.audit, self.workspaces)
-        self.durable = DurableRunService(self.config.state_root)
-        self.context = ContextBusService(self.config.state_root)
+        self.durable = DurableRunService(self.config.resolved_state_root)
+        self.context = ContextBusService(self.config.resolved_state_root)
         self.control_plane = ControlPlaneService(self.durable, self.context)
+        self.routine_scheduler = RoutineSchedulerService(self.control_plane)
         self.processes = ProcessService(
             self.config, self.audit, self.workspaces, durable=self.durable
         )
+        self.control_plane.attach_process_service(self.processes)
         self.repository = RepositoryService(self.config, self.audit, self.workspaces)
         self.oma = OmaService(self.config, self.audit)
+        self.candidate_generation = CandidateGenerationService(
+            self.config, self.audit, self.workspaces
+        )
         self.search = SearchSessionService(
             self.config,
             self.audit,
@@ -79,6 +90,8 @@ class SentraMCPServer:
             self.repository,
             durable=self.durable,
         )
+        self.maestri = MaestriService(self.config, self.audit)
+        self.canvas = NativeCanvasService(self.config,self.workspaces,self.filesystem,self.audit)
         self.research = ResearchService(
             self.config,
             self.audit,
@@ -94,7 +107,7 @@ class SentraMCPServer:
         self.runtime_config = RuntimeConfigService(
             self._effective_config,
             self._apply_safe_config,
-            state_path=self.config.state_root / "mcp-config.json",
+            state_path=self.config.resolved_state_root / "mcp-config.json",
         )
 
         verifier = None
@@ -117,9 +130,15 @@ class SentraMCPServer:
 
         @asynccontextmanager
         async def lifespan(_server: MCPServer):
+            routine_task = asyncio.create_task(
+                self.routine_scheduler.run(), name="sentra-routine-scheduler"
+            )
             try:
                 yield {}
             finally:
+                self.routine_scheduler.stop()
+                routine_task.cancel()
+                await asyncio.gather(routine_task, return_exceptions=True)
                 await self.research.close()
                 await self.browser.shutdown()
                 self.workspace_ops.shutdown()
@@ -155,6 +174,11 @@ class SentraMCPServer:
                 "service": "sentra-mcp",
                 "server_version": SERVER_VERSION,
                 "instance_id": instance_id,
+                "policy": {
+                    "enabled_surfaces": sorted(self.config.enabled_surfaces),
+                    "process_mode": self.config.process_mode,
+                    "tool_allowlist": list(self.config.tool_allowlist),
+                },
                 "build": manifest["server"],
                 "contract": manifest["contract"],
             })
@@ -185,7 +209,7 @@ class SentraMCPServer:
             "oauth_issuer_url": self.config.oauth_issuer_url or None,
             "oauth_resource_url": self.config.oauth_resource_url or None,
             "remote_store": str(self.config.remote_store_path),
-            "state_root": str(self.config.state_root),
+            "state_root": str(self.config.resolved_state_root),
             "tool_allowlist": list(self.config.tool_allowlist),
         }
 
@@ -195,8 +219,11 @@ class SentraMCPServer:
         self.filesystem.update_config(self.config)
         self.processes.update_config(self.config)
         self.repository.update_config(self.config)
+        self.candidate_generation.update_config(self.config)
         self.search.update_config(self.config)
         self.jobs.update_config(self.config)
+        self.maestri.update_config(self.config)
+        self.canvas.update_config(self.config)
         self.browser.config = self.config
         self.research.update_config(self.config)
         self.telemetry.config = self.config
@@ -230,6 +257,8 @@ class SentraMCPServer:
             return
 
         surfaces = self.config.enabled_surfaces
+        if "developer" in surfaces:
+            register_native_canvas_tools(tool_server,self.canvas)
         if "core" in surfaces:
             register_filesystem_tools(
                 tool_server, self.filesystem, self.capabilities
@@ -241,6 +270,8 @@ class SentraMCPServer:
                 self.capabilities,
                 self.filesystem,
                 self.processes,
+                self.control_plane,
+                governance_specialized="admin" in surfaces,
             )
             register_context_tools(tool_server, self.control_plane)
         if {"developer", "oma"} & surfaces:
@@ -248,6 +279,7 @@ class SentraMCPServer:
                 tool_server,
                 self.repository,
                 self.oma,
+                self.candidate_generation,
                 surfaces=surfaces,
             )
         if "remote" in surfaces:
@@ -263,6 +295,7 @@ class SentraMCPServer:
             workspaces=self.workspaces,
             jobs=self.jobs,
             research=self.research,
+            maestri=self.maestri,
             durable=self.durable,
             surfaces=surfaces - {"remote"},
         )

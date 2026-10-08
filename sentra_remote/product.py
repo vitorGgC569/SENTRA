@@ -9,14 +9,17 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
 import zipfile
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .agent_config import AgentConfig
 from .secrets import protect_secret, unprotect_secret
 
 SAFE_TOOL_ALLOWLIST = (
@@ -37,6 +40,7 @@ SAFE_TOOL_ALLOWLIST = (
     "sentra_list_research_runs", "sentra_research_status", "sentra_research_result",
 )
 
+ACCESS_SCOPES = ("workspace", "user", "computer")
 PROFILE_POLICIES: dict[str, dict[str, Any]] = {
     "Safe": {
         "surfaces": ("core", "developer", "browser", "oma"),
@@ -56,10 +60,134 @@ PROFILE_POLICIES: dict[str, dict[str, Any]] = {
 }
 
 
+@contextmanager
+def _exclusive_registry_lock(path: Path, timeout_s: float = 5.0):
+    """Serialize registry read/modify/write across SENTRA processes."""
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        deadline = time.monotonic() + max(0.1, float(timeout_s))
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "timed out waiting for runtime authority registry lock"
+                        )
+                    time.sleep(0.02)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            flock = getattr(fcntl, "flock")
+            lock_ex = int(getattr(fcntl, "LOCK_EX"))
+            lock_nb = int(getattr(fcntl, "LOCK_NB"))
+            lock_un = int(getattr(fcntl, "LOCK_UN"))
+            while True:
+                try:
+                    flock(handle.fileno(), lock_ex | lock_nb)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(
+                            "timed out waiting for runtime authority registry lock"
+                        )
+                    time.sleep(0.02)
+            try:
+                yield
+            finally:
+                flock(handle.fileno(), lock_un)
+    finally:
+        handle.close()
+
+
 @dataclass(slots=True)
 class ProductPaths:
     install_dir: Path
     state_dir: Path
+
+    @staticmethod
+    def _authority_registry_path() -> Path:
+        base = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))).expanduser().resolve()
+        return base / "SENTRA" / "runtime-authorities.json"
+
+    @staticmethod
+    def _authority_key(install_dir: Path) -> str:
+        normalized = os.path.normcase(str(install_dir.expanduser().resolve()))
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
+
+    @classmethod
+    def _recorded_state_dir(cls, install_dir: Path) -> Path | None:
+        path = cls._authority_registry_path()
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        authorities = payload.get("authorities")
+        if not isinstance(authorities, dict):
+            return None
+        item = authorities.get(cls._authority_key(install_dir))
+        if not isinstance(item, dict):
+            return None
+        recorded_install = str(item.get("install_dir") or "")
+        if os.path.normcase(recorded_install) != os.path.normcase(str(install_dir.resolve())):
+            return None
+        recorded_state = str(item.get("state_dir") or "").strip()
+        return Path(recorded_state).expanduser().resolve() if recorded_state else None
+
+    def persist_runtime_authority(self) -> Path:
+        path = self._authority_registry_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _exclusive_registry_lock(path):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
+            authorities = payload.setdefault("authorities", {})
+            if not isinstance(authorities, dict):
+                authorities = {}
+                payload["authorities"] = authorities
+            authorities[self._authority_key(self.install_dir)] = {
+                "install_dir": str(self.install_dir.resolve()),
+                "state_dir": str(self.state_dir.resolve()),
+                "updated_at": time.time(),
+            }
+            payload["schema_version"] = 1
+
+            fd, temp_name = tempfile.mkstemp(
+                prefix=path.name + ".",
+                suffix=".tmp",
+                dir=str(path.parent),
+            )
+            temp = Path(temp_name)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump(payload, handle, indent=2)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temp, path)
+            finally:
+                temp.unlink(missing_ok=True)
+        return path
 
     @classmethod
     def default(cls, install_dir: Path | None = None) -> "ProductPaths":
@@ -67,11 +195,26 @@ class ProductPaths:
             "LOCALAPPDATA", str(Path.home())
         )) / "SENTRA" / "Commander").expanduser().resolve()
         state_override = os.environ.get("SENTRA_STATE_DIR", "").strip()
-        state_dir = (
-            Path(state_override).expanduser().resolve()
-            if state_override
-            else (Path.home() / ".sentra").resolve()
-        )
+        if state_override:
+            state_dir = Path(state_override).expanduser().resolve()
+        else:
+            recorded = cls._recorded_state_dir(installed)
+            if recorded is not None:
+                state_dir = recorded
+            else:
+                # First-run migration fallback only. Once a runtime is created,
+                # persist_runtime_authority() becomes the source of truth.
+                source_state = installed / ".sentra"
+                source_tunnel = source_state / "tunnel"
+                has_source_tunnel_state = (
+                    (source_tunnel / "runtime-key.dpapi").is_file()
+                    or (source_tunnel / "profiles" / "sentra-local.yaml").is_file()
+                )
+                state_dir = (
+                    source_state.resolve()
+                    if install_dir is not None and has_source_tunnel_state
+                    else (Path.home() / ".sentra").resolve()
+                )
         return cls(installed, state_dir)
 
     @property
@@ -103,7 +246,14 @@ class ProductPaths:
 
     @property
     def tunnel_client(self) -> Path:
-        return self.install_dir / "tunnel-client.exe"
+        installed = self.install_dir / "tunnel-client.exe"
+        if installed.is_file():
+            return installed
+        # Source-tree development keeps the official client private/untracked.
+        development = (
+            self.install_dir / ".sentra" / "tunnel-client" / "tunnel-client.exe"
+        )
+        return development if development.is_file() else installed
 
     @property
     def extension_dir(self) -> Path:
@@ -113,6 +263,8 @@ class ProductPaths:
 @dataclass(slots=True)
 class ProductSettings:
     profile: str = "Developer"
+    access_scope: str = "workspace"
+    autostart_desktop: bool = True
     allowed_roots: list[str] = field(default_factory=list)
     autostart_mcp: bool = True
     autostart_relay: bool = True
@@ -127,14 +279,34 @@ class ProductSettings:
     web_model_name: str = ""
 
     @staticmethod
+    def _normalize_access_scope(value: object) -> str:
+        scope = str(value or "workspace").strip().lower()
+        aliases = {
+            "workspace": "workspace",
+            "workspaces": "workspace",
+            "user": "user",
+            "home": "user",
+            "computer": "computer",
+            "full": "computer",
+        }
+        normalized = aliases.get(scope)
+        if normalized not in ACCESS_SCOPES:
+            raise ValueError("access_scope must be workspace, user or computer")
+        return normalized
+
+    @staticmethod
     def _normalize_web_model_name(value: object) -> str:
         model = str(value or "").strip()
+        allowed_prefixes = ("sentra/chatgpt-web/", "sentra/gemini-web/")
         if model and (
-            not model.startswith("sentra/chatgpt-web/")
+            not model.startswith(allowed_prefixes)
             or len(model) > 200
             or any(ord(ch) < 32 or ord(ch) == 127 for ch in model)
         ):
-            raise ValueError("web_model_name must use the sentra/chatgpt-web/ namespace")
+            raise ValueError(
+                "web_model_name must use the sentra/chatgpt-web/ or "
+                "sentra/gemini-web/ namespace"
+            )
         return model
 
     @classmethod
@@ -146,6 +318,7 @@ class ProductSettings:
             raise ValueError("desktop settings must be a JSON object")
         known = {item.name for item in cls.__dataclass_fields__.values()}
         settings = cls(**{key: value for key, value in data.items() if key in known})
+        settings.access_scope = cls._normalize_access_scope(settings.access_scope)
         settings.web_model_name = cls._normalize_web_model_name(settings.web_model_name)
         return settings
 
@@ -157,6 +330,7 @@ class ProductSettings:
                 raise ValueError(f"{label} port must be 1024..65535")
         if self.mcp_port == self.relay_port:
             raise ValueError("MCP and relay ports must be different")
+        self.access_scope = self._normalize_access_scope(self.access_scope)
         self.web_model_name = self._normalize_web_model_name(self.web_model_name)
         roots: list[str] = []
         for item in self.allowed_roots:
@@ -165,15 +339,15 @@ class ProductSettings:
                 roots.append(str(root))
         self.allowed_roots = roots
         normalized_permissions: dict[str, list[str]] = {}
-        for root in roots:
-            requested = self.workspace_permissions.get(root) or (
+        for root_text in roots:
+            requested = self.workspace_permissions.get(root_text) or (
                 ["read"] if self.profile == "Safe" else ["read", "write", "execute"]
             )
             permissions = [
                 name for name in ("read", "write", "execute")
                 if name in set(str(item).strip().lower() for item in requested)
             ]
-            normalized_permissions[root] = permissions or ["read"]
+            normalized_permissions[root_text] = permissions or ["read"]
         self.workspace_permissions = normalized_permissions
         path.parent.mkdir(parents=True, exist_ok=True)
         temp = path.with_suffix(".tmp")
@@ -185,6 +359,34 @@ class ProductSettings:
         if self.tool_allowlist:
             base["tool_allowlist"] = tuple(dict.fromkeys(self.tool_allowlist))
         return base
+
+
+def mcp_policy_status(settings: ProductSettings, health: dict[str, Any]) -> dict[str, Any]:
+    """Verify registration-time policy rather than inferring it from a live port."""
+    from sentra_mcp.config import ALLOWED_TOOL_SURFACES
+
+    requested = settings.policy()
+    surfaces = set(requested["surfaces"])
+    if "all" in surfaces:
+        surfaces = set(ALLOWED_TOOL_SURFACES) - {"all"}
+    expected = {
+        "enabled_surfaces": sorted(surfaces),
+        "process_mode": requested["process_mode"],
+        "tool_allowlist": sorted(set(requested.get("tool_allowlist") or ())),
+    }
+    policy = health.get("policy")
+    if not isinstance(policy, dict):
+        return {"ok": False, "reason": "runtime_policy_unverified", "expected": expected}
+    actual = {}
+    for name in ("enabled_surfaces", "tool_allowlist"):
+        values = policy.get(name)
+        if not isinstance(values, list) or not all(isinstance(item, str) for item in values):
+            return {"ok": False, "reason": "runtime_policy_unverified", "expected": expected}
+        actual[name] = sorted(set(values))
+    actual["process_mode"] = policy.get("process_mode")
+    matched = actual == expected
+    return {"ok": matched, "reason": None if matched else "runtime_policy_mismatch",
+            "expected": expected, "actual": actual}
 
 
 def ensure_browser_token(paths: ProductPaths) -> str:
@@ -220,6 +422,14 @@ def configure_tunnel(paths: ProductPaths, tunnel_id: str, runtime_key: str) -> N
     temp.replace(paths.tunnel_config)
 
 
+@contextmanager
+def tunnel_key_update(paths: ProductPaths):
+    """Serialize browser enrollment and private-stdin key rotation."""
+    paths.state_dir.mkdir(parents=True, exist_ok=True)
+    with _exclusive_registry_lock(paths.state_dir / "tunnel-key-update", timeout_s=1.0):
+        yield
+
+
 def load_tunnel_config(paths: ProductPaths, *, reveal_secret: bool = False) -> dict[str, Any]:
     if not paths.tunnel_config.is_file():
         return {}
@@ -233,6 +443,54 @@ def load_tunnel_config(paths: ProductPaths, *, reveal_secret: bool = False) -> d
     }
     if reveal_secret and data.get("runtime_key"):
         result["runtime_key"] = unprotect_secret(str(data["runtime_key"]))
+    return result
+
+
+def tunnel_credential_storage(paths: ProductPaths) -> dict[str, Any]:
+    """Report credential-at-rest protection without ever revealing the credential."""
+    if not paths.tunnel_config.is_file():
+        return {"ok": False, "configured": False, "scheme": None}
+    try:
+        data = json.loads(paths.tunnel_config.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {
+            "ok": False,
+            "configured": True,
+            "scheme": None,
+            "detail": "tunnel configuration is unreadable",
+        }
+    if not isinstance(data, dict):
+        return {
+            "ok": False,
+            "configured": True,
+            "scheme": None,
+            "detail": "tunnel configuration is invalid",
+        }
+    protected = str(data.get("runtime_key") or "")
+    scheme = protected.split(":", 1)[0].lower() if ":" in protected else "plaintext"
+    expected = "dpapi" if os.name == "nt" else "keyring"
+    scheme_ok = bool(protected) and scheme == expected
+    decryptable: bool | None = None
+    detail: str | None = None
+    if scheme_ok and os.name == "nt":
+        try:
+            # Verify the DPAPI blob belongs to the current Windows user without
+            # returning, logging or persisting the plaintext credential.
+            decryptable = bool(unprotect_secret(protected))
+        except Exception:
+            decryptable = False
+            detail = "DPAPI credential cannot be opened for the current Windows user"
+    ok = scheme_ok and decryptable is not False
+    result: dict[str, Any] = {
+        "ok": ok,
+        "configured": True,
+        "scheme": scheme if protected else None,
+        "expected_scheme": expected,
+    }
+    if decryptable is not None:
+        result["decryptable"] = decryptable
+    if detail:
+        result["detail"] = detail
     return result
 
 
@@ -262,11 +520,35 @@ def _docker_status() -> dict[str, Any]:
             capture_output=True, text=True, timeout=5, check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return {"ok": False, "detail": str(exc)[:160]}
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "state": "docker_cli_missing",
+            "detail": "Docker CLI not found; install Docker Desktop or configure a trusted sandbox runner.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "state": "docker_timeout",
+            "detail": "Docker CLI timed out while checking daemon readiness.",
+        }
+    except OSError as exc:
+        detail = str(exc).strip() or exc.__class__.__name__
+        return {"ok": False, "state": "docker_error", "detail": detail[:160]}
+
+    raw = (result.stdout or result.stderr or "").strip()
+    if result.returncode != 0:
+        return {
+            "ok": False,
+            "state": "docker_daemon_unavailable",
+            "detail": (raw or f"docker info exited with code {result.returncode}")[:160],
+        }
+    version = raw.strip().strip('"')
     return {
-        "ok": result.returncode == 0,
-        "detail": (result.stdout or result.stderr).strip()[:160],
+        "ok": True,
+        "state": "ready",
+        "version": version or None,
+        "detail": f"Docker daemon ready{f' ({version})' if version else ''}",
     }
 
 
@@ -281,7 +563,12 @@ def _git_status() -> dict[str, Any]:
     return {"ok": result.returncode == 0, "detail": result.stdout.strip()[:160]}
 
 
-def collect_product_status(paths: ProductPaths, settings: ProductSettings) -> dict[str, Any]:
+def collect_product_status(
+    paths: ProductPaths,
+    settings: ProductSettings,
+    *,
+    include_optional: bool = False,
+) -> dict[str, Any]:
     token = ""
     try:
         token = ensure_browser_token(paths)
@@ -305,8 +592,14 @@ def collect_product_status(paths: ProductPaths, settings: ProductSettings) -> di
                 ),
                 "server_version": health.get("server_version"),
             })
-            if not mcp["ok"]:
+            instance_matches = mcp["ok"]
+            policy = mcp_policy_status(settings, health)
+            mcp["policy"] = policy
+            mcp["ok"] = bool(instance_matches and policy["ok"])
+            if not instance_matches:
                 mcp["detail"] = "port belongs to a different SENTRA instance"
+            elif not policy["ok"]:
+                mcp["detail"] = policy["reason"]
         except Exception as exc:
             mcp["detail"] = str(exc)[:160]
     relay_port_open = tcp_open("127.0.0.1", settings.relay_port)
@@ -321,11 +614,25 @@ def collect_product_status(paths: ProductPaths, settings: ProductSettings) -> di
                 f"http://127.0.0.1:{settings.relay_port}/health",
                 token=token,
             )
+            authenticated = False
+            try:
+                auth = json_get(
+                    f"http://127.0.0.1:{settings.relay_port}/auth/check",
+                    token=token,
+                )
+                authenticated = auth.get("ok") is True
+            except Exception:
+                authenticated = False
+            extension = health.get("extension") if isinstance(health.get("extension"), dict) else {}
             relay.update({
-                "ok": health.get("ok") is True,
+                "ok": health.get("ok") is True and authenticated,
+                "authenticated": authenticated,
                 "workers_online": health.get("workers_online", []),
+                "extension": extension,
                 "bridge_state": health.get("state") or health.get("edge_bridge", {}).get("state"),
             })
+            if health.get("ok") is True and not authenticated:
+                relay["detail"] = "relay pairing token mismatch"
         except Exception as exc:
             relay["ok"] = False
             relay["detail"] = str(exc)[:160]
@@ -342,9 +649,38 @@ def collect_product_status(paths: ProductPaths, settings: ProductSettings) -> di
             tunnel["ui"] = base + "/ui"
         except Exception as exc:
             tunnel["detail"] = str(exc)[:160]
+
+        current_logs = []
+        for log_name in ("tunnel.out.log", "tunnel.err.log"):
+            log_path = paths.state_dir / "logs" / log_name
+            try:
+                current_logs.append(
+                    log_path.read_text(encoding="utf-8", errors="replace")[-131072:]
+                )
+            except OSError:
+                pass
+        current_log = "\n".join(current_logs)
+        if "token_invalidated" in current_log:
+            tunnel.update({
+                "ok": False,
+                "reauth_required": True,
+                "control_plane": "REAUTH_REQUIRED",
+                "detail": "Runtime API key was invalidated by the control plane",
+            })
+    extension_value = relay.get("extension")
+    extension_presence: dict[str, Any] = (
+        extension_value if isinstance(extension_value, dict) else {}
+    )
     edge = {
-        "ok": bool(relay.get("workers_online")),
+        "ok": bool(
+            relay.get("ok")
+            and (relay.get("workers_online") or extension_presence.get("online"))
+        ),
         "workers": relay.get("workers_online", []),
+        "extension_online": bool(extension_presence.get("online")),
+        "extension_last_seen": extension_presence.get("last_seen"),
+        "extension_age_s": extension_presence.get("age_s"),
+        "extension_status": extension_presence.get("status") or {},
         "extension_dir": str(paths.extension_dir),
     }
     remote_agent: dict[str, Any] = {"ok": False, "configured": False}
@@ -358,18 +694,78 @@ def collect_product_status(paths: ProductPaths, settings: ProductSettings) -> di
                 "name": agent_data.get("name"),
                 "relay_url": agent_data.get("relay_url"),
                 "process_mode": agent_data.get("process_mode"),
+                "profile": agent_data.get("profile"),
+                "access_scope": agent_data.get("access_scope"),
+                "tool_surfaces": agent_data.get("tool_surfaces"),
             })
         except (OSError, json.JSONDecodeError):
             remote_agent["detail"] = "agent config is unreadable"
+    web_models_root = paths.install_dir / "web-models"
+    web_models_launcher = web_models_root / "win-unpacked" / "Codex Web GPT.exe"
+    web_models_manifest = web_models_root / "win-unpacked" / "resources" / "runtime" / "manifest.json"
+    web_models_installed = web_models_launcher.is_file()
+    web_models_payload_complete = (
+        web_models_installed and web_models_manifest.is_file()
+    )
+    web_models_autostart = (paths.state_dir / "web-models-enabled").is_file()
+    web_models_ready = False
+    web_models_gateway: dict[str, Any] = {"reachable": False}
+    if web_models_payload_complete:
+        try:
+            with urllib.request.urlopen(
+                "http://127.0.0.1:17842/healthz",
+                timeout=0.5,
+            ) as response:
+                payload = json.load(response)
+            catalog = payload.get("catalog") if isinstance(payload.get("catalog"), dict) else {}
+            upstream = payload.get("upstream") if isinstance(payload.get("upstream"), dict) else {}
+            web_models_gateway = {
+                "reachable": True,
+                "status": int(response.status),
+                "service": payload.get("service"),
+                "catalog_ready": bool(catalog.get("status") == "ready" and catalog.get("models")),
+                "turn_ready": bool(upstream.get("status") == "ok" and upstream.get("accepting_turns") is True),
+            }
+            web_models_ready = bool(
+                response.status == 200
+                and payload.get("service") == "sentra-model-gateway"
+                and payload.get("ready") is True
+            )
+        except Exception as exc:
+            web_models_gateway["detail"] = str(exc)[:160]
+    web_models = {
+        # Compatibility: historically "ok" meant the packaged payload exists.
+        "ok": web_models_payload_complete,
+        "installed": web_models_installed,
+        "payload_complete": web_models_payload_complete,
+        "autostart": web_models_autostart,
+        "ready": web_models_ready,
+        "catalog_ready": bool(web_models_gateway.get("catalog_ready")),
+        "turn_ready": bool(web_models_gateway.get("turn_ready")),
+        "scheduled": bool(
+            web_models_payload_complete and web_models_autostart and not web_models_ready
+        ),
+        "gateway": web_models_gateway,
+        "launcher": str(web_models_launcher),
+    }
+    lazy_status = {
+        "ok": None,
+        "state": "not_checked",
+        "lazy": True,
+        "detail": "Checked only when the related feature is used.",
+    }
     return {
         "mcp": mcp,
         "relay": relay,
         "tunnel": tunnel,
         "edge": edge,
         "remote_agent": remote_agent,
-        "sandbox": _docker_status(),
-        "git": _git_status(),
+        "web_models": web_models,
+        "credential_storage": tunnel_credential_storage(paths),
+        "sandbox": _docker_status() if include_optional else dict(lazy_status),
+        "git": _git_status() if include_optional else dict(lazy_status),
         "profile": settings.profile,
+        "access_scope": settings.access_scope,
         "allowed_roots": list(settings.allowed_roots),
     }
 def list_recent_jobs(paths: ProductPaths, limit: int = 50) -> list[dict[str, Any]]:
@@ -533,6 +929,9 @@ def enqueue_task(paths: ProductPaths, workspace: Path, prompt: str) -> dict[str,
         (str(root), text, now, now),
     )
     db.commit()
+    if cur.lastrowid is None:
+        db.close()
+        raise RuntimeError("task insert did not return an id")
     task_id = int(cur.lastrowid)
     db.close()
     return {"task_id": task_id, "state": "QUEUED", "workspace": str(root)}
@@ -573,7 +972,7 @@ def run_next_task(paths: ProductPaths, settings: ProductSettings) -> dict[str, A
         command = [str(exe)]
     else:
         source_main = Path(__file__).resolve().parents[1] / "main.py"
-        command = [os.environ.get("PYTHON", os.sys.executable), "-B", str(source_main)]
+        command = [os.environ.get("PYTHON", sys.executable), "-B", str(source_main)]
     command += [
         "--workspace", str(row["workspace"]),
         "--provider", "extension",
@@ -619,10 +1018,47 @@ def run_next_task(paths: ProductPaths, settings: ProductSettings) -> dict[str, A
         "log": str(log),
     }
 
+def agent_bootstrap_root(paths: ProductPaths) -> Path:
+    """Return the non-authoritative bootstrap root used by a registry-managed Agent."""
+    root = paths.state_dir / "default-workspace"
+    root.mkdir(parents=True, exist_ok=True)
+    return root.resolve()
+
+
+def sync_agent_policy(
+    paths: ProductPaths,
+    settings: ProductSettings,
+) -> Path | None:
+    """Apply Desktop profile/filesystem policy to an already-paired Remote Agent."""
+    config_path = paths.state_dir / "agent.json"
+    if not config_path.is_file():
+        return None
+    sync_workspace_registry(paths, settings)
+    config = AgentConfig.load(config_path)
+    policy = settings.policy()
+    config.allowed_roots = [str(agent_bootstrap_root(paths))]
+    config.process_mode = str(policy["process_mode"])
+    config.state_root = str(paths.state_dir)
+    config.profile = settings.profile
+    config.access_scope = settings.access_scope
+    config.tool_surfaces = [str(item) for item in policy["surfaces"]]
+    config.tool_allowlist = [str(item) for item in policy.get("tool_allowlist") or ()]
+    config.save(config_path)
+    return config_path
+
+
 def sync_workspace_registry(paths: ProductPaths, settings: ProductSettings) -> Path:
     """Persist Desktop-approved workspace permissions for the MCP registry."""
     settings.save(paths.settings)
     state_path = paths.state_dir / "workspaces.json"
+    existing: dict[str, Any] = {}
+    if state_path.is_file():
+        try:
+            loaded = json.loads(state_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                existing = loaded
+        except (OSError, json.JSONDecodeError):
+            existing = {}
     grants: list[dict[str, Any]] = []
     now = time.time()
     for index, root_text in enumerate(settings.allowed_roots):
@@ -640,7 +1076,69 @@ def sync_workspace_registry(paths: ProductPaths, settings: ProductSettings) -> P
             "created_at": now,
             "approved_at": now,
         })
-    payload = {"version": 1, "grants": grants, "pending": {}, "history": []}
+    broad_permissions = (
+        ["read"] if settings.profile == "Safe" else ["read", "write", "execute"]
+    )
+    scope_roots: list[Path] = []
+    if settings.access_scope == "user":
+        scope_roots = [Path.home().expanduser().resolve()]
+    elif settings.access_scope == "computer":
+        if os.name == "nt":
+            scope_roots = [
+                Path(f"{letter}:\\").resolve()
+                for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                if Path(f"{letter}:\\").exists()
+            ]
+        else:
+            scope_roots = [Path("/").resolve()]
+    for index, root in enumerate(scope_roots):
+        grants.append({
+            "workspace_id": "scope:" + hashlib.sha256(str(root).encode()).hexdigest()[:16],
+            "alias": (
+                "@user"
+                if settings.access_scope == "user"
+                else f"@computer-{index + 1}"
+            ),
+            "path": str(root),
+            "permissions": list(broad_permissions),
+            "scope": "permanent",
+            "owner": None,
+            "expires_at": None,
+            "source": "access_scope",
+            "created_at": now,
+            "approved_at": now,
+        })
+    managed_paths = {
+        str(Path(str(item["path"])).expanduser().resolve()).casefold()
+        for item in grants
+        if isinstance(item, dict) and item.get("path")
+    }
+    for item in existing.get("grants", []):
+        if not isinstance(item, dict):
+            continue
+        workspace_id = str(item.get("workspace_id") or "")
+        source = str(item.get("source") or "")
+        if workspace_id.startswith(("desktop:", "scope:")) or source == "access_scope":
+            continue
+        try:
+            existing_path = str(
+                Path(str(item.get("path") or "")).expanduser().resolve()
+            )
+        except OSError:
+            continue
+        if not existing_path or existing_path.casefold() in managed_paths:
+            continue
+        grants.append(dict(item))
+
+    pending = existing.get("pending")
+    history = existing.get("history")
+    payload = {
+        "version": max(2, int(existing.get("version") or 1)),
+        "access_scope": settings.access_scope,
+        "grants": grants,
+        "pending": dict(pending) if isinstance(pending, dict) else {},
+        "history": list(history) if isinstance(history, list) else [],
+    }
     state_path.parent.mkdir(parents=True, exist_ok=True)
     temp = state_path.with_suffix(".tmp")
     temp.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")

@@ -10,6 +10,7 @@ from mcp.server.mcpserver.context import Context
 from ..errors import sanitize_error
 from ..identity import resolve_owner
 from ..models import ResponseEnvelope
+from ..services.candidate import CandidateGenerationService
 from ..services.oma import OmaService
 from ..services.repository import RepositoryService
 
@@ -44,6 +45,7 @@ def register_sentra_tools(
     mcp: MCPServer,
     repository: RepositoryService,
     oma: OmaService,
+    candidate_generation: CandidateGenerationService | None = None,
     *,
     surfaces: set[str] | None = None,
 ) -> None:
@@ -155,6 +157,33 @@ def register_sentra_tools(
             return await _async_call(
                 lambda: repository.test(target, workspace, owner)
             )
+
+        if candidate_generation is not None:
+            @mcp.tool()
+            async def sentra_oma_candidate_generate(
+                task: dict[str, Any],
+                ctx: Context,
+                workspace: str | None = None,
+                context_summary: str = "",
+                provider: str | None = None,
+                session_token: str | None = None,
+            ) -> ResponseEnvelope:
+                """Generate a candidate patch without applying or promoting it.
+
+                Execute permission is required because source context may be sent
+                to an explicitly configured provider. Project files remain
+                read-only; the caller must independently verify the patch.
+                """
+                owner = resolve_owner(ctx, session_token=session_token)
+                return await _async_call(
+                    lambda: candidate_generation.generate(
+                        owner,
+                        workspace=workspace,
+                        task=task,
+                        context_summary=context_summary,
+                        provider=provider,
+                    )
+                )
 
     if "oma" in enabled:
         @mcp.tool()

@@ -32,6 +32,9 @@ def collect(config_path: Path) -> dict[str, Any]:
         "allowed_roots": list(config.allowed_roots),
         "audit_log": config.audit_log,
         "process_mode": config.process_mode,
+        "profile": config.profile,
+        "access_scope": config.access_scope,
+        "tool_surfaces": list(config.tool_surfaces),
         "token_present": bool(config.device_token),
     }
     try:
