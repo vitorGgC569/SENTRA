@@ -8,6 +8,7 @@ from typing import Any
 EXTENSION_IDENTITY_FILES = (
     "service-worker.js",
     "content-script.js",
+    "recovery-guard.js",
     "selectors.js",
     "observer.js",
 )

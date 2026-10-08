@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import shutil
 import sys
@@ -27,14 +28,27 @@ def _product_code(version: str) -> str:
     )).upper() + "}"
 
 
+MSI_IDENTIFIER_MAX = 72
+
+
+def _stable_msi_id(prefix: str, relative: Path) -> str:
+    normalized = "root" if relative == Path(".") else relative.as_posix().casefold()
+    leaf = "root" if relative == Path(".") else (relative.name or "root")
+    safe_leaf = msilib.make_id(leaf)
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    suffix = "_" + digest
+    label_budget = MSI_IDENTIFIER_MAX - len(prefix) - len(suffix)
+    if label_budget < 1:
+        raise ValueError("MSI identifier prefix is too long")
+    return msilib.make_id(prefix + safe_leaf[:label_budget] + suffix)
+
+
 def _component_id(relative: Path) -> str:
-    raw = "cmp_" + "_".join(relative.parts or ("root",))
-    return msilib.make_id(raw)
+    return _stable_msi_id("cmp_", relative)
 
 
 def _directory_id(relative: Path) -> str:
-    raw = "dir_" + "_".join(relative.parts or ("root",))
-    return msilib.make_id(raw)
+    return _stable_msi_id("dir_", relative)
 
 
 def _add_tree(db, cab: CAB, feature: Feature, install: Directory, source: Path) -> dict[str, str]:
@@ -82,12 +96,18 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
         "sentra-desktop.exe", "sentra-human.exe", "sentra-human-worker.exe",
         "sentra-mcp.exe", "sentra-browser-relay.exe",
         "sentra-agent.exe", "sentra-diagnostics.exe", "sentra-admin.exe",
-        "sentra-update-helper.exe", "sentra-oma.exe", "sentra.exe",
+        "sentra-update-helper.exe", "sentra-oma.exe", "sentra-cli.exe", "sentra-canvas.exe", "sentra.exe",
         "tunnel-client.exe",
     }
     missing = sorted(name for name in required if not (source / name).is_file())
     if missing:
         raise FileNotFoundError("MSI staging is missing: " + ", ".join(missing))
+    if not (source / "docs" / "onboarding_media" / "SENTRA_SETUP_GUIDE.html").is_file():
+        raise FileNotFoundError("MSI staging missing visual setup guide")
+    if not (source / "docs" / "onboarding_media" / "mcp-create-tunnel.mp4").is_file():
+        raise FileNotFoundError("MSI staging missing first-run tutorial video")
+    if not (source / "docs" / "onboarding_media" / "mcp-connect-connector.mp4").is_file():
+        raise FileNotFoundError("MSI staging missing connector tutorial video")
     if not (source / "edge_extension" / "manifest.json").is_file():
         raise FileNotFoundError("MSI staging is missing edge_extension")
     web_models = source / "web-models" / "win-unpacked"
@@ -152,6 +172,42 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
             r"Software\Microsoft\Windows\CurrentVersion\Run",
             "SENTRA Desktop",
             f'"[#{desktop_id}]" --hidden',
+            root_component,
+        ),
+    ])
+
+    add_data(db, "Environment", [
+        (
+            "SENTRA_User_Path",
+            "=-Path",
+            "[~];[INSTALLDIR]",
+            root_component,
+        ),
+    ])
+
+    add_data(db, "Registry", [
+        (
+            "SENTRA_Protocol_Name",
+            1,
+            r"Software\Classes\sentra",
+            None,
+            "URL:SENTRA Protocol",
+            root_component,
+        ),
+        (
+            "SENTRA_Protocol_Flag",
+            1,
+            r"Software\Classes\sentra",
+            "URL Protocol",
+            "",
+            root_component,
+        ),
+        (
+            "SENTRA_Protocol_Command",
+            1,
+            r"Software\Classes\sentra\shell\open\command",
+            None,
+            f'"[#{desktop_id}]" --open-url "%1"',
             root_component,
         ),
     ])

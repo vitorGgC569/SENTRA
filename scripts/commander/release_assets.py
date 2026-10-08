@@ -7,6 +7,7 @@ import importlib.metadata
 import json
 import shutil
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from sentra_remote.installer import INSTALL_MARKER, PRODUCTS, download_tunnel_cl
 from sentra_version import PRODUCT_VERSION
 
 from scripts.commander.build_msi import build_msi
+from scripts.commander.build_windows import _BuildLock
 from scripts.commander.extension_identity import stamp_extension_identity
 
 
@@ -82,10 +84,29 @@ def build_staging(dist: Path, staging: Path, tunnel_archive: Path) -> Path:
         source = ROOT / name
         if source.is_file():
             shutil.copy2(source, docs / name)
-    for name in ("QUICKSTART.md", "ARCHITECTURE.md", "SECURE_MCP_TUNNEL.md"):
+    for name in (
+        "START_HERE.md",
+        "QUICKSTART.md",
+        "USING_SENTRA.md",
+        "SENTRA_CLI.md",
+        "WEB_MODELS.md",
+        "MCP_SERVER.md",
+        "ARCHITECTURE.md",
+        "SECURE_MCP_TUNNEL.md",
+        "ZERO_CONFIG_SETUP.md",
+    ):
         source = ROOT / "docs" / name
         if source.is_file():
             shutil.copy2(source, docs / name)
+    media = ROOT / "docs" / "onboarding_media"
+    for video in ("mcp-create-tunnel.mp4", "mcp-connect-connector.mp4"):
+        source = media / video
+        if not source.is_file():
+            raise FileNotFoundError(f"Bundled SENTRA onboarding tutorial missing: {source}")
+    guide = media / "SENTRA_SETUP_GUIDE.html"
+    if not guide.is_file():
+        raise FileNotFoundError(f"Bundled SENTRA visual setup guide missing: {guide}")
+    shutil.copytree(media, docs / "onboarding_media")
     return staging
 
 
@@ -179,17 +200,31 @@ def create_assets(
     tunnel_archive: Path,
 ) -> dict[str, str]:
     release_dir.mkdir(parents=True, exist_ok=True)
-    staging = release_dir / "staging"
-    build_staging(dist, staging, tunnel_archive)
+    staging = Path(
+        tempfile.mkdtemp(prefix="sentra-release-staging-")
+    ).resolve()
+    artifacts_temp = Path(
+        tempfile.mkdtemp(prefix="sentra-release-artifacts-")
+    ).resolve()
+    try:
+        build_staging(dist, staging, tunnel_archive)
 
-    setup = release_dir / f"SENTRA-Setup-{PRODUCT_VERSION}.exe"
-    shutil.copy2(staging / "SENTRA-Setup.exe", setup)
-    msi = release_dir / f"SENTRA-Desktop-{PRODUCT_VERSION}-x64.msi"
-    build_msi(staging, msi, PRODUCT_VERSION)
-    update_zip = release_dir / f"SENTRA-Desktop-{PRODUCT_VERSION}-update.zip"
-    build_update_zip(staging, update_zip)
+        setup = release_dir / f"SENTRA-Setup-{PRODUCT_VERSION}.exe"
+        shutil.copy2(staging / "SENTRA-Setup.exe", setup)
 
-    shutil.rmtree(staging, ignore_errors=True)
+        msi = release_dir / f"SENTRA-Desktop-{PRODUCT_VERSION}-x64.msi"
+        local_msi = artifacts_temp / msi.name
+        build_msi(staging, local_msi, PRODUCT_VERSION)
+        shutil.copy2(local_msi, msi)
+
+        update_zip = release_dir / f"SENTRA-Desktop-{PRODUCT_VERSION}-update.zip"
+        local_update_zip = artifacts_temp / update_zip.name
+        build_update_zip(staging, local_update_zip)
+        shutil.copy2(local_update_zip, update_zip)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(artifacts_temp, ignore_errors=True)
+
     return finalize_assets(release_dir, signer_thumbprint="")
 
 
@@ -236,24 +271,26 @@ def main() -> int:
     parser.add_argument("--signer-thumbprint", default="")
     args = parser.parse_args()
     release_dir = Path(args.release).resolve()
-    if args.finalize_only:
-        result = finalize_assets(
-            release_dir,
-            signer_thumbprint=args.signer_thumbprint,
-        )
-    else:
-        if not args.tunnel_archive:
-            parser.error("--tunnel-archive is required unless --finalize-only is used")
-        result = create_assets(
-            Path(args.dist).resolve(),
-            release_dir,
-            Path(args.tunnel_archive).resolve(),
-        )
-        if args.signer_thumbprint:
+    lock_path = ROOT / ".sentra" / "release-assets.lock"
+    with _BuildLock(lock_path, description="release asset build"):
+        if args.finalize_only:
             result = finalize_assets(
                 release_dir,
                 signer_thumbprint=args.signer_thumbprint,
             )
+        else:
+            if not args.tunnel_archive:
+                parser.error("--tunnel-archive is required unless --finalize-only is used")
+            result = create_assets(
+                Path(args.dist).resolve(),
+                release_dir,
+                Path(args.tunnel_archive).resolve(),
+            )
+            if args.signer_thumbprint:
+                result = finalize_assets(
+                    release_dir,
+                    signer_thumbprint=args.signer_thumbprint,
+                )
     print(json.dumps(result, indent=2))
     return 0
 

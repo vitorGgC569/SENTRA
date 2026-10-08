@@ -5,7 +5,7 @@ from pathlib import Path
 
 # Executed by absolute path with -I against arbitrary authorized repositories.
 sys.path.insert(0, str(Path(__file__).parent))
-from paths import iter_workspace_files
+from paths import iter_workspace_files  # type: ignore[import-not-found]
 
 
 def main():

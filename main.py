@@ -49,9 +49,27 @@ def parser():
     cli.add_argument("--prompt", help="Objetivo concreto da implementação")
     cli.add_argument("--workspace", help="Repositório alvo; padrão: diretório atual")
     cli.add_argument("--config", default=str(PROJECT_ROOT / "config.yaml"))
-    cli.add_argument("--provider", choices=["extension", "local", "openai", "browser"], help="Provedor dos workers")
-    cli.add_argument("--reviewer", choices=["extension", "local", "openai", "browser"], help="Revisor interno; não é a IA central")
+    cli.add_argument("--provider", choices=["extension", "gemini_web", "local", "openai", "browser"], help="Provedor dos workers")
+    cli.add_argument("--reviewer", choices=["extension", "gemini_web", "local", "openai", "browser"], help="Revisor interno; não é a IA central")
     cli.add_argument("--workers", type=int, help="Tarefas concorrentes; padrão conservador: 1")
+    cli.add_argument(
+        "--remote-principal",
+        help="Principal autorizado cujos Remote Agents podem executar candidatos OMA",
+    )
+    cli.add_argument(
+        "--remote-workspace",
+        help="Alias do workspace aprovado existente nos Remote Agents",
+    )
+    cli.add_argument(
+        "--remote-provider",
+        choices=["extension", "gemini_web", "local", "openai", "browser"],
+        help="Provider usado para geração de candidato no Remote Agent",
+    )
+    cli.add_argument(
+        "--require-remote-workers",
+        action="store_true",
+        help="Falha a run se nenhum Remote Agent elegível estiver disponível",
+    )
     cli.add_argument("--max-rounds", type=int, help="Máximo de tentativas de tarefas por run")
     cli.add_argument("--resume", action="store_true", help="Retoma --job-id, preservando orçamento e checkpoints")
     cli.add_argument("--trust-workspace", action="store_true",
@@ -99,7 +117,7 @@ async def doctor(config, workspace, *, worker=None, reviewer=None):
     names.update(routing.get("roles", {}).values())
     if routing.get("fallback"):
         names.add(routing["fallback"])
-    if "extension" in names:
+    if {"extension", "gemini_web"} & names:
         from browser.extension_transport import ExtensionTransport, _get
         transport = ExtensionTransport(config.get("browser", {}).get("relay_base","http://127.0.0.1:8765"))
         try:
@@ -163,6 +181,16 @@ async def main_async(argv=None) -> int:
         raise ValueError("--idle-exit-secs deve ser >= 0 (0 = nunca sai por ociosidade)")
     if args.allow_protected and not args.promote:
         raise ValueError("--allow-protected só pode ser usado com --promote")
+    if (args.remote_workspace or args.remote_provider or args.require_remote_workers) and not args.remote_principal:
+        raise ValueError(
+            "--remote-workspace/--remote-provider/--require-remote-workers exigem --remote-principal"
+        )
+    if args.remote_principal is not None and not args.remote_principal.strip():
+        raise ValueError("--remote-principal não pode ser vazio")
+    if args.remote_principal and not args.remote_workspace:
+        raise ValueError("--remote-principal exige --remote-workspace explícito")
+    if args.remote_principal and (args.demo or args.mock):
+        raise ValueError("Remote Agents não são usados em --demo/--mock")
     config = load_config(Path(args.config).resolve())
     if args.sandbox or args.sandbox_image:
         execution = config.setdefault("validation", {}).setdefault("execution", {})
@@ -275,6 +303,17 @@ async def main_async(argv=None) -> int:
     if not demo and options["execution"]["backend"] == "host" and not args.trust_workspace:
         raise ValueError("use --sandbox docker; testes no host exigem --trust-workspace; use --demo para experimentar")
     if args.promote:
+        if args.sandbox is None and args.sandbox_image is None:
+            # Promotion must repeat verification under the exact execution
+            # boundary recorded by the run. Reuse it by default instead of
+            # silently switching to today's config.yaml backend.
+            stored = PersistenceStore(args.promote, workspace / "runs")
+            handoff = stored._load_json(stored.run_dir / "handoff.json", {})
+            recorded_execution = handoff.get("execution")
+            if isinstance(recorded_execution, dict):
+                options["execution"] = recorded_execution
+        if options["execution"]["backend"] == "host" and not args.trust_workspace:
+            raise ValueError("promotion verified on host requires explicit --trust-workspace")
         result = await promote_candidate(workspace, args.promote, allow_protected=args.allow_protected,
                                           commands=options["validation_commands"], profiles=options["command_profiles"],
                                           timeout=options["test_timeout"], execution=options["execution"],
@@ -293,6 +332,11 @@ async def main_async(argv=None) -> int:
             (workspace/"math_utils.py").write_text("# Offline demonstration fixture\n",encoding="utf-8")
             print("DEMO OFFLINE: modelos roteirizados; filesystem, gateway, subprocessos e testes reais.")
             objective = "Implement factorial and verify zero, positive and negative inputs"
+            # The demo workspace and its validation fixture are created by SENTRA
+            # itself, so the offline demonstration must not depend on Docker Desktop.
+            # This is deliberately limited to demo mode; user workspaces keep the
+            # configured fail-closed Docker/explicit-host policy.
+            options["execution"] = {"backend": "host"}
             # Do not run arbitrary operator profiles in the generated demonstration.
             options["validation_commands"], options["command_profiles"] = ["[[TEST|all]]"], {}
             # Scripted providers create no remote chats and consume no quota.
@@ -317,6 +361,37 @@ async def main_async(argv=None) -> int:
             if not diagnostics["ok"]:
                 print(json.dumps(diagnostics, ensure_ascii=False, indent=2))
                 return 2
+
+        remote_session = None
+        if args.remote_principal:
+            from orchestrator.remote_runtime import RemoteSchedulerSession
+
+            remote_session = RemoteSchedulerSession(
+                args.remote_principal,
+                workspace=args.remote_workspace,
+                provider=args.remote_provider or args.provider,
+            )
+            bindings = remote_session.bindings()
+            if args.require_remote_workers and bindings["eligible_count"] < 1:
+                remote_session.close()
+                remote_session = None
+                reasons = ", ".join(
+                    f"{item.get('node_id')}: {item.get('reason')}"
+                    for item in bindings.get("skipped", [])
+                ) or "nenhum Remote Agent elegível"
+                raise RuntimeError("REMOTE_WORKER_REQUIRED: " + reasons)
+            manifests = list(options.get("resource_manifests") or [])
+            manifests.extend(bindings.get("resource_manifests") or [])
+            options["resource_manifests"] = manifests
+            producers = dict(options.get("candidate_producers") or {})
+            producers.update(bindings.get("candidate_producers") or {})
+            options["candidate_producers"] = producers
+            print(
+                "Remote workers: "
+                f"{bindings['eligible_count']} elegível(is); "
+                f"{len(bindings.get('skipped', []))} ignorado(s)"
+            )
+
         router = build_router(config, worker=args.provider, reviewer=args.reviewer, mock=demo, root=PROJECT_ROOT)
         print(f"Run: {run_id}\nWorkspace: {workspace}\nWorkers: {router.primary_name}; revisor interno: {router.providers['master'].model_name}")
         try:
@@ -337,6 +412,8 @@ async def main_async(argv=None) -> int:
                 n_failed = len(clear_res.get("failed", []))
                 print(f"\n[--clear] Chats excluídos/limpos: {n_cleared} (falhas: {n_failed})")
             await close_router(router)
+            if remote_session is not None:
+                remote_session.close()
     print(f"\nStatus: {result['status']}\nTarefas: {result['completed_tasks']}/{result['total_tasks']}")
     print(f"Contexto para a central: {result['handoff_path']}\nPatch: {result['patch_path']}")
     for error in result.get("errors",[]):

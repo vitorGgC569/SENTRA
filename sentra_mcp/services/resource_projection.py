@@ -27,6 +27,18 @@ def _platform_capabilities(value: Any) -> set[str]:
     return out
 
 
+def _tool_allowed(tool: str, permissions: list[str]) -> bool:
+    for raw in permissions:
+        rule = str(raw or "").strip()
+        if rule == "*":
+            return True
+        if rule.endswith("*") and tool.startswith(rule[:-1]):
+            return True
+        if rule == tool:
+            return True
+    return False
+
+
 def _flatten_truthy_capabilities(value: Any, prefix: str = "") -> set[str]:
     """Flatten advertised booleans/lists without inventing authority semantics."""
     found: set[str] = set()
@@ -81,6 +93,8 @@ class RemoteResourceProjection:
         sentra = sentra if isinstance(sentra, dict) else {}
         advertised = sentra.get("capabilities")
         advertised = advertised if isinstance(advertised, dict) else {}
+        contract = sentra.get("contract")
+        contract = contract if isinstance(contract, dict) else {}
         resource_manifest = sentra.get("resources")
         resource_manifest = resource_manifest if isinstance(resource_manifest, dict) else {}
         resource_entries = resource_manifest.get("resources")
@@ -115,10 +129,27 @@ class RemoteResourceProjection:
             capabilities.add("python:" + _norm(raw_caps.get("python")))
         if raw_caps.get("hostname"):
             capabilities.add("host:" + _norm(raw_caps.get("hostname"))[:128])
-        for tool in device.get("allowed_tools") or []:
+        permissions = [
+            str(tool) for tool in (device.get("allowed_tools") or [])
+            if str(tool).strip()
+        ]
+        for tool in permissions:
             name = _norm(tool)
             if name:
                 capabilities.add("tool:" + name)
+
+        contract_tools = {
+            str(name)
+            for name in (contract.get("tool_names") or [])
+            if str(name)
+        }
+        candidate_tool = "sentra_oma_candidate_generate"
+        if (
+            candidate_tool in contract_tools
+            and _tool_allowed(candidate_tool, permissions)
+        ):
+            capabilities.add("candidate_generation")
+            capabilities.add("tool:" + candidate_tool)
 
         max_concurrency = 1
         for source in (resource_manifest, advertised, raw_caps):
@@ -133,8 +164,6 @@ class RemoteResourceProjection:
 
         server = sentra.get("server")
         server = server if isinstance(server, dict) else {}
-        contract = sentra.get("contract")
-        contract = contract if isinstance(contract, dict) else {}
         reasons = compatibility.get("reasons")
         reasons = reasons if isinstance(reasons, list) else []
 
@@ -159,6 +188,8 @@ class RemoteResourceProjection:
                 "build_id": server.get("build_id"),
                 "source_hash": server.get("source_hash"),
                 "schema_hash": contract.get("schema_hash"),
+                "tool_schema_hash": contract.get("tool_schema_hash") or contract.get("schema_hash"),
+                "tool_names_hash": contract.get("tool_names_hash"),
                 "protocol_version": server.get("protocol_version"),
                 "allowed_tools": list(device.get("allowed_tools") or []),
                 "resource_id": resource_entry.get("resource_id") if isinstance(resource_entry, dict) else None,
@@ -193,3 +224,63 @@ class RemoteResourceProjection:
         for item in inventory["nodes"]:
             registry.upsert(NodeCapabilityManifest.from_dict(item))
         return registry
+
+    def scheduler_bindings(
+        self,
+        principal: str,
+        *,
+        workspace: str | None = None,
+        provider: str | None = None,
+    ) -> dict[str, Any]:
+        """Build executable OMA bindings from authorized remote devices."""
+        from orchestrator.remote_candidate import RemoteCandidateProducer
+
+        requested_workspace = str(workspace or "").strip()
+        inventory = self.inventory(principal)
+        manifests: list[dict[str, Any]] = []
+        producers: dict[str, RemoteCandidateProducer] = {}
+        skipped: list[dict[str, Any]] = []
+
+        for raw in inventory["eligible"]:
+            node = NodeCapabilityManifest.from_dict(raw)
+            if "candidate_generation" not in node.capabilities:
+                skipped.append({
+                    "node_id": node.node_id,
+                    "reason": "candidate_generation_not_authorized",
+                })
+                continue
+            if (
+                requested_workspace
+                and node.workspaces
+                and requested_workspace not in node.workspaces
+            ):
+                skipped.append({
+                    "node_id": node.node_id,
+                    "reason": "workspace_not_advertised",
+                    "workspaces": list(node.workspaces),
+                })
+                continue
+
+            device_id = str((node.metadata or {}).get("device_id") or "").strip()
+            if not device_id:
+                skipped.append({
+                    "node_id": node.node_id,
+                    "reason": "device_id_missing",
+                })
+                continue
+
+            manifests.append(node.to_dict())
+            producers[node.node_id] = RemoteCandidateProducer(
+                self.gateway,
+                principal=principal,
+                device_id=device_id,
+                workspace=requested_workspace or None,
+                provider=provider,
+            )
+
+        return {
+            "resource_manifests": manifests,
+            "candidate_producers": producers,
+            "eligible_count": len(manifests),
+            "skipped": skipped,
+        }
