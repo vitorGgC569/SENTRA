@@ -13,10 +13,17 @@ from pathlib import Path
 import pytest
 import zstandard as zstd
 
-from sentra_model_gateway.gateway import GatewayConfig, GatewayServer, LauncherSupervisor
+from sentra_model_gateway.gateway import GatewayConfig, GatewayServer, LauncherSupervisor, _extract_codex_goal_context, _extract_codex_goal_signal, _extract_codex_task_text, _extract_codex_subagent_notifications, _upstream_version_from_ref
 from orchestrator.providers.model_provider import ChatGPTWebModelProvider
 from orchestrator.providers.codex_web_provider import CodexChatGPTWebProvider
 from orchestrator.providers.base import AgentRequest
+
+
+UPSTREAM_MANIFEST = json.loads(
+    (Path(__file__).resolve().parents[2] / "integrations" / "codex_chatgpt_web" / "upstream.json")
+    .read_text(encoding="utf-8")
+)
+UPSTREAM_VERSION = _upstream_version_from_ref(str(UPSTREAM_MANIFEST["ref"]))
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):
@@ -33,20 +40,76 @@ class UpstreamHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/healthz":
-            return self._send(200, {"status": "ok", "service": "codex-chatgpt-web", "version": "6.0.0", "accepting_turns": True})
+            return self._send(200, {
+                "status": "ok",
+                "service": "codex-chatgpt-web",
+                "version": UPSTREAM_VERSION,
+                "accepting_turns": True,
+                "active_http_turns": int(
+                    getattr(self.server, "active_http_turns", 0)
+                ),
+                "active_browser_turns": int(
+                    getattr(self.server, "active_browser_turns", 0)
+                ),
+            })
         if self.path == "/v1/models":
-            return self._send(200, {"models": [{"slug": "gpt-6-sol"}, {"slug": "chatgpt-web/high", "display_name": "Web"}]})
+            self.server.received = {
+                "path": self.path,
+                "authorization": self.headers.get("Authorization"),
+            }
+            return self._send(200, {"models": [
+                {"slug": "gpt-6-sol"},
+                {"slug": "chatgpt-web/high", "display_name": "Web"},
+                {"slug": "gemini-web/flash", "display_name": "Gemini Flash"},
+            ]})
         self._send(404, {})
 
     def do_POST(self):
         size = int(self.headers["Content-Length"])
         raw = self.rfile.read(size)
-        body = json.loads(raw) if self.path not in {"/v1/images/edits"} else raw
+        body = (
+            raw
+            if self.path in {"/v1/images/edits"}
+            else (json.loads(raw) if raw else {})
+        )
         self.server.received = {"path": self.path, "body": body, "metadata": self.headers.get("x-codex-turn-metadata"), "authorization": self.headers.get("Authorization"), "content_type": self.headers.get("Content-Type"), "content_encoding": self.headers.get("Content-Encoding")}
+        if self.path == "/admin/cancel-turns":
+            if self.headers.get("Authorization") != "Bearer upstream-secret":
+                return self._send(401, {"error": "unauthorized"})
+            cancelled_http = int(
+                getattr(self.server, "active_http_turns", 0)
+            )
+            cancelled_browser = int(
+                getattr(self.server, "active_browser_turns", 0)
+            )
+            self.server.active_http_turns = 0
+            self.server.active_browser_turns = 0
+            return self._send(200, {
+                "status": "ok",
+                "cancelled_http_turns": cancelled_http,
+                "cancelled_browser_turns": cancelled_browser,
+                "active_http_turns": 0,
+                "active_browser_turns": 0,
+            })
         if self.path in {"/v1/alpha/search", "/v1/images/edits", "/admin/interrupt-turn"}:
             return self._send(200, {"ok": True})
         if self.path == "/v1/responses/compact":
             return self._send(200, {"output": [{"type": "compaction", "encrypted_content": "summary"}]})
+        if body.get("input") == "terminal-keepalive":
+            terminal = b'event: response.completed\ndata: {"response":{"status":"completed","model":"chatgpt-web/high"}}\n\n'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            self.wfile.write(f"{len(terminal):X}\r\n".encode("ascii") + terminal + b"\r\n")
+            self.wfile.flush()
+            time.sleep(1.5)
+            try:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except OSError:
+                pass
+            return
         if body.get("input") == "slow-chunked":
             first = b'event: response.heartbeat\ndata: {"type":"response.heartbeat"}\n\n'
             second = b'event: response.completed\ndata: {"response":{"status":"completed","model":"chatgpt-web/high"}}\n\ndata: [DONE]\n\n'
@@ -76,7 +139,15 @@ class UpstreamHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def servers(tmp_path):
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
-    gateway = GatewayServer(GatewayConfig(upstream=f"http://127.0.0.1:{upstream.server_port}", port=0, admin_token="test-secret", upstream_control_token="upstream-secret", state_root=tmp_path / "durable", browser_descriptor=tmp_path / "browser.json"))
+    gateway = GatewayServer(GatewayConfig(
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        port=0,
+        admin_token="test-secret",
+        upstream_control_token="upstream-secret",
+        state_root=tmp_path / "durable",
+        browser_descriptor=tmp_path / "browser.json",
+        launcher_executable=tmp_path / "missing-launcher.exe",
+    ))
     threads = [threading.Thread(target=server.serve_forever, daemon=True) for server in (upstream, gateway)]
     for thread in threads:
         thread.start()
@@ -141,7 +212,7 @@ def _packaged_gateway_config(
     expected_files = ["launcher/electron/main.cjs", "src/config.ts"]
     commit = "757942251222ee0f71953c35636679c6d92dd636"
     (integration / "upstream.json").write_text(
-        json.dumps({"patch_files": expected_files, "commit": commit}),
+        json.dumps({"patch_files": expected_files, "commit": commit, "ref": UPSTREAM_MANIFEST["ref"]}),
         encoding="utf-8",
     )
     (payload / "integration-build.json").write_text(
@@ -197,6 +268,52 @@ def test_gateway_authority_uses_same_auto_detected_browser_descriptor_as_launche
         gateway.turn_authority.durable.close()
 
 
+def test_upstream_watchdog_restarts_live_launcher_when_upstream_is_dead(tmp_path: Path, monkeypatch) -> None:
+    gateway = GatewayServer(GatewayConfig(
+        upstream="http://127.0.0.1:9",
+        port=0,
+        state_root=tmp_path / "state-watchdog",
+        browser_descriptor=tmp_path / "browser-watchdog.json",
+    ))
+    calls: list[str] = []
+    monkeypatch.setattr(gateway, "_upstream_health", lambda: (False, {}))
+    monkeypatch.setattr(
+        gateway.launcher,
+        "status",
+        lambda: {"running": True, "pid": 1234, "source": "owned"},
+    )
+    monkeypatch.setattr(
+        gateway.launcher,
+        "stop",
+        lambda: calls.append("stop") or {"running": False, "pid": None, "source": "none"},
+    )
+    monkeypatch.setattr(
+        gateway.launcher,
+        "start",
+        lambda hidden=False: calls.append(f"start:{hidden}") or {
+            "running": True,
+            "pid": 5678,
+            "source": "owned",
+        },
+    )
+    try:
+        first = gateway.supervise_upstream_once(now=100.0)
+        assert first["state"] == "DEGRADED"
+        assert calls == []
+
+        recovered = gateway.supervise_upstream_once(now=106.1)
+        assert recovered["state"] == "RECOVERING"
+        assert recovered["action"] == "restart_launcher"
+        assert calls == ["stop", "start:True"]
+
+        recovering = gateway.supervise_upstream_once(now=106.2)
+        assert recovering["state"] == "RECOVERING"
+        assert calls == ["stop", "start:True"]
+    finally:
+        gateway.server_close()
+        gateway.turn_authority.durable.close()
+
+
 def test_launcher_payload_validation_rejects_stale_build(tmp_path: Path) -> None:
     supervisor = LauncherSupervisor(_packaged_gateway_config(tmp_path, patch_hash="0" * 64))
     with pytest.raises(RuntimeError, match="payload is stale"):
@@ -204,11 +321,20 @@ def test_launcher_payload_validation_rejects_stale_build(tmp_path: Path) -> None
 
 
 def test_launcher_environment_fences_payload_identity(tmp_path: Path) -> None:
-    supervisor = LauncherSupervisor(_packaged_gateway_config(tmp_path))
+    config = _packaged_gateway_config(tmp_path)
+    relay_token = Path(config.state_root) / "browser" / "relay-token"
+    relay_token.parent.mkdir(parents=True, exist_ok=True)
+    relay_token.write_text("relay-secret\n", encoding="utf-8")
+
+    supervisor = LauncherSupervisor(config)
     payload = supervisor.validate_payload()
     environment = supervisor._environment()
+    assert environment["SENTRA_MANAGED_TUNNEL"] == "1"
+    assert environment["SENTRA_MANAGED_TUNNEL"] == "1"
     assert environment["SENTRA_INTEGRATION_PATCH_SHA256"] == payload["patch_sha256"]
     assert environment["SENTRA_UPSTREAM_COMMIT"] == payload["commit"]
+    assert environment["SENTRA_GEMINI_WEB_ENABLED"] == "1"
+    assert environment["SENTRA_BROWSER_RELAY_TOKEN_FILE"] == str(relay_token)
 
 
 def test_launcher_refuses_to_adopt_stale_live_descriptor(tmp_path: Path) -> None:
@@ -235,10 +361,46 @@ def test_launcher_refuses_to_adopt_stale_live_descriptor(tmp_path: Path) -> None
 
 
 def test_catalog_namespace_health_and_admin(servers):
-    _, gateway = servers
-    status, payload, _ = call(gateway.server_port, "GET", "/v1/models")
+    upstream, gateway = servers
+
+    status, cached_payload, _ = call(
+        gateway.server_port,
+        "GET",
+        "/sentra/model-catalog",
+        headers={"Authorization": "Bearer test-secret"},
+    )
     assert status == 200
-    assert [item["slug"] for item in json.loads(payload)["models"]] == ["gpt-6-sol", "sentra/chatgpt-web/high"]
+    assert json.loads(cached_payload)["status"] == "awaiting_codex_catalog"
+
+    status, payload, _ = call(
+        gateway.server_port,
+        "GET",
+        "/v1/models",
+        headers={"Authorization": "Bearer codex-token"},
+    )
+    assert status == 200
+    assert upstream.received["authorization"] == "Bearer codex-token"
+    assert [item["slug"] for item in json.loads(payload)["models"]] == [
+        "gpt-6-sol",
+        "sentra/chatgpt-web/high",
+        "sentra/gemini-web/flash",
+    ]
+
+    assert call(gateway.server_port, "GET", "/sentra/model-catalog")[0] == 401
+    status, cached_payload, _ = call(
+        gateway.server_port,
+        "GET",
+        "/sentra/model-catalog",
+        headers={"Authorization": "Bearer test-secret"},
+    )
+    assert status == 200
+    cached = json.loads(cached_payload)
+    assert cached["status"] == "ready"
+    assert [item["slug"] for item in cached["models"]] == [
+        "sentra/chatgpt-web/high",
+        "sentra/gemini-web/flash",
+    ]
+
     assert call(gateway.server_port, "GET", "/healthz")[0] == 200
     _, resource_payload, _ = call(gateway.server_port, "GET", "/sentra/resources", headers={"Authorization": "Bearer test-secret"})
     resource = json.loads(resource_payload)["resources"][0]
@@ -369,6 +531,25 @@ def test_responses_sse_and_compaction_preserve_turn_header(servers):
     assert upstream.received["body"]["model"] == "chatgpt-web/high"
     assert call(gateway.server_port, "POST", "/v1/responses", {"model": "sentra/unknown", "input": []})[0] == 400
     assert call(gateway.server_port, "POST", "/v1/responses", {"model": "chatgpt-web/", "input": []})[0] == 400
+    assert call(gateway.server_port, "POST", "/v1/responses", {"model": "gemini-web/", "input": []})[0] == 400
+    assert call(gateway.server_port, "POST", "/v1/responses", {"model": "sentra/gemini-web/", "input": []})[0] == 400
+
+
+def test_gemini_web_routes_stay_under_sentra_turn_authority(servers):
+    upstream, gateway = servers
+    for requested in ("sentra/gemini-web/flash", "gemini-web/flash"):
+        status, payload, _ = call(
+            gateway.server_port,
+            "POST",
+            "/v1/responses",
+            {"model": requested, "stream": False, "input": "gemini-selection"},
+        )
+        assert status == 200
+        assert json.loads(payload)["model"] == "sentra/gemini-web/flash"
+        assert upstream.received["body"]["model"] == "gemini-web/flash"
+        metadata = upstream.received["body"]["client_metadata"]
+        assert metadata["sentra_managed"] is True
+        assert metadata["sentra_turn_capability"].startswith("stc_")
 
 
 def test_legacy_web_model_alias_stays_under_sentra_turn_authority(servers):
@@ -380,7 +561,7 @@ def test_legacy_web_model_alias_stays_under_sentra_turn_authority(servers):
         {"model": "chatgpt-web/high", "stream": False, "input": "legacy-selection"},
     )
     assert status == 200
-    assert json.loads(payload)["model"] == "chatgpt-web/high"
+    assert json.loads(payload)["model"] == "sentra/chatgpt-web/high"
     assert upstream.received["body"]["model"] == "chatgpt-web/high"
     metadata = upstream.received["body"]["client_metadata"]
     assert metadata["sentra_managed"] is True
@@ -457,6 +638,31 @@ def test_gateway_rechunks_streaming_upstream_without_buffering(servers):
     assert b"[DONE]" in rest
 
 
+def test_gateway_closes_sse_on_terminal_event_without_waiting_for_upstream_eof(servers):
+    _, gateway = servers
+    request = {
+        "model": "sentra/chatgpt-web/high",
+        "stream": True,
+        "input": "terminal-keepalive",
+    }
+    connection = http.client.HTTPConnection("127.0.0.1", gateway.server_port, timeout=5)
+    started = time.monotonic()
+    connection.request(
+        "POST",
+        "/v1/responses",
+        body=json.dumps(request).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    response = connection.getresponse()
+    body = response.read()
+    elapsed = time.monotonic() - started
+    connection.close()
+
+    assert response.status == 200
+    assert b"response.completed" in body
+    assert elapsed < 1.0
+
+
 def test_gateway_decodes_codex_zstd_request_and_strips_encoding(servers):
     upstream, gateway = servers
     payload = json.dumps({
@@ -506,6 +712,47 @@ def test_image_edit_body_is_forwarded_without_json_rewrite(servers):
     connection.close()
     assert upstream.received["body"] == b"raw-image"
     assert upstream.received["content_type"] == "multipart/form-data; boundary=test"
+
+
+def test_model_provider_uses_redacted_admin_catalog_without_codex_bearer(servers):
+    upstream, gateway = servers
+    gateway.cache_model_catalog({
+        "models": [
+            {"slug": "gpt-6-sol"},
+            {"slug": "chatgpt-web/high", "display_name": "Web"},
+            {"slug": "gemini-web/flash", "display_name": "Gemini Flash"},
+        ]
+    })
+
+    async def exercise():
+        provider = ChatGPTWebModelProvider(
+            f"http://127.0.0.1:{gateway.server_port}/v1",
+            api_key="not-a-codex-bearer",
+            gateway_admin_token="test-secret",
+        )
+        try:
+            catalog = await provider.list_models()
+            assert [item["slug"] for item in catalog] == [
+                "sentra/chatgpt-web/high",
+                "sentra/gemini-web/flash",
+            ]
+        finally:
+            await provider.close()
+
+    asyncio.run(exercise())
+    assert not hasattr(upstream, "received") or upstream.received.get("path") != "/v1/models"
+
+
+def test_codex_web_provider_accepts_sentra_gemini_namespace():
+    provider = CodexChatGPTWebProvider(
+        base_url="http://127.0.0.1:17842/v1",
+        model_name="sentra/gemini-web/flash",
+        gateway_admin_token="admin",
+    )
+    try:
+        assert provider.model_name == "sentra/gemini-web/flash"
+    finally:
+        asyncio.run(provider.close())
 
 
 def test_async_model_provider_keeps_native_events(servers):
@@ -575,6 +822,32 @@ def test_internal_turn_authority_requires_private_bearer(servers):
     environment = gateway.launcher._environment()
     assert environment["SENTRA_TURN_AUTHORITY_TOKEN"] == gateway.turn_authority_token
     gateway.turn_authority.retire(capability, failed=True)
+
+
+def test_browser_audit_links_native_turn_without_logging_capability(servers):
+    from sentra_core.telemetry import EventJournal
+
+    _, gateway = servers
+    capability = gateway.turn_authority.issue(request_identity=json.dumps({
+        "thread_id": "thread-audit", "turn_id": "native-audit-turn",
+    }))
+    try:
+        status, _, _ = call(
+            gateway.server_port, "POST", "/internal/turn/register",
+            {"capability": capability, "traceId": "trace-audit", "allowedTools": []},
+            {"Authorization": "Bearer " + gateway.turn_authority_token},
+        )
+        assert status == 200
+        journal = EventJournal(gateway.audit.path.parent)
+        page = journal.query(correlation_id="native-audit-turn")
+        assert len(page["items"]) == 1
+        evidence = page["items"][0]["details"]
+        assert evidence["trace_id"] == "trace-audit"
+        assert evidence["operation_state"] == "RUNNING"
+        assert evidence["completion_verified"] is False
+        assert capability not in json.dumps(page)
+    finally:
+        gateway.turn_authority.retire(capability, failed=True)
 
 
 def test_generated_admin_token_authorizes_admin_routes(tmp_path):
@@ -773,9 +1046,60 @@ def test_gateway_uses_launcher_private_control_without_daemon_token(tmp_path):
             thread.join(timeout=2)
 
 
+def test_gateway_fallback_uses_loaded_private_upstream_control_token(tmp_path):
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+    state_root = tmp_path / "durable"
+    token_dir = state_root / "web-models"
+    token_dir.mkdir(parents=True)
+    loaded_token = "upstream-control-token-loaded-from-private-state-0123456789"
+    (token_dir / "upstream-control.token").write_text(
+        loaded_token + "\n", encoding="utf-8"
+    )
+    gateway = GatewayServer(GatewayConfig(
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        port=0,
+        admin_token="admin-secret",
+        upstream_control_token="",
+        state_root=state_root,
+        browser_descriptor=tmp_path / "missing-launcher-browser.json",
+    ))
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (upstream, gateway)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        status, payload, _ = call(
+            gateway.server_port,
+            "POST",
+            "/sentra/upstream/interrupt-turn",
+            {"threadId": "thread-fallback", "turnId": "turn-fallback"},
+            {"Authorization": "Bearer admin-secret"},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        assert upstream.received["path"] == "/admin/interrupt-turn"
+        assert upstream.received["authorization"] == "Bearer " + loaded_token
+        assert upstream.received["body"] == {
+            "threadId": "thread-fallback",
+            "turnId": "turn-fallback",
+        }
+    finally:
+        for server in (gateway, upstream):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)
+
+
 def test_launcher_supervisor_adopts_only_live_sentra_managed_descriptor(tmp_path):
     descriptor = tmp_path / "launcher-browser.json"
-    supervisor = LauncherSupervisor(GatewayConfig(port=0, browser_descriptor=descriptor))
+    supervisor = LauncherSupervisor(GatewayConfig(
+        port=0,
+        browser_descriptor=descriptor,
+        launcher_executable=tmp_path / "missing-launcher.exe",
+    ))
     payload = supervisor.validate_payload()
     descriptor.write_text(json.dumps({
         "version": 3,
@@ -795,3 +1119,200 @@ def test_launcher_supervisor_adopts_only_live_sentra_managed_descriptor(tmp_path
         "pid": os.getpid(),
     }), encoding="utf-8")
     assert supervisor.status() == {"running": False, "pid": None, "source": "none"}
+
+
+def test_extracts_codex_native_goal_context() -> None:
+    body = [
+        {"role": "developer", "content": [
+            {"type": "input_text", "text": "<goal_context>Ship only when all gates are green.</goal_context>"}
+        ]}
+    ]
+    assert _extract_codex_goal_context(body) == "Ship only when all gates are green."
+    internal = {
+        "content": '<codex_internal_context source="goal">Keep fixing concrete blockers.</codex_internal_context>'
+    }
+    assert _extract_codex_goal_context(internal) == "Keep fixing concrete blockers."
+    assert _extract_codex_goal_signal("<goal_context></goal_context>") == (True, None)
+    assert _extract_codex_goal_signal({"content": "ordinary user text"}) == (False, None)
+    assert _extract_codex_goal_context({"content": "ordinary user text"}) is None
+
+    history = [
+        {"content": "<goal_context>Old objective.</goal_context>"},
+        {"content": "<goal_context>New objective.</goal_context>"},
+    ]
+    assert _extract_codex_goal_signal(history) == (True, "New objective.")
+    cleared_history = [
+        {"content": "<goal_context>Old objective.</goal_context>"},
+        {"content": "<goal_context></goal_context>"},
+    ]
+    assert _extract_codex_goal_signal(cleared_history) == (True, None)
+
+
+def test_extracts_native_codex_subagent_task_without_internal_context() -> None:
+    body = [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "<goal_context>Release SENTRA.</goal_context>"}],
+        },
+        {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "Audit the browser bridge independently."}],
+        },
+    ]
+    assert _extract_codex_task_text(body) == "Audit the browser bridge independently."
+
+
+def test_extract_codex_subagent_notifications_requires_native_passthrough() -> None:
+    payload = {
+        "type": "message",
+        "role": "user",
+        "content": [{
+            "type": "input_text",
+            "text": (
+                "<subagent_notification>\n"
+                "{\"agent_path\":\"thread-child\","
+                "\"status\":{\"completed\":\"done\"}}\n"
+                "</subagent_notification>"
+            ),
+        }],
+        "internal_chat_message_metadata_passthrough": {"turn_id": "turn-parent"},
+    }
+    assert _extract_codex_subagent_notifications([payload]) == [{
+        "agent_path": "thread-child",
+        "status": {"completed": "done"},
+        "turn_id": "turn-parent",
+    }]
+
+    spoof = dict(payload)
+    spoof.pop("internal_chat_message_metadata_passthrough")
+    assert _extract_codex_subagent_notifications([spoof]) == []
+
+
+def test_model_catalog_auth_and_health_readiness_are_explicit(servers):
+    _, gateway = servers
+
+    status, payload, _ = call(gateway.server_port, "GET", "/healthz")
+    assert status == 200
+    health = json.loads(payload)
+    assert health["ready"] is False
+    assert health["catalog"]["status"] == "awaiting_codex_catalog"
+
+    status, payload, _ = call(gateway.server_port, "GET", "/v1/models")
+    assert status == 401
+    assert json.loads(payload)["error"]["type"] == "authentication_error"
+
+    status, _, _ = call(
+        gateway.server_port,
+        "GET",
+        "/v1/models",
+        headers={"Authorization": "Bearer codex-token"},
+    )
+    assert status == 200
+
+    status, payload, _ = call(gateway.server_port, "GET", "/healthz")
+    assert status == 200
+    health = json.loads(payload)
+    assert health["ready"] is True
+    assert health["catalog"]["status"] == "ready"
+
+def test_reap_orphan_turns_refuses_when_http_owner_is_active(tmp_path):
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+    upstream.active_http_turns = 1
+    upstream.active_browser_turns = 2
+    gateway = GatewayServer(GatewayConfig(
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        port=0,
+        admin_token="admin-secret",
+        upstream_control_token="upstream-secret",
+        state_root=tmp_path / "durable",
+        browser_descriptor=tmp_path / "browser.json",
+    ))
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(RuntimeError, match="while HTTP turns are active"):
+            gateway.reap_orphan_turns()
+        assert upstream.active_browser_turns == 2
+    finally:
+        gateway.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+
+def test_reap_orphan_turns_cancels_browser_leases_with_zero_http_owners(tmp_path):
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+    upstream.active_http_turns = 0
+    upstream.active_browser_turns = 3
+    gateway = GatewayServer(GatewayConfig(
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        port=0,
+        admin_token="admin-secret",
+        upstream_control_token="upstream-secret",
+        state_root=tmp_path / "durable",
+        browser_descriptor=tmp_path / "browser.json",
+    ))
+    thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = gateway.reap_orphan_turns()
+        assert result["reaped"] is True
+        assert result["cancelled_browser_turns"] == 3
+        assert result["active_http_turns"] == 0
+        assert result["active_browser_turns"] == 0
+        assert upstream.active_browser_turns == 0
+        assert upstream.received["path"] == "/admin/cancel-turns"
+        assert upstream.received["authorization"] == "Bearer upstream-secret"
+    finally:
+        gateway.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+        thread.join(timeout=2)
+
+def test_gateway_fallback_uses_loaded_upstream_control_token(tmp_path, monkeypatch):
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)
+    state_root = tmp_path / "durable"
+    token_dir = state_root / "web-models"
+    token_dir.mkdir(parents=True)
+    (token_dir / "upstream-control.token").write_text(
+        "upstream-secret-0123456789-abcdef\n", encoding="utf-8"
+    )
+    gateway = GatewayServer(GatewayConfig(
+        upstream=f"http://127.0.0.1:{upstream.server_port}",
+        port=0,
+        admin_token="admin-secret",
+        upstream_control_token="",
+        state_root=state_root,
+        browser_descriptor=tmp_path / "browser.json",
+    ))
+
+    def fail_runtime_control(*_args, **_kwargs):
+        raise RuntimeError("launcher unavailable")
+
+    monkeypatch.setattr(gateway.launcher, "runtime_control", fail_runtime_control)
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True)
+        for server in (upstream, gateway)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        status, payload, _ = call(
+            gateway.server_port,
+            "POST",
+            "/sentra/upstream/interrupt-turn",
+            {"threadId": "thread-fallback", "turnId": "turn-fallback"},
+            {"Authorization": "Bearer admin-secret"},
+        )
+        assert status == 200
+        assert json.loads(payload)["ok"] is True
+        assert upstream.received["path"] == "/admin/interrupt-turn"
+        assert upstream.received["authorization"] == "Bearer upstream-secret-0123456789-abcdef"
+    finally:
+        for server in (gateway, upstream):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)

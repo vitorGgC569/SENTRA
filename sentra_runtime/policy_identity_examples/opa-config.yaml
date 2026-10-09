@@ -1,0 +1,23 @@
+# Template for an EXISTING owner-configured OPA deployment. Not auto-started.
+# Host routes below must enforce authenticated service identity.
+services:
+  sentra_policy_host:
+    url: https://sentra.example.invalid/policy
+    credentials:
+      bearer:
+        token: ${SENTRA_OPA_SERVICE_TOKEN}
+bundles:
+  sentra:
+    service: sentra_policy_host
+    resource: bundles/sentra
+    persist: true
+    polling:
+      min_delay_seconds: 10
+      max_delay_seconds: 20
+decision_logs:
+  service: sentra_policy_host
+  resource: decision-logs
+  mask_decision: /sentra/log_mask
+status:
+  service: sentra_policy_host
+  resource: status

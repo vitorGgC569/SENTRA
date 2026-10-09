@@ -1,5 +1,5 @@
 diff --git a/launcher/electron/browser-host.cjs b/launcher/electron/browser-host.cjs
-index 9025c18f1ea87c178948c9e7e95e64c76500521c..d36c9ce69954a9131c6d0604cb6b4bf9780b27a1 100644
+index 9025c18..d36c9ce 100644
 --- a/launcher/electron/browser-host.cjs
 +++ b/launcher/electron/browser-host.cjs
 @@ -1419,6 +1419,7 @@ class BrowserHost {
@@ -32,7 +32,7 @@ index 9025c18f1ea87c178948c9e7e95e64c76500521c..d36c9ce69954a9131c6d0604cb6b4bf9
      };
      writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
 diff --git a/launcher/electron/connector-identity.cjs b/launcher/electron/connector-identity.cjs
-index 320ec5af058a0244eed710605fc375ec22190765..406d2f1907066541418d01ef950dab0212fdd990 100644
+index 320ec5a..406d2f1 100644
 --- a/launcher/electron/connector-identity.cjs
 +++ b/launcher/electron/connector-identity.cjs
 @@ -1,6 +1,6 @@
@@ -93,7 +93,7 @@ index 320ec5af058a0244eed710605fc375ec22190765..406d2f1907066541418d01ef950dab02
  
  module.exports = {
 diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
-index 2c9c5651fbe3e84e326f0cf6e24c27f68e3f6e4d..b27ba9e2ab920c73f6bdc0429f1e67a534f84340 100644
+index 2c9c565..b27ba9e 100644
 --- a/launcher/electron/control-server.cjs
 +++ b/launcher/electron/control-server.cjs
 @@ -38,12 +38,13 @@ function writeJson(response, status, body) {
@@ -165,7 +165,7 @@ index 2c9c5651fbe3e84e326f0cf6e24c27f68e3f6e4d..b27ba9e2ab920c73f6bdc0429f1e67a5
          const url = new URL(body?.url);
          if (url.origin !== "https://chatgpt.com" || url.username || url.password
 diff --git a/launcher/electron/main.cjs b/launcher/electron/main.cjs
-index 71b95c20ad2056592fda5bd8a106a999186c7a91..0b483039d2e491ba7280e9c1461f7757d4ed55fd 100644
+index 71b95c2..0b48303 100644
 --- a/launcher/electron/main.cjs
 +++ b/launcher/electron/main.cjs
 @@ -47,6 +47,7 @@ const {
@@ -442,7 +442,7 @@ index 71b95c20ad2056592fda5bd8a106a999186c7a91..0b483039d2e491ba7280e9c1461f7757
      // through the existing instance, and release browser resources before a user retry.
 diff --git a/launcher/electron/orphan-runtime-recovery.cjs b/launcher/electron/orphan-runtime-recovery.cjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..90696a21ff109b07a6873f4691595a8d03dc4dda
+index 0000000..90696a2
 --- /dev/null
 +++ b/launcher/electron/orphan-runtime-recovery.cjs
 @@ -0,0 +1,86 @@
@@ -533,7 +533,7 @@ index 0000000000000000000000000000000000000000..90696a21ff109b07a6873f4691595a8d
 +  recoverOrphanedRuntimeLock,
 +};
 diff --git a/launcher/electron/preload.cjs b/launcher/electron/preload.cjs
-index 0ed9dfc00f54d965d16414df4f96c0cc14704fce..a7958b9faded288c5880b8ffeb28b2110081b84c 100644
+index 0ed9dfc..a7958b9 100644
 --- a/launcher/electron/preload.cjs
 +++ b/launcher/electron/preload.cjs
 @@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
@@ -545,7 +545,7 @@ index 0ed9dfc00f54d965d16414df4f96c0cc14704fce..a7958b9faded288c5880b8ffeb28b211
    setBrowserSurfaceActive: (active) => ipcRenderer.invoke("launcher:browser-surface-active", active),
    showBrowser: () => ipcRenderer.invoke("launcher:browser-show"),
 diff --git a/launcher/electron/runtime-install.cjs b/launcher/electron/runtime-install.cjs
-index f516eace38b9d81bd351f2097b69857d186c2019..33e1efa618765133695ee2b84f2e6d3e6d3ad102 100644
+index f516eac..33e1efa 100644
 --- a/launcher/electron/runtime-install.cjs
 +++ b/launcher/electron/runtime-install.cjs
 @@ -2,6 +2,7 @@ const { createHash } = require("node:crypto");
@@ -565,7 +565,7 @@ index f516eace38b9d81bd351f2097b69857d186c2019..33e1efa618765133695ee2b84f2e6d3e
        previousMoved = true;
      }
 diff --git a/launcher/electron/runtime-supervisor.cjs b/launcher/electron/runtime-supervisor.cjs
-index 682cdd40285cca3354dab005f4a7b27c7fd89d37..130fb4577f64bbc14849bb01871a703867535400 100644
+index 682cdd4..130fb45 100644
 --- a/launcher/electron/runtime-supervisor.cjs
 +++ b/launcher/electron/runtime-supervisor.cjs
 @@ -10,7 +10,7 @@ const {
@@ -700,7 +700,7 @@ index 682cdd40285cca3354dab005f4a7b27c7fd89d37..130fb4577f64bbc14849bb01871a7038
            await this.startTunnel(config);
          } catch (caught) {
 diff --git a/launcher/src/App.tsx b/launcher/src/App.tsx
-index e9d3fac8840cd5b407697e56d58fa650609afc9b..54ee3c10aded4cce9c82c795cc9050ba104f77c4 100644
+index e9d3fac..54ee3c1 100644
 --- a/launcher/src/App.tsx
 +++ b/launcher/src/App.tsx
 @@ -1281,15 +1281,20 @@ function McpSurface({
@@ -850,7 +850,7 @@ index e9d3fac8840cd5b407697e56d58fa650609afc9b..54ee3c10aded4cce9c82c795cc9050ba
      <div className={`doctor-summary${report.ok ? " is-healthy" : ""}`}>
        <header>
 diff --git a/launcher/src/i18n.ts b/launcher/src/i18n.ts
-index 3ffaf193d1032867b80640e92450427c57479618..e458db4ef3101f3146244c5547dbdef31af08e8f 100644
+index 3ffaf19..e458db4 100644
 --- a/launcher/src/i18n.ts
 +++ b/launcher/src/i18n.ts
 @@ -120,26 +120,26 @@ const en = {
@@ -895,7 +895,7 @@ index 3ffaf193d1032867b80640e92450427c57479618..e458db4ef3101f3146244c5547dbdef3
    openConnectors: "Open ChatGPT Plugins",
    connectorName: "Connector name",
 diff --git a/launcher/src/types.ts b/launcher/src/types.ts
-index 4c191f8067dd283c6d7b6475e130fd7a1937a3d5..7af04e559395a96dae76ddce7d2c44e7ca3c1c21 100644
+index 4c191f8..7af04e5 100644
 --- a/launcher/src/types.ts
 +++ b/launcher/src/types.ts
 @@ -82,7 +82,7 @@ export interface DoctorCheck {
@@ -924,7 +924,7 @@ index 4c191f8067dd283c6d7b6475e130fd7a1937a3d5..7af04e559395a96dae76ddce7d2c44e7
    setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;
    showBrowser(): Promise<BrowserState>;
 diff --git a/launcher/tests/packaging-contract.test.cjs b/launcher/tests/packaging-contract.test.cjs
-index d96cc16bce2115aa606a269d6b1a6f95c4579f30..de34cc3ceb6c5210bfe8d6327ae300d3965a1029 100644
+index d96cc16..de34cc3 100644
 --- a/launcher/tests/packaging-contract.test.cjs
 +++ b/launcher/tests/packaging-contract.test.cjs
 @@ -25,6 +25,25 @@ test("the full verification gate audits launcher dependencies", () => {
@@ -974,7 +974,7 @@ index d96cc16bce2115aa606a269d6b1a6f95c4579f30..de34cc3ceb6c5210bfe8d6327ae300d3
 +});
 diff --git a/launcher/tests/runtime-install-orphan.test.cjs b/launcher/tests/runtime-install-orphan.test.cjs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c8956be54c90b5db10cc7a5a4fc136f21680438e
+index 0000000..c8956be
 --- /dev/null
 +++ b/launcher/tests/runtime-install-orphan.test.cjs
 @@ -0,0 +1,66 @@
@@ -1045,7 +1045,7 @@ index 0000000000000000000000000000000000000000..c8956be54c90b5db10cc7a5a4fc136f2
 +  }
 +});
 diff --git a/src/adapters/chatgpt-web/browser-helper-main.ts b/src/adapters/chatgpt-web/browser-helper-main.ts
-index 1c497e72fddc984510c0a12cfb8c9d83f6fb255a..0204cd9f1af54463d3f75b345048113232120a0a 100644
+index 1c497e7..0204cd9 100644
 --- a/src/adapters/chatgpt-web/browser-helper-main.ts
 +++ b/src/adapters/chatgpt-web/browser-helper-main.ts
 @@ -24,6 +24,7 @@ interface RunMessage {
@@ -1077,10 +1077,26 @@ index 1c497e72fddc984510c0a12cfb8c9d83f6fb255a..0204cd9f1af54463d3f75b3450481132
      reasoning: message.turn.reasoning,
      ...(message.turn.modelFamily ? { modelFamily: message.turn.modelFamily } : {}),
 diff --git a/src/adapters/chatgpt-web/browser-worker.ts b/src/adapters/chatgpt-web/browser-worker.ts
-index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed2fe844c7 100644
+index c63b9d9..6160d7a 100644
 --- a/src/adapters/chatgpt-web/browser-worker.ts
 +++ b/src/adapters/chatgpt-web/browser-worker.ts
-@@ -132,7 +132,11 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
+@@ -56,6 +56,7 @@ import {
+   CHATGPT_COMPLETION_ACTION_SELECTOR,
+   CHATGPT_COMPOSER_SELECTOR,
+   CHATGPT_EFFORT_CONTROL_SELECTOR,
++  isChatGptThinkOnlyComposer,
+   CHATGPT_EFFORT_ITEM_SELECTOR,
+   CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
+   CHATGPT_STOP_BUTTON_SELECTOR,
+@@ -76,6 +77,7 @@ import {
+ } from "../../launcher-browser-host";
+ import {
+   CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
++  CHATGPT_WEB_AUTO_BACKEND_MODEL,
+   resolveChatGptWebContextLimits,
+   resolveChatGptWebMessageTokenBudget,
+   resolveChatGptWebTransportLimits,
+@@ -132,7 +134,11 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
  export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
  export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
  export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
@@ -1093,7 +1109,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
  const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
  const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
  const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
-@@ -573,10 +577,10 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -573,10 +579,10 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
    // The visible sheet can be aria-hidden during hydration. Include those controls in the role
    // query but still require visibility; never select a hidden duplicate or switch locator rules.
    const personalized = page
@@ -1106,7 +1122,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
      .filter({ visible: true });
    let personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
    let unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
-@@ -622,7 +626,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -622,7 +628,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
          );
        }
        throw chatGptConnectorUnavailableError(
@@ -1115,7 +1131,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
        );
      }
    }
-@@ -651,7 +655,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -651,7 +657,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
      );
      const choice = menu
        .locator(CHATGPT_PERSONALIZATION_CHOICE_SELECTOR)
@@ -1124,7 +1140,58 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
      if (await runChatGptPersonalizationStep(() => choice.count(), deadline, abortSignal) !== 1) {
        throw chatGptConnectorUnavailableError(
          "ChatGPT personalization menu did not expose one exact Personalized choice",
-@@ -1249,6 +1253,7 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
+@@ -871,6 +877,7 @@ export class ChatGptSubmissionRejectionObserver {
+ type SelectedChatGptWebModelMode = ChatGptWebModelMode & {
+   modelFamily?: "5.6" | "6";
+   selection?: { url: string; label: string };
++  autoDefaultUrl?: string;
+   usageModel?: ChatGptUsageModel;
+ };
+ 
+@@ -937,15 +944,16 @@ export function assertChatGptWebInputWithinLimits(
+   capabilities: ChatGptWebCapabilities,
+   promptChars?: number,
+ ): void {
+-  if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID) {
++  if (modelId !== CHATGPT_WEB_MODEL_ID && modelId !== CHATGPT_WEB_LUNA_MODEL_ID
++    && modelId !== CHATGPT_WEB_AUTO_BACKEND_MODEL) {
+     throw new Error(`ChatGPT web context limit is not defined for model: ${modelId}`);
+   }
+   if (
+-    modelId === CHATGPT_WEB_LUNA_MODEL_ID
++    (modelId === CHATGPT_WEB_LUNA_MODEL_ID || modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL)
+     && estimatedInputTokens > CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET
+   ) {
+     throw new ChatGptWebAdapterError(
+-      `This Luna turn requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, which exceeds the measured ${CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET.toLocaleString("en-US")}-token ChatGPT Free browser transport budget. Completed Luna history is already replaced by its rolling checkpoint; the remaining payload is the current Codex turn and cannot be reduced by /compact.`,
++      `This ${modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL ? "Auto" : "Luna"} turn requires ${estimatedInputTokens.toLocaleString("en-US")} estimated input tokens, exceeding the conservative ${CHATGPT_LUNA_BROWSER_INPUT_TOKEN_BUDGET.toLocaleString("en-US")}-token ChatGPT Free browser request budget. Shorten or compact the task; the message was not sent.`,
+       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+     );
+   }
+@@ -998,6 +1006,10 @@ export function assertChatGptWebMultipartInputWithinLimits(
+   if (!isChatGptWebMultipartPartCount(partCount)) {
+     throw new Error("Bigger Context requires two or six context parts");
+   }
++  if (modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL) {
++    throw new ChatGptWebAdapterError("Bigger Context is unavailable for ChatGPT Auto; the account-default route uses the conservative Free budget.",
++      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false });
++  }
+   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+     throw new ChatGptWebAdapterError(
+       "Bigger Context is unavailable for Luna because every later browser request includes the accumulated transcript inside the same 28,000-token transport budget.",
+@@ -1078,9 +1090,9 @@ export function resolveChatGptWebMultipartStagingMode(
+   maxStageMessageTokens: number,
+   maxStageChars: number,
+ ): ChatGptWebModelMode {
+-  if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || !capabilities.solAvailable) {
++  if (modelId === CHATGPT_WEB_LUNA_MODEL_ID || modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL || !capabilities.solAvailable) {
+     throw new ChatGptWebAdapterError(
+-      "Bigger Context staging is unavailable for a Luna-only account.",
++      "Bigger Context staging is unavailable for ChatGPT Auto or a Luna-only account.",
+       { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
+     );
+   }
+@@ -1249,6 +1261,7 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
  
  export interface BrowserTurn {
    traceId: string;
@@ -1132,7 +1199,16 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
    modelId: string;
    reasoning?: string;
    modelFamily?: "5.6" | "6";
-@@ -2069,7 +2074,7 @@ class ChatGptBrowserDiagnostics {
+@@ -1392,7 +1405,7 @@ export async function setChatGptThinkMode(
+ ): Promise<void> {
+   throwIfPromptAttachmentAborted(abortSignal);
+   const controls = composerForm
+-    .getByRole("button", { name: "Think", exact: true })
++    .getByRole("button", { name: /^(?:Think|Pensar)$/i })
+     .filter({ visible: true });
+   const count = await controls.count();
+   if (count === 0 && !enabled) {
+@@ -2069,7 +2082,7 @@ class ChatGptBrowserDiagnostics {
  
  export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
    const configured = provider.chatgptWeb ?? {};
@@ -1141,7 +1217,73 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
    const browserHost = configured.browserHost ?? "managed-chrome";
    const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
    const browserHelperScriptPath = configured.browserHelperScriptPath?.trim();
-@@ -3331,6 +3336,7 @@ export class ChatGptBrowserWorker {
+@@ -2486,6 +2499,12 @@ export class ChatGptBrowserWorker {
+     const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
+     const composer = await this.activeComposer(page);
+     const composerForm = composer.locator("xpath=ancestor::form[1]");
++    if (modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL && await isChatGptThinkOnlyComposer(composerForm)) {
++      // The account-default Free UI exposes only Pensar/Think. Do not infer an
++      // underlying family. Keep its default mode and prove it again before Send.
++      await setChatGptThinkMode(composerForm, false, captureDiagnostic);
++      return { ...mode, uiEffortIndex: null, autoDefaultUrl: page.url() };
++    }
+     const uiEffortIndex = mode.uiEffortIndex;
+     if (uiEffortIndex === null) {
+       await settleChatGptUi();
+@@ -2502,6 +2521,17 @@ export class ChatGptBrowserWorker {
+       return mode;
+     }
+     const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
++    if (await isChatGptThinkOnlyComposer(composerForm)) {
++      // This session has a Think toggle but no verifiable model/effort picker.
++      // Never silently infer GPT-6 or High; no message has been submitted.
++      throw new ChatGptWebAdapterError(
++        "ChatGPT exposes a Think-only composer without a verifiable model and effort picker. "
++        + "Cannot confirm " + (modelFamily ? "GPT-" + modelFamily + " " : "") + mode.displayLabel
++        + " on this browser account. The message was not sent. "
++        + "Check the ChatGPT account and temporary-chat model availability.",
++        { status: 400, errorType: "invalid_request_error", code: "chatgpt_model_controls_unavailable", retryable: false },
++      );
++    }
+     const effortWaitAbort = new AbortController();
+     try {
+       const ready = await Promise.race([
+@@ -2562,11 +2592,11 @@ export class ChatGptBrowserWorker {
+       const state = await readChatGptEffortSnapshot(container)
+         .catch(error => { throw chatGptModelControlUnavailableAdapterError(String(error)); });
+       if (uiEffortIndex > state.max - state.min) {
+-        const detail = uiEffortIndex === 4 ? await chatGptUnavailableProDetail(menu) : undefined;
+-        throw chatGptModelControlUnavailableAdapterError(
+-          `ChatGPT effort slider does not expose item index ${uiEffortIndex} (min=${state.min}; max=${state.max})`
+-          + (uiEffortIndex === 4 ? " ChatGPT may have temporarily hidden Pro because you reached its usage limit." : ""),
+-          detail,
++        throw new ChatGptWebAdapterError(
++          `ChatGPT does not offer ${mode.displayLabel} in the selected browser model `
++          + `(requested step ${uiEffortIndex}; visible steps ${state.min}..${state.max}). `
++          + "The message was not sent. Choose an available effort or verify your account's model access.",
++          { status: 400, errorType: "invalid_request_error", code: "chatgpt_effort_unavailable", retryable: false },
+         );
+       }
+       if (!state.available[uiEffortIndex]) {
+@@ -2641,6 +2671,17 @@ export class ChatGptBrowserWorker {
+   }
+ 
+   private async assertSelectedEffort(page: Page, mode: SelectedChatGptWebModelMode, verifyFamily = true): Promise<void> {
++    if (mode.autoDefaultUrl) {
++      const composer = await this.activeComposer(page);
++      const form = composer.locator("xpath=ancestor::form[1]");
++      const think = form.getByRole("button", { name: /^(?:Think|Pensar)$/i });
++      if (page.url() !== mode.autoDefaultUrl || !await composer.isEditable()
++        || !await isChatGptThinkOnlyComposer(form)
++        || await think.getAttribute("aria-pressed") !== "false") {
++        throw chatGptModelControlUnavailableAdapterError("ChatGPT Auto lost its default Think-only browser surface before submission");
++      }
++      return;
++    }
+     if (!mode.selection) return;
+     const composer = await this.activeComposer(page);
+     const controls = composer.locator("xpath=ancestor::form[1]")
+@@ -3331,6 +3372,7 @@ export class ChatGptBrowserWorker {
      const appResult = menuRows.filter({
        has: page.getByText(this.config.appName, { exact: true }),
      });
@@ -1149,7 +1291,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
      if (new URL(page.url()).searchParams.get("temporary-chat") === "true") await ensureChatGptPersonalizedConnectorAccess(
        page,
        capture,
-@@ -3348,7 +3354,7 @@ export class ChatGptBrowserWorker {
+@@ -3348,7 +3390,7 @@ export class ChatGptBrowserWorker {
              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
            });
            await withBrowserTurnAbort(settleChatGptUi(), personalizationSignal);
@@ -1158,7 +1300,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
              delay: 25,
              signal: personalizationSignal,
              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-@@ -3367,9 +3373,9 @@ export class ChatGptBrowserWorker {
+@@ -3367,9 +3409,9 @@ export class ChatGptBrowserWorker {
                  ? element.value : element.textContent ?? "",
                focused: element === document.activeElement,
              }), undefined, { timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: personalizationSignal });
@@ -1170,7 +1312,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
                );
              }
            }
-@@ -3404,7 +3410,7 @@ export class ChatGptBrowserWorker {
+@@ -3404,7 +3446,7 @@ export class ChatGptBrowserWorker {
          await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
          await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
          await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
@@ -1179,7 +1321,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
            delay: 25,
            signal: abortSignal,
            timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-@@ -4561,6 +4567,9 @@ export class ChatGptBrowserWorker {
+@@ -4561,6 +4603,9 @@ export class ChatGptBrowserWorker {
  
    private async runExclusive(turn: BrowserTurn): Promise<string> {
      if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
@@ -1189,7 +1331,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
      if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
  
      const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-@@ -4595,7 +4604,19 @@ export class ChatGptBrowserWorker {
+@@ -4595,7 +4640,19 @@ export class ChatGptBrowserWorker {
          phase: "heartbeat",
          traceId: turn.traceId,
          helperPid: process.pid,
@@ -1210,7 +1352,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
          const now = Date.now();
          if (now - lastHeartbeatFailureAt < 30_000) return;
          lastHeartbeatFailureAt = now;
-@@ -4608,6 +4629,18 @@ export class ChatGptBrowserWorker {
+@@ -4608,6 +4665,18 @@ export class ChatGptBrowserWorker {
      };
      try {
        if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
@@ -1229,7 +1371,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
        if (turn.requireRetainedConversation && !reused) {
          throw chatGptRetainedConversationUnavailableError();
        }
-@@ -4617,7 +4650,20 @@ export class ChatGptBrowserWorker {
+@@ -4617,7 +4686,20 @@ export class ChatGptBrowserWorker {
        await turn.onPreparedSelected?.(reused);
        heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
        heartbeatTimer.unref?.();
@@ -1252,7 +1394,7 @@ index c63b9d98578c4b212cd4c0db38fa4f78828bddf2..b7facf8c33028bd201b4003ef1e873ed
        originalError = error;
        terminal = error instanceof ChatGptCompactionHandoffAccepted
 diff --git a/src/adapters/chatgpt-web/environment.ts b/src/adapters/chatgpt-web/environment.ts
-index bc9a9ffe690d109f0092ed4ca4b8870e50bd8426..e1404d0b76ad669da525c8b952e584f3e32a37cf 100644
+index bc9a9ff..e1404d0 100644
 --- a/src/adapters/chatgpt-web/environment.ts
 +++ b/src/adapters/chatgpt-web/environment.ts
 @@ -15,6 +15,8 @@ export interface ChatGptTurnEnvironment {
@@ -1265,7 +1407,7 @@ index bc9a9ffe690d109f0092ed4ca4b8870e50bd8426..e1404d0b76ad669da525c8b952e584f3
  
  export interface ChatGptTurnIdentity {
 diff --git a/src/adapters/chatgpt-web/index.ts b/src/adapters/chatgpt-web/index.ts
-index 6043500a0634dd965ad767f67f35d33b19b9e5f0..7396e0dd2629f1c08acb8ed445a8120a250a3d83 100644
+index 6043500..7396e0d 100644
 --- a/src/adapters/chatgpt-web/index.ts
 +++ b/src/adapters/chatgpt-web/index.ts
 @@ -54,6 +54,17 @@ function brokerSocketPath(provider: CodexProviderConfig): string {
@@ -1329,7 +1471,7 @@ index 6043500a0634dd965ad767f67f35d33b19b9e5f0..7396e0dd2629f1c08acb8ed445a8120a
              const identity = extractChatGptTurnIdentity(parsed);
              console.warn(
 diff --git a/src/adapters/chatgpt-web/launcher-helper-client.ts b/src/adapters/chatgpt-web/launcher-helper-client.ts
-index 9c1ceac522d70e1c00b3ddfdde3f66bfbe37426a..402a429823be0d870bac6a764b48d15dfe4021fc 100644
+index 9c1ceac..402a429 100644
 --- a/src/adapters/chatgpt-web/launcher-helper-client.ts
 +++ b/src/adapters/chatgpt-web/launcher-helper-client.ts
 @@ -281,6 +281,7 @@ export class LauncherBrowserHelperClient {
@@ -1340,8 +1482,104 @@ index 9c1ceac522d70e1c00b3ddfdde3f66bfbe37426a..402a429823be0d870bac6a764b48d15d
              modelId: turn.modelId,
              reasoning: turn.reasoning,
              ...(turn.modelFamily ? { modelFamily: turn.modelFamily } : {}),
+diff --git a/src/adapters/chatgpt-web/model-selection.ts b/src/adapters/chatgpt-web/model-selection.ts
+index 4529117..aa78bbe 100644
+--- a/src/adapters/chatgpt-web/model-selection.ts
++++ b/src/adapters/chatgpt-web/model-selection.ts
+@@ -16,7 +16,7 @@ function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
+   return menu.menu.getByRole("menuitemradio", {
+     name: family === "5.6" ? /^GPT[-\s]?5\.6\s+Sol(?:\s+Pro)?$/i
+       // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
+-      : /^(?:Latest|最新|최신|GPT[-\s]?6(?:\s+Astra)?(?:\s+Pro)?)$/i,
++      : /^(?:Latest|最新|최신|(?:GPT[-\s]?)?6(?:\s+Astra)?(?:\s+Pro)?)$/i,
+     exact: true,
+     includeHidden: true,
+   });
+@@ -33,7 +33,10 @@ export async function selectChatGptModelFamily(
+     const option = familyOption(menu, family);
+     if (await option.count() > 1) throw familyError(family);
+     if (await option.count() === 1 && await option.getAttribute("aria-checked") === "true") return menu;
+-    // The attached radio rows are inert while this composer-owned advanced view is collapsed.
++    // The compact 2026 picker already shows its radio rows. Legacy pickers
++    // keep the radio options hidden behind the advanced view.
++    const directVisible = await option.count() === 1 && await option.isVisible().catch(() => false);
++    if (!directVisible) {
+     const powerView = menu.menu.locator('[data-model-picker-view]');
+     if (await powerView.count() === 1) {
+       const view = await powerView.getAttribute("data-model-picker-view");
+@@ -48,6 +51,7 @@ export async function selectChatGptModelFamily(
+       if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click({ timeout: 5_000 });
+     }
+     await option.waitFor({ state: "visible", timeout: 5_000 });
++    }
+     await option.click({ timeout: 5_000 });
+     await page.keyboard.press("Escape");
+     const selected = await reopen();
+@@ -70,9 +74,8 @@ export function chatGptModelFamilyMatches(
+   family: ChatGptWebModelFamily,
+   effort: ChatGptWebAdapterEffort,
+ ): boolean {
+-  // Latest uses 5.6 for the existing lower-effort multipart acknowledgements and 6 for Pro.
+-  // Never interpret a future Latest Pro model as 6, or a lower effort as the final Pro response.
+-  const expected = family === "6" && effort !== "max" ? "5.6" : family;
++  // Explicit family 6 must never pass by observing a 5.6 response.
++  const expected = family;
+   const states = descriptions.flatMap(text => {
+     const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i
+       .exec(text.replace(/\s+/g, " ").trim());
+@@ -98,10 +101,13 @@ export async function assertChatGptModelFamily(
+       await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),
+       await menu.slider.getAttribute("aria-valuenow"),
+     );
+-    const descriptions = await menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]").evaluate(element => (
+-      (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
+-        .map(id => element.ownerDocument.getElementById(id)?.textContent ?? "")
+-    ));
++    const descriptions = await menu.slider.locator("xpath=ancestor::*[@role='menuitem'][1]").evaluate(element => {
++      const described = (element.getAttribute("aria-describedby") ?? "").split(/\s+/).filter(Boolean)
++        .map(id => element.ownerDocument.getElementById(id)?.textContent ?? "").filter(Boolean);
++      // The localized compact power slider puts its model and effort label
++      // directly in the menu item's text (e.g. "6 Instantânea, 1 de 1").
++      return described.length ? described : [(element.textContent ?? "").trim()];
++    });
+     if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
+     if (Date.now() >= deadline) break;
+     await new Promise(resolve => setTimeout(resolve, 50));
+diff --git a/src/adapters/chatgpt-web/model.ts b/src/adapters/chatgpt-web/model.ts
+index 6891f10..63d94d9 100644
+--- a/src/adapters/chatgpt-web/model.ts
++++ b/src/adapters/chatgpt-web/model.ts
+@@ -1,5 +1,6 @@
+ import {
+   CHATGPT_WEB_BACKEND_MODEL,
++  CHATGPT_WEB_AUTO_BACKEND_MODEL,
+   CHATGPT_WEB_LUNA_BACKEND_MODEL,
+ } from "../../chatgpt-web-models";
+ 
+@@ -16,7 +17,7 @@ export interface ChatGptWebCapabilities {
+ export interface ChatGptWebModelMode {
+   modelId: string;
+   effort: "low" | "medium" | "high" | "xhigh" | "max";
+-  displayLabel: "Luna" | "Think" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
++  displayLabel: "Auto" | "Luna" | "Think" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
+   uiEffortIndex: 0 | 1 | 2 | 3 | 4 | null;
+   thinkEnabled: boolean;
+   localTools: boolean;
+@@ -27,6 +28,12 @@ export function resolveChatGptWebModelMode(
+   reasoning: string | undefined,
+   capabilities: ChatGptWebCapabilities,
+ ): ChatGptWebModelMode {
++  if (modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL) {
++    if (reasoning && reasoning !== "low") throw new Error("ChatGPT Auto supports only low effort");
++    // Auto is a text-first route, independent of paid MCP app entitlements.
++    return { modelId, effort: "low", displayLabel: "Auto", uiEffortIndex: 0,
++      thinkEnabled: false, localTools: false };
++  }
+   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+     if (capabilities.solAvailable) {
+       throw new Error("ChatGPT Luna is not available while the account exposes the Sol model selector");
 diff --git a/src/adapters/chatgpt-web/turn-broker.ts b/src/adapters/chatgpt-web/turn-broker.ts
-index f218978630a4b6b830be70797565421471871fc7..9f72a0ce1342e3fb39eea6ce5a0b284158b1e61d 100644
+index f218978..9f72a0c 100644
 --- a/src/adapters/chatgpt-web/turn-broker.ts
 +++ b/src/adapters/chatgpt-web/turn-broker.ts
 @@ -81,6 +81,8 @@ interface TurnChannel {
@@ -1524,9 +1762,21 @@ index f218978630a4b6b830be70797565421471871fc7..9f72a0ce1342e3fb39eea6ce5a0b2841
      const callId = opaqueId("call");
      const toolRequest: BrokerToolRequest = {
        callId,
+diff --git a/src/adapters/chatgpt-web/usage.ts b/src/adapters/chatgpt-web/usage.ts
+index 73d0940..7537a1e 100644
+--- a/src/adapters/chatgpt-web/usage.ts
++++ b/src/adapters/chatgpt-web/usage.ts
+@@ -70,6 +70,7 @@ export function resolveBiggerContextMultipartParts(
+   capabilities: ChatGptWebCapabilities,
+   experimentalSkillAttachments = false,
+ ): ChatGptWebMultipartPartCount | undefined {
++  if (parsed.modelId === "chatgpt-web-auto") return undefined;
+   if (isChatGptWebZeroRiskBackendModel(parsed.modelId)) {
+     throw new Error("Bigger Context is unavailable for ChatGPT Zero Risk");
+   }
 diff --git a/src/adapters/gemini-web/index.ts b/src/adapters/gemini-web/index.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..f73dfec992102a3d6793a83506745fc6d08b72da
+index 0000000..f73dfec
 --- /dev/null
 +++ b/src/adapters/gemini-web/index.ts
 @@ -0,0 +1,507 @@
@@ -2037,8 +2287,186 @@ index 0000000000000000000000000000000000000000..f73dfec992102a3d6793a83506745fc6
 +): ProviderAdapter {
 +  return new GeminiWebAdapter(config, route, fetchImpl);
 +}
+diff --git a/src/chatgpt-session.ts b/src/chatgpt-session.ts
+index afe5d7f..3446e69 100644
+--- a/src/chatgpt-session.ts
++++ b/src/chatgpt-session.ts
+@@ -12,11 +12,14 @@ export const CHATGPT_COMPOSER_SELECTOR = [
+   "#prompt-textarea",
+   '[contenteditable="true"][data-lexical-editor="true"]',
+   'form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"][role="textbox"]',
++  'form .ProseMirror[contenteditable="true"][role="textbox"]',
+ ].join(", ");
+ export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
+   'button[aria-haspopup="menu"][data-tone="neutral"]',
+   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
+   'button[data-codex-intelligence-trigger="true"][data-composer-navigation-target="reasoning"][aria-haspopup="menu"]',
++  'button[aria-haspopup="menu"][aria-label="Selecionar modelo do ChatGPT"]',
++  'button[aria-haspopup="menu"][aria-label="Select ChatGPT model"]',
+ ].join(", ");
+ export const CHATGPT_EFFORT_MENU_SELECTOR = [
+   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
+@@ -24,6 +27,14 @@ export const CHATGPT_EFFORT_MENU_SELECTOR = [
+   '[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
+   '[role="menu"]:has([data-model-picker-power-slider])',
+ ].join(", ");
++/** Detect authenticated Think-only temporary-chat composers that lack an
++ * independently verifiable model or effort selector. No model inference here.
++ */
++export async function isChatGptThinkOnlyComposer(form: Locator): Promise<boolean> {
++  if (await form.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true }).count() !== 0) return false;
++  const thinkOnly = form.getByRole("button", { name: /^(?:Pensar|Think)$/i });
++  return await thinkOnly.count() === 1 && await thinkOnly.first().isVisible();
++}
+ export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
+ export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider], [data-model-picker-power-slider]';
+ export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"], [data-model-picker-power-slider] [role="slider"]';
+@@ -198,10 +209,17 @@ export async function readChatGptEffortSnapshot(
+     });
+     const state = parseChatGptEffortSliderState(snapshot.min, snapshot.max, snapshot.value);
+     if (!state) throw new Error("ChatGPT effort slider exposed an invalid ARIA range");
+-    if (snapshot.locks.some(lock => lock !== "true" && lock !== "false")) break;
+     if (snapshot.locks.length === state.max - state.min + 1) {
+       return { ...state, available: snapshot.locks.map(lock => lock === "false") };
+     }
++    // The 2026 compact picker renders only the unlocked Instant tick and an
++    // upgrade-locked next step, despite exposing an ARIA range of 0..1.
++    // Treat the unrepresented step as unavailable, never silently infer High.
++    if (state.min === 0 && state.max === 1 && state.value === 0
++        && snapshot.locks.length === 1 && (snapshot.locks[0] === "false" || snapshot.locks[0] === null)) {
++      return { ...state, available: [true, false] };
++    }
++    if (snapshot.locks.some(lock => lock !== "true" && lock !== "false")) break;
+     if (Date.now() >= deadline) break;
+     await new Promise(resolve => setTimeout(resolve, 50));
+   } while (true);
+diff --git a/src/chatgpt-web-models.ts b/src/chatgpt-web-models.ts
+index bd0f4eb..a37af37 100644
+--- a/src/chatgpt-web-models.ts
++++ b/src/chatgpt-web-models.ts
+@@ -1,6 +1,8 @@
+ export const CHATGPT_WEB_MODEL_PREFIX = "chatgpt-web/";
+ export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
+ export const CHATGPT_WEB_LUNA_BACKEND_MODEL = "gpt-5.6-luna";
++/** Generic account-default browser route. Never claim a specific GPT family. */
++export const CHATGPT_WEB_AUTO_BACKEND_MODEL = "chatgpt-web-auto";
+ /** Internal adapter identity for a turn whose ChatGPT model is selected by the user in the launcher. */
+ export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
+ /** Internal adapter identity for the explicitly enabled, Pro-sized Zero Risk context profile. */
+@@ -8,7 +10,8 @@ export const CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL = "chatgpt-web-zero-risk-pr
+ 
+ export type ChatGptWebAutomaticBackendModel =
+   | typeof CHATGPT_WEB_BACKEND_MODEL
+-  | typeof CHATGPT_WEB_LUNA_BACKEND_MODEL;
++  | typeof CHATGPT_WEB_LUNA_BACKEND_MODEL
++  | typeof CHATGPT_WEB_AUTO_BACKEND_MODEL;
+ export type ChatGptWebBackendModel =
+   | ChatGptWebAutomaticBackendModel
+   | ChatGptWebZeroRiskBackendModel;
+@@ -130,6 +133,11 @@ export function resolveChatGptWebContextLimits(
+       CHATGPT_WEB_ZERO_RISK_AUTO_COMPACT_TOKEN_LIMIT,
+     );
+   }
++  if (backendModel === CHATGPT_WEB_AUTO_BACKEND_MODEL) {
++    // The Free account browser envelope is much smaller than Plus. Deliberately
++    // cap Auto to the conservative Free transport budget on every account.
++    return contextLimits(28_000, 18_000);
++  }
+   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+     // Luna carries continuity through a private checkpoint on every completed browser turn. Codex
+     // internally clamps this field to 90% of the model window, but the reported active usage is the
+@@ -173,6 +181,7 @@ export function resolveChatGptWebTransportLimits(
+ ): ChatGptWebTransportLimits {
+   if (isChatGptWebZeroRiskBackendModel(backendModel)) return {};
+   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) return {};
++  if (backendModel === CHATGPT_WEB_AUTO_BACKEND_MODEL) return { browserComposerCharLimit: 80_000 };
+   if (!capabilities.proAvailable) {
+     if (effort === "low") {
+       return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
+@@ -321,6 +330,18 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
+   requiresPro: false,
+ };
+ 
++export const CHATGPT_WEB_AUTO_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
++  slug: "chatgpt-web/auto",
++  displayName: "ChatGPT Web — Auto (conta)",
++  description: "Usa o modelo padrao disponivel nesta conta. Em Free sem seletor usa o composer normal; nao afirma GPT-6 nem nivel High.",
++  interactionMode: "automatic",
++  backendModel: CHATGPT_WEB_AUTO_BACKEND_MODEL,
++  codexEffort: "low",
++  adapterEffort: "low",
++  supportedCodexEfforts: ["low"],
++  requiresPro: false,
++};
++
+ export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
+   CHATGPT_WEB_LUNA_MODEL_ROUTE,
+ ];
+@@ -426,6 +447,30 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[]
+     supportedCodexEfforts: ["max"],
+     requiresPro: true,
+   },
++  {
++    slug: "chatgpt-web/gpt-6-instant",
++    displayName: "GPT-6 Instant (Web)",
++    description: "Explicit GPT-6 Instant; browser must confirm the selected family before sending.",
++    interactionMode: "automatic",
++    backendModel: CHATGPT_WEB_BACKEND_MODEL,
++    modelFamily: "6",
++    codexEffort: "low",
++    adapterEffort: "low",
++    supportedCodexEfforts: ["low"],
++    requiresPro: false,
++  },
++  {
++    slug: "chatgpt-web/gpt-6",
++    displayName: "GPT-6 (Web)",
++    description: "Explicit GPT-6 with Medium, High, or account-supported Extra High. Browser controls must confirm the actual model and effort before sending.",
++    interactionMode: "automatic",
++    backendModel: CHATGPT_WEB_BACKEND_MODEL,
++    modelFamily: "6",
++    codexEffort: "high",
++    adapterEffort: "high",
++    supportedCodexEfforts: ["medium", "high", "xhigh"],
++    requiresPro: false,
++  },
+   {
+     slug: "chatgpt-web/gpt-6-pro",
+     displayName: "GPT-6 Pro (Web)",
+@@ -444,6 +489,7 @@ const routesBySlug = new Map(
+   [
+     CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
+     CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
++    CHATGPT_WEB_AUTO_MODEL_ROUTE,
+     ...CHATGPT_WEB_LUNA_MODEL_ROUTES,
+     ...CHATGPT_WEB_MODEL_ROUTES,
+     CHATGPT_WEB_LEGACY_LUNA_MODEL_ROUTE,
+@@ -470,11 +516,11 @@ export function availableChatGptWebModelRoutes(
+       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
+   }
+   if (!capabilities.solAvailable) return includeLegacy
+-    ? [...CHATGPT_WEB_LUNA_MODEL_ROUTES, CHATGPT_WEB_LEGACY_LUNA_MODEL_ROUTE, CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE]
+-    : CHATGPT_WEB_LUNA_MODEL_ROUTES;
++    ? [CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_LUNA_MODEL_ROUTES, CHATGPT_WEB_LEGACY_LUNA_MODEL_ROUTE, CHATGPT_WEB_LUNA_THINK_MODEL_ROUTE]
++    : [CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_LUNA_MODEL_ROUTES];
+   const candidates = includeLegacy
+-    ? [...CHATGPT_WEB_MODEL_ROUTES, ...CHATGPT_WEB_LEGACY_MODEL_ROUTES]
+-    : CHATGPT_WEB_MODEL_ROUTES;
++    ? [CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_MODEL_ROUTES, ...CHATGPT_WEB_LEGACY_MODEL_ROUTES]
++    : [CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_MODEL_ROUTES];
+   return candidates.filter(route =>
+     (!route.requiresPro || capabilities.proAvailable)
+     && (!route.requiresExtraHigh || capabilities.extraHighAvailable));
+@@ -510,6 +556,7 @@ export function requireChatGptWebModelRoute(
+   if (route.interactionMode === "manual") {
+     throw new Error(`${route.displayName} is only available while Zero Risk is enabled`);
+   }
++  if (route.backendModel === CHATGPT_WEB_AUTO_BACKEND_MODEL) return resolveRouteEffort(route, capabilities, reasoning);
+   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
+     if (capabilities.solAvailable) {
+       throw new Error(`${route.displayName} is only available for Luna-only accounts`);
 diff --git a/src/cli.ts b/src/cli.ts
-index 006da679ae74532ec6da71bd575d9dbccf261083..782b2e9cf25df031768c417538cec620d971166b 100644
+index 006da67..782b2e9 100644
 --- a/src/cli.ts
 +++ b/src/cli.ts
 @@ -16,6 +16,7 @@ import {
@@ -2074,7 +2502,7 @@ index 006da679ae74532ec6da71bd575d9dbccf261083..782b2e9cf25df031768c417538cec620
      ? (() => {
          const status = inspectCodexIntegration();
 diff --git a/src/codex-integration-shared.ts b/src/codex-integration-shared.ts
-index bb685f29a7b567336f66ac6736071376ec9e1272..7921bd38695c0d5e6f262cdb7f4575e1e25c21aa 100644
+index bb685f2..7921bd3 100644
 --- a/src/codex-integration-shared.ts
 +++ b/src/codex-integration-shared.ts
 @@ -264,6 +264,15 @@ export function getCodexJournalRecoveryPath(): string {
@@ -2094,7 +2522,7 @@ index bb685f29a7b567336f66ac6736071376ec9e1272..7921bd38695c0d5e6f262cdb7f4575e1
  }
  
 diff --git a/src/config.ts b/src/config.ts
-index 8a64e6032a2feb9e7ab0792bd2cf6af2285906bf..450257fef99a016a04666ca8f9ddcd512d86047c 100644
+index 8a64e60..450257f 100644
 --- a/src/config.ts
 +++ b/src/config.ts
 @@ -19,10 +19,10 @@ export type SubagentProtocol = "compatibility-v1" | "native";
@@ -2272,7 +2700,7 @@ index 8a64e6032a2feb9e7ab0792bd2cf6af2285906bf..450257fef99a016a04666ca8f9ddcd51
        proAvailable: manual ? false : config.proAvailable,
 diff --git a/src/gemini-web-models.ts b/src/gemini-web-models.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac7a725df283fbe77fcd6849068e4097d71f655c
+index 0000000..ac7a725
 --- /dev/null
 +++ b/src/gemini-web-models.ts
 @@ -0,0 +1,54 @@
@@ -2331,7 +2759,7 @@ index 0000000000000000000000000000000000000000..ac7a725df283fbe77fcd6849068e4097
 +  return route;
 +}
 diff --git a/src/model-catalog.ts b/src/model-catalog.ts
-index 3820878ecffd6206881a5f6c901c9b1c9afa8226..2c7584961db1984aabf31c1d40605fea9f46e913 100644
+index 3820878..8897ad5 100644
 --- a/src/model-catalog.ts
 +++ b/src/model-catalog.ts
 @@ -1,4 +1,9 @@
@@ -2344,6 +2772,15 @@ index 3820878ecffd6206881a5f6c901c9b1c9afa8226..2c7584961db1984aabf31c1d40605fea
  import type { CodexModelContextOverride } from "./codex-integration";
  import {
    availableChatGptWebModelRoutes,
+@@ -48,7 +53,7 @@ function routedModelPriority(
+   const priority = modelPriority(template);
+   if (priority === undefined
+     || config.subagentProtocol !== "compatibility-v1"
+-    || !["chatgpt-web/light", "chatgpt-web/gpt-5.6-sol-instant"].includes(route.slug)) return priority;
++    || !["chatgpt-web/auto", "chatgpt-web/light", "chatgpt-web/gpt-5.6-sol-instant"].includes(route.slug)) return priority;
+   if (priority === Number.MAX_SAFE_INTEGER) {
+     throw new Error("Native Codex model template priority cannot reserve the Compatibility V1 roster");
+   }
 @@ -60,7 +65,9 @@ function nativeTemplateCandidate(value: unknown, requireTools: boolean): value i
    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
    const model = value as JsonObject;
@@ -2433,7 +2870,7 @@ index 3820878ecffd6206881a5f6c901c9b1c9afa8226..2c7584961db1984aabf31c1d40605fea
    };
  }
 diff --git a/src/responses/parser.ts b/src/responses/parser.ts
-index ded9b12250c0e2d6934914f77963747e3ed9834c..2c7920bff3e3885a400c82a8dfc604057dc06ce6 100644
+index ded9b12..2c7920b 100644
 --- a/src/responses/parser.ts
 +++ b/src/responses/parser.ts
 @@ -14,7 +14,10 @@ import type {
@@ -2474,7 +2911,7 @@ index ded9b12250c0e2d6934914f77963747e3ed9834c..2c7920bff3e3885a400c82a8dfc60405
      ...(textCompaction ? { _compactionResponseFormat: "message" as const } : {}),
      ...(opaqueMultiAgentV2Payload ? { _opaqueMultiAgentV2Payload: true } : {}),
 diff --git a/src/responses/state.ts b/src/responses/state.ts
-index a889c3a8bb5d9aa7b82e582521a959f4537d8fe9..54935fa53990a244ac992c581f7e978719211b52 100644
+index a889c3a..54935fa 100644
 --- a/src/responses/state.ts
 +++ b/src/responses/state.ts
 @@ -1,6 +1,7 @@
@@ -2568,7 +3005,7 @@ index a889c3a8bb5d9aa7b82e582521a959f4537d8fe9..54935fa53990a244ac992c581f7e9787
    pruneResponses();
    schedulePersist();
 diff --git a/src/server.ts b/src/server.ts
-index 8bae1ac704926551eb3b7ac05ce77b9d2b5720f4..207fbbe60e2613e15363c7a00a90b8f9cefe25be 100644
+index 8bae1ac..207fbbe 100644
 --- a/src/server.ts
 +++ b/src/server.ts
 @@ -1,4 +1,5 @@
@@ -2883,7 +3320,7 @@ index 8bae1ac704926551eb3b7ac05ce77b9d2b5720f4..207fbbe60e2613e15363c7a00a90b8f9
        if (req.method === "GET" && url.pathname === "/v1/responses") {
          return new Response("Responses WebSocket transport is not enabled on this local route", {
 diff --git a/src/types.ts b/src/types.ts
-index cccf7e1ccca76190d9b20d95f3e8516fe3cc14a0..4b45636930c4386925763e609b37c572df8ac708 100644
+index cccf7e1..4b45636 100644
 --- a/src/types.ts
 +++ b/src/types.ts
 @@ -9,6 +9,8 @@ export interface CodexParsedRequest {
@@ -2895,9 +3332,168 @@ index cccf7e1ccca76190d9b20d95f3e8516fe3cc14a0..4b45636930c4386925763e609b37c572
    /**
     * Dedicated native compaction, identified by compaction_trigger or canonical responses/memento
     * metadata. Both run without local tools; their output contracts differ.
+diff --git a/tests/chatgpt-model-selection.test.ts b/tests/chatgpt-model-selection.test.ts
+index c839662..3590b5e 100644
+--- a/tests/chatgpt-model-selection.test.ts
++++ b/tests/chatgpt-model-selection.test.ts
+@@ -1,15 +1,17 @@
+ import { expect, test } from "bun:test";
+ import { chatGptModelFamilyMatches, selectChatGptModelFamily } from "../src/adapters/chatgpt-web/model-selection";
++import { CHATGPT_COMPOSER_SELECTOR, CHATGPT_EFFORT_CONTROL_SELECTOR, isChatGptThinkOnlyComposer } from "../src/chatgpt-session";
+ 
+ test("model selection recognizes Latest in the launcher languages without accepting other model names", async () => {
+   for (const [label, accepted] of [
+     ["Latest", true], ["最新", true], ["최신", true], ["GPT-6 Pro", true],
+-    ["GPT-5.6 Sol", false], ["GPT-7 Pro", false], ["Latest preview", false],
++    ["6", true], ["GPT-5.6 Sol", false], ["GPT-7 Pro", false], ["Latest preview", false],
+   ] as const) {
+     const menu = { menu: {
+       getByRole: (_role: string, options: { name: RegExp }) => ({
+         count: async () => options.name.test(label) ? 1 : 0,
+         getAttribute: async () => "true",
++        isVisible: async () => true,
+         waitFor: async () => { throw new Error("Requested family is absent"); },
+       }),
+       locator: () => ({ count: async () => 1, getAttribute: async () => "true" }),
+@@ -22,7 +24,9 @@ test("model selection recognizes Latest in the launcher languages without accept
+ 
+ test("family confirmation separates Latest staging from the actual Pro response", () => {
+   expect(chatGptModelFamilyMatches(["5.6 High, 3 of 5."], "5.6", "high")).toBe(true);
+-  expect(chatGptModelFamilyMatches(["5.6 Extra High, 4 of 5."], "6", "xhigh")).toBe(true);
++  expect(chatGptModelFamilyMatches(["6 Extra High, 4 of 5."], "6", "xhigh")).toBe(true);
++  expect(chatGptModelFamilyMatches(["6 Instantânea, 1 de 1."], "6", "low")).toBe(true);
++  expect(chatGptModelFamilyMatches(["5.6 High, 3 of 5."], "6", "high")).toBe(false);
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "max")).toBe(true);
+   expect(chatGptModelFamilyMatches(["GPT-5.6 Sol Pro, 5 of 5."], "5.6", "max")).toBe(true);
+   for (const descriptions of [[], ["Try Pro for more reasoning"], ["5.6 High, 3 of 5."], ["5.6 Pro, 5 of 5."],
+@@ -32,3 +36,25 @@ test("family confirmation separates Latest staging from the actual Pro response"
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "5.6", "max")).toBe(false);
+   expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "xhigh")).toBe(false);
+ });
++
++test("compact localized ChatGPT controls remain discoverable without generic menu guesses", () => {
++  expect(CHATGPT_COMPOSER_SELECTOR).toContain('form .ProseMirror[contenteditable="true"][role="textbox"]');
++  expect(CHATGPT_EFFORT_CONTROL_SELECTOR).toContain('aria-label="Selecionar modelo do ChatGPT"');
++  expect(CHATGPT_EFFORT_CONTROL_SELECTOR).toContain('aria-label="Select ChatGPT model"');
++});
++
++test("Think-only temporary composer is detected without pretending to select GPT-6 High", async () => {
++  function mockForm(controlCount: number, thinkCount: number, isVisible: boolean) {
++    return {
++      locator: () => ({ filter: () => ({ count: async () => controlCount }) }),
++      getByRole: () => ({
++        count: async () => thinkCount,
++        first: () => ({ isVisible: async () => isVisible }),
++      }),
++    } as unknown as Parameters<typeof isChatGptThinkOnlyComposer>[0];
++  }
++  expect(await isChatGptThinkOnlyComposer(mockForm(0, 1, true))).toBe(true);
++  expect(await isChatGptThinkOnlyComposer(mockForm(1, 1, true))).toBe(false);
++  expect(await isChatGptThinkOnlyComposer(mockForm(0, 0, false))).toBe(false);
++  expect(await isChatGptThinkOnlyComposer(mockForm(0, 1, false))).toBe(false);
++});
+diff --git a/tests/chatgpt-web-models.test.ts b/tests/chatgpt-web-models.test.ts
+index e245190..66c5c92 100644
+--- a/tests/chatgpt-web-models.test.ts
++++ b/tests/chatgpt-web-models.test.ts
+@@ -1,8 +1,12 @@
+ import { describe, expect, test } from "bun:test";
+ import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
++import { resolveChatGptWebModelMode } from "../src/adapters/chatgpt-web/model";
++import { assertChatGptWebInputWithinLimits } from "../src/adapters/chatgpt-web/browser-worker";
+ import {
+   availableChatGptWebModelRoutes,
+   CHATGPT_WEB_BACKEND_MODEL,
++  CHATGPT_WEB_AUTO_BACKEND_MODEL,
++  CHATGPT_WEB_AUTO_MODEL_ROUTE,
+   CHATGPT_WEB_LUNA_BACKEND_MODEL,
+   CHATGPT_WEB_LUNA_MODEL_ROUTE,
+   CHATGPT_WEB_LEGACY_LUNA_MODEL_ROUTE,
+@@ -47,18 +51,21 @@ describe("fixed ChatGPT Web model routes", () => {
+       ["chatgpt-web/pro", "ultra", "max"],
+     ]);
+     expect(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName)).toEqual([
+-      "GPT-5.6 Sol Instant (Web)", "GPT-5.6 Sol (Web)", "GPT-5.6 Pro (Web)", "GPT-6 Pro (Web)",
++      "GPT-5.6 Sol Instant (Web)", "GPT-5.6 Sol (Web)", "GPT-5.6 Pro (Web)", "GPT-6 Instant (Web)", "GPT-6 (Web)", "GPT-6 Pro (Web)",
+     ]);
+     expect(CHATGPT_WEB_LUNA_MODEL_ROUTE.displayName).toBe("GPT-5.6 Luna (Web)");
+   });
+ 
+   test("exposes only Plus-eligible routes without the Pro account capability", () => {
+     expect(availableChatGptWebModelRoutes(plus).map(route => route.slug)).toEqual([
++      "chatgpt-web/auto",
+       "chatgpt-web/gpt-5.6-sol-instant",
+       "chatgpt-web/gpt-5.6-sol",
++      "chatgpt-web/gpt-6-instant",
++      "chatgpt-web/gpt-6",
+     ]);
+     expect(availableChatGptWebModelRoutes({ solAvailable: true, extraHighAvailable: true, proAvailable: true }))
+-      .toEqual(CHATGPT_WEB_MODEL_ROUTES);
++      .toEqual([CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_MODEL_ROUTES]);
+     expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", plus))
+       .toThrow("Extra High is not available for this account");
+     expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
+@@ -68,7 +75,7 @@ describe("fixed ChatGPT Web model routes", () => {
+   test("Extra High stays routable without granting Pro or Pro-sized context", () => {
+     const config = { ...defaultConfig("full"), extraHighAvailable: true, proAvailable: false };
+     expect(availableChatGptWebModelRoutes(config).map(route => route.slug))
+-      .toEqual(["chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol"]);
++      .toEqual(["chatgpt-web/auto", "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol", "chatgpt-web/gpt-6-instant", "chatgpt-web/gpt-6"]);
+     const request = parsed("chatgpt-web/extra-high", "low");
+     expect(routeChatGptWebRequest(request, config).adapterEffort).toBe("xhigh");
+     expect(request.options.reasoning).toBe("xhigh");
+@@ -83,7 +90,7 @@ describe("fixed ChatGPT Web model routes", () => {
+ 
+   test("exposes Luna and Think when the authenticated account has no Sol selector", () => {
+     const free = { solAvailable: false, extraHighAvailable: false, proAvailable: false };
+-    expect(availableChatGptWebModelRoutes(free)).toEqual(CHATGPT_WEB_LUNA_MODEL_ROUTES);
++    expect(availableChatGptWebModelRoutes(free)).toEqual([CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_LUNA_MODEL_ROUTES]);
+     expect(requireChatGptWebModelRoute("chatgpt-web/luna", free).backendModel)
+       .toBe(CHATGPT_WEB_LUNA_BACKEND_MODEL);
+     expect(requireChatGptWebModelRoute("chatgpt-web/think", free))
+@@ -96,6 +103,23 @@ describe("fixed ChatGPT Web model routes", () => {
+     })).toThrow("only available for Luna-only accounts");
+   });
+ 
++  test("Auto never implies GPT-6, is routable on Free and Plus, and has a conservative envelope", () => {
++    const free={solAvailable:false,extraHighAvailable:false,proAvailable:false};
++    const route=requireChatGptWebModelRoute("chatgpt-web/auto",free,"low");
++    expect(route.backendModel).toBe(CHATGPT_WEB_AUTO_BACKEND_MODEL);
++    expect(route.interactionMode === "automatic" && route.modelFamily).toBeUndefined();
++    expect(requireChatGptWebModelRoute("chatgpt-web/auto",plus,"low").slug).toBe("chatgpt-web/auto");
++    expect(() => requireChatGptWebModelRoute("chatgpt-web/auto",free,"high")).toThrow("does not support effort");
++    expect(resolveChatGptWebContextLimits(CHATGPT_WEB_AUTO_BACKEND_MODEL,"low",free)).toEqual({
++      contextWindow:28000, effectiveContextWindowPercent:64, autoCompactTokenLimit:18000,
++    });
++    const parsedAuto=parsed("chatgpt-web/auto","low");
++    const selected=routeChatGptWebRequest(parsedAuto,{...defaultConfig("browser-only"), solAvailable:false});
++    expect(selected.slug).toBe("chatgpt-web/auto");
++    expect(parsedAuto.modelId).toBe(CHATGPT_WEB_AUTO_BACKEND_MODEL);
++    expect(parsedAuto._chatgptModelFamily).toBeUndefined();
++  });
++
+   test("Zero Risk exposes one generic route independent of account capabilities", () => {
+     const manual = {
+       solAvailable: false,
+@@ -352,3 +376,15 @@ describe("fixed ChatGPT Web model routes", () => {
+     expect(new Set(keys).size).toBe(3);
+   });
+ });
++
++test("Auto preflights the Free browser envelope without assuming a paid model", () => {
++  const free={ solAvailable:false, extraHighAvailable:false, proAvailable:false, localToolsEnabled:false };
++  const auto=resolveChatGptWebModelMode(CHATGPT_WEB_AUTO_BACKEND_MODEL,"low",free);
++  expect(auto).toMatchObject({effort:"low",displayLabel:"Auto",uiEffortIndex:0,thinkEnabled:false,localTools:false});
++  expect(() => assertChatGptWebInputWithinLimits(600,580,CHATGPT_WEB_AUTO_BACKEND_MODEL,"low",free,1200)).not.toThrow();
++  expect(() => assertChatGptWebInputWithinLimits(29_000,28_000,CHATGPT_WEB_AUTO_BACKEND_MODEL,"low",free,6500)).toThrow("Auto turn requires");
++  expect(() => assertChatGptWebInputWithinLimits(600,580,CHATGPT_WEB_AUTO_BACKEND_MODEL,"low",free,90_000)).toThrow("composer boundary");
++  const paid={...free,solAvailable:true,localToolsEnabled:true};
++  expect(resolveChatGptWebModelMode(CHATGPT_WEB_AUTO_BACKEND_MODEL,"low",paid).localTools).toBe(false);
++  expect(() => resolveChatGptWebModelMode(CHATGPT_WEB_AUTO_BACKEND_MODEL,"high",paid)).toThrow("only low effort");
++});
 diff --git a/tests/gemini-web-adapter.test.ts b/tests/gemini-web-adapter.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..92c500365e3bc49f849be110b48a8d0013744abb
+index 0000000..92c5003
 --- /dev/null
 +++ b/tests/gemini-web-adapter.test.ts
 @@ -0,0 +1,310 @@
@@ -3213,7 +3809,7 @@ index 0000000000000000000000000000000000000000..92c500365e3bc49f849be110b48a8d00
 +});
 diff --git a/tests/gemini-web.test.ts b/tests/gemini-web.test.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..b941995b2a85af56fb4a23f022617962c630654c
+index 0000000..b941995
 --- /dev/null
 +++ b/tests/gemini-web.test.ts
 @@ -0,0 +1,214 @@
@@ -3432,10 +4028,18 @@ index 0000000000000000000000000000000000000000..b941995b2a85af56fb4a23f022617962
 +  }));
 +});
 diff --git a/tests/model-catalog.test.ts b/tests/model-catalog.test.ts
-index 979e0556d9388be63e68221d5f495c7df4376c14..01b3fe9f1ad32a430befaf910352225aa56f20c1 100644
+index 979e055..664f8a3 100644
 --- a/tests/model-catalog.test.ts
 +++ b/tests/model-catalog.test.ts
-@@ -12,6 +12,7 @@ import {
+@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
+ import { defaultConfig } from "../src/config";
+ import {
+   CHATGPT_WEB_LUNA_MODEL_ROUTE,
++  CHATGPT_WEB_AUTO_MODEL_ROUTE,
+   CHATGPT_WEB_LUNA_MODEL_ROUTES,
+   CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
+   CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
+@@ -12,6 +13,7 @@ import {
    chatGptWebRouteEfforts,
    resolveChatGptWebContextLimits,
  } from "../src/chatgpt-web-models";
@@ -3443,7 +4047,92 @@ index 979e0556d9388be63e68221d5f495c7df4376c14..01b3fe9f1ad32a430befaf910352225a
  import { augmentNativeModelCatalog, buildChatGptWebModel } from "../src/model-catalog";
  
  function source(): Record<string, unknown> {
-@@ -372,3 +373,34 @@ describe("native /models augmentation", () => {
+@@ -68,10 +70,10 @@ describe("native /models augmentation", () => {
+     expect(legacy.map(model => [model.context_window, model.auto_compact_token_limit])).toEqual([
+       [111_193, 95_000], [111_193, 95_000], [111_193, 95_000], [111_193, 95_000], [112_193, 95_000],
+     ]);
+-    expect(web.map(model => model.slug)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.slug));
+-    expect(web.map(model => model.display_name)).toEqual(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName));
++    expect(web.map(model => model.slug)).toEqual([CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_MODEL_ROUTES].map(route => route.slug));
++    expect(web.map(model => model.display_name)).toEqual([CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_MODEL_ROUTES].map(route => route.displayName));
+     for (const [index, model] of web.entries()) {
+-      const route = CHATGPT_WEB_MODEL_ROUTES[index]!;
++      const route = [CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_MODEL_ROUTES][index]!;
+       const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
+       expect(model).toMatchObject({
+         slug: route.slug,
+@@ -93,7 +95,7 @@ describe("native /models augmentation", () => {
+       expect((model.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
+         .toEqual([...chatGptWebRouteEfforts(route, config)]);
+     }
+-    expect((web[1]!.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
++    expect((web[2]!.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
+       .toEqual(["medium", "high", "xhigh"]);
+     expect(() => buildChatGptWebModel(originalModels[1], {
+       ...CHATGPT_WEB_MODEL_ROUTES[1]!, supportedCodexEfforts: ["low", "medium"],
+@@ -132,8 +134,7 @@ describe("native /models augmentation", () => {
+ 
+     expect(spawnOverrides).toEqual([
+       "gpt-5.6-sol",
+-      ...CHATGPT_WEB_MODEL_ROUTES.slice(1).map(route => route.slug),
+-      "chatgpt-web/gpt-5.6-sol-instant",
++      ...CHATGPT_WEB_MODEL_ROUTES.slice(1, 5).map(route => route.slug),
+     ]);
+     expect(models.find(model => model.slug === "chatgpt-web/light")?.priority).toBe(3);
+   });
+@@ -184,7 +185,8 @@ describe("native /models augmentation", () => {
+     const models = second.models as Array<Record<string, unknown>>;
+     const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
+     expect(web.map(model => model.slug)).toEqual([
+-      "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol",
++      "chatgpt-web/auto", "chatgpt-web/gpt-5.6-sol-instant", "chatgpt-web/gpt-5.6-sol",
++      "chatgpt-web/gpt-6-instant", "chatgpt-web/gpt-6",
+       "chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high",
+     ]);
+     expect(web.every(model => model.tool_mode === null)).toBe(true);
+@@ -195,6 +197,9 @@ describe("native /models augmentation", () => {
+       effectiveContextWindowPercent: model.effective_context_window_percent,
+       autoCompactTokenLimit: model.auto_compact_token_limit,
+     }))).toEqual([
++      { contextWindow: 28_000, effectiveContextWindowPercent: 64, autoCompactTokenLimit: 18_000 },
++      { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
++      { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
+       { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
+       { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
+       { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
+@@ -209,10 +214,10 @@ describe("native /models augmentation", () => {
+     config.solAvailable = false;
+     const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
+     const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
+-    expect(web).toHaveLength(3);
+-    expect(web.filter(model => model.visibility === "list").map(model => model.slug)).toEqual(CHATGPT_WEB_LUNA_MODEL_ROUTES.map(route => route.slug));
++    expect(web).toHaveLength(4);
++    expect(web.filter(model => model.visibility === "list").map(model => model.slug)).toEqual([CHATGPT_WEB_AUTO_MODEL_ROUTE, ...CHATGPT_WEB_LUNA_MODEL_ROUTES].map(route => route.slug));
+     expect(web.filter(model => model.visibility === "hide").map(model => model.slug)).toEqual(["chatgpt-web/luna", "chatgpt-web/think"]);
+-    expect(web[0]).toMatchObject({
++    expect(web[1]).toMatchObject({
+       slug: CHATGPT_WEB_LUNA_MODEL_ROUTE.slug,
+       display_name: CHATGPT_WEB_LUNA_MODEL_ROUTE.displayName,
+       default_reasoning_level: "low",
+@@ -320,7 +325,7 @@ describe("native /models augmentation", () => {
+     const result = augmentNativeModelCatalog(native, defaultConfig("full"));
+     const web = (result.models as Array<Record<string, unknown>>)
+       .filter(model => String(model.slug).startsWith("chatgpt-web/"));
+-    expect(web.length).toBe(5);
++    expect(web.length).toBe(8);
+     expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
+     expect(web.every(model => model.tool_mode === null)).toBe(true);
+   });
+@@ -336,7 +341,7 @@ describe("native /models augmentation", () => {
+     const web = (result.models as Array<Record<string, unknown>>)
+       .filter(model => String(model.slug).startsWith("chatgpt-web/"));
+ 
+-    expect(web).toHaveLength(5);
++    expect(web).toHaveLength(8);
+     expect(web.every(model => model.supported_in_api === true)).toBe(true);
+     expect((result.models as Array<Record<string, unknown>>).slice(0, models.length))
+       .toEqual(models);
+@@ -372,3 +377,34 @@ describe("native /models augmentation", () => {
      }, defaultConfig("full"))).toThrow("no list-visible, tool-capable model");
    });
  });
@@ -3479,7 +4168,7 @@ index 979e0556d9388be63e68221d5f495c7df4376c14..01b3fe9f1ad32a430befaf910352225a
 +  }
 +});
 diff --git a/tests/server-lifecycle.test.ts b/tests/server-lifecycle.test.ts
-index 81e4b1d59f90c3ba8dcc9ff594f7f747cdfb73ba..e4395f2a38b81232cb1353591736f6f8a66728fd 100644
+index 81e4b1d..e4395f2 100644
 --- a/tests/server-lifecycle.test.ts
 +++ b/tests/server-lifecycle.test.ts
 @@ -1155,6 +1155,48 @@ test("health proves that Codex received a successful augmented model catalog", a
@@ -3531,3 +4220,38 @@ index 81e4b1d59f90c3ba8dcc9ff594f7f747cdfb73ba..e4395f2a38b81232cb1353591736f6f8
  test("server exposes authenticated standalone Web Search on the routed v1 base URL", async () => {
    const config = { ...defaultConfig("browser-only"), port: 0 };
    let upstreamRequest: Request | undefined;
+diff --git a/tests/server-models.test.ts b/tests/server-models.test.ts
+index 2cc4097..d62f865 100644
+--- a/tests/server-models.test.ts
++++ b/tests/server-models.test.ts
+@@ -54,9 +54,12 @@ test("proxies official /models auth and query, then appends grouped and legacy W
+   };
+   expect(body.models.map(model => model.slug)).toEqual([
+     "gpt-5.6-sol",
++    "chatgpt-web/auto",
+     "chatgpt-web/gpt-5.6-sol-instant",
+     "chatgpt-web/gpt-5.6-sol",
+     "chatgpt-web/gpt-5.6-pro",
++    "chatgpt-web/gpt-6-instant",
++    "chatgpt-web/gpt-6",
+     "chatgpt-web/gpt-6-pro",
+     "chatgpt-web/light",
+     "chatgpt-web/medium",
+@@ -102,7 +105,7 @@ test("Luna-only account exposes no paid ChatGPT Web routes", async () => {
+   );
+   const body = await response.json() as { models: Array<{ slug: string }> };
+   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/")).map(model => model.slug))
+-    .toEqual(["chatgpt-web/gpt-5.6-luna", "chatgpt-web/luna", "chatgpt-web/think"]);
++    .toEqual(["chatgpt-web/auto", "chatgpt-web/gpt-5.6-luna", "chatgpt-web/luna", "chatgpt-web/think"]);
+ });
+ 
+ test("Zero Risk returns one generic Web row without using scanned capabilities", async () => {
+@@ -175,7 +178,7 @@ test("ChatGPT-only native catalog rows do not turn model discovery into a 502",
+   const body = await response.json() as { models: Array<{ slug: string; supported_in_api?: boolean }> };
+   expect(body.models[0]).toMatchObject({ slug: "gpt-chatgpt-only", supported_in_api: false });
+   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/")))
+-    .toHaveLength(5);
++    .toHaveLength(8);
+   expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/"))
+     .every(model => model.supported_in_api === true)).toBe(true);
+ });

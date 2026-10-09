@@ -1290,3 +1290,41 @@ def test_responses_stream_enforces_absolute_deadline(tmp_path: Path) -> None:
 
     interrupt.assert_called_once()
     assert str(interrupt.call_args.args[0]).startswith("sentra-cli-turn-")
+
+def test_chatgpt_web_rejected_preflight_error_is_concise_and_not_uncertain(tmp_path: Path) -> None:
+    cfg = CLIConfig(workspace=tmp_path, openai_api_key="none")
+    client = ModelClient(cfg)
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def __iter__(self):
+            yield b"event: response.failed\n"
+            yield (b'data: {"type":"response.failed","response":'
+                   b'{"id":"opaque-private-trace","error":'
+                   b'{"code":"chatgpt_model_controls_unavailable",'
+                   b'"message":"Think-only composer has no model picker"}}}\n')
+
+    with patch("sentra_cli.client.urllib.request.urlopen", return_value=Response()):
+        with pytest.raises(Exception) as error:
+            list(client._responses_stream([{"role": "user", "content": "test"}], cfg.model))
+    assert "HTTP 400" in str(error.value)
+    assert "chatgpt_model_controls_unavailable" in str(error.value)
+    assert "Think-only composer" in str(error.value)
+    assert "opaque-private-trace" not in str(error.value)
+    assert client.last_delivery_state == "rejected"
+
+
+def test_chatgpt_web_unknown_failure_remains_uncertain(tmp_path: Path) -> None:
+    cfg = CLIConfig(workspace=tmp_path, openai_api_key="none")
+    client = ModelClient(cfg)
+    detail, rejected = client._stream_failure_detail({
+        "type": "response.failed",
+        "response": {"error": {"code": "server_is_overloaded", "message": "Upstream unavailable"}},
+    })
+    assert detail == "server_is_overloaded: Upstream unavailable"
+    assert rejected is False

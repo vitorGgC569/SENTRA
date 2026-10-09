@@ -1,0 +1,23 @@
+{
+  "name": "sentra-canvas-collab",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build:browser": "node build_browser.mjs"
+  },
+  "dependencies": {
+    "@hocuspocus/common": "4.7.0",
+    "@hocuspocus/provider": "4.7.0",
+    "@hocuspocus/server": "4.7.0",
+    "y-protocols": "^1.0.6",
+    "yjs": "^13.6.8"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12"
+  }
+}

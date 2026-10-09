@@ -63,7 +63,14 @@ def test_sentra_upstream_patch_matches_pinned_checkout_exactly() -> None:
     assert sorted(path for path, _ in sections) == sorted(manifest["patch_files"])
 
     for relative, hunks in sections:
-        source = (UPSTREAM / relative).read_text(encoding="utf-8").splitlines()
+        source_path = UPSTREAM / relative
+        if not source_path.exists():
+            assert hunks, f"new patch file {relative} has no hunks"
+            assert all(old_start == 0 and not old_lines for old_start, old_lines in hunks), (
+                f"new patch file {relative} unexpectedly removes upstream content"
+            )
+            continue
+        source = source_path.read_text(encoding="utf-8").splitlines()
         for old_start, old_lines in hunks:
             actual = source[old_start - 1 : old_start - 1 + len(old_lines)]
             assert actual == old_lines, f"patch drift in {relative} at original line {old_start}"

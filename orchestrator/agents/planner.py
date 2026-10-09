@@ -143,7 +143,7 @@ REPOSITORY CONTEXT:
 
         if not isinstance(tasks_data, list) or len(tasks_data) > 200:
             raise ValueError("planner must return at most 200 tasks")
-        tasks = []
+        tasks: list[Task] = []
         for d in tasks_data:
             if not isinstance(d, dict):
                 raise ValueError("planner task must be an object")
@@ -182,7 +182,7 @@ REPOSITORY CONTEXT:
         by_id = {t.id: t for t in tasks}
         if len(by_id) != len(tasks) or any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,79}", t.id) for t in tasks):
             raise ValueError("planner task IDs must be unique and path-safe")
-        done = set()
+        done: set[str] = set()
         for task in tasks:
             if not isinstance(task.dependencies, list) or any(d not in by_id for d in task.dependencies):
                 raise ValueError("unknown dependency in planner DAG")

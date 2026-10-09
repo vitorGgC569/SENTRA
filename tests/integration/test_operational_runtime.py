@@ -39,18 +39,32 @@ async def test_isolated_run_handoff_and_explicit_promotion(tmp_path):
     assert resumed["status"] == "CANDIDATE_READY" and len(provider.history) == calls
     promoted = await promote_candidate(tmp_path, "operational")
     assert promoted["status"] == "APPLIED"
+    assert promoted["project_revision"] >= 1
+    assert promoted["integration_fencing_token"] >= 1
     assert "def factorial" in (tmp_path / "math_utils.py").read_text()
     assert fingerprint(source_files(tmp_path)) == result["candidate_hash"]
 
 
-async def test_promotion_rejects_stale_workspace_and_tampered_patch(tmp_path):
+async def test_promotion_rebases_unrelated_workspace_change(tmp_path):
+    (tmp_path / "math_utils.py").write_text("# baseline\n")
+    routing, _ = router()
+    await IntegratedRun(tmp_path, "rebase-unrelated", "factorial", routing).run()
+    (tmp_path / "user.txt").write_text("user work")
+    promoted = await promote_candidate(tmp_path, "rebase-unrelated")
+    assert promoted["status"] == "APPLIED"
+    assert promoted["promotion_rebased"] is True
+    assert (tmp_path / "user.txt").read_text() == "user work"
+    assert "def factorial" in (tmp_path / "math_utils.py").read_text()
+
+
+async def test_promotion_rejects_conflicting_workspace_change_and_tampered_patch(tmp_path):
     (tmp_path / "math_utils.py").write_text("# baseline\n")
     routing, _ = router()
     result = await IntegratedRun(tmp_path, "guard", "factorial", routing).run()
-    (tmp_path / "user.txt").write_text("user work")
-    with pytest.raises(ValueError, match="STALE_BASE"):
+    (tmp_path / "math_utils.py").write_text("# competing agent edit\n")
+    with pytest.raises(ValueError, match="STALE_BASE_CONFLICT"):
         await promote_candidate(tmp_path, "guard")
-    (tmp_path / "user.txt").unlink()
+    (tmp_path / "math_utils.py").write_text("# baseline\n")
     Path(result["patch_path"]).write_text("tampered")
     with pytest.raises(ValueError, match="changed after verification"):
         await promote_candidate(tmp_path, "guard")
@@ -93,7 +107,10 @@ def test_run_lock_and_identifier_boundary(tmp_path):
 async def test_real_engine_dispatch_overlaps_independent_tasks_but_respects_dag(tmp_path):
     from orchestrator.engine import OMAEngine
     routing, _ = router()
-    engine = OMAEngine("concurrent", "test scheduler", tmp_path, routing, max_parallel_workers=2)
+    engine = OMAEngine(
+        "concurrent", "test scheduler", tmp_path, routing,
+        max_parallel_workers=2, enforce_milestone_gate=False,
+    )
     active, peak, completed = set(), [], set()
     async def plan():
         for t in [Task("A",engine.run_id,"alpha"), Task("B",engine.run_id,"beta"),

@@ -4,6 +4,49 @@ Este guia conecta o SENTRA MCP local ao ChatGPT ou a outro produto OpenAI compat
 
 > Segurança: nunca coloque API keys, `tunnel_id` privados, tokens, arquivos DPAPI, perfis locais ou logs sensíveis no Git. Use os placeholders deste guia literalmente até substituí-los apenas no ambiente local.
 
+## Antes de começar: o que este guia resolve
+
+Use este guia quando quiser que **o próprio ChatGPT chame as tools locais do SENTRA**. O fluxo é:
+
+```text
+ChatGPT → Secure MCP Tunnel → SENTRA MCP local
+```
+
+Isso é diferente de **Web Models**, que conecta o Codex ao Gateway local para usar ChatGPT/Gemini Web como modelos, e também é diferente da **extensão Edge**, que só permite ao SENTRA operar uma aba já aberta no navegador.
+
+Se o seu objetivo é apenas usar `sentra-cli` no terminal, você não precisa configurar Tunnel, Web Models ou Edge.
+
+## Caminho recomendado no produto instalado
+
+Para uso normal no Windows, você não precisa executar manualmente os blocos PowerShell deste documento. No **SENTRA Desktop → Quick Start**:
+
+1. **Open Platform Tunnels** → crie/selecione o `tunnel_...`.
+2. **Open Runtime API Keys** → crie uma chave Restricted com **Tunnels: Read + Use**.
+3. Cole Tunnel ID + Runtime API key e clique **Connect OpenAI & Start**. O Desktop protege a chave com DPAPI e inicia os serviços.
+4. No ChatGPT, conecte o túnel como **app/plugin MCP** em Developer mode.
+5. Faça o smoke test com `sentra_health` e, para tools stateful, `sentra_session_open`.
+
+O Desktop mantém o MCP em loopback, protege a Runtime API key com DPAPI e supervisiona uma única instância do tunnel-client. As seções abaixo continuam sendo o runbook detalhado para desenvolvimento, diagnóstico e recuperação manual.
+
+**Não confunda os dois bridges:** Secure MCP Tunnel = **ChatGPT ↔ MCP local**. Extensão Edge = **SENTRA ↔ aba Web existente** para workflows de navegador e Web Models. Instalações atuais pareiam a extensão com o relay local por prova install-local; não é necessário copiar um bearer token para a extensão.
+
+### Topologia do primeiro uso
+
+```text
+ChatGPT app/plugin
+      │
+      │ HTTPS de saída / Secure MCP Tunnel
+      ▼
+SENTRA MCP 127.0.0.1:8000
+      │
+      ├── filesystem / processos / jobs / repos / OMA
+      └── browser tools ──► relay local ──► extensão Edge ──► aba já aberta
+
+Codex ──► SENTRA Gateway 127.0.0.1:17842/v1 ──► Web Models (ChatGPT/Gemini Web)
+```
+
+Portanto, para apenas chamar tools locais a partir do ChatGPT, **Tunnel + MCP bastam**. A extensão Edge é opcional e entra somente quando uma tool precisa atuar no navegador. O caminho Codex/Web Models é outra superfície: ele aponta o Codex para o Gateway local e não deve apontar diretamente para o sidecar upstream.
+
 ## 1. Pré-requisitos
 
 - Windows 10/11 e Python 3.11+.
@@ -155,10 +198,9 @@ try {
     --profile-dir .sentra\tunnel\profiles `
     --explain
 
-  & .\.sentra\tunnel-client\tunnel-client.exe run `
-    --profile sentra-local `
-    --profile-dir .sentra\tunnel\profiles `
-    --health.listen-addr 127.0.0.1:0
+  # O tunnel persistente deve ser iniciado exclusivamente pelo supervisor
+  # singleton do SENTRA. Ele também migra o layout DPAPI legado sem expor a chave.
+  & .\scripts\commander\Start-SENTRA-Singleton.ps1
 } finally {
   Remove-Item Env:CONTROL_PLANE_API_KEY -ErrorAction SilentlyContinue
   if ($bstr -ne [IntPtr]::Zero) {
@@ -168,16 +210,23 @@ try {
 }
 ```
 
-O `tunnel-client run` precisa permanecer saudável durante descoberta do app e chamadas MCP.
+O supervisor singleton do SENTRA mantém exatamente um `tunnel-client` saudável durante descoberta do app e chamadas MCP; não inicie uma segunda instância manualmente.
 
 ## 10. Health, readiness e UI local
 
 O tunnel-client expõe localmente:
 
-- `/healthz`: processo saudável;
-- `/readyz`: pronto e conectado para encaminhar trabalho;
+- `/healthz`: processo local saudável;
+- `/readyz`: dependências locais/readiness do cliente satisfeitas; **não trate
+  esse código sozinho como prova de polling aceito pelo Control Plane**;
 - `/metrics`: métricas operacionais;
 - `/ui`: painel local de administração.
+
+O SENTRA também correlaciona os logs da sessão atual do tunnel. Se o Control Plane
+responder `401 token_invalidated`, o status do produto é
+`control_plane=REAUTH_REQUIRED` e `ok=false`, mesmo que o endpoint local ainda
+pareça saudável. Esse estado é terminal para a credencial: o supervisor não entra
+em restart-loop; rotacione a Runtime API key e reconfigure o mesmo `tunnel_id`.
 
 Use a URL de health impressa pelo cliente. Exemplo conceitual:
 
@@ -189,15 +238,17 @@ Start-Process http://127.0.0.1:PORT/ui
 
 Não exponha a UI local externamente sem uma necessidade operacional deliberada.
 
-## 11. Conecte o túnel ao ChatGPT
+## 11. Conecte o SENTRA como app/plugin MCP no ChatGPT
 
 1. Confirme que o túnel está associado ao workspace ChatGPT correto na Platform.
 2. No ChatGPT, habilite o **Developer mode** quando disponível para seu plano/workspace.
-3. Abra **Plugins**.
-4. Use o botão para adicionar/criar um app no modo de desenvolvedor.
+3. Abra **Plugins/Apps** (o rótulo pode variar conforme a versão do cliente).
+4. Use a opção para adicionar/criar um app MCP em modo de desenvolvedor.
 5. Em **Connection**, escolha **Tunnel**.
 6. Selecione o túnel listado ou informe o `tunnel_id` quando a interface permitir.
-7. Conclua a criação/conexão do app.
+7. Conclua a conexão e abra uma conversa nova antes do primeiro smoke test.
+
+Depois disso, o ChatGPT chama o **MCP local do SENTRA** através do Secure MCP Tunnel. A extensão Edge não é necessária para a conexão MCP em si; ela só é necessária quando uma tool/workflow pede controle do navegador ou Web Models.
 
 Se o túnel não aparecer, verifique primeiro a associação do workspace e a permissão **Tunnels: Read + Use**. Mudanças de função/permissão podem levar algum tempo para propagar.
 
@@ -229,6 +280,27 @@ sentra_browser_tabs
 
 Para o browser, `tabs: []` junto com `edge_bridge.state = "IDLE"` pode ser o estado correto quando nenhum job adotou a aba principal do Edge.
 
+### Atualização do catálogo MCP
+
+`sentra_health` e `sentra_run(action="contract_manifest")` anunciam o contrato
+canônico do servidor, incluindo `schema_hash`, `tool_count`, `tool_names` e
+`build_id`. Compare esses valores com o catálogo carregado pelo cliente após
+atualizações do SENTRA.
+
+Se o servidor anunciar mais tools que uma conversa ChatGPT já aberta, não
+reduza o servidor nem crie aliases duplicados para mascarar a diferença. O
+catálogo MCP é carregado pelo cliente e uma conversa existente pode manter o
+schema anterior. Depois de atualizar/reiniciar o MCP e o tunnel-client:
+
+1. confirme `/healthz` e o `contract_manifest` novo;
+2. reconecte/atualize o app SENTRA no ChatGPT quando necessário;
+3. abra uma nova conversa para carregar o novo `tools/list`;
+4. confirme que `tool_count` e `schema_hash` correspondem ao contrato do servidor.
+
+Uma conversa antiga pode continuar funcional com o subconjunto de tools que
+ela já carregou; isso não deve ser interpretado como ausência da implementação
+no servidor.
+
 ## 13. Rotação e revogação
 
 Se uma Runtime API key for exposta:
@@ -238,7 +310,8 @@ Se uma Runtime API key for exposta:
 3. substitua somente o arquivo DPAPI local;
 4. reinicie o tunnel-client;
 5. confirme `doctor`, `/healthz` e `/readyz`;
-6. pesquise o histórico Git e logs para garantir que o segredo não permaneceu em artefatos.
+6. confirme também o estado do Control Plane. `healthz=200` e até `readyz=200` não substituem a prova de polling upstream; `token_invalidated` deve ser tratado como `REAUTH_REQUIRED`, não como falha transitória para restart infinito;
+7. pesquise o histórico Git e logs para garantir que o segredo não permaneceu em artefatos.
 
 Não tente “corrigir” uma chave vazada apenas removendo-a de um commit novo. Se ela chegou ao histórico remoto, considere-a comprometida.
 

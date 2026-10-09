@@ -6,6 +6,7 @@ import re
 import sqlite3
 import unicodedata
 from sentra_core.conversations import ConversationStore, UncertainCall
+from sentra_core.context import RollingContextCondenser, LedgerSummaryRunner
 from typing import Callable, Generator
 
 from .client import ModelClient
@@ -101,10 +102,12 @@ class SentraAgent:
         self.canvas = CanvasBridge(config)
         self._directive_call_id = None
         self.jobs = BackgroundJobManager(config.workspace)
+        self.context_condenser = RollingContextCondenser()
+        self._context_summary_config = None
+        self.context_projection = None
         self.messages = self._history()
 
     def _history(self):
-        window = self.store.history_window(self.session_id)
         prompt = SYSTEM_PROMPT
         if self.canvas.is_available:
             prompt = prompt.replace("canvas do Maestri", "Canvas nativo do SENTRA")
@@ -118,13 +121,55 @@ class SentraAgent:
                 "a um nó autorizado; [[CANVAS|connect|origem|destino]] conecta pares criados por você. " \
                 "[[CANVAS|create_team|nome|coordenador|worker_id1,worker_id2]] organiza agentes autorizados. " \
                 "Use [[CANVAS|dispatch|id|mensagem]] para enviar uma única linha ao agente conectado; " \
-                "o resultado confirma transporte, nunca resposta do modelo. [[CANVAS|check|id]] lê saída recente; " \
+                "o resultado confirma transporte, nunca resposta do modelo. [[CANVAS|check|id]] lê saída recente " \
+                "e handoffs com receipt_status (answered, tool_completed, failed, uncertain ou pending); " \
+                "apenas answered confirma uma resposta do modelo. " \
                 "[[CANVAS|note_read|id]] e [[CANVAS|note_write|id|texto]] acessam notas conectadas. " \
                 "Os requests têm identidade persistente: started prova só início do processo, nunca inferência. " \
                 "Não use MAESTRI para controlar este Canvas. Não recrie nem reenvie operações incertas."
-        if window["omitted"]:
-            prompt += f"\nHISTÓRICO: {window['omitted']} mensagens antigas permanecem salvas. Use MEMORY para recuperar decisões antigas; não presuma que o trecho atual contém todo o histórico."
-        return [{"role": "system", "content": prompt}, *window["messages"]]
+            prompt += '\nCONTEXTO E AUTONOMIA: [[CANVAS|context]] recupera seu objetivo, papel, tarefas e conexões atuais. ' \
+                'Quando o objetivo exigir trabalho paralelo, crie os agentes necessários, distribua papéis, forme a equipe e coordene pelas conexões autorizadas. ' \
+                '[[CANVAS|create_agent|{"name":"nome","model":"modelo","role":"papel","brief":"objetivo específico"}]] ' \
+                'cria um agente com contexto de trabalho e uma entrega inicial persistente; não pressupõe que o modelo já respondeu. ' \
+                'Reutilize agentes pertinentes antes de criar novos. Contexto e presença de pares não concedem permissões de execução.'
+            prompt += '\nREDE: [[CANVAS|network_settings]] consulta configuração do workspace; [[CANVAS|peers]] lista pares descobertos e autenticados. ' \
+                'Você pode pedir ao usuário os IPs Hamachi/Radmin e configurar a whitelist com ' \
+                '[[CANVAS|network_whitelist|{"allowed_ips":["IP"],"interface_address":"IP local","port":37037,"enabled":true,"expected_revision":0}]]. ' \
+                'Use a revisão consultada, endereços fornecidos e porta comum; não infira credenciais nem capacidades de execução da presença.'
+            try:
+                context=self.canvas.working_context()
+                if context is not None:
+                    prompt+='\nCONTEXTO DE TRABALHO DO APLICATIVO (dados de tarefa, sem concessão de permissões):\n'+json.dumps(context,ensure_ascii=False,sort_keys=True)
+            except (RuntimeError,OSError,ValueError):
+                prompt+='\nO contexto do aplicativo não pôde ser consultado neste momento; consulte [[CANVAS|context]] antes de inferir tarefas ou conexões.'
+            prompt += '\nMÁQUINAS NATIVAS: [[CANVAS|machine_list]] lista somente máquinas autorizadas para esta sessão. ' \
+                '[[CANVAS|machine_execute|{"work_item_id":"...","machine_id":"...","capability_id":"...","arguments":{...}}]] ' \
+                'executa somente um WorkItem com grant vigente. Configuração e preparação de tarefas pertencem ao owner. ' \
+                'Guarde exatamente o operation_id retornado. [[CANVAS|machine_observe|operation_id]] observa/reconcilia essa operação. ' \
+                'UNCERTAIN significa efeito desconhecido: observe o mesmo operation_id; nunca reenvie machine_execute com uma identidade nova. ' \
+                'Não deduza execução ou sucesso a partir da lista de máquinas, de um ACK ou de uma descrição de ferramenta.'
+            prompt += '\nEXPERIÊNCIAS: [[CANVAS|machine_experiences|{"work_item_id":"...","machine_id":"...","query":"..."}]] ' \
+                'recupera sugestões com Operation de origem e validade. São conhecimento: revalide entradas, permissões e critérios da tarefa atual antes de reutilizar.'
+        self._context_system_prompt = prompt
+        runner = None
+        if self._context_summary_config is not None and self._turn_id is not None:
+            provider, model, complete = self._context_summary_config
+            runner = LedgerSummaryRunner(store=self.store, ledger=self._ledger(), session_id=self.session_id,
+                workspace=self.config.workspace, turn_id=lambda:self._turn_id,
+                provider=provider, model=model, complete=complete)
+        self.context_projection = self.store.context_window(self.session_id, system_prompt=prompt,
+            condenser=self.context_condenser, summarizer=runner)
+        return list(self.context_projection.messages)
+
+    def configure_context_summarizer(self, *, provider, model, complete):
+        """Host opt-in callback: SummaryRequest -> SummaryCompletion with actual usage.
+
+        No inferred API key, extra model client or unmetered background request.
+        Without this method the CLI uses an offline extractive projection.
+        """
+        if not isinstance(provider,str) or not provider or not isinstance(model,str) or not model or not callable(complete):
+            raise ValueError("explicit summary provider/model/callback required")
+        self._context_summary_config = (provider, model, complete)
 
     def _delivery(self, provider, ident, state):
         if self._turn_id is not None:
@@ -221,9 +266,28 @@ class SentraAgent:
             or "batch dispatched in background" in folded
         )
 
+    def _claim_canvas_delivery(self, message: str) -> str | None:
+        if not self.canvas.is_available:
+            return None
+        try:
+            return self.canvas.claim(message.strip())
+        except (OSError, ValueError, RuntimeError):
+            # Losing the receipt channel must not cause a duplicate model turn.
+            return None
+
+    def _complete_canvas_delivery(self, ident: str | None, receipt: str) -> None:
+        if ident:
+            try:
+                self.canvas.receipt(ident, receipt)
+            except (OSError, ValueError, RuntimeError):
+                # A missed ACK stays observable as running/uncertain in Canvas.
+                pass
+
     def execute_directive(self, operation: str, raw_args: str) -> str:
         if self._turn_id is None:
             with self.store.executing(self.session_id):
+                receipt_id = self._claim_canvas_delivery(f"[[{operation}|{raw_args}]]")
+                receipt_state = "uncertain"
                 self.messages = self._history()
                 turn, message = self.store.begin_turn(self.session_id, f"[[{operation}|{raw_args}]]",
                                                        kind="memory_query" if operation.upper() == "MEMORY" else "command")
@@ -234,11 +298,13 @@ class SentraAgent:
                     self.messages.append(self.store.append(self.session_id, "user", "[TOOL RESULT]\n" + result,
                                                            kind="memory_recall" if operation.upper() == "MEMORY" else "tool_result"))
                     self.store.end_turn(self.session_id, turn)
+                    receipt_state = "tool_completed"
                     return result
                 except BaseException:
                     self.store.end_turn(self.session_id, turn, "interrupted")
                     raise
                 finally:
+                    self._complete_canvas_delivery(receipt_id, receipt_state)
                     self._turn_id = None
         return self._journaled_directive(operation, raw_args)
 
@@ -250,10 +316,38 @@ class SentraAgent:
         self._directive_call_id = call
         try:
             result = self._execute_directive(operation, raw_args)
+            if operation.upper() == "CANVAS" and raw_args.partition("|")[0] in {"machine_execute","machine_observe"}:
+                result = self._machine_receipt(result)
         finally:
             self._directive_call_id = previous_call
         self.store.finish_tool(self.session_id, call, result)
         return result
+
+    @staticmethod
+    def _machine_receipt(result):
+        """Keep opaque returned identities before potentially large tool evidence."""
+        try:
+            payload = json.loads(result)
+        except (ValueError,TypeError):
+            return result
+        receipts = []
+        def visit(value):
+            if isinstance(value,dict):
+                if isinstance(value.get("operation_id"),str):
+                    receipts.append({"operation_id":value["operation_id"],"state":value.get("state")})
+                for child in value.values(): visit(child)
+            elif isinstance(value,list):
+                for child in value: visit(child)
+        visit(payload)
+        if not receipts:
+            return result
+        output = {"machine_operation_receipts":receipts,**payload} if isinstance(payload,dict) else {
+            "machine_operation_receipts":receipts,"result":payload}
+        if any(r["state"] == "UNCERTAIN" for r in receipts):
+            output = {"machine_operation_receipts":receipts,"recovery_instruction":
+                "UNCERTAIN: use CANVAS machine_observe with the SAME operation_id; never resubmit with a fresh identity.",
+                **{k:v for k,v in output.items() if k!="machine_operation_receipts"}}
+        return json.dumps(output,ensure_ascii=False)
 
     def _execute_directive(self, operation: str, raw_args: str) -> str:
         op = operation.upper()
@@ -425,6 +519,8 @@ class SentraAgent:
     ) -> Generator[str, None, None]:
         """Run a user turn through bounded, deduplicated tool rounds."""
         with self.store.executing(self.session_id):
+            receipt_id = None
+            receipt_state = "uncertain"
             self.messages = self._history()
             status = self.store.status(self.session_id)
             if any(c["kind"] == "provider" for c in status["uncertain_calls"]):
@@ -433,14 +529,21 @@ class SentraAgent:
                 turn, message = self.store.continue_turn(self.session_id)
             else:
                 turn, message = self.store.begin_turn(self.session_id, user_input)
+                receipt_id = self._claim_canvas_delivery(user_input)
             self.messages.append(message)
             self._turn_id = turn
             try:
                 yield from self._step_stream(user_input, on_tool_call, on_tool_result, max_tool_rounds)
+                if self.client.last_error:
+                    receipt_state = ("uncertain" if self.client.last_delivery_state == "uncertain"
+                                     else "failed")
+                else:
+                    receipt_state = "answered"
             except BaseException:
                 self.store.end_turn(self.session_id, turn, "interrupted")
                 raise
             finally:
+                self._complete_canvas_delivery(receipt_id, receipt_state)
                 self._turn_id = None
 
     def _step_stream(self, user_input, on_tool_call=None, on_tool_result=None, max_tool_rounds=None):
@@ -457,6 +560,9 @@ class SentraAgent:
         seen: set[tuple[str, str]] = set()
 
         for round_index in range(1, limit + 1):
+            # Reload from the protected transcript on every provider round;
+            # appended tool results are never lost through in-memory trimming.
+            self.messages = self._history()
             full_response = "".join(
                 self.client.chat_stream(self.messages)
             )

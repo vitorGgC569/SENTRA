@@ -137,12 +137,27 @@ def test_parallel_research_synthesizes_from_shared_context(tmp_path: Path) -> No
     service._parallel_chat_batch = fake_batch
     service._chat_retry = fake_synthesis
     try:
-        nodes, answer = asyncio.run(service._parallel(run["run_id"], "research objective", "owner-a", 2, 60, []))
+        root_goal = control.create_goal(
+            run["run_id"],
+            "owner-a",
+            objective="research objective",
+            priority="CRITICAL",
+            external_key="test-research-root",
+        )
+        nodes, answer = asyncio.run(
+            service._parallel(
+                run["run_id"], "research objective", "owner-a", 2, 60, [],
+                root_goal["goal_id"],
+            )
+        )
         assert answer == "integrated answer"
         assert len(nodes) == 3
         assert all(node.get("context_event_id") for node in nodes)
         assert all(node.get("agent_id") and node.get("chat_id") for node in nodes)
+        assert all(node.get("goal_id") for node in nodes)
         status = durable.run_status(run["run_id"], "owner-a")
+        assert len(status["goals"]) == 4
+        assert all(agent.get("goal_id") for agent in status["agents"])
         assert len(status["agents"]) == 3
         assert len(status["chats"]) == 3
         assert {chat["conversation_id"] for chat in status["chats"]} == {"conv-1", "conv-2", "conv-synthesis"}
@@ -695,6 +710,217 @@ def test_control_plane_context_compiler_preserves_relevant_overflow_cursor(tmp_p
         assert next_batch.count == 1
         assert next_batch.last_seq == second["seq"]
         assert "current.second" in next_batch.text
+    finally:
+        context.close()
+        durable.close()
+
+
+def test_goal_projection_preserves_context_cursor_on_budget_overflow(tmp_path: Path) -> None:
+    durable, context, control = _services(tmp_path)
+    try:
+        run = durable.create_run("owner-a")
+        durable.create_goal(
+            run["run_id"],
+            "owner-a",
+            objective="G" * 4500,
+            acceptance_criteria=["Keep context delivery lossless."],
+            external_key="budget-goal",
+        )
+        published = []
+        for index in range(3):
+            published.append(control.publish_context(
+                run["run_id"],
+                "owner-a",
+                event_type="FACT",
+                subject=f"budget.event.{index}",
+                payload={"text": str(index) * 650},
+                evidence=[],
+                confidence=None,
+                supersedes=[],
+                task_id="T-budget",
+                agent_id=None,
+                idempotency_key=f"budget-{index}",
+            ))
+        bridge = ControlPlaneContextBridge(
+            control, "owner-a", max_chars=2200, max_items=10
+        )
+        first = bridge.prepare(
+            run_id=run["run_id"], role="executor", task_id="T-budget", seat="seat-budget"
+        )
+        assert len(first.text) <= 2200
+        assert first.truncated is True
+        assert 0 < first.last_seq < published[-1]["seq"]
+        bridge.acknowledge(
+            run_id=run["run_id"], role="executor", task_id="T-budget",
+            seat="seat-budget", consumer_id=first.consumer_id, last_seq=first.last_seq,
+        )
+        second = bridge.prepare(
+            run_id=run["run_id"], role="executor", task_id="T-budget", seat="seat-budget"
+        )
+        assert second.last_seq > first.last_seq
+        assert "budget.event." in second.text
+    finally:
+        context.close()
+        durable.close()
+
+
+def test_mcts_research_binds_durable_goal_tree_to_agents(tmp_path: Path) -> None:
+    durable, context, control = _services(tmp_path)
+    config = MCPConfig(
+        allowed_roots=(tmp_path,),
+        audit_log=tmp_path / ".sentra" / "audit.jsonl",
+        remote_store_path=tmp_path / ".sentra" / "remote.sqlite3",
+        state_root=tmp_path / ".sentra",
+        process_mode="unrestricted",
+    )
+    service = ResearchService(
+        config,
+        AuditLogger(config.audit_log),
+        object(),
+        durable=durable,
+        control_plane=control,
+        db_path=tmp_path / ".sentra" / "research-mcts-goals.sqlite3",
+    )
+    run = durable.create_run("owner-a", workspace="sentra")
+    root_goal = control.create_goal(
+        run["run_id"],
+        "owner-a",
+        objective="Explore architecture",
+        priority="CRITICAL",
+        external_key="test-mcts-root",
+    )
+    batch_round = 0
+
+    async def fake_batch(owner, prompts, *, timeout_s):
+        nonlocal batch_round
+        batch_round += 1
+        return [
+            {
+                "text": f"depth {batch_round} branch {index + 1}",
+                "conversation_id": f"conv-{batch_round}-{index + 1}",
+                "conversation_url": f"https://chatgpt.com/c/conv-{batch_round}-{index + 1}",
+            }
+            for index in range(len(prompts))
+        ]
+
+    async def fake_chat(owner, prompt, *, timeout_s):
+        if "research tree judge" in prompt:
+            return {
+                "text": '{"selected":[0],"reason":"strongest evidence"}',
+                "conversation_id": f"judge-{batch_round}",
+                "conversation_url": f"https://chatgpt.com/c/judge-{batch_round}",
+            }
+        assert "surviving paths" in prompt.lower()
+        return {
+            "text": "final integrated answer",
+            "conversation_id": "conv-final",
+            "conversation_url": "https://chatgpt.com/c/conv-final",
+        }
+
+    service._parallel_chat_batch = fake_batch
+    service._chat_retry = fake_chat
+    try:
+        nodes, answer = asyncio.run(
+            service._mcts(
+                run["run_id"],
+                "Explore architecture",
+                "owner-a",
+                2,
+                2,
+                1,
+                60,
+                [],
+                root_goal["goal_id"],
+            )
+        )
+        assert answer == "final integrated answer"
+        assert sum(node["kind"] == "branch" for node in nodes) == 4
+        assert sum(node["kind"] == "judge" for node in nodes) == 2
+        assert sum(node["kind"] == "synthesis" for node in nodes) == 1
+        assert all(node.get("goal_id") for node in nodes)
+        assert all(node.get("agent_id") and node.get("chat_id") for node in nodes)
+
+        status = durable.run_status(run["run_id"], "owner-a")
+        assert len(status["goals"]) == 8
+        assert len(status["agents"]) == 7
+        assert len(status["chats"]) == 7
+        assert all(agent["goal_id"] for agent in status["agents"])
+        child_goals = [
+            goal for goal in status["goals"]
+            if goal["goal_id"] != root_goal["goal_id"]
+        ]
+        assert all(goal["parent_goal_id"] for goal in child_goals)
+        assert all(goal["state"] == "SUCCEEDED" for goal in child_goals)
+    finally:
+        asyncio.run(service.close())
+        context.close()
+        durable.close()
+
+
+def test_read_messages_advances_scan_cursor_past_unrelated_messages(tmp_path: Path) -> None:
+    durable, context, control = _services(tmp_path)
+    try:
+        run = durable.create_run("owner-a")
+        a = durable.assign_agent(run["run_id"], "owner-a", role="builder", agent_id="agent-a")
+        b = durable.assign_agent(run["run_id"], "owner-a", role="reviewer", agent_id="agent-b")
+        c = durable.assign_agent(run["run_id"], "owner-a", role="judge", agent_id="agent-c")
+        first = control.send_message(
+            run["run_id"], "owner-a", from_agent_id=a["agent_id"],
+            to_agent_id=c["agent_id"], body="not for B", idempotency_key="cursor-other-1",
+        )
+        direct = control.send_message(
+            run["run_id"], "owner-a", from_agent_id=a["agent_id"],
+            to_agent_id=b["agent_id"], body="for B", idempotency_key="cursor-direct",
+        )
+        trailing = control.send_message(
+            run["run_id"], "owner-a", from_agent_id=a["agent_id"],
+            to_agent_id=c["agent_id"], body="also not for B", idempotency_key="cursor-other-2",
+        )
+
+        page = control.read_messages(
+            run["run_id"], "owner-a", agent_id=b["agent_id"], after_seq=0, limit=10,
+        )
+        assert [item["event_id"] for item in page["items"]] == [direct["event_id"]]
+        assert page["delivered_last_seq"] == direct["seq"]
+        assert page["last_seq"] == trailing["seq"]
+        assert page["last_seq"] > first["seq"]
+
+        empty = control.read_messages(
+            run["run_id"], "owner-a", agent_id=b["agent_id"],
+            after_seq=page["last_seq"], limit=10,
+        )
+        assert empty["items"] == []
+        assert empty["last_seq"] == page["last_seq"]
+    finally:
+        context.close()
+        durable.close()
+
+
+def test_read_messages_never_scans_past_undelivered_relevant_item(tmp_path: Path) -> None:
+    durable, context, control = _services(tmp_path)
+    try:
+        run = durable.create_run("owner-a")
+        a = durable.assign_agent(run["run_id"], "owner-a", role="builder", agent_id="agent-a")
+        b = durable.assign_agent(run["run_id"], "owner-a", role="reviewer", agent_id="agent-b")
+        first = control.send_message(
+            run["run_id"], "owner-a", from_agent_id=a["agent_id"],
+            to_agent_id=b["agent_id"], body="one", idempotency_key="limit-one",
+        )
+        second = control.send_message(
+            run["run_id"], "owner-a", from_agent_id=a["agent_id"],
+            to_agent_id=b["agent_id"], body="two", idempotency_key="limit-two",
+        )
+        page = control.read_messages(
+            run["run_id"], "owner-a", agent_id=b["agent_id"], after_seq=0, limit=1,
+        )
+        assert [item["event_id"] for item in page["items"]] == [first["event_id"]]
+        assert page["last_seq"] == first["seq"]
+
+        next_page = control.read_messages(
+            run["run_id"], "owner-a", agent_id=b["agent_id"],
+            after_seq=page["last_seq"], limit=1,
+        )
+        assert [item["event_id"] for item in next_page["items"]] == [second["event_id"]]
     finally:
         context.close()
         durable.close()

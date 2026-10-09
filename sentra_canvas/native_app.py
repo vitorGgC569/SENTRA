@@ -6,6 +6,7 @@ or Maestri application is required.
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 
 class WindowControls:
@@ -46,7 +47,8 @@ def launch_native(server, *, serve=True) -> None:
             "pywebview is required for the native SENTRA desktop. "
             "Install pywebview or use --no-open for API-only mode."
         ) from exc
-    url = f"http://127.0.0.1:{server.server_port}/native.html#token={server.secret}"
+    surface="desktop.html" if (Path(__file__).parent/"static"/"desktop.html").is_file() else "native.html"
+    url = f"http://127.0.0.1:{server.server_port}/{surface}#token={server.secret}"
     thread = None
     if serve:
         thread = threading.Thread(
@@ -62,8 +64,8 @@ def launch_native(server, *, serve=True) -> None:
             "SENTRA",
             url=url,
             js_api=controls,
-            width=1280,
-            height=760,
+            width=1440,
+            height=900,
             min_size=(1024,650),
             maximized=False,
             frameless=True,

@@ -20,7 +20,7 @@ def test_native_model_is_default_only_without_an_explicit_choice(tmp_path,monkey
     assert parse_args([]).model=="sentra/chatgpt-web/high"
     monkeypatch.delenv("SENTRA_CLI_MODEL")
     monkeypatch.setattr("sentra_cli.codex_native.authenticated",lambda:False)
-    assert CLIConfig(workspace=tmp_path).model=="sentra/chatgpt-web/high"
+    assert CLIConfig(workspace=tmp_path).model=="sentra/chatgpt-web/auto"
 
 def test_saved_model_beats_native_default_but_not_explicit_model(tmp_path,monkeypatch):
     from sentra_remote.product import ProductSettings

@@ -1,5 +1,10 @@
 # SENTRA Desktop release process
 
+A política atual de CI/CD, gates Windows/Canvas/Web Models, permissões mínimas,
+validação actionlint e separação entre build e publicação está em
+[CI_CD.md](CI_CD.md). A release estável só é publicada após a validação do job
+`windows-release`; o job `publish-release` detém a permissão de escrita.
+
 Stable desktop releases use semantic tags `vX.Y.Z`. The tag must match
 `PRODUCT_VERSION` in `sentra_version.py`.
 
@@ -36,6 +41,29 @@ The release workflow intentionally uses this order:
 12. create the immutable GitHub Release for the tag.
 
 A stable tag fails if the signing certificate is missing.
+## Agent-assisted release flow
+
+The installed Desktop Commander or official Codex can run the existing
+Windows build commands and inspect logs through scoped local filesystem/process
+access. Use an isolated build environment or disposable workspace and obtain
+explicit approval before altering Git, installing dependencies, changing Windows
+settings, or publishing. Build can create **unsigned** QA artifacts without
+signing credentials.
+
+A public stable release requires the repository's existing GitHub release
+workflow and its signing secrets. Release automation must **fail closed**
+on failed tests, unexpected dirty Git status, missing signed binaries, SHA-256
+mismatches, or absent credentials. Never send PFX data, runtime API keys, or
+Publisher API secrets through chat, logs or CLI arguments.
+
+The initial Edge Add-ons publication requires an authorized Partner Center
+submission and review. After that, Edge Add-ons Update REST API v1.1 supports
+automated new-version uploads and publication using Partner Center API
+credentials (stored in the CI secret store). No agent can guarantee that a
+store review or ChatGPT connector authorization will be accepted.
+
+Detailed agent-assisted setup, safe commands, store blockers and the final release checklist: [AGENT_ASSISTED_SETUP_AND_RELEASE.md](AGENT_ASSISTED_SETUP_AND_RELEASE.md).
+
 ## Local release-candidate build
 
 A developer can build unsigned artifacts for testing:
@@ -46,7 +74,9 @@ python scripts/commander/release_assets.py --tunnel-archive .sentra/tunnel-clien
 ```
 
 Unsigned local artifacts are test candidates only. They must not be presented
-as a stable SENTRA release.
+as a stable SENTRA release. The registered `[[BUILD]]` operation fails closed
+when this Windows builder exists but execution is not on a Windows host; test
+collection is never accepted as Windows build evidence.
 
 ## Upgrade and rollback
 

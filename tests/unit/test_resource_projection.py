@@ -134,3 +134,65 @@ def test_projection_consumes_standard_resource_manifest_when_present() -> None:
     assert "browser_engine:chromium" in set(node["capabilities"])
     assert node["metadata"]["resource_id"] == "node:dev-1"
     assert node["metadata"]["resource_schema_version"] == 1
+
+
+def test_candidate_generation_capability_requires_contract_and_permission() -> None:
+    device = _device()
+    device["allowed_tools"] = ["sentra_*"]
+    device["capabilities"]["workspaces"] = ["sentra", "project-a"]
+    device["capabilities"]["sentra"]["contract"]["tool_names"] = [
+        "sentra_repo_read",
+        "sentra_oma_candidate_generate",
+    ]
+    projection = RemoteResourceProjection(FakeGateway([device]))
+    node = projection.inventory("principal")["eligible"][0]
+    assert "candidate_generation" in set(node["capabilities"])
+    assert "tool:sentra_oma_candidate_generate" in set(node["capabilities"])
+    assert node["workspaces"] == ["sentra", "project-a"]
+
+    blocked = _device("blocked")
+    blocked["allowed_tools"] = ["sentra_repo_read"]
+    blocked["capabilities"]["sentra"]["contract"]["tool_names"] = [
+        "sentra_oma_candidate_generate"
+    ]
+    node = RemoteResourceProjection(FakeGateway([blocked])).inventory("principal")["eligible"][0]
+    assert "candidate_generation" not in set(node["capabilities"])
+
+
+def test_scheduler_bindings_only_create_authorized_project_producers() -> None:
+    good = _device("good")
+    good["allowed_tools"] = ["sentra_*"]
+    good["capabilities"]["workspaces"] = ["project-a"]
+    good["capabilities"]["sentra"]["contract"]["tool_names"] = [
+        "sentra_oma_candidate_generate"
+    ]
+
+    wrong_project = _device("wrong-project")
+    wrong_project["allowed_tools"] = ["sentra_*"]
+    wrong_project["capabilities"]["workspaces"] = ["project-b"]
+    wrong_project["capabilities"]["sentra"]["contract"]["tool_names"] = [
+        "sentra_oma_candidate_generate"
+    ]
+
+    no_tool = _device("no-tool")
+    no_tool["capabilities"]["workspaces"] = ["project-a"]
+
+    projection = RemoteResourceProjection(
+        FakeGateway([good, wrong_project, no_tool])
+    )
+    bindings = projection.scheduler_bindings(
+        "principal",
+        workspace="project-a",
+        provider="gemini_web",
+    )
+    assert bindings["eligible_count"] == 1
+    assert [m["node_id"] for m in bindings["resource_manifests"]] == [
+        "remote:good"
+    ]
+    producer = bindings["candidate_producers"]["remote:good"]
+    assert producer.device_id == "good"
+    assert producer.workspace == "project-a"
+    assert producer.provider == "gemini_web"
+    reasons = {item["node_id"]: item["reason"] for item in bindings["skipped"]}
+    assert reasons["remote:wrong-project"] == "workspace_not_advertised"
+    assert reasons["remote:no-tool"] == "candidate_generation_not_authorized"

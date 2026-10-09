@@ -56,7 +56,8 @@ class FixedConversationRouter:
         if type(max_seats) is not int or max_seats < 1:
             raise ValueError("max_seats must be a positive integer")
         self._max_seats = min(max_seats, len(_ROLES))
-        self._map, self._last_dispatch = {}, 0.0
+        self._map: dict[str, dict[str, Any]] = {}
+        self._last_dispatch = 0.0
         self._fatal_error = None
         self._lock = asyncio.Lock()
         self._path = Path(store_dir) / self.FILENAME if store_dir else None
@@ -650,7 +651,7 @@ class FixedConversationRouter:
 
     async def clear_conversations(self, transport=None) -> Dict[str, Any]:
         """Exclui todas as conversas confirmadas gerenciadas por este pool para manter a conta limpa."""
-        results = {"cleared": [], "failed": [], "skipped": []}
+        results: dict[str, list[dict[str, Any]]] = {"cleared": [], "failed": [], "skipped": []}
         async with self._lock:
             self._load()
             if not self._map:

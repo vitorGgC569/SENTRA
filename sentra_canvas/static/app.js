@@ -4,6 +4,7 @@ const esc = x => String(x ?? "").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",
 const ptoken = new URLSearchParams(location.hash.slice(1)).get("token");
 if (ptoken) { sessionStorage.setItem("sentra_canvas_token",ptoken);history.replaceState(null,"",location.pathname); }
 const token = sessionStorage.getItem("sentra_canvas_token");
+if(token){$("canvas-web-link").href="/canvas#token="+encodeURIComponent(token);}
 let workspace = "", detail = null, cursors={}, lastPanels="", busy=false;
 function notice(msg) { $("notice").textContent=msg;$("notice").style.display="block";setTimeout(()=>$("notice").style.display="none",5000); }
 async function api(path,body=null) {

@@ -35,7 +35,7 @@ def default_model(state_root: Path | None = None) -> str:
     except (ImportError, OSError, ValueError, RuntimeError, TypeError):
         pass
     from .codex_native import authenticated
-    return "sentra/codex/current" if authenticated() else "sentra/chatgpt-web/high"
+    return "sentra/codex/current" if authenticated() else "sentra/chatgpt-web/auto"
 
 
 def find_maestri_cli() -> str | None:
@@ -78,6 +78,9 @@ class CLIConfig:
         os.environ.get("SENTRA_CODEX_WEB_API_KEY", "sentra-local"),
     )
     model: str | None = None
+    reasoning_effort: str = field(
+        default_factory=lambda: os.environ.get("SENTRA_CLI_REASONING_EFFORT", "low").strip().lower()
+    )
     fallback_model: str = os.environ.get(
         "SENTRA_CLI_FALLBACK_MODEL", "gpt-4o"
     )
@@ -123,6 +126,8 @@ class CLIConfig:
             self.state_root = Path(self.state_root).expanduser().resolve()
         if self.model is None:
             self.model = default_model(self.state_root)
+        if self.reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+            raise ValueError("reasoning effort must be low, medium, high or xhigh")
         self.maestri_pipe = self.maestri_pipe or os.environ.get("MAESTRI_PIPE")
         self.maestri_socket = (
             self.maestri_socket or os.environ.get("MAESTRI_SOCKET")

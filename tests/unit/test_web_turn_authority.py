@@ -7,6 +7,7 @@ import time
 import pytest
 
 from sentra_model_gateway.turn_authority import TurnAuthority
+from sentra_mcp.services.context import ContextBusService
 from sentra_mcp.services.durable import DurableStateConflict, StaleFenceError
 
 
@@ -63,6 +64,28 @@ def test_conversation_lease_blocks_concurrent_physical_tabs(tmp_path):
         authority.authorize("tool", {"capability": second, "traceId": "trace-two", "wireName": "tool"})
     finally:
         authority.durable.close()
+
+
+def test_native_turn_correlation_survives_authority_restart(tmp_path):
+    path = tmp_path / "browser.json"
+    authority = TurnAuthority(tmp_path / "state", path)
+    token = authority.issue(request_identity=json.dumps({
+        "thread_id": "thread-persisted", "turn_id": "native-persisted",
+    }))
+    authority.authorize("register", {
+        "capability": token, "traceId": "trace-persisted", "allowedTools": [],
+    })
+    authority.durable.close()
+    recovered = TurnAuthority(tmp_path / "state", path)
+    try:
+        evidence = recovered.telemetry_metadata(token)
+        assert evidence["correlation_id"] == "native-persisted"
+        assert evidence["trace_id"] == "trace-persisted"
+        assert evidence["completion_verified"] is False
+        assert token not in json.dumps(evidence)
+        recovered.retire(token, failed=True)
+    finally:
+        recovered.durable.close()
 
 
 def test_read_only_turn_and_compaction_phase_bind_conversation_uri(tmp_path):
@@ -197,3 +220,403 @@ def test_retired_blocked_capability_cannot_rehydrate(tmp_path):
             )
     finally:
         recovered.durable.close()
+
+
+def test_turn_authority_records_harness_goal(tmp_path: Path) -> None:
+    descriptor = tmp_path / "launcher-browser.json"
+    authority = TurnAuthority(tmp_path / "state", descriptor)
+    try:
+        token = authority.issue(
+            request_identity="goal-turn-1",
+            goal_text="Make the SENTRA release gates green.",
+        )
+        capability = authority._capability(token)
+        run = authority.durable.run_status(capability.run_id, capability.owner)
+        assert len(run["goals"]) == 1
+        goal = run["goals"][0]
+        assert goal["objective"] == "Make the SENTRA release gates green."
+        assert goal["metadata"]["harness_owned"] is True
+        assert goal["external_key"] == "codex-native-goal"
+    finally:
+        authority.durable.close()
+
+
+def test_codex_goal_persists_across_turns_clear_and_restart(tmp_path) -> None:
+    state = tmp_path / "state"
+    descriptor_path = tmp_path / "browser.json"
+    owner = "sentra:web-model-gateway"
+    conversation_uri = "conversation://goal-continuity"
+    authority = TurnAuthority(state, descriptor_path)
+    try:
+        first = authority.issue(
+            conversation_uri=conversation_uri,
+            request_identity=json.dumps({"thread_id": "thread-1", "turn_id": "turn-1"}),
+            goal_text="Ship SENTRA with all gates green.",
+            goal_present=True,
+        )
+        first_cap = authority._capability(first)
+        first_events = authority.durable.events(first_cap.run_id, owner, limit=100)
+        link = [
+            item for item in first_events["items"]
+            if item.get("type") == "CHECKPOINT"
+            and (item.get("payload") or {}).get("label") == "codex-goal-link"
+        ][-1]
+        link_data = link["payload"]["data"]
+        goal_run_id = link_data["goal_run_id"]
+        goal_id = link_data["goal_id"]
+
+        authority.issue(
+            conversation_uri="conversation://replacement-chat",
+            request_identity=json.dumps({"thread_id": "thread-1", "turn_id": "turn-2"}),
+            goal_text=None,
+            goal_present=False,
+        )
+        persisted = authority.durable.goal_info(goal_id, owner)
+        assert persisted["state"] == "ACTIVE"
+        assert persisted["objective"] == "Ship SENTRA with all gates green."
+
+        authority.issue(
+            conversation_uri=conversation_uri,
+            request_identity=json.dumps({"thread_id": "thread-1", "turn_id": "turn-3"}),
+            goal_text=None,
+            goal_present=True,
+        )
+        cleared = authority.durable.goal_info(goal_id, owner)
+        assert cleared["state"] == "PAUSED"
+        assert cleared["metadata"]["cleared"] is True
+
+        authority.issue(
+            conversation_uri=conversation_uri,
+            request_identity=json.dumps({"thread_id": "thread-1", "turn_id": "turn-4"}),
+            goal_text="Ship SENTRA after real Edge E2E passes.",
+            goal_present=True,
+        )
+        resumed = authority.durable.goal_info(goal_id, owner)
+        assert resumed["state"] == "ACTIVE"
+        assert resumed["objective"] == "Ship SENTRA after real Edge E2E passes."
+        assert resumed["metadata"]["cleared"] is False
+        assert resumed["run_id"] == goal_run_id
+    finally:
+        authority.durable.close()
+
+    recovered = TurnAuthority(state, descriptor_path)
+    try:
+        recovered_goal = recovered.durable.goal_info(goal_id, owner)
+        assert recovered_goal["state"] == "ACTIVE"
+        assert recovered_goal["objective"] == "Ship SENTRA after real Edge E2E passes."
+        authority_runs = [
+            item for item in recovered.durable.list_runs(owner, limit=1000)["items"]
+            if (item.get("capability_snapshot") or {}).get("kind") == "codex-goal-authority"
+        ]
+        assert len(authority_runs) == 1
+        assert authority_runs[0]["run_id"] == goal_run_id
+    finally:
+        recovered.durable.close()
+
+
+def test_native_codex_subagent_binds_to_parent_goal_and_survives_restart(tmp_path) -> None:
+    state = tmp_path / "state"
+    descriptor_path = tmp_path / "browser.json"
+    owner = "sentra:web-model-gateway"
+    authority = TurnAuthority(state, descriptor_path)
+    try:
+        root_token = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-root",
+                "turn_id": "turn-root-1",
+                "request_kind": "turn",
+                "agent_name": "/root",
+            }),
+            goal_text="Release SENTRA only after all gates pass.",
+            goal_present=True,
+        )
+        root_cap = authority._capability(root_token)
+        root_progress = authority.durable.operation_status(
+            root_cap.operation_id, owner
+        )["progress"]
+        root_goal_run_id = root_progress["goal_run_id"]
+        root_goal_id = root_progress["goal_id"]
+
+        child_token = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-child-a",
+                "turn_id": "turn-child-a-1",
+                "request_kind": "turn",
+                "parent_thread_id": "thread-root",
+                "agent_name": "/root/auditor",
+                "subagent_kind": "thread_spawn",
+            }),
+            goal_text="Release SENTRA only after all gates pass.",
+            goal_present=True,
+            task_text="Audit the browser bridge independently.",
+        )
+        child_cap = authority._capability(child_token)
+        child_progress = authority.durable.operation_status(
+            child_cap.operation_id, owner
+        )["progress"]
+        assert child_progress["goal_run_id"] == root_goal_run_id
+        assert child_progress["goal_id"] != root_goal_id
+        assert child_progress["agent_id"].startswith("agent-codex-")
+
+        child_goal = authority.durable.goal_info(child_progress["goal_id"], owner)
+        assert child_goal["parent_goal_id"] == root_goal_id
+        assert child_goal["objective"] == "Audit the browser bridge independently."
+        status = authority.durable.run_status(root_goal_run_id, owner)
+        agent = next(
+            item for item in status["agents"]
+            if item["agent_id"] == child_progress["agent_id"]
+        )
+        assert agent["goal_id"] == child_progress["goal_id"]
+        assert agent["metadata"]["codex_thread_id"] == "thread-child-a"
+
+        follow_token = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-child-a",
+                "turn_id": "turn-child-a-2",
+                "request_kind": "turn",
+            }),
+            goal_present=False,
+            task_text="Continue",
+        )
+        follow_cap = authority._capability(follow_token)
+        follow_progress = authority.durable.operation_status(
+            follow_cap.operation_id, owner
+        )["progress"]
+        assert follow_progress["goal_run_id"] == root_goal_run_id
+        assert follow_progress["goal_id"] == child_progress["goal_id"]
+        assert follow_progress["agent_id"] == child_progress["agent_id"]
+    finally:
+        authority.durable.close()
+
+    recovered = TurnAuthority(state, descriptor_path)
+    try:
+        after_restart = recovered.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-child-a",
+                "turn_id": "turn-child-a-3",
+                "request_kind": "turn",
+            }),
+            goal_present=False,
+            task_text="Continue after restart",
+        )
+        cap = recovered._capability(after_restart)
+        progress = recovered.durable.operation_status(
+            cap.operation_id, owner
+        )["progress"]
+        assert progress["goal_run_id"] == root_goal_run_id
+        assert progress["goal_id"] == child_progress["goal_id"]
+        assert progress["agent_id"] == child_progress["agent_id"]
+    finally:
+        recovered.durable.close()
+
+
+def test_nested_native_subagent_uses_same_goal_tree_and_notification_closes_subgoal(tmp_path) -> None:
+    state = tmp_path / "state"
+    descriptor_path = tmp_path / "browser.json"
+    owner = "sentra:web-model-gateway"
+    authority = TurnAuthority(state, descriptor_path)
+    try:
+        root = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-root-nested",
+                "turn_id": "turn-root-1",
+                "request_kind": "turn",
+                "agent_name": "/root",
+            }),
+            goal_text="Release SENTRA with native multi-agent coordination.",
+            goal_present=True,
+        )
+        root_cap = authority._capability(root)
+        root_progress = authority.durable.operation_status(
+            root_cap.operation_id, owner
+        )["progress"]
+
+        child = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-child-nested",
+                "turn_id": "turn-child-1",
+                "request_kind": "turn",
+                "parent_thread_id": "thread-root-nested",
+                "agent_name": "/root/child",
+                "subagent_kind": "thread_spawn",
+            }),
+            goal_text="Release SENTRA with native multi-agent coordination.",
+            goal_present=True,
+            task_text="Audit the Control Plane.",
+        )
+        child_cap = authority._capability(child)
+        child_progress = authority.durable.operation_status(
+            child_cap.operation_id, owner
+        )["progress"]
+
+        grandchild = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-grandchild-nested",
+                "turn_id": "turn-grandchild-1",
+                "request_kind": "turn",
+                "parent_thread_id": "thread-child-nested",
+                "agent_name": "/root/child/reviewer",
+                "subagent_kind": "thread_spawn",
+            }),
+            goal_present=False,
+            task_text="Review the child findings adversarially.",
+        )
+        grand_cap = authority._capability(grandchild)
+        grand_progress = authority.durable.operation_status(
+            grand_cap.operation_id, owner
+        )["progress"]
+
+        assert child_progress["goal_run_id"] == root_progress["goal_run_id"]
+        assert grand_progress["goal_run_id"] == root_progress["goal_run_id"]
+        grand_goal = authority.durable.goal_info(grand_progress["goal_id"], owner)
+        assert grand_goal["parent_goal_id"] == child_progress["goal_id"]
+
+        authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-root-nested",
+                "turn_id": "turn-root-2",
+                "request_kind": "turn",
+                "agent_name": "/root",
+            }),
+            goal_present=False,
+            subagent_notifications=[{
+                "agent_path": "thread-grandchild-nested",
+                "status": {"completed": "review complete"},
+                "turn_id": "turn-root-2",
+            }],
+        )
+        closed_goal = authority.durable.goal_info(grand_progress["goal_id"], owner)
+        assert closed_goal["state"] == "SUCCEEDED"
+        run_status = authority.durable.run_status(root_progress["goal_run_id"], owner)
+        closed_agent = next(
+            item for item in run_status["agents"]
+            if item["agent_id"] == grand_progress["agent_id"]
+        )
+        assert closed_agent["state"] == "AVAILABLE"
+
+        followup = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-grandchild-nested",
+                "turn_id": "turn-grandchild-2",
+                "request_kind": "turn",
+            }),
+            goal_present=False,
+            task_text="Review one additional edge case.",
+        )
+        followup_cap = authority._capability(followup)
+        followup_progress = authority.durable.operation_status(
+            followup_cap.operation_id, owner
+        )["progress"]
+        assert followup_progress["agent_id"] == grand_progress["agent_id"]
+        assert followup_progress["goal_run_id"] == root_progress["goal_run_id"]
+        assert followup_progress["goal_id"] != grand_progress["goal_id"]
+        successor = authority.durable.goal_info(
+            followup_progress["goal_id"], owner
+        )
+        assert successor["state"] == "ACTIVE"
+        assert successor["parent_goal_id"] == child_progress["goal_id"]
+        assert successor["metadata"]["successor_of"] == grand_progress["goal_id"]
+        resumed_agent = next(
+            item for item in authority.durable.run_status(
+                root_progress["goal_run_id"], owner
+            )["agents"]
+            if item["agent_id"] == grand_progress["agent_id"]
+        )
+        assert resumed_agent["state"] == "ACTIVE"
+        assert resumed_agent["goal_id"] == followup_progress["goal_id"]
+
+        authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-root-nested",
+                "turn_id": "turn-root-3",
+                "request_kind": "turn",
+                "agent_name": "/root",
+            }),
+            goal_present=False,
+            subagent_notifications=[{
+                "agent_path": "thread-grandchild-nested",
+                "status": {"completed": "review complete"},
+                "turn_id": "turn-root-2",
+            }],
+        )
+        successor_after_replay = authority.durable.goal_info(
+            followup_progress["goal_id"], owner
+        )
+        assert successor_after_replay["state"] == "ACTIVE"
+
+        context = ContextBusService(state)
+        try:
+            delta = context.read_delta(
+                root_progress["goal_run_id"],
+                owner,
+                types=["RESULT"],
+                limit=100,
+            )
+            event = next(
+                item for item in delta["items"]
+                if item["agent_id"] == grand_progress["agent_id"]
+            )
+            assert event["payload"]["result"] == "review complete"
+            assert event["payload"]["goal_id"] == grand_progress["goal_id"]
+        finally:
+            context.close()
+    finally:
+        authority.durable.close()
+
+
+def test_native_codex_subagent_late_binds_when_parent_goal_appears(tmp_path) -> None:
+    state = tmp_path / "state"
+    descriptor_path = tmp_path / "browser.json"
+    owner = "sentra:web-model-gateway"
+    authority = TurnAuthority(state, descriptor_path)
+    try:
+        child_token = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-child-late",
+                "turn_id": "turn-child-late-1",
+                "request_kind": "turn",
+                "parent_thread_id": "thread-root-late",
+                "agent_name": "/root/late_child",
+                "subagent_kind": "thread_spawn",
+            }),
+            goal_present=False,
+            task_text="Inspect the release gate.",
+        )
+        child_cap = authority._capability(child_token)
+        before = authority.durable.operation_status(
+            child_cap.operation_id, owner
+        )["progress"]
+        assert before["agent_id"].startswith("agent-codex-")
+        assert before["goal_id"] is None
+
+        authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-root-late",
+                "turn_id": "turn-root-late-1",
+                "request_kind": "turn",
+                "agent_name": "/root",
+            }),
+            goal_text="Release only after every live gate passes.",
+            goal_present=True,
+        )
+
+        follow_token = authority.issue(
+            request_identity=json.dumps({
+                "thread_id": "thread-child-late",
+                "turn_id": "turn-child-late-2",
+                "request_kind": "turn",
+            }),
+            goal_present=False,
+            task_text="Inspect the release gate.",
+        )
+        follow_cap = authority._capability(follow_token)
+        after = authority.durable.operation_status(
+            follow_cap.operation_id, owner
+        )["progress"]
+        assert after["agent_id"] == before["agent_id"]
+        assert isinstance(after["goal_id"], str)
+        child_goal = authority.durable.goal_info(after["goal_id"], owner)
+        assert child_goal["objective"] == "Inspect the release gate."
+        assert child_goal["parent_goal_id"]
+    finally:
+        authority.durable.close()

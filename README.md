@@ -25,14 +25,47 @@ além de SHA-256, CycloneDX SBOM e pacote de atualização verificável.
 A aplicação fornece tray + painel operacional para MCP, Secure Tunnel, Edge,
 Docker, Git e Remote Agent; profiles Safe/Developer/Full; workspaces com
 permissões read/write/execute; jobs/fila OMA; auditoria, diff, snapshots e
-rollback; onboarding do Secure MCP Tunnel sem PowerShell.
+rollback; Quick Start do Secure MCP Tunnel sem PowerShell.
 
-Comece em [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Arquitetura:
+**Novo por aqui? Comece em [`docs/ZERO_CONFIG_SETUP.md`](docs/ZERO_CONFIG_SETUP.md).** Instale e use os recursos locais imediatamente; OpenAI, Codex, Edge, Git e Docker são integrações opcionais e configuráveis sob demanda. Veja também [`docs/START_HERE.md`](docs/START_HERE.md). O guia mostra Desktop, terminal, ChatGPT/MCP, Codex/Web Models, Edge e Maestri sem misturar os papéis.\n\nQuick Start: [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Arquitetura:
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Segurança:
 [`SECURITY.md`](SECURITY.md). Processo de publicação:
 [`docs/RELEASE.md`](docs/RELEASE.md).
 
 O fluxo CLI abaixo continua suportado para desenvolvimento do próprio SENTRA.
+
+## Comece aqui: escolha como quer usar o SENTRA
+
+Você não precisa configurar tudo para começar. Escolha **uma** superfície, valide que ela funciona e só depois habilite as demais.
+
+**Primeiros passos recomendados:**
+
+1. Instale/abra o SENTRA e confirme **MCP Ready**.
+2. Se quiser usar o ChatGPT como cliente das tools locais, conecte o **Secure MCP Tunnel**.
+3. Se quiser usar ChatGPT/Gemini Web dentro do Codex, abra **Web Models** e conecte o Codex ao Gateway local.
+4. Instale a extensão **Edge** apenas quando quiser que o SENTRA opere uma aba web já aberta.
+
+| Superfície | Use quando | Primeiro passo |
+|---|---|---|
+| **SENTRA Desktop** | instalar, conectar OpenAI, configurar política, Edge/Web Models e acompanhar saúde | abra o Desktop e conclua **Quick Start** |
+| **Terminal / SENTRA CLI** | conversar com um agente no terminal, executar tools e coordenar Maestri | `sentra-cli.cmd` no checkout ou `sentra-cli.exe` instalado |
+| **Codex + Web Models** | disponibilizar modelos ChatGPT/Gemini Web dentro do Codex e do OMA | **Web Models → Abrir interface Web → Conectar Codex** |
+| **ChatGPT app/plugin via Secure MCP Tunnel** | deixar o ChatGPT chamar o MCP local do SENTRA sem publicar a porta 8000 | **Quick Start → Connect OpenAI & Start**, depois conecte o app MCP no ChatGPT |
+
+### Modelo mental em 30 segundos
+
+- Quer **usar o SENTRA diretamente**? Abra o **Desktop** ou `sentra-cli` no terminal.
+- Quer **usar ChatGPT/Gemini Web como modelos dentro do Codex/OMA**? Ative **Web Models**; o Codex fala com o Gateway local do SENTRA.
+- Quer que **o próprio ChatGPT chame tools do SENTRA**? Conecte o **Secure MCP Tunnel** e adicione o SENTRA como app/plugin MCP no ChatGPT.
+- Quer que o SENTRA **opere uma aba web já aberta**? Habilite a **extensão Edge**. Ela é um atuador de navegador, não o caminho MCP.
+
+Esses caminhos podem coexistir. Tunnel não substitui Web Models; Web Models não substitui a extensão; a extensão não expõe o MCP ao ChatGPT.
+
+O **Secure MCP Tunnel** e a **extensão Edge** resolvem problemas diferentes. O tunnel conecta o ChatGPT ao **MCP local** do SENTRA por uma conexão HTTPS de saída. A extensão Edge é o **atuador de navegador**: quando uma tarefa realmente precisa do ChatGPT/Gemini Web, ela adota temporariamente uma aba elegível já aberta no Edge principal.
+
+O Quick Start atual pareia o relay local da extensão automaticamente; não copie bearer tokens para a extensão.
+
+Guia unificado: [`docs/USING_SENTRA.md`](docs/USING_SENTRA.md). Guias por superfície: [`docs/QUICKSTART.md`](docs/QUICKSTART.md) · [`docs/SENTRA_CLI.md`](docs/SENTRA_CLI.md) · [`docs/WEB_MODELS.md`](docs/WEB_MODELS.md) · [`docs/SECURE_MCP_TUNNEL.md`](docs/SECURE_MCP_TUNNEL.md).
 
 ---
 
@@ -114,16 +147,16 @@ python -B main.py --demo
 Modelos roteirizados + testes reais em `.oma/demo-*`. Prova a máquina local,
 não inteligência nem Edge.
 
-### 3. Caminho live: relay + extensão
+### 3. Caminho live legado para desenvolvimento do OMA\n\n> **Fluxo de source checkout.** No produto instalado, use **SENTRA Desktop → Quick Start → Open Edge extensions**. O pareamento atual é gerenciado pelo SENTRA; não copie bearer/relay token manualmente.
 
 ```powershell
 # Terminal 1 (deixe aberto)
-python -B main.py --relay   # anote o token em .oma/relay-token
+python -B main.py --relay   # somente fluxo legado/source checkout
 ```
 
 No **Edge principal já logado**: `edge://extensions` → modo desenvolvedor →
 **Carregar sem compactação** → pasta `edge_extension/` → Detalhes →
-Opções → cole o token → **Ativar** → salve. Não é necessário abrir outro
+No fluxo legado, conclua o pareamento conforme o relay de desenvolvimento. No produto instalado, o SENTRA cuida dessa etapa. Não é necessário abrir outro
 perfil/navegador. A extensão mantém **zero tabs próprias sempre** e, sob demanda, adota
 temporariamente **no máximo 1 aba `chatgpt.com` já existente e inativa**. Research inicia chats em série,
 guarda seus `conversation_id` e coleta as respostas depois por ID, portanto

@@ -3,6 +3,8 @@ import json
 import re
 from pathlib import Path
 
+from scripts.commander.extension_identity import extension_source_identity
+
 EXT = Path(__file__).resolve().parent.parent.parent / "edge_extension"
 
 
@@ -10,11 +12,19 @@ def _read(name: str) -> str:
     return (EXT / name).read_text(encoding="utf-8")
 
 
+def test_manifest_source_hash_matches_extension_files():
+    manifest = json.loads(_read("manifest.json"))
+    identity = extension_source_identity(EXT)
+    assert manifest["sentra_source_hash"] == identity["source_hash"]
+
+
 def test_versions_in_lockstep():
     manifest = json.loads(_read("manifest.json"))
     sw = re.search(r'OMA_SW_VERSION = "([^"]+)"', _read("service-worker.js")).group(1)
     cs = re.search(r'OMA_CS_VERSION = "([^"]+)"', _read("content-script.js")).group(1)
-    assert manifest["version"] == sw == cs, (manifest["version"], sw, cs)
+    guard = re.search(r'const VERSION = "([^"]+)"', _read("recovery-guard.js")).group(1)
+    assert manifest["version"] == sw == cs == guard, (manifest["version"], sw, cs, guard)
+    assert manifest["sentra_build_id"] == "sentra-edge-1.6.52-durable-r27"
 
 
 def test_node_syntax_if_available():
@@ -23,7 +33,7 @@ def test_node_syntax_if_available():
 
     if not shutil.which("node"):
         return
-    for name in ("service-worker.js", "content-script.js", "selectors.js", "observer.js"):
+    for name in ("service-worker.js", "content-script.js", "recovery-guard.js", "selectors.js", "observer.js"):
         result = subprocess.run(
             ["node", "--check", str(EXT / name)],
             capture_output=True,
@@ -34,6 +44,7 @@ def test_node_syntax_if_available():
 def test_additional_checks_recovery_contract_present():
     content = _read("content-script.js")
     observer = _read("observer.js")
+    guard = _read("recovery-guard.js")
 
     assert "omaIsAdditionalChecksMessage" in content
     assert "omaFindAdditionalChecksBannerText(false)" in content
@@ -41,11 +52,26 @@ def test_additional_checks_recovery_contract_present():
     assert "MutationObserver(omaScheduleGlobalAdditionalChecksScan)" in content
     assert "omaStopGenerationForRecovery" in content
     assert 'omaSendMessage("Continue", [])' in content
-    assert "OMA_MAX_ADDITIONAL_CHECK_RECOVERIES = 2" in content
+    assert "OMA_MAX_ADDITIONAL_CHECK_RECOVERIES = 1" in content
+    assert "mais algumas verificacoes" in content
+    assert "OMA_ADDITIONAL_CHECKS_RESUME_COOLDOWN_MS = 3000" in content
+    assert "omaWaitAdditionalChecksCleared" in content
+    assert "omaMaybeResetAdditionalChecksRecoveryCycle" in content
     assert "omaAdditionalChecksRecoveryPromise" in content
     assert "ADDITIONAL_CHECKS_LOOP" in content
     assert "omaFindAdditionalChecksBannerText" in observer
     assert "omaRecoverAdditionalChecks()" in observer
+    assert "__SENTRA_RECOVERY_GUARD__" in guard
+    assert "mais algumas verificacoes" in guard
+    assert "SENTRA_RECOVERY_GUARD_STATUS" in guard
+    worker = _read("service-worker.js")
+    assert 'files: ["recovery-guard.js"]' in worker
+    assert "omaHeartbeatExtension" in worker
+    assert 'omaRelay("/extension/heartbeat"' in worker
+    assert "if (settings.oma_relay_token)" in worker
+    manifest = json.loads(_read("manifest.json"))
+    assert "scripting" in manifest["permissions"]
+    assert manifest["content_scripts"][0]["js"][0] == "recovery-guard.js"
 
 
 def test_recovery_scans_transient_dom_without_treating_chat_text_as_system_banner():
@@ -79,7 +105,8 @@ def test_lazy_single_controller_contract():
     assert "await omaReleaseControllerReferences();" in browser_actions
     assert "await omaEnsureTabs(desiredTabs);" in worker
     assert "máximo 1 tab" in options
-    assert 'chrome.tabs.query({ url: ["https://chatgpt.com/*"] })' in worker
+    assert '"https://chatgpt.com/*", "https://gemini.google.com/*"' in worker
+    assert "omaAllowedControllerUrl" in worker
     assert "tab.active !== true" in worker
     assert "adopted: true" in worker
     assert "chrome.tabs.create(" not in worker
@@ -144,7 +171,10 @@ def test_bfcache_read_only_recovery_is_bounded_and_never_replays_send():
     open_conv = worker.split(
         "async function omaOpenConversationByUrl", 1
     )[1].split("async function omaWaitConversationIdentity", 1)[0]
-    chat_start = worker.split('if (job.kind === "CHAT_START")', 1)[1].split(
+    chat_start = worker.split('if (job.kind === "CHAT_START" || job.kind === "CHAT_SEND")', 1)[1].split(
+        'if (job.kind === "CHAT_PEEK")', 1
+    )[0]
+    chat_peek = worker.split('if (job.kind === "CHAT_PEEK")', 1)[1].split(
         'if (job.kind === "CHAT_COLLECT")', 1
     )[0]
     freshness = worker.split(
@@ -165,6 +195,9 @@ def test_bfcache_read_only_recovery_is_bounded_and_never_replays_send():
     assert 'operation: "WAIT_RESPONSE"' in worker
     assert 'operation: "SEND_MESSAGE"' in chat_start
     assert "omaSendReadOnlyToTab" not in chat_start
+    assert 'operation: "SEND_MESSAGE"' not in chat_peek
+    assert "omaSendReadOnlyToTab" in chat_peek
+    assert 'operation: "WAIT_RESPONSE"' not in chat_peek
 
 
 def test_idle_wake_never_creates_tabs_and_only_scheduler_can_adopt():
@@ -187,16 +220,18 @@ def test_idle_wake_never_creates_tabs_and_only_scheduler_can_adopt():
     assert "void omaTick();" in worker
 
 
-def test_edge_screenshot_permission_is_runtime_scoped_to_chatgpt():
+def test_edge_screenshot_permission_is_runtime_scoped_to_supported_web_models():
     manifest = json.loads(_read("manifest.json"))
     worker = _read("service-worker.js")
 
     # captureVisibleTab requires <all_urls> or a user-granted activeTab token.
-    # SENTRA is unattended, so the manifest carries <all_urls>, while the
-    # service worker narrows screenshot execution back to chatgpt.com.
+    # SENTRA is unattended, so the manifest carries <all_urls>, while runtime
+    # execution narrows screenshots back to the two supported Web-model hosts.
     assert "<all_urls>" in manifest["host_permissions"]
-    assert 'if (!/^https:\\/\\/chatgpt\\.com\\//.test(String(tabInfo.url || "")))' in worker
-    assert "BROWSER_ACTION screenshot is restricted to https://chatgpt.com" in worker
+    assert "https://chatgpt.com/*" in manifest["host_permissions"]
+    assert "https://gemini.google.com/*" in manifest["host_permissions"]
+    assert 'if (!omaAllowedControllerUrl(String(tabInfo.url || "")))' in worker
+    assert "BROWSER_ACTION screenshot is restricted to ChatGPT/Gemini web" in worker
     assert "chrome.tabs.captureVisibleTab" in worker
 
 
@@ -206,3 +241,134 @@ def test_auto_update_compares_full_extension_identity():
     assert "data.build_id !== OMA_BUILD_ID" in worker
     assert "data.source_hash !== OMA_SOURCE_HASH" in worker
     assert "chrome.runtime.reload();" in worker
+
+
+def test_chat_peek_is_read_only_and_exposes_additional_checks_recovery_telemetry():
+    worker = _read("service-worker.js")
+    content = _read("content-script.js")
+    peek = worker.split('if (job.kind === "CHAT_PEEK")', 1)[1].split(
+        'if (job.kind === "CHAT_COLLECT")', 1
+    )[0]
+
+    assert 'operation: "GET_STATUS"' in peek
+    assert 'operation: "READ_RESPONSE"' in peek
+    assert 'operation: "WAIT_RESPONSE"' not in peek
+    assert "additional_checks_recovery_attempts" in peek
+    assert "additional_checks_recovery_active" in peek
+    assert "additional_checks_recovery_attempts" in content
+    assert "additional_checks_recovery_active" in content
+
+
+def test_global_additional_checks_recovery_is_independent_from_oma_scheduler():
+    content = _read("content-script.js")
+    recovery = content.split("async function omaMaybeRecoverGlobalAdditionalChecks()", 1)[1]
+    recovery = recovery.split("function omaScheduleGlobalAdditionalChecksScan()", 1)[0]
+
+    assert "oma_auto_recover_additional_checks: true" in recovery
+    assert "settings.oma_auto_recover_additional_checks === false" in recovery
+    assert "settings.oma_enabled" not in recovery
+    assert "omaFindAdditionalChecksBannerText(false)" in recovery
+    assert "omaRecoverAdditionalChecks()" in recovery
+
+
+def test_auto_pairing_bootstrap_repairs_token_without_overriding_user_disable():
+    worker = _read("service-worker.js")
+    options = _read("options.js")
+
+    assert 'chrome.runtime.getURL("sentra-bootstrap.json")' in worker
+    assert 'OMA_RELAY + "/auth/bootstrap"' in worker
+    assert "async function omaBootstrapPairing()" in worker
+    assert "async function omaEnsurePairing()" in worker
+    assert "response.status === 401 && allowBootstrap" in worker
+    assert 'await chrome.storage.local.remove("oma_relay_token")' in worker
+    assert "oma_user_disabled: false" in worker
+    assert "const enabled = !preference.oma_user_disabled;" in worker
+    assert 'oma_state: enabled ? "AUTO_PAIRED" : "PAIRED_DISABLED"' in worker
+    assert "oma_user_disabled: !enabled.checked" in options
+
+    tick = worker.split("async function omaTick()", 1)[1]
+    assert tick.index("await omaCheckForUpdates();") < tick.index(
+        "await omaEnsurePairing();"
+    )
+    assert tick.index("await omaEnsurePairing();") < tick.index(
+        "if (!settings.oma_enabled || !settings.oma_relay_token) return;"
+    )
+
+
+def test_gemini_web_adapter_contract_is_explicit_and_fail_closed():
+    manifest = json.loads(_read("manifest.json"))
+    selectors = _read("selectors.js")
+    observer = _read("observer.js")
+    content = _read("content-script.js")
+    worker = _read("service-worker.js")
+
+    assert "https://gemini.google.com/*" in manifest["host_permissions"]
+    assert "https://gemini.google.com/*" in manifest["content_scripts"][0]["matches"]
+    assert "rich-textarea .ql-editor" in selectors
+    assert "model-response" in selectors
+    assert "user-query" in selectors
+    assert "Send message" in selectors
+    assert ".model-response-text" in selectors
+    assert ".markdown-main-panel" in selectors
+    assert "Interromper" in selectors
+    assert "omaNodeReadableText" in observer
+    assert "node.textContent" in observer
+    assert "omaAssistantMessageCount" in observer
+    assert "buttons_sample" in worker
+    assert "omaSetGeminiModel" in content
+    assert "omaGeminiModelIdFromText" in content
+    assert "omaGeminiNearbyModelLabel" in content
+    assert "document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT)" in content
+    assert "scannedText < 6000" in content
+    assert "omaGeminiModelDiagnostics" in content
+    assert "gemini_model_candidates" in content
+    assert "verticalGap <= 320" in content
+    assert "horizontalGap <= Math.max(480, window.innerWidth * 0.35)" in content
+    assert "window.getComputedStyle(clickable).cursor" in content
+    assert 'case "SET_MODEL"' in content
+    assert "MODEL_SELECTION_FAILED" in content
+    assert "omaApplyRequestedModel" in worker
+    assert "omaConversationKey(provider, conversationId)" in worker
+    assert "gemini.google.com" in worker
+    assert "chrome.tabs.create(" not in worker
+    assert "chrome.tabs.remove(" not in worker
+    assert "chrome.windows.create(" not in worker
+
+def test_wait_response_requires_time_based_quiet_window():
+    observer = _read("observer.js")
+    assert "OMA_RESPONSE_QUIET_MS = 5000" in observer
+    assert "OMA_DONE_QUIET_MS = 3000" in observer
+    assert "lastTextChangedAt" in observer
+    assert "doneSince" in observer
+    assert "textQuiet" in observer
+    assert "doneQuiet" in observer
+
+
+def test_wait_settled_recovers_stale_content_script_with_read_only_retry():
+    worker = _read("service-worker.js")
+    settled = worker.split(
+        "async function omaWaitSettled", 1
+    )[1].split("async function omaWaitTabDeparted", 1)[0]
+    assert "omaSendReadOnlyToTab(" in settled
+    assert '{ operation: "GET_STATUS" }' in settled
+    assert "3," in settled
+
+
+def test_wait_settled_timeout_has_pre_send_semantic_code():
+    worker = _read("service-worker.js")
+    settled = worker.split(
+        "async function omaWaitSettled", 1
+    )[1].split("async function omaWaitTabDeparted", 1)[0]
+    assert "PRE_SEND_NOT_READY" in settled
+
+
+
+def test_config_principal_edge_pool_matches_single_controller():
+    import yaml
+
+    config = yaml.safe_load(
+        (Path(__file__).resolve().parent.parent.parent / "config.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert config["browser"]["tab_pool"] == {"min_tabs": 1, "max_tabs": 1}

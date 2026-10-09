@@ -1,7 +1,7 @@
 # Modelos Web no SENTRA
 
 O checkout `third_party/codex-chatgpt-web` permanece upstream puro, fixado em
-`757942251222ee0f71953c35636679c6d92dd636` (v6.0.0). A interface Electron,
+`a13cd09950969f43e3b7e25c71fa43efaf5446c5` (v6.1.1). A interface Electron,
 login, Browser Host, Responses, SSE, compaction e Turn Broker continuam
 upstream-owned. A adaptação SENTRA fica em
 `integrations/codex_chatgpt_web/sentra-upstream.patch` e é aplicada somente a
@@ -45,8 +45,13 @@ apenas observa estado e não altera a configuração do Codex silenciosamente.
 ## Seleção de modelo
 
 A aba **Web Models** do SENTRA Desktop possui um seletor explícito preenchido
-pelo catálogo vivo de `/v1/models`. **Usar seleção** persiste o modelo no
-state directory privado do usuário; não altera `config.yaml` e não modifica o
+pelo último catálogo Web autenticado observado pelo Gateway. O endpoint nativo
+`/v1/models` exige o Bearer real do Codex e não deve ser sondado diretamente
+pela UI com uma credencial local fictícia. Em cada consulta autenticada do
+Codex, o Gateway preserva o catálogo completo para o cliente e grava somente
+metadados redigidos dos modelos Web em `/sentra/model-catalog`, protegido pelo
+token administrativo local. **Usar seleção** persiste o modelo no state
+directory privado do usuário; não altera `config.yaml` e não modifica o
 checkout upstream.
 
 Para novas instâncias do OMA, a resolução do modelo `codex_web` segue esta
@@ -56,10 +61,41 @@ ordem:
 2. `SENTRA_CODEX_WEB_MODEL` no ambiente;
 3. modelo salvo pela UI do SENTRA.
 
-O valor persistido precisa usar o namespace `sentra/chatgpt-web/*`. A escolha
-do usuário no picker nativo do Codex continua independente e pode selecionar
-qualquer item do catálogo que o Gateway anunciou; o padrão do SENTRA define o
-modelo usado pelo OMA quando não existe override explícito.
+O valor persistido precisa usar `sentra/chatgpt-web/*` ou, quando Gemini Web
+estiver habilitado, `sentra/gemini-web/*`. A escolha do usuário no picker
+nativo do Codex continua independente e pode selecionar qualquer item do
+catálogo que o Gateway anunciou; o padrão do SENTRA define o modelo usado pelo
+OMA quando não existe override explícito.
+
+### Gemini Web
+
+O mesmo runtime pode publicar, de forma **opt-in**, três rotas Gemini Web
+suportadas pela integração: `gemini-web/flash-lite`, `gemini-web/flash` e
+`gemini-web/pro`. Elas usam o relay durável do SENTRA e a mesma extensão do
+Edge principal; não iniciam outro navegador, não usam Playwright como fallback
+e não substituem o provider ChatGPT padrão.
+
+**Catálogo suportado não é garantia de disponibilidade na conta.** A interface
+do Gemini pode expor apenas um subconjunto dessas opções conforme conta, plano
+ou rollout. Antes de um envio, a extensão confirma o modelo no seletor real da
+aba adotada. Se a opção pedida não existir, o turno falha com
+`MODEL_SELECTION_FAILED` **antes de SEND_MESSAGE**, portanto é seguro escolher
+outro modelo e tentar novamente. O SENTRA não troca silenciosamente um modelo
+explicitamente escolhido pelo usuário. Para automação e swarm, `flash` é o
+default compatível; use `flash-lite` somente quando ele aparecer na sessão
+Gemini atual.
+
+Para o provider direto do orquestrador, habilite `gemini_web.enabled: true` e
+escolha `gemini_web.model` em `config.yaml`. No runtime Codex/Web Models, as
+rotas Gemini só entram no catálogo quando o Gateway encontra o token privado do
+relay no state directory e injeta a configuração no processo filho. O token é
+referenciado por caminho de arquivo; ele não deve ser copiado para
+`config.yaml`, documentação, logs ou Git.
+
+A continuidade é vinculada à URL exata da conversa Gemini. Tool calls são
+aceitas somente pelo envelope SENTRA validado contra as tools realmente
+oferecidas pelo Codex; nomes inventados, argumentos inválidos, chamadas
+paralelas proibidas ou mistura de resposta final com tool call falham fechado.
 
 ## Desenvolvimento e build
 
@@ -69,8 +105,14 @@ estiver no PATH, pode ficar somente em `.sentra/toolchain`.
 ```powershell
 ./scripts/integrations/Bootstrap-CodexChatGPTWeb.ps1
 ./scripts/integrations/Build-CodexChatGPTWebRuntime.ps1
+$env:SENTRA_STATE_DIR = (Resolve-Path ".\.sentra").Path
 python -m sentra_model_gateway.gateway --launch-upstream
 ```
+
+No fluxo de desenvolvimento acima, `SENTRA_STATE_DIR` deve apontar para o
+mesmo state directory usado pelo relay local; assim Gateway e relay compartilham
+a mesma autoridade privada sem copiar tokens. No produto instalado, o Desktop
+já passa seu `state_dir` explicitamente aos serviços.
 
 O bootstrap valida remoto, commit, pacote e licença e mantém o checkout upstream
 limpo. O build:
@@ -237,3 +279,64 @@ descritor do Browser Host; o Browser Control Server delega a operação ao
 instalado quando o launcher está sob autoridade SENTRA. `SENTRA_WEB_CONTROL_TOKEN`
 permanece aceito apenas como fallback de compatibilidade. A aba **Web Models**
 usa o token administrativo efetivo do próprio Gateway, sem duplicar segredos.
+
+
+## Native Codex subagents vs SENTRA Research
+
+SENTRA deliberately keeps two delegation planes distinct.
+
+- **Codex native multi-agent** is owned by the Codex harness and uses its native
+  `spawn_agent`, `wait_agent` and follow-up lifecycle. SENTRA routes Web-model
+  turns and preserves the Codex protocol; it does not replace those tools with
+  `sentra_research_*`. When Codex supplies canonical thread-spawn lineage,
+  SENTRA binds that child thread to a durable Agent/subgoal under the parent's
+  Goal and reuses the binding on later turns/restart, including nested child
+  threads. Codex still owns spawn/wait/follow-up/terminal semantics. When the
+  native runtime injects a canonical `<subagent_notification>`, SENTRA projects
+  the terminal outcome into the subgoal and publishes a `RESULT`/`FAILURE` to
+  the Context Bus; it does not infer completion from a Web turn ending.
+  Notification replay is deduplicated by the native turn identity. If Codex
+  issues a follow-up after a completed wait, SENTRA keeps the same Agent identity
+  but creates a successor subgoal under the same parent instead of reopening a
+  terminal Goal.
+- **SENTRA Research** is a Control-Plane workflow for independent ChatGPT Web
+  conversations. Each branch has a durable Agent/Chat/subgoal identity and its
+  RESULT or FAILURE is published to the Context Bus before synthesis.
+
+A release validation must exercise both planes separately. Passing Research does
+not prove native `spawn_agent`; passing native Codex multi-agent does not prove
+the Edge Research collector.
+
+### Research collection on one principal Edge controller
+
+Research may launch several independent generations, but SENTRA still owns only
+one adopted principal-Edge controller. Collection is therefore cooperative:
+`CHAT_PEEK` performs only `GET_STATUS` + `READ_RESPONSE` and branches are
+polled round-robin. A peek never sends a message and never invokes the
+side-effecting response waiter. The content script's bounded
+`additional_checks` recovery remains a separate UI recovery mechanism and its
+attempt/active state is exposed as telemetry.
+
+Queue time and execution time are separate budgets. A branch that waited for the
+single controller receives its execution deadline when leased; queue delay does
+not consume the generation budget.
+
+If one branch fails or times out after the send may have occurred, SENTRA keeps
+the failure/uncertainty durably and does not replay the send automatically.
+Successful sibling results remain available for partial synthesis when the
+strategy permits it.
+
+## Rotas GPT-6 e seletor compacto (outubro de 2026)
+
+A integração reconhece o editor ProseMirror e os controles de seleção atuais do ChatGPT, incluindo o rótulo localizado `Selecionar modelo do ChatGPT`. O catálogo anuncia `sentra/chatgpt-web/gpt-6-instant` (Instant) e `sentra/chatgpt-web/gpt-6` (Medium/High, com Extra High somente quando disponível), além de `sentra/chatgpt-web/gpt-6-pro` quando autorizado pela conta. A rota `gpt-6` utiliza High como esforço padrão. A família GPT-6 e o nível de esforço são verificados no navegador antes do envio; a seleção `/model` sozinha não comprova que o turno foi executado.
+
+Contas que mostrem apenas `6 Instantânea` com o próximo nível bloqueado podem usar o perfil Instant, mas High deve falhar antes de enviar a mensagem, com `chatgpt_effort_unavailable` ou `chatgpt_effort_locked`. Nunca rebaixar silenciosamente High para Instant, nem relatar tal falta de acesso como sobrecarga. Para conferir, use `/model sentra/chatgpt-web/gpt-6`, consulte `/model` e realize uma inferência somente depois que o navegador confirmar High. As rotas legadas `sentra/chatgpt-web/high` não fixam a família GPT-6.
+
+**Superficie Think-only em chat temporario:** Algumas contas ou sessoes do
+ChatGPT expoem apenas Pensar/Think no composer, sem seletor de modelo ou
+esforco. Nao ha prova da familia GPT-6 nessa superficie. O Browser Worker
+reconhece a condicao e recusa o turno com HTTP 400
+chatgpt_model_controls_unavailable antes do envio; nao aguarda 70 segundos
+nem converte a falha em server_is_overloaded. A correcao do acesso depende
+de a sessao autenticada do ChatGPT apresentar o modelo e o esforco pedidos.
+Nao desabilitar chats temporarios ou alternar contas silenciosamente.

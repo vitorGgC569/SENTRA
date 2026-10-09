@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -46,6 +48,38 @@ def test_pairing_device_tokens_permissions_and_rotation(tmp_path: Path) -> None:
         store.heartbeat(device_id, rotated["device_token"])
     with pytest.raises(PermissionError):
         store.heartbeat(device_id, token)
+
+
+def test_invalid_pairing_attempts_are_rate_limited(tmp_path: Path) -> None:
+    now = [1000.0]
+    store = RemoteStore(tmp_path / "pairing-rate.sqlite3", clock=lambda: now[0])
+    try:
+        for _ in range(20):
+            with pytest.raises(PermissionError, match="invalid or expired"):
+                store.pair_device("BAD-CODE", rate_key="192.0.2.10")
+        with pytest.raises(PermissionError, match="rate limited"):
+            store.pair_device("BAD-CODE", rate_key="192.0.2.10")
+        with pytest.raises(PermissionError, match="invalid or expired"):
+            store.pair_device("BAD-CODE", rate_key="192.0.2.11")
+        now[0] += 61
+        with pytest.raises(PermissionError, match="invalid or expired"):
+            store.pair_device("BAD-CODE", rate_key="192.0.2.10")
+    finally:
+        store.close()
+
+
+def test_public_device_marks_broad_acl(tmp_path: Path) -> None:
+    store = RemoteStore(tmp_path / "broad-acl.sqlite3")
+    try:
+        broad = store.create_pairing("u", "Broad", "win", ["sentra_repo_*"])
+        broad_device = store.pair_device(broad["pairing_code"])
+        assert store.get_device("u", broad_device["device_id"])["broad_acl"] is True
+
+        narrow = store.create_pairing("u", "Narrow", "win", ["sentra_health"])
+        narrow_device = store.pair_device(narrow["pairing_code"])
+        assert store.get_device("u", narrow_device["device_id"])["broad_acl"] is False
+    finally:
+        store.close()
 
 
 def test_rotation_grace_expires(tmp_path: Path) -> None:
@@ -177,6 +211,14 @@ def test_relay_pair_heartbeat_poll_result_roundtrip(tmp_path: Path) -> None:
 
 def _valid_remote_contract(*tools: str) -> dict:
     tool_names = list(tools or ("sentra_health",))
+    tool_names_hash = hashlib.sha256(
+        json.dumps(
+            tool_names,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     return {
         "sentra": {
             "server": {
@@ -191,6 +233,8 @@ def _valid_remote_contract(*tools: str) -> dict:
             },
             "contract": {
                 "schema_hash": "b" * 64,
+                "tool_schema_hash": "b" * 64,
+                "tool_names_hash": tool_names_hash,
                 "tool_count": len(tool_names),
                 "tool_names": tool_names,
             },
@@ -246,3 +290,142 @@ def test_contract_required_remote_job_fails_closed_and_recovers_without_replay(
     leased = store.poll_job(did, tok)
     assert leased is not None
     assert leased.job_id == job_id
+
+
+def test_remote_store_idempotency_reuses_same_job(tmp_path: Path) -> None:
+    store = RemoteStore(tmp_path / "idempotent.sqlite3", online_window_s=10)
+    pair = store.create_pairing("u", "PC", "win", ["sentra_health"])
+    paired = store.pair_device(pair["pairing_code"])
+    did = paired["device_id"]
+
+    first = store.submit_job(
+        "u", did, "sentra_health", {"probe": 1},
+        idempotency_key="same-request",
+    )
+    second = store.submit_job(
+        "u", did, "sentra_health", {"probe": 1},
+        idempotency_key="same-request",
+    )
+
+    assert second == first
+    replay = store.job_for_idempotency(
+        "u", did, "same-request",
+        tool="sentra_health", arguments={"probe": 1},
+    )
+    assert replay is not None
+    assert replay["job_id"] == first
+
+
+def test_remote_store_idempotency_rejects_payload_collision(tmp_path: Path) -> None:
+    store = RemoteStore(tmp_path / "idempotent-collision.sqlite3", online_window_s=10)
+    pair = store.create_pairing("u", "PC", "win", ["sentra_health"])
+    paired = store.pair_device(pair["pairing_code"])
+    did = paired["device_id"]
+
+    store.submit_job(
+        "u", did, "sentra_health", {"probe": 1},
+        idempotency_key="collision",
+    )
+
+    with pytest.raises(ValueError, match="different remote request"):
+        store.submit_job(
+            "u", did, "sentra_health", {"probe": 2},
+            idempotency_key="collision",
+        )
+
+
+@pytest.mark.parametrize(
+    ("association", "expected_message"),
+    [("run_id", "different run"), ("operation_id", "different operation")],
+)
+def test_remote_store_idempotency_rejects_new_association_on_replay(
+    tmp_path: Path, association: str, expected_message: str
+) -> None:
+    store = RemoteStore(tmp_path / f"idempotent-{association}.sqlite3")
+    pair = store.create_pairing("u", "PC", "win", ["sentra_health"])
+    did = store.pair_device(pair["pairing_code"])["device_id"]
+    store.submit_job("u", did, "sentra_health", {}, idempotency_key="association")
+
+    with pytest.raises(ValueError, match=expected_message):
+        store.submit_job(
+            "u", did, "sentra_health", {}, idempotency_key="association",
+            **{association: f"new-{association}"},
+        )
+
+
+def test_remote_store_concurrent_idempotency_is_unique_across_connections(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "idempotent-concurrent.sqlite3"
+    first_store = RemoteStore(database)
+    pair = first_store.create_pairing("u", "PC", "win", ["sentra_health"])
+    did = first_store.pair_device(pair["pairing_code"])["device_id"]
+    second_store = RemoteStore(database)
+    stores = [first_store, second_store] * 8
+    barrier = threading.Barrier(len(stores))
+
+    def submit(store: RemoteStore) -> str:
+        barrier.wait()
+        return store.submit_job(
+            "u", did, "sentra_health", {"probe": "concurrent"},
+            idempotency_key="one-job",
+        )
+
+    with ThreadPoolExecutor(max_workers=len(stores)) as pool:
+        job_ids = list(pool.map(submit, stores))
+
+    assert len(set(job_ids)) == 1
+    assert first_store.db.execute(
+        "SELECT COUNT(*) FROM jobs WHERE user_id=? AND device_id=? AND idempotency_key=?",
+        ("u", did, "one-job"),
+    ).fetchone()[0] == 1
+    second_store.close()
+    first_store.close()
+
+
+def test_remote_store_migrates_duplicate_legacy_idempotency_keys(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "idempotent-legacy.sqlite3"
+    store = RemoteStore(database)
+    pair = store.create_pairing("u", "PC", "win", ["sentra_health"])
+    did = store.pair_device(pair["pairing_code"])["device_id"]
+    job_ids = [
+        store.submit_job("u", did, "sentra_health", {"job": i})
+        for i in range(2)
+    ]
+    store.db.execute("DROP INDEX idx_jobs_idempotency")
+    store.db.execute(
+        "CREATE INDEX idx_jobs_idempotency "
+        "ON jobs(user_id,device_id,idempotency_key)"
+    )
+    store.db.execute(
+        "UPDATE jobs SET idempotency_key='legacy-duplicate' WHERE id IN (?,?)",
+        job_ids,
+    )
+    store.db.commit()
+    store.close()
+
+    migrated = RemoteStore(database)
+    rows = migrated.db.execute(
+        "SELECT id,idempotency_key FROM jobs WHERE id IN (?,?) ORDER BY created,id",
+        job_ids,
+    ).fetchall()
+    assert len(rows) == 2
+    assert sum(row["idempotency_key"] == "legacy-duplicate" for row in rows) == 1
+    assert sum(row["idempotency_key"] is None for row in rows) == 1
+    canonical = next(row for row in rows if row["idempotency_key"] == "legacy-duplicate")
+    canonical_arguments = json.loads(
+        migrated.db.execute("SELECT arguments FROM jobs WHERE id=?", (canonical["id"],)).fetchone()[0]
+    )
+    replay_id = migrated.submit_job(
+        "u", did, "sentra_health", canonical_arguments,
+        idempotency_key="legacy-duplicate",
+    )
+    assert replay_id == canonical["id"]
+    index = next(
+        row for row in migrated.db.execute("PRAGMA index_list(jobs)")
+        if row["name"] == "idx_jobs_idempotency"
+    )
+    assert index["unique"] == 1
+    migrated.close()

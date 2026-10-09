@@ -247,6 +247,9 @@ class DurableRunService:
                     error_json TEXT,
                     rollback_json TEXT,
                     cleanup_policy TEXT NOT NULL,
+                    intent_sha256 TEXT,
+                    resource_key TEXT,
+                    fencing_token INTEGER,
                     UNIQUE(run_id,idempotency_key)
                 );
                 CREATE TABLE IF NOT EXISTS resources(
@@ -320,6 +323,14 @@ class DurableRunService:
             }
             if "goal_id" not in agent_columns:
                 self.db.execute("ALTER TABLE agents ADD COLUMN goal_id TEXT")
+            # Existing operations do not obtain a new execution grant retroactively.
+            op_columns = {str(r["name"]) for r in self.db.execute(
+                "PRAGMA table_info(operations)").fetchall()}
+            for col, sql_type in (("intent_sha256", "TEXT"),
+                                  ("resource_key", "TEXT"),
+                                  ("fencing_token", "INTEGER")):
+                if col not in op_columns:
+                    self.db.execute(f"ALTER TABLE operations ADD COLUMN {col} {sql_type}")
             self.db.commit()
 
     def close(self) -> None:
@@ -1054,6 +1065,188 @@ class DurableRunService:
             self._project_locked(row["run_id"])
             return self._chat_info_locked(self._chat_row(chat_id))
 
+    def reserve_operation_intent(
+        self,
+        run_id: str,
+        owner: str,
+        *,
+        operation_id: str,
+        idempotency_key: str,
+        intent_sha256: str,
+        resource_key: str,
+        kind: str = "sentra.machine",
+        ttl_s: float = 60.0,
+        operation_context: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically bind operation intent, reservation and lease in the core DB.
+
+        This is an opt-in operation admission path. Legacy create_operation
+        keeps its old contract, but unbound legacy rows can NEVER be replayed
+        as trusted machine reservations. The same SQLite transaction stores
+        the operation, full-intent SHA and monotonically fenced resource lease.
+        A call returning EXISTING must reconcile, never repeat the effect.
+        """
+        oid = _validate_id("operation_id", operation_id)
+        key = str(idempotency_key or "").strip()
+        scope = _validate_id("resource_key", resource_key)
+        if not key or len(key) > 240:
+            raise ValueError("idempotency_key must be 1..240 chars")
+        if not isinstance(intent_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", intent_sha256
+        ):
+            raise ValueError("trusted intent_sha256 required")
+        kind = str(kind or "").strip()
+        if not kind or len(kind) > 120:
+            raise ValueError("operation kind required")
+        if type(ttl_s) not in (int, float) or not 1 <= ttl_s <= 3600:
+            raise ValueError("bounded lease TTL required")
+        context = dict(operation_context or {})
+        if (set(context) - {"work_item_id", "principal_id", "machine_id", "capability_id"}
+                or any(not isinstance(value, str) or not value or len(value) > 128
+                       for value in context.values())):
+            raise ValueError("invalid trusted operation context")
+        with self.lock:
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                run = self._run_row(run_id, owner)
+                if run["state"] != "RUNNING":
+                    raise DurableStateConflict("run must be RUNNING")
+                existing = self.db.execute(
+                    "SELECT * FROM operations WHERE run_id=? AND idempotency_key=?",
+                    (run_id, key),
+                ).fetchone()
+                if existing is not None:
+                    if (existing["operation_id"] != oid
+                            or existing["kind"] != kind
+                            or existing["intent_sha256"] != intent_sha256
+                            or existing["resource_key"] != scope
+                            or type(existing["fencing_token"]) is not int
+                            or any(_load(existing["progress_json"], {}).get(k) != v
+                                   for k, v in context.items())):
+                        raise DurableStateConflict("persistent operation intent mismatch")
+                    result = {
+                        "status": "EXISTING", "operation_id": oid,
+                        "run_id": run_id, "owner": owner,
+                        "intent_sha256": intent_sha256,
+                        "resource_key": scope,
+                        "fencing_token": existing["fencing_token"],
+                    }
+                    self.db.commit()
+                    return result
+                # An expired lease does not prove that an admitted physical
+                # effect stopped. Quarantine that resource until reconciliation
+                # establishes a terminal result; never retry by inventing a new ID.
+                unresolved = self.db.execute(
+                    "SELECT progress_json FROM operations WHERE resource_key=? AND kind!='sentra.machine.observation' "
+                    "AND state IN ('STARTING','RUNNING','WAITING_EXTERNAL',"
+                    "'CANCEL_REQUESTED','UNCERTAIN')", (scope,),
+                ).fetchall()
+                if any(_load(row["progress_json"], {}).get("effect_started") is True
+                       for row in unresolved):
+                    raise DurableStateConflict("machine effect requires reconciliation")
+                now = self.clock()
+                lease = self.db.execute(
+                    "SELECT * FROM leases WHERE resource_key=?", (scope,)
+                ).fetchone()
+                if lease is not None and float(lease["lease_until"]) > now:
+                    raise DurableStateConflict("resource already leased")
+                previous = self.db.execute(
+                    "SELECT fencing_token FROM lease_fences WHERE resource_key=?",
+                    (scope,),
+                ).fetchone()
+                token = max(
+                    int(lease["fencing_token"]) if lease is not None else 0,
+                    int(previous["fencing_token"]) if previous is not None else 0,
+                ) + 1
+                self.db.execute(
+                    "INSERT INTO operations(operation_id,run_id,owner,idempotency_key,"
+                    "kind,state,readiness,progress_json,started_at,updated_at,"
+                    "heartbeat_at,cleanup_policy,intent_sha256,resource_key,fencing_token)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (oid, run_id, owner, key, kind, "STARTING", "UNKNOWN", _json(context),
+                     now, now, now, "manual", intent_sha256, scope, token),
+                )
+                self.db.execute(
+                    "INSERT INTO lease_fences(resource_key,fencing_token) VALUES(?,?) "
+                    "ON CONFLICT(resource_key) DO UPDATE SET fencing_token=excluded.fencing_token",
+                    (scope, token),
+                )
+                self.db.execute(
+                    "INSERT INTO leases(resource_key,run_id,operation_id,owner,"
+                    "fencing_token,lease_until,updated_at) VALUES(?,?,?,?,?,?,?) "
+                    "ON CONFLICT(resource_key) DO UPDATE SET "
+                    "run_id=excluded.run_id,operation_id=excluded.operation_id,"
+                    "owner=excluded.owner,fencing_token=excluded.fencing_token,"
+                    "lease_until=excluded.lease_until,updated_at=excluded.updated_at",
+                    (scope, run_id, oid, owner, token, now + ttl_s, now),
+                )
+                self._append_event_locked(
+                    run_id, "MACHINE_INTENT_RESERVED", operation_id=oid,
+                    state="STARTING", payload={
+                        "kind": kind, "intent_sha256": intent_sha256,
+                        "resource_key": scope, "fencing_token": token,
+                    },
+                )
+                self.db.commit()
+                result = {
+                    "status": "RESERVED", "operation_id": oid,
+                    "run_id": run_id, "owner": owner,
+                    "intent_sha256": intent_sha256,
+                    "resource_key": scope, "fencing_token": token,
+                }
+            except BaseException:
+                self.db.rollback()
+                raise
+            self._project_locked(run_id)
+            return result
+
+    def begin_machine_effect(
+        self, operation_id: str, owner: str, *, intent_sha256: str,
+        resource_key: str, fencing_token: int,
+    ) -> dict[str, Any]:
+        """Durably mark the physical boundary immediately before provider I/O.
+
+        The caller also holds the resource's OS lock. The transaction verifies
+        the exact operation AND current lease, so a lease from another operation
+        cannot authorize this process. No unbound legacy operation is accepted.
+        """
+        with self.lock:
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                self._verify_fence_locked(resource_key, fencing_token)
+                row = self._operation_row(operation_id, owner)
+                lease = self.db.execute(
+                    "SELECT * FROM leases WHERE resource_key=?", (resource_key,),
+                ).fetchone()
+                if (row["intent_sha256"] != intent_sha256
+                        or row["resource_key"] != resource_key
+                        or row["fencing_token"] != fencing_token
+                        or row["state"] != "RUNNING"
+                        or lease["operation_id"] != operation_id
+                        or lease["owner"] != owner
+                        or self._run_row(row["run_id"], owner)["state"] != "RUNNING"):
+                    raise StaleFenceError("physical effect binding is no longer active")
+                progress = _load(row["progress_json"], {})
+                first = progress.get("effect_started") is not True
+                progress["effect_started"] = True
+                progress["effect_boundary"] = "central-os-lock-v1"
+                now = self.clock()
+                self.db.execute(
+                    "UPDATE operations SET progress_json=?,updated_at=?,heartbeat_at=? "
+                    "WHERE operation_id=?", (_json(progress), now, now, operation_id),
+                )
+                if first:
+                    self._append_event_locked(
+                        row["run_id"], "MACHINE_PHYSICAL_EFFECT_STARTED",
+                        operation_id=operation_id, state="RUNNING",
+                        payload={"resource_key": resource_key, "fencing_token": fencing_token},
+                    )
+                self.db.commit()
+            except BaseException:
+                self.db.rollback()
+                raise
+            return self._operation_info_locked(self._operation_row(operation_id, owner))
+
     def create_operation(
         self,
         run_id: str,
@@ -1285,7 +1478,11 @@ class DurableRunService:
         target = Path(path).resolve()
         if not target.is_file():
             raise FileNotFoundError("artifact file does not exist")
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()
+        checksum = hashlib.sha256()
+        with target.open("rb") as artifact_stream:
+            for chunk in iter(lambda: artifact_stream.read(1024 * 1024), b""):
+                checksum.update(chunk)
+        digest = checksum.hexdigest()
         if expected_sha256 is not None and digest!=expected_sha256:
             raise ValueError("artifact content does not match expected SHA-256")
         size = target.stat().st_size
@@ -1911,6 +2108,38 @@ class DurableRunService:
                     "total": total, "next_offset": next_offset if next_offset < total else None,
                 },
             }
+
+    def list_operations(self, run_id: str, owner: str, *, offset: int = 0,
+                        limit: int = 100, states: list[str] | None = None) -> dict[str, Any]:
+        """Bounded operation metadata; result bodies stay behind artifact reads."""
+        if type(offset) is not int or offset < 0 or type(limit) is not int or not 1 <= limit <= 1000:
+            raise ValueError("invalid operation page")
+        if states is not None and (not isinstance(states,list) or not states or
+                                  any(not isinstance(s,str) or s not in OPERATION_STATES for s in states)):
+            raise ValueError("invalid operation states")
+        with self.lock:
+            self._run_row(run_id,owner)
+            where="run_id=?";values=[run_id]
+            if states:
+                where+=" AND state IN ("+",".join("?" for _ in states)+")";values.extend(states)
+            total=int(self.db.execute("SELECT COUNT(*) FROM operations WHERE "+where,values).fetchone()[0])
+            counts={row["state"]:row["total"] for row in self.db.execute(
+                "SELECT state,COUNT(*) total FROM operations WHERE run_id=? GROUP BY state",(run_id,))}
+            rows=self.db.execute("SELECT operation_id,run_id,kind,state,readiness,started_at,updated_at,"
+                "json_extract(progress_json,'$.work_item_id') work_item_id,"
+                "json_extract(progress_json,'$.principal_id') principal_id,"
+                "json_extract(progress_json,'$.machine_id') machine_id,"
+                "json_extract(progress_json,'$.capability_id') capability_id,"
+                "json_extract(progress_json,'$.effect_started') effect_started "
+                "FROM operations WHERE "+where+" ORDER BY updated_at DESC,operation_id LIMIT ? OFFSET ?",
+                (*values,limit,offset)).fetchall()
+            items=[dict(row) for row in rows]
+            for item in items:
+                item["effect_started"]=item["effect_started"]==1
+                item["terminal"]=item["state"] in TERMINAL_OPERATION_STATES
+            next_offset=offset+len(items)
+            return {"items":items,"state_counts":counts,"page":{"offset":offset,"limit":limit,
+                "returned":len(items),"total":total,"next_offset":next_offset if next_offset<total else None}}
 
     def run_status(self, run_id: str, owner: str, *, include_details: bool = True) -> dict[str, Any]:
         with self.lock:

@@ -28,5 +28,7 @@ def test_remote_agent_resource_manifest_is_scheduler_friendly():
     assert node["state"] == "ONLINE"
     assert node["capabilities"]["remote_node"] is True
     assert node["capabilities"]["process_mode"] == "workspace"
+    assert node["capabilities"]["profile"] == "Developer"
+    assert node["capabilities"]["access_scope"] == "workspace"
     assert node["capabilities"]["mcp_tool_count"] == 90
     assert node["labels"]["agent_name"] == "worker-a"

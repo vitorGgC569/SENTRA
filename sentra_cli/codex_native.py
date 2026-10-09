@@ -85,9 +85,12 @@ def generate(config,messages,model,delivery,*,usage_callback=None):
             "SENTRA will execute those directives using its own durable journal. "
             "The JSON below is the complete ordered conversation context.\n"+
             json.dumps(messages,ensure_ascii=False))
+    effort=config.reasoning_effort
+    if effort not in {"low","medium","high","xhigh"}:
+        raise NativeModelError("unsupported Codex reasoning effort")
     command=[str(executable),"exec","--ignore-user-config","--ephemeral","--json",
              "--sandbox","read-only","--skip-git-repo-check","-C",str(config.workspace),
-             "-c",'approval_policy="never"',"-c",'model_reasoning_effort="low"']
+             "-c",'approval_policy="never"',"-c",f'model_reasoning_effort="{effort}"']
     if suffix!="current":command.extend(["--model",suffix])
     command.append("-")
     ident="sentra-codex-"+uuid.uuid4().hex
@@ -112,7 +115,7 @@ def generate(config,messages,model,delivery,*,usage_callback=None):
         delivery("codex-cli",ident,"completed")
         try:
             EventJournal(config.state_root).append("cli","model.codex.completed","ok",
-                {"turn_id":ident,"native_thread_id":native_thread,"model":model,"usage":usage},correlation_id=ident)
+                {"turn_id":ident,"native_thread_id":native_thread,"model":model,"effort":effort,"usage":usage},correlation_id=ident)
         except Exception:pass # Protected conversation remains authoritative.
         return text
     except BaseException:

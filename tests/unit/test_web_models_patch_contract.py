@@ -38,7 +38,7 @@ def test_upstream_patch_applies_to_pinned_clean_checkout() -> None:
         capture_output=True, text=True, check=True,
     ).stdout.strip() == ""
     applied = subprocess.run(
-        ["git", "-C", str(checkout), "apply", "--check", str(patch)],
+        ["git", "-C", str(checkout), "apply", "--check", "--unidiff-zero", str(patch)],
         capture_output=True, text=True,
     )
     assert applied.returncode == 0, applied.stderr or applied.stdout
@@ -85,3 +85,17 @@ def test_sentra_managed_web_models_have_one_mcp_owner() -> None:
     assert 'const { embeddedRuntimeInvocation, runtimeInvocation } = require("./runtime-command.cjs");' in patch_text
     assert 'if (sentraManagedHarness()) {' in patch_text
     assert 'return embeddedRuntimeInvocation({' in patch_text
+
+    supervisor_patch = patch_text.split(
+        "diff --git a/launcher/electron/runtime-supervisor.cjs "
+        "b/launcher/electron/runtime-supervisor.cjs",
+        1,
+    )[1].split("diff --git a/launcher/src/App.tsx b/launcher/src/App.tsx", 1)[0]
+    runtime_command_patch = supervisor_patch.split(
+        "runtimeCommand(args) {",
+        1,
+    )[1].split("return this.runtimeInvocationFactory({", 1)[0]
+    assert "if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();" in runtime_command_patch
+    assert "+    if (sentraManagedHarness()) {" in runtime_command_patch
+    assert "+      return embeddedRuntimeInvocation({" in runtime_command_patch
+    assert "@@ -554,0 +562,7 @@" not in supervisor_patch

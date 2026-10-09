@@ -304,3 +304,65 @@ def test_real_single_cli_recruits_two_workers_dispatches_and_preserves_history(t
         assert len(restored.store.list_resources("agents",ws))==3
         assert len(restored.graph.handoffs(ws))==2
     finally:restored.shutdown()
+
+def test_canvas_handoff_receipts_are_destination_bound_and_idempotent(scoped):
+    app, ws, coordinator, coordinator_token, call = scoped
+    worker = call("create_agent", "receipt_worker|sentra/model", "add-receipt-worker")
+    node = worker["node_id"]
+    request = call("dispatch", node + "|receipt ping", "receipt-ping")
+    assert request["status"] == "sent"
+    worker_token = next(token for token, (_, ident) in app._agent_tokens.items()
+                        if ident == worker["resource"]["terminal_id"])
+    workspace = app.store.workspace(ws)["path"]
+
+    def receipt(token, action, **kwargs):
+        return app.agent_control(token, {"workspace": workspace, "action": action, **kwargs})
+
+    assert receipt(coordinator_token, "claim", value="receipt ping") == {"status":"not_found"}
+    with pytest.raises(PermissionError):
+        receipt(coordinator_token, "receipt", handoff_id=request["id"],
+                receipt_status="answered")
+    assert receipt(worker_token, "claim", value="not this message") == {"status":"not_found"}
+    first = receipt(worker_token, "claim", value="receipt ping")
+    assert first["id"] == request["id"] and first["receipt_status"] == "running"
+    assert receipt(worker_token, "claim", value="receipt ping") == {"status":"not_found"}
+    acknowledged = receipt(worker_token, "receipt", handoff_id=request["id"],
+                           receipt_status="answered")
+    assert acknowledged["receipt_status"] == "answered"
+    assert not acknowledged["idempotent_replay"]
+    assert receipt(worker_token, "receipt", handoff_id=request["id"],
+                   receipt_status="answered")["idempotent_replay"]
+    with pytest.raises(ValueError):
+        receipt(worker_token, "receipt", handoff_id=request["id"],
+                receipt_status="failed")
+    observed = call("check", node)
+    assert observed["handoffs"][0]["receipt_status"] == "answered"
+    assert app.graph.handoffs(ws)[0]["receipt_status"] == "answered"
+
+
+def test_canvas_handoff_running_receipt_becomes_uncertain_on_recovery(scoped):
+    app,ws,coordinator,token,call = scoped
+    worker=call("create_agent","recovery_worker|sentra/model","recovery-worker")
+    request=call("dispatch",worker["node_id"]+"|need receipt","recovery-dispatch")
+    target_token=next(t for t,(_,ident) in app._agent_tokens.items()
+                      if ident==worker["resource"]["terminal_id"])
+    ws_path=app.store.workspace(ws)["path"]
+    receipt=app.agent_control(target_token,{"workspace":ws_path,"action":"claim",
+                                           "value":"need receipt"})
+    assert receipt["id"]==request["id"]
+    app.graph.recover_handoffs([ws])
+    assert app.graph.handoffs(ws)[0]["receipt_status"]=="uncertain"
+    with pytest.raises(ValueError):
+        app.agent_control(target_token,{"workspace":ws_path,"action":"receipt",
+                                        "handoff_id":request["id"],"receipt_status":"answered"})
+
+def test_terminal_exit_marks_unconfirmed_web_handoff_uncertain(scoped):
+    app,ws,_,_,call=scoped
+    worker=call("create_agent","interrupt_worker|sentra/model","interrupt-worker")
+    delivery=call("dispatch",worker["node_id"]+"|unconfirmed work","interrupt-dispatch")
+    assert app.graph.handoffs(ws)[0]["receipt_status"]=="pending"
+    app.terminal_close(ws,worker["resource"]["terminal_id"])
+    h=app.graph.handoffs(ws)[0]
+    assert h["id"]==delivery["id"]
+    assert h["status"]=="sent"
+    assert h["receipt_status"]=="uncertain"

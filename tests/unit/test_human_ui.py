@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 
+from sentra_remote.human_desktop import HumanAPI
 from sentra_remote.human_store import HumanStore
 from sentra_remote.human_worker import WorkerLease
 from sentra_remote.product import ProductPaths, ProductSettings, list_tasks
@@ -152,6 +154,33 @@ def test_worker_lease_reclaims_invalid_pid(tmp_path: Path) -> None:
     assert lease.acquire() is True
     lease.release()
     assert not path.exists()
+
+
+def test_worker_lease_preserves_fresh_initializing_file(tmp_path: Path) -> None:
+    path = tmp_path / "worker.pid"
+    path.write_text("", encoding="ascii")
+
+    lease = WorkerLease(path)
+
+    assert lease.acquire() is False
+    assert path.exists()
+    assert path.read_text(encoding="ascii") == ""
+
+
+def test_human_api_does_not_spawn_duplicate_worker(tmp_path: Path, monkeypatch) -> None:
+    _store_obj, paths, _workspace = _store(tmp_path)
+    lease_path = paths.state_dir / "human-worker.pid"
+    lease_path.write_text(str(os.getpid()), encoding="ascii")
+
+    api = HumanAPI.__new__(HumanAPI)
+    api.paths = paths
+
+    def fail_spawn(*_args, **_kwargs):
+        raise AssertionError("duplicate worker spawn")
+
+    monkeypatch.setattr("sentra_remote.human_desktop.subprocess.Popen", fail_spawn)
+
+    assert api.ensure_worker() == {"ok": True, "spawned": False}
 
 
 def test_release_payload_includes_human_ui_binaries() -> None:

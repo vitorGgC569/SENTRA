@@ -113,3 +113,21 @@ def test_provider_error_retries_then_succeeds():
 
 def _fail():
     return AgentResponse(content="", success=False, error="boom")
+
+
+def test_planner_preserves_composition_metadata():
+    task = _task(1)
+    task.update({
+        "provides": [{"name": "api.user", "schema_version": "2"}],
+        "requires": [{"name": "db.user", "schema_version": "1"}],
+        "milestone": "accounts",
+        "task_type": "backend",
+    })
+    planner, _ = _planner([{"tasks": [task]}])
+    planned = __import__("asyncio").run(
+        planner.plan(run_id="R", objective="obj")
+    )[0]
+    assert planned.metadata["provides"] == task["provides"]
+    assert planned.metadata["requires"] == task["requires"]
+    assert planned.metadata["milestone"] == "accounts"
+    assert planned.metadata["task_type"] == "backend"

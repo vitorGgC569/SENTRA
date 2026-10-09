@@ -113,6 +113,24 @@ def test_progress_respects_absolute_cap():
     store.close()
 
 
+def test_queue_wait_does_not_consume_execution_budget():
+    now = [2500.0]
+    store = JobStore(clock=lambda: now[0])
+    jid = store.submit(ChatJob(task_id="T-queue", prompt="hi", timeout_s=60))
+    now[0] = 2620.0
+    assert store.result(jid) is None
+    assert store.counts()["queued"] == 1
+
+    leased = store.poll("TAB-1")
+    assert leased is not None
+    assert leased["deadline"] == pytest.approx(2680.0)
+    now[0] = 2681.0
+    result = store.result(jid)
+    assert result["status"] == "FAILED"
+    assert "WORKER_LOST" in (result["error"] or "")
+    store.close()
+
+
 def test_orphan_safe_requeues_once_then_fails(monkeypatch):
     monkeypatch.setattr(JobStore, "LEASE_WINDOW_S", 120.0)
     monkeypatch.setattr(JobStore, "PROGRESS_WINDOW_S", 120.0)
@@ -270,3 +288,91 @@ def test_browser_action_validation_is_bounded_and_allowlisted() -> None:
             browser_action="extract",
         ).validate()
 
+
+
+def test_extension_bootstrap_pairs_without_bearer_in_bootstrap_file(tmp_path):
+    import shutil
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent.parent / "edge_extension"
+    extension = tmp_path / "edge_extension"
+    shutil.copytree(source, extension)
+
+    server = RelayServer(port=0, extension_dir=str(extension)).start()
+    base = f"http://127.0.0.1:{server.server.server_port}"
+    try:
+        bootstrap = json.loads(
+            (extension / "sentra-bootstrap.json").read_text(encoding="utf-8")
+        )
+        encoded = json.dumps(bootstrap, sort_keys=True)
+        assert "token" not in bootstrap
+        assert server.token not in encoded
+        assert bootstrap["schema_version"] == 1
+        assert len(bootstrap["proof"]) == 64
+
+        request = urllib.request.Request(
+            base + "/auth/bootstrap",
+            data=json.dumps(bootstrap).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "chrome-extension://" + ("a" * 32),
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request) as response:
+            paired = json.load(response)
+        assert paired["ok"] is True
+        assert paired["token"] == server.token
+
+        check = urllib.request.Request(
+            base + "/auth/check",
+            headers={"Authorization": "Bearer " + paired["token"]},
+        )
+        with urllib.request.urlopen(check) as response:
+            assert json.load(response)["ok"] is True
+
+        bad = dict(bootstrap)
+        bad["proof"] = "0" * 64
+        request = urllib.request.Request(
+            base + "/auth/bootstrap",
+            data=json.dumps(bad).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "chrome-extension://" + ("a" * 32),
+            },
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        assert error.value.code == 401
+
+        request = urllib.request.Request(
+            base + "/auth/bootstrap",
+            data=json.dumps(bootstrap).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        assert error.value.code == 403
+
+        request = urllib.request.Request(
+            base + "/auth/bootstrap",
+            data=json.dumps(bootstrap).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Origin": "https://malicious.example",
+            },
+            method="POST",
+        )
+        with pytest.raises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request)
+        assert error.value.code == 403
+
+        with urllib.request.urlopen(base + "/health") as response:
+            health = json.load(response)
+        assert health["bootstrap"]["successes"] == 1
+        assert health["bootstrap"]["failures"] == 3
+        assert health["bootstrap"]["last_seen"] is not None
+    finally:
+        server.stop()

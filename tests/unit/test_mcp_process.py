@@ -62,6 +62,35 @@ def _sleep_command(seconds: float = 30.0) -> list[str]:
     return [sys.executable, "-u", "-c", f"import time; time.sleep({seconds})"]
 
 
+def test_process_environment_strips_credentials_and_auth_helpers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    service = _service(tmp_path)
+    monkeypatch.setenv("SENTRA_SAFE_TEST_VALUE", "visible")
+    monkeypatch.setenv("GITHUB_PAT", "must-not-leak")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "must-not-leak")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "C:/secret.json")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "agent.sock")
+    monkeypatch.setenv("HTTPS_PROXY", "https://user:password@example.invalid")
+    monkeypatch.setenv("SERVICE_DSN", "postgres://secret")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+
+    clean = service._sanitized_environment()
+
+    assert clean["SENTRA_SAFE_TEST_VALUE"] == "visible"
+    for name in (
+        "GITHUB_PAT",
+        "AWS_ACCESS_KEY_ID",
+        "GOOGLE_APPLICATION_CREDENTIALS",
+        "SSH_AUTH_SOCK",
+        "HTTPS_PROXY",
+        "SERVICE_DSN",
+        "GIT_CONFIG_COUNT",
+    ):
+        assert name not in clean
+
+
 def test_persistent_stdio_echo_and_string_command(tmp_path: Path) -> None:
     service = _service(tmp_path)
     code = "import sys\nfor line in sys.stdin:\n print('E:' + line.rstrip('\\n'), flush=True)"

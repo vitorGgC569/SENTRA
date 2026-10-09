@@ -145,3 +145,38 @@ async def test_model_cannot_change_fixed_test_harness(tmp_path, client):
     assert not evidence['all_passed']
     assert 'PATCH_SCOPE_DENIED' in evidence['results'][0]['stderr']
     assert client == []
+
+
+def test_registered_build_uses_real_windows_builder_when_available(tmp_path):
+    builder = tmp_path / "scripts" / "commander" / "build_windows.py"
+    builder.parent.mkdir(parents=True)
+    builder.write_text("print('builder')\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    runner = CommandRunner(tmp_path)
+    if sys.platform.startswith("win"):
+        command = runner.resolve_command("[[BUILD]]")
+        assert command == [
+            runner._python(),
+            str(builder.resolve()),
+            "--clean-output",
+            "--phase",
+            "all",
+        ]
+    else:
+        with pytest.raises(
+            PermissionError,
+            match="registered Windows build requires a Windows host",
+        ):
+            runner.resolve_command("[[BUILD]]")
+
+
+def test_registered_typecheck_uses_ci_baseline_when_present(tmp_path):
+    baseline = tmp_path / "scripts" / "check_mypy_baseline.py"
+    baseline.parent.mkdir(parents=True)
+    baseline.write_text("raise SystemExit(0)\n", encoding="utf-8")
+
+    runner = CommandRunner(tmp_path)
+    assert runner.resolve_command("[[TYPECHECK]]") == [
+        runner._python(),
+        str(baseline.resolve()),
+    ]

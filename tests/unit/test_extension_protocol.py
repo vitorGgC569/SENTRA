@@ -2,6 +2,7 @@
 import pytest
 
 from native_bridge.protocol import ChatJob, ChatResult
+from native_bridge.protocol import PRE_SEND_PHASES, PROGRESS_PHASES
 from native_bridge.host import encode_message, decode_messages
 
 
@@ -37,17 +38,31 @@ def test_continuation_requires_explicit_trusted_conversation_url():
 
 def test_relay_extension_version_endpoint(tmp_path):
     import json as _json
+    import shutil as _shutil
     import urllib.request as _url
     from native_bridge.relay import RelayServer
     from pathlib import Path as _P
-    ext = _P(__file__).resolve().parent.parent.parent / "edge_extension"
+    ext_source = _P(__file__).resolve().parent.parent.parent / "edge_extension"
+    ext = tmp_path / "edge_extension"
+    _shutil.copytree(ext_source, ext)
     server = RelayServer(port=18777, extension_dir=str(ext)).start()
     try:
+        bootstrap = ext / "sentra-bootstrap.json"
+        bootstrap.write_text('{"stale":true}\n', encoding="utf-8")
+
         with _url.urlopen("http://127.0.0.1:18777/extension/version") as r:
             data = _json.loads(r.read())
+
         manifest = _json.loads((ext / "manifest.json").read_text(encoding="utf-8"))
+        healed = _json.loads(bootstrap.read_text(encoding="utf-8"))
         assert data["version"] == manifest["version"]
         assert "service-worker.js" in data["files"]
+        assert data["bootstrap_refreshed"] is True
+        assert "token" not in data and "proof" not in data
+        assert healed["extension_version"] == manifest["version"]
+        assert healed["build_id"] == manifest["sentra_build_id"]
+        assert healed["source_hash"] == manifest["sentra_source_hash"]
+        assert len(healed["proof"]) == 64
     finally:
         server.stop()
 
@@ -68,9 +83,22 @@ def test_relay_submit_poll_result_wait_roundtrip():
 
         job_id = post("/jobs/submit", {"task_id": "T-1", "prompt": "hi", "timeout_s": 60})["job_id"]
         assert job_id.startswith("job_")
+        with _url.urlopen(_url.Request(
+            base + f"/jobs/wait?job_id={job_id}&timeout_s=0.01",
+            headers={"Authorization": "Bearer " + server.token},
+        )) as r:
+            queued = __import__("json").loads(r.read())
+        assert queued["pending"] is True and queued["state"] == "QUEUED"
         with _url.urlopen(_url.Request(base + "/jobs/poll?worker=TAB-1", headers={"Authorization": "Bearer " + server.token})) as r:
             polled = __import__("json").loads(r.read())["job"]
         assert polled["job_id"] == job_id and polled["task_id"] == "T-1"
+        with _url.urlopen(_url.Request(
+            base + f"/jobs/wait?job_id={job_id}&timeout_s=0.01",
+            headers={"Authorization": "Bearer " + server.token},
+        )) as r:
+            leased = __import__("json").loads(r.read())
+        assert leased["pending"] is True and leased["state"] == "LEASED"
+        assert leased["deadline"] == pytest.approx(polled["deadline"])
         post("/jobs/result", {"job_id": job_id, "task_id": "T-1", "status": "COMPLETED",
                               "result": "ok", "worker": "TAB-1", "lease_token": polled["lease_token"]})
         with _url.urlopen(_url.Request(base + f"/jobs/wait?job_id={job_id}&timeout_s=5", headers={"Authorization": "Bearer " + server.token})) as r:
@@ -79,6 +107,45 @@ def test_relay_submit_poll_result_wait_roundtrip():
         with _url.urlopen(base + "/health") as r:
             h = __import__("json").loads(r.read())
         assert h["submitted"] == 1 and h["completed"] == 1 and "TAB-1" in h["workers_online"]
+    finally:
+        server.stop()
+
+
+def test_extension_presence_heartbeat_is_independent_from_controller_workers():
+    import json as _json
+    import urllib.request as _url
+    from native_bridge.relay import RelayServer
+
+    server = RelayServer(port=18781).start()
+    try:
+        base = "http://127.0.0.1:18781"
+        req = _url.Request(
+            base + "/extension/heartbeat",
+            data=_json.dumps({
+                "status": {
+                    "sw_version": "1.6.51",
+                    "sw_build_id": "sentra-edge-1.6.51-durable-r26",
+                }
+            }).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + server.token,
+            },
+            method="POST",
+        )
+        with _url.urlopen(req) as response:
+            posted = _json.loads(response.read())
+
+        assert posted["ok"] is True
+        assert posted["extension"]["online"] is True
+
+        with _url.urlopen(base + "/health") as response:
+            health = _json.loads(response.read())
+
+        assert health["workers_online"] == []
+        assert health["extension"]["online"] is True
+        assert health["extension"]["last_seen"] is not None
+        assert health["extension"]["status"]["sw_version"] == "1.6.51"
     finally:
         server.stop()
 
@@ -158,6 +225,19 @@ def test_chat_start_and_collect_protocol_contract():
             kind="CHAT_COLLECT",
             conversation_url="https://chatgpt.com/c/abc-123",
         ).validate()
+
+
+    peek = ChatJob(
+        task_id="T-peek",
+        prompt="",
+        kind="CHAT_PEEK",
+        conversation_url="https://chatgpt.com/c/abc-123",
+        timeout_s=15,
+    )
+    peek.validate()
+    assert peek.new_chat is False
+    assert "peeking" in PROGRESS_PHASES
+    assert "peeking" in PRE_SEND_PHASES
 
 
 def test_browser_action_can_bootstrap_without_target_worker():
@@ -240,3 +320,71 @@ def test_native_framing_roundtrip_and_partial():
     partial = encode_message(m1)[:6]
     msgs, rest = decode_messages(partial)
     assert msgs == [] and rest == partial
+
+
+def test_gemini_job_contract_and_conversation_urls():
+    job = ChatJob(
+        task_id="T-gemini",
+        prompt="hello",
+        provider="gemini",
+        model="pro",
+        timeout_s=60,
+    )
+    job.validate()
+    assert job.provider == "gemini"
+    assert job.model == "pro"
+
+    followup = ChatJob(
+        task_id="T-gemini-follow",
+        prompt="continue",
+        provider="gemini",
+        model="flash",
+        new_chat=False,
+        conversation_url="https://gemini.google.com/app/abc_DEF-123",
+        timeout_s=60,
+    )
+    followup.validate()
+    assert followup.conversation_url == "https://gemini.google.com/app/abc_DEF-123"
+
+    result = ChatResult(
+        job_id="job_gemini",
+        task_id="T-gemini",
+        status="COMPLETED",
+        result="ok",
+        conversation_url="https://gemini.google.com/app/abc_DEF-123",
+    )
+    result.validate()
+    assert result.conversation_id == "abc_DEF-123"
+
+    with pytest.raises(ValueError, match="Gemini model"):
+        ChatJob(task_id="T", prompt="x", provider="gemini", model="unknown").validate()
+    with pytest.raises(ValueError, match="DELETE_CHAT"):
+        ChatJob(
+            task_id="T",
+            prompt="abc",
+            provider="gemini",
+            kind="DELETE_CHAT",
+            new_chat=False,
+        ).validate()
+    with pytest.raises(ValueError, match="ChatGPT conversation"):
+        ChatJob(
+            task_id="T",
+            prompt="x",
+            provider="chatgpt",
+            new_chat=False,
+            conversation_url="https://gemini.google.com/app/abc",
+        ).validate()
+
+
+def test_content_script_accepts_only_whitespace_normalization_for_prompt_match():
+    from pathlib import Path
+    source = (
+        Path(__file__).resolve().parent.parent.parent
+        / "edge_extension"
+        / "content-script.js"
+    ).read_text(encoding="utf-8")
+    start = source.index("function omaTextsMatch")
+    body = source[start: source.index("\n}", start) + 2]
+    assert 'replace(/\\s+/g, "")' in body
+    assert "nonWhitespace(a) === nonWhitespace(b)" in body
+    assert "non-whitespace" in body

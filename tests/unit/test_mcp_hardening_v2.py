@@ -263,6 +263,9 @@ def test_async_jobs_return_immediately_wait_result_and_cancel(tmp_path: Path) ->
         started_at = time.monotonic()
         job = jobs.start("TEST", "mcp:A", target="unit")
         assert time.monotonic() - started_at < 0.5
+        assert job["accepted"] is True
+        assert job["execution_mode"] == "detached"
+        assert job["result_ready"] is False
         early = jobs.wait(job["job_id"], "mcp:A", 0.02)
         assert early["state"] in {"PENDING", "RUNNING"}
         assert early["timed_out"] is True
@@ -294,6 +297,40 @@ def test_async_jobs_return_immediately_wait_result_and_cancel(tmp_path: Path) ->
         assert jobs.status(slow["job_id"], "mcp:A")["state"] == "CANCELLED"
         with pytest.raises(PermissionError):
             jobs.status(job["job_id"], "mcp:B")
+    finally:
+        jobs.close()
+
+
+def test_jobs_are_recoverable_by_same_authenticated_principal(tmp_path: Path) -> None:
+    config = _config(tmp_path, process_mode="unrestricted")
+    jobs = JobService(
+        config,
+        AuditLogger(config.audit_log),
+        _FakeRepository(),
+        db_path=tmp_path / ".sentra" / "jobs.sqlite3",
+    )
+    try:
+        job = jobs.start(
+            "TEST",
+            "session:old",
+            target="unit",
+            principal="local-operator",
+        )
+        recovered = jobs.status(
+            job["job_id"],
+            "session:new",
+            "local-operator",
+        )
+        assert recovered["job_id"] == job["job_id"]
+
+        listed = jobs.list_jobs(
+            "session:new",
+            principal="local-operator",
+        )
+        assert any(item["job_id"] == job["job_id"] for item in listed["items"])
+
+        with pytest.raises(PermissionError):
+            jobs.status(job["job_id"], "session:new", "different-principal")
     finally:
         jobs.close()
 
@@ -618,6 +655,10 @@ def test_edge_bridge_idle_is_visible_without_controller_tabs(
             "max_controller_tabs": 1,
             "pool_active": True,
             "workers_online": [],
+            "extension_online": False,
+            "extension_status": {},
+            "extension_last_seen": None,
+            "extension_age_s": None,
         }
         await service.shutdown()
 
@@ -891,3 +932,210 @@ def test_edge_open_reclaims_offline_orphan_before_lazy_bootstrap(
         ]
 
     asyncio.run(probe())
+
+
+def test_absolute_workspace_selector_uses_most_specific_broad_grant(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    broad = tmp_path / "broad"
+    nested = broad / "project"
+    primary.mkdir()
+    nested.mkdir(parents=True)
+
+    config = _config(primary, process_mode="unrestricted")
+    registry = WorkspaceRegistry(
+        config,
+        state_path=primary / ".sentra" / "workspaces.json",
+    )
+    data = {
+        "version": 2,
+        "access_scope": "user",
+        "grants": [
+            {
+                "workspace_id": "scope:broad",
+                "alias": "@user",
+                "path": str(broad.resolve()),
+                "permissions": ["read", "write", "execute"],
+                "scope": "permanent",
+                "owner": None,
+                "expires_at": None,
+                "source": "access_scope",
+                "created_at": 0.0,
+                "approved_at": 0.0,
+            },
+            {
+                "workspace_id": "ws:nested",
+                "alias": "nested-read",
+                "path": str(nested.resolve()),
+                "permissions": ["read"],
+                "scope": "permanent",
+                "owner": None,
+                "expires_at": None,
+                "source": "approved",
+                "created_at": 0.0,
+                "approved_at": 0.0,
+            },
+        ],
+        "pending": {},
+        "history": [],
+    }
+    registry.state_path.parent.mkdir(parents=True, exist_ok=True)
+    registry.state_path.write_text(json.dumps(data), encoding="utf-8")
+
+    # Read chooses the explicit nested grant.
+    read_view = registry.resolve(str(nested), "mcp:A", "read")
+    assert read_view["alias"] == "nested-read"
+
+    # Execute cannot use the read-only nested grant, so the broader approved
+    # access scope is selected.
+    execute_view = registry.resolve(str(nested), "mcp:A", "execute")
+    assert execute_view["alias"] == "@user"
+    process = ProcessService(config, workspaces=registry)
+    try:
+        cwd = process._resolve_cwd_in_workspace(
+            Path(str(execute_view["path"])),
+            str(nested),
+        )
+        assert cwd == nested.resolve()
+    finally:
+        process.shutdown()
+
+
+def test_research_parallel_preserves_partial_branch_evidence(tmp_path: Path) -> None:
+    class PartialBrowser(_FakeBrowser):
+        async def chat_collect(self, owner: str, conversation_url: str, *, timeout_s: int) -> dict:
+            if conversation_url.endswith("/fake-1"):
+                self.collect_attempts += 1
+                raise RuntimeError("permanent branch collection failure")
+            return await super().chat_collect(owner, conversation_url, timeout_s=timeout_s)
+
+    async def probe() -> None:
+        config = _config(tmp_path)
+        browser = PartialBrowser()
+        service = ResearchService(
+            config,
+            AuditLogger(config.audit_log),
+            browser,
+            db_path=tmp_path / ".sentra" / "research-partial.sqlite3",
+        )
+        run = await service.start(
+            "keep useful sibling evidence",
+            "mcp:A",
+            strategy="parallel",
+            temporary=False,
+            branches=2,
+            timeout_s=30,
+        )
+        done = await service.wait(run["run_id"], "mcp:A", 5)
+        assert done["state"] == "COMPLETED"
+        branches = [node for node in done["result"]["nodes"] if node["kind"] == "branch"]
+        assert len(branches) == 2
+        assert branches[0]["error"] == "permanent branch collection failure"
+        assert branches[1]["text"]
+        assert any(node["kind"] == "synthesis" for node in done["result"]["nodes"])
+        await service.close()
+
+    asyncio.run(probe())
+
+
+def test_research_all_failed_branches_return_partial_result(tmp_path: Path) -> None:
+    class FailedBrowser(_FakeBrowser):
+        async def chat_collect(self, owner: str, conversation_url: str, *, timeout_s: int) -> dict:
+            self.collect_attempts += 1
+            raise RuntimeError("permanent branch collection failure")
+
+    async def probe() -> None:
+        config = _config(tmp_path)
+        browser = FailedBrowser()
+        service = ResearchService(
+            config,
+            AuditLogger(config.audit_log),
+            browser,
+            db_path=tmp_path / ".sentra" / "research-all-failed.sqlite3",
+        )
+        run = await service.start(
+            "preserve failure evidence",
+            "mcp:A",
+            strategy="parallel",
+            temporary=False,
+            branches=2,
+            timeout_s=30,
+        )
+        done = await service.wait(run["run_id"], "mcp:A", 5)
+        assert done["state"] == "FAILED"
+        assert done["result"] is not None
+        assert done["result"]["partial"] is True
+        assert len(done["result"]["nodes"]) == 2
+        assert all(node["error"] for node in done["result"]["nodes"])
+        await service.close()
+
+    asyncio.run(probe())
+
+
+def test_workspace_approval_command_pins_registry_state_path(tmp_path: Path) -> None:
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    state = tmp_path / "private-state" / "workspaces.json"
+    primary.mkdir()
+    secondary.mkdir()
+    registry = WorkspaceRegistry(_config(primary), state_path=state)
+
+    requested = registry.request_add(
+        path=str(secondary),
+        owner="mcp:A",
+        alias="secondary",
+        permissions=("read",),
+        lifetime="permanent",
+    )
+
+    approval = requested["approval_required"]
+    assert approval["state_path"] == str(state)
+    assert f'--workspace-state "{state}"' in approval["command"]
+    assert requested["request_id"] in approval["command"]
+
+
+def test_process_docker_unavailable_is_structured_dependency_error() -> None:
+    from sentra_mcp.tools.process import _failure
+
+    response = _failure(RuntimeError("DOCKER_UNAVAILABLE: daemon is down"))
+    assert response.ok is False
+    assert response.error is not None
+    assert response.error.code == "docker_unavailable"
+    assert response.error.category == "dependency"
+    assert response.error.retryable is True
+
+
+def test_workspace_request_ids_are_safe_cli_positionals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    primary.mkdir()
+    secondary.mkdir()
+    config = _config(primary)
+    registry = WorkspaceRegistry(
+        config,
+        state_path=primary / ".sentra" / "workspaces.json",
+    )
+    monkeypatch.setattr(
+        "sentra_mcp.services.workspaces.secrets.token_urlsafe",
+        lambda _: "-looks-like-an-option",
+    )
+
+    requested = registry.request_add(
+        path=str(secondary),
+        owner="mcp:A",
+        alias="secondary",
+        permissions=("read",),
+        lifetime="session",
+    )
+    assert requested["request_id"] == "ws_-looks-like-an-option"
+    assert not requested["request_id"].startswith("-")
+    assert requested["approval_required"]["command"].endswith(
+        "approve-workspace ws_-looks-like-an-option"
+    )
+
+    registry.approve_local(requested["request_id"])
+    removed = registry.request_remove("secondary", "mcp:A")
+    assert removed["request_id"] == "ws_-looks-like-an-option"
+    assert not removed["request_id"].startswith("-")

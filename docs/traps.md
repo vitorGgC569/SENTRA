@@ -49,9 +49,9 @@
 ### 1.5 Content-script obsoleto em tabs abertas
 - **Sintoma:** reload da extensão não atualiza scripts de tabs já abertas.
 - **Causa:** injeção nova só ocorre em navegação/carregamento.
-- **Correção:** nosso fluxo sempre navega (`new_chat=true`) antes de operar, logo
-  recebe injeção fresca; `GET_STATUS` reporta `cs_version` para detectar desvio.
-- **Regra:** nunca opere tab "herdada" sem navegar primeiro (ou sem checar versão).
+- **Correção atual (1.6.52+):** o service worker consulta tabs ChatGPT existentes, valida o `recovery-guard` e reinjeta `recovery-guard.js` quando ausente/antigo.
+  O guard é idempotente, independe de OMA e o bridge expõe status/versão da extensão sem exigir controller ativo.
+- **Regra:** não force navegação só para atualizar o guard. Em tab herdada, valide identidade/status pelo bridge e falhe fechado se houver versão incompatível.
 
 ### 1.6 Controller não pode sequestrar a tab ativa nem criar tabs próprias
 - **Sintoma (quase-incidente):** um controller podia navegar a conversa ativa do usuário;
@@ -366,7 +366,7 @@
   clipboard real no composer → `images_attached` confirmado por job (0 =
   falha visível). Limites: sem canal de imagem não há QA visual de UI.
 - **Recarregar a extensão após update é obrigatório** (código novo não entra
-  sozinho; `edge://extensions` → recarregar; confira 1.4.0). Pasta renomeada?
+  sozinho; `edge://extensions` → recarregar; confira 1.6.52). Pasta renomeada?
   Remova o registro antigo e carregue o novo caminho — path morto dá
   "File path cannot be resolved".
 - **Headless Edge só escreve `--screenshot` em `.png`**: tmp de captura tem
@@ -404,3 +404,21 @@
   - Sem backend live: **falhar alto** (`BrowserSession.ask` levanta; provider live
     recus
 ...[truncated 911 chars]
+
+
+## 11. Revisão operacional de 28/09/2026
+
+- **Heartbeat da extensão ≠ controller ativo.** Desde 1.6.52, o service worker
+  reporta `extension.online` ao relay independentemente do pool de controllers.
+  `workers_online=[]` pode significar extensão saudável e ociosa; não classifique
+  isso sozinho como bridge morto.
+- **Catch silencioso tem semântica.** Falhas que podem perder estado durável,
+  lease/storage, reload/reinjeção, controller ou alarm devem incrementar
+  telemetria/erro. Probes DOM e cleanup realmente best-effort podem permanecer
+  fail-soft para não transformar ausência esperada de seletor em incidente.
+- **Tunnel local ready não prova credencial upstream.** `token_invalidated` é
+  `REAUTH_REQUIRED`, terminal para a chave atual. O supervisor não entra em
+  restart-loop; falhas transitórias usam grace period + backoff.
+- **Authority única.** Depois da primeira migração, `install_dir -> state_dir`
+  é persistido em registry fora do próprio state-root. Não volte a escolher
+  `repo\.sentra` versus `~\.sentra` por heurística em cada startup.

@@ -71,6 +71,8 @@ def test_runtime_config_safe_apply_and_privileged_offline_approval(tmp_path: Pat
     result = service.update({"max_read_bytes": 4096, "allowed_roots": [str(tmp_path)]})
     assert result["applied"]["max_read_bytes"] == 4096
     assert result["approval_required"]["request_id"]
+    assert result["approval_required"]["state_path"] == str(tmp_path / "config.json")
+    assert f'--state "{tmp_path / "config.json"}"' in result["approval_required"]["command"]
     pending = service.list_pending()["pending"]
     request_id = result["approval_required"]["request_id"]
     assert pending[request_id]["status"] == "PENDING"
@@ -234,7 +236,16 @@ def test_search_wait_screenshot_resource_and_tool_surfaces(tmp_path: Path) -> No
             assert "sentra_job_wait" in tools
             assert "sentra_request_workspace" in tools
             assert "sentra_read_document" in tools
-            assert len(tools) <= 60
+            assert {"sentra_governance", "sentra_coordination"} <= set(tools)
+            assert "sentra_oma_candidate_generate" in tools
+            assert {
+                "sentra_blueprint", "sentra_policy", "sentra_budget",
+                "sentra_plugin", "sentra_skill", "sentra_routine",
+            }.isdisjoint(tools)
+            # Capability v4 adds candidate generation plus two compact
+            # governance multiplexers to the prior developer surface budget.
+            assert "sentra_canvas" in tools
+            assert len(tools) <= 64
 
             started = await client.call_tool("sentra_start_search", {
                 "path": ".",
@@ -290,7 +301,15 @@ def test_default_surface_is_core_developer_browser_and_browser_owner_is_optional
             assert "sentra_usage_stats" not in tools
             assert "sentra_list_devices" not in tools
             assert "sentra_oma_health" not in tools
-            assert len(tools) < 75
+            assert {"sentra_governance", "sentra_coordination"} <= set(tools)
+            assert {
+                "sentra_blueprint", "sentra_policy", "sentra_budget",
+                "sentra_plugin", "sentra_skill", "sentra_routine",
+            }.isdisjoint(tools)
+            # Preserve the previous budget plus candidate generation and the
+            # two compact governance multiplexers.
+            assert "sentra_canvas" in tools
+            assert len(tools) <= 78
             schema = tools["sentra_browser_open"].input_schema
             assert "owner" in schema["properties"]
             assert "session_token" in schema["properties"]
@@ -301,6 +320,34 @@ def test_default_surface_is_core_developer_browser_and_browser_owner_is_optional
             assert set(backend["enum"]) == {"auto", "playwright", "edge"}
             shot = tools["sentra_browser_screenshot"].input_schema["properties"]
             assert shot["include_base64"]["default"] is False
+        await runtime.browser.shutdown()
+        runtime.search.close()
+        runtime.processes.shutdown()
+        runtime.remote_store.close()
+
+    asyncio.run(probe())
+
+
+def test_admin_surface_exposes_specialized_governance_wrappers(tmp_path: Path) -> None:
+    import asyncio
+    from mcp import Client
+    from sentra_mcp.server import SentraMCPServer
+
+    async def probe() -> None:
+        config = MCPConfig(
+            allowed_roots=(tmp_path,),
+            audit_log=tmp_path / ".sentra" / "audit.jsonl",
+            remote_store_path=tmp_path / ".sentra" / "remote.sqlite3",
+            tool_surfaces=("core", "admin"),
+        )
+        runtime = SentraMCPServer(config)
+        async with Client(runtime.mcp) as client:
+            tools = {tool.name for tool in (await client.list_tools()).tools}
+            assert {"sentra_governance", "sentra_coordination"} <= tools
+            assert {
+                "sentra_blueprint", "sentra_policy", "sentra_budget",
+                "sentra_plugin", "sentra_skill", "sentra_routine",
+            } <= tools
         await runtime.browser.shutdown()
         runtime.search.close()
         runtime.processes.shutdown()
@@ -481,3 +528,75 @@ def test_persistent_search_is_correlated_to_durable_operation_and_idempotent(
     finally:
         service.close()
         durable.close()
+
+
+def test_persistent_search_does_not_publish_success_when_durable_finalize_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    audit = AuditLogger(config.audit_log)
+    durable = DurableRunService(tmp_path / ".sentra")
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    service = SearchSessionService(
+        config,
+        audit,
+        durable=durable,
+        db_path=tmp_path / ".sentra" / "search-durable.sqlite3",
+    )
+    original_update = durable.update_operation
+
+    def fail_terminal(operation_id, owner, **kwargs):
+        if kwargs.get("state") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            raise RuntimeError("durable finalization unavailable")
+        return original_update(operation_id, owner, **kwargs)
+
+    monkeypatch.setattr(durable, "update_operation", fail_terminal)
+    try:
+        run = durable.create_run("test-session", workspace="root:0")
+        started = service.start(
+            ".",
+            "alpha",
+            owner="test-session",
+            search_type="content",
+            run_id=run["run_id"],
+            idempotency_key="search-finalize-failure",
+        )
+        deadline = time.monotonic() + 5
+        page = {}
+        while time.monotonic() < deadline:
+            page = service.get_results(started["search_id"], "test-session", 0, 10)
+            if page["state"] not in {"RUNNING", "CANCELLING"}:
+                break
+            time.sleep(0.02)
+
+        assert page["state"] == "INTERRUPTED"
+        assert "reconcile before replay" in page["error"]
+        operation = durable.operation_status(started["operation_id"], "test-session")
+        assert operation["state"] == "RUNNING"
+    finally:
+        service.close()
+        durable.close()
+
+
+def test_runtime_config_request_ids_are_safe_cli_positionals(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = RuntimeConfigService(
+        lambda: {},
+        lambda changes: dict(changes),
+        state_path=tmp_path / "config.json",
+    )
+    monkeypatch.setattr(
+        "sentra_mcp.services.runtime_config.secrets.token_urlsafe",
+        lambda _: "-looks-like-an-option",
+    )
+
+    result = service.update({"allowed_roots": [str(tmp_path)]})
+    approval = result["approval_required"]
+    assert approval["request_id"] == "cfg_-looks-like-an-option"
+    assert not approval["request_id"].startswith("-")
+    assert approval["command"].endswith(
+        "approve-config cfg_-looks-like-an-option"
+    )

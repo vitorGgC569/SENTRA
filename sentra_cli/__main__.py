@@ -47,6 +47,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Primary SENTRA model",
     )
     parser.add_argument(
+        "--effort",choices=("low","medium","high","xhigh"),
+        default=os.environ.get("SENTRA_CLI_REASONING_EFFORT","low").strip().lower(),
+        help="Codex reasoning effort (low, medium, high, xhigh)",
+    )
+    parser.add_argument(
         "--fallback-model",
         default=os.environ.get("SENTRA_CLI_FALLBACK_MODEL", "gpt-4o"),
         help="Direct OpenAI fallback model when configured",
@@ -267,6 +272,7 @@ def main(argv: list[str] | None = None) -> int:
     config = CLIConfig(
         workspace=workspace,
         model=args.model,
+        reasoning_effort=args.effort,
         fallback_model=args.fallback_model,
         gateway_url=args.gateway_url,
         timeout_s=args.timeout,

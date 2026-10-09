@@ -164,6 +164,17 @@ As tools de repositório reutilizam `repository.CommandGateway` e aceitam um sel
 
 `sentra_request_allowed_root` permanece somente como alias de compatibilidade para um grant permanente `read+write+execute`. Grants `session` pertencem ao `session_token` da conversa; TTL expira automaticamente; roots aninhados usam o root mais específico. `workspace_id` é estável (`config:N`/`ws:...`), enquanto `root:N` é apenas um selector efêmero.
 
+### Maestri canvas
+
+- `sentra_maestri(action="status"|"list")` descobre automaticamente o Maestri ativo, named pipe, workspace e terminal manager;
+- `recruit` cria/reutiliza um terminal; sem preset/comando explícito, usa `.\\sentra-cli.cmd`;
+- `send` envia prompt + Enter atomicamente; `check` lê a saída atual;
+- `connect` conecta dois terminais/agentes;
+- `dismiss` exige `confirm=true` e recusa fechar o manager por padrão;
+- ações mutáveis participam de Durable Run/idempotência quando `idempotency_key` é fornecida.
+
+A integração não depende das variáveis `MAESTRI_*` herdadas por um terminal: o MCP localiza o CLI instalado, o workspace ativo em `~/.maestri` e valida o pipe `maestri-*` vivo antes de executar efeitos colaterais.
+
 ### Jobs assíncronos
 
 - `sentra_test_start`

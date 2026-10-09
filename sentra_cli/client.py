@@ -1149,6 +1149,34 @@ class ModelClient:
         return result
 
     @staticmethod
+    def _stream_failure_detail(event: dict[str, Any]) -> tuple[str, bool]:
+        """Extract the compact Responses failure, preserving pre-send certainty.
+
+        A response.failed SSE event nests its structured error inside response;
+        rendering the entire event as str(dict) leaked IDs and made actionable
+        account/model failures look like transport outages.
+        """
+        error = event.get("error")
+        if not isinstance(error, dict):
+            response = event.get("response")
+            error = response.get("error") if isinstance(response, dict) else None
+        if not isinstance(error, dict):
+            return "Web response failed without structured error details", False
+        code = str(error.get("code") or "").strip()
+        message = str(error.get("message") or error.get("type") or "model failure").strip()
+        detail = f"{code}: {message}" if code else message
+        # Only explicit browser preflight errors, known to occur before send,
+        # can be reported as rejected rather than uncertain delivery.
+        pre_submission_codes = {
+            "chatgpt_model_controls_unavailable",
+            "chatgpt_effort_unavailable",
+            "chatgpt_effort_locked",
+            "model_version_unavailable",
+        }
+        rejected = event.get("type") == "response.failed" and code in pre_submission_codes
+        return detail[:900], rejected
+
+    @staticmethod
     def _extract_response_text(response: dict[str, Any]) -> str:
         pieces: list[str] = []
         for item in response.get("output") or []:
@@ -1291,10 +1319,8 @@ class ModelClient:
                                 emitted = True
                                 yield text
                     elif event_type in {"response.failed", "error"}:
-                        detail = data.get("error") or data
-                        raise ProviderHTTPError(
-                            "gateway", None, str(detail)[:1000]
-                        )
+                        detail, rejected = self._stream_failure_detail(data)
+                        raise ProviderHTTPError("gateway", 400 if rejected else None, detail)
             if not emitted:
                 raise ProviderHTTPError(
                     "gateway", None, "response completed without output text"
@@ -1302,8 +1328,12 @@ class ModelClient:
             if not completed:
                 raise ProviderHTTPError("gateway", None, "response stream ended before completion")
             self._delivery("gateway", turn_id, "completed")
-        except ProviderHTTPError:
-            self._delivery("gateway", turn_id, "uncertain")
+        except ProviderHTTPError as exc:
+            self._delivery(
+                "gateway",
+                turn_id,
+                "rejected" if exc.status == 400 and not emitted else "uncertain",
+            )
             raise
         except Exception as exc:
             self._delivery("gateway", turn_id, "uncertain")

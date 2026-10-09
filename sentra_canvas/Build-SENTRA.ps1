@@ -5,7 +5,12 @@ if (-not $Output) { $Output = Join-Path $Root '.sentra\canvas\native-next' }
 $Builder = Join-Path $Root 'scripts\commander\build_canvas.py'
 Push-Location $Root
 try {
-    & python $Builder --dist $Output
+    # PyInstaller logs normal progress to stderr; Windows PowerShell 5 maps
+    # native stderr to non-terminating ErrorRecords. Preserve exit-code checks.
+    $NativeErrorPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { & python $Builder --dist $Output }
+    finally { $ErrorActionPreference = $NativeErrorPreference }
     if ($LASTEXITCODE -ne 0) { throw "Canvas builder returned exit code $LASTEXITCODE" }
     $Exe = Join-Path $Output 'sentra-canvas.exe'
     $File = Get-Item $Exe

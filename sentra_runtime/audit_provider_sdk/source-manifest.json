@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "kind": "owned-client-sdk-only",
+  "services_started": false,
+  "build_and_runtime_acceptance": "pending final coordinated validation",
+  "toolchain": "go1.27.1",
+  "sources": {
+    "nats-server": {"path": "third_party/nats-server", "head": "6af2d22525d55f08ea72812e799b0397e1cf06f1", "client_module": "github.com/nats-io/nats.go", "client_version": "v1.53.1"},
+    "tessera": {"path": "third_party/tessera", "head": "0489e17418aa6f6a3acf692d45e03102eeb2b3e5", "client_module": "github.com/transparency-dev/tessera", "api_profile": "tessera-conformance-add-tiles-v1"},
+    "immudb": {"path": "third_party/immudb", "head": "bfdce03649f52d575be46f74425fd18eaf4fa69c", "client_module": "github.com/codenotary/immudb", "api_profile": "schema.ImmuService native gRPC; full dual/linear-advance/inclusion proofs"}
+  },
+  "deployment_prerequisites": [
+    "Operator-built SDK binary, reviewed go.sum and pinned binary SHA256",
+    "Existing TLS NATS account, JetStream file-backed bounded stream and pull durable consumer",
+    "Native Tessera add/tiles deployment behind authenticated HTTPS; signed log checkpoint and independent witness quorum",
+    "Existing immudb database/account/TLS, pinned server UUID and ECDSA state-signing public key",
+    "Operator-approved initial checkpoints/state; callback credentials; protected DPAPI/keyring storage"
+  ],
+  "explicit_limits": [
+    "No broker/IdP/log/database is manufactured by this bridge",
+    "No transport notification creates or dispatches SENTRA Run/WorkItem/Operation/grant",
+    "PubAck does not prove an executed machine effect",
+    "Inclusion and signed state do not prove complete effect coverage",
+    "No speculative resend after lost append/transaction response",
+    "Transaction export supports one-entry audit records and does not restore all SENTRA artifacts"
+  ]
+}

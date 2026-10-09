@@ -64,7 +64,10 @@ def apply_patch(workspace: Path, patch_text: str) -> str:
         if not files:
             return "Error: No valid file patches found in diff"
         result = PatchManager.apply_patch(workspace, patch_text)
-        return f"Patch applied successfully: modified {len(files)} file(s)"
+        if not isinstance(result, dict) or result.get("success") is not True:
+            detail = result.get("error") if isinstance(result, dict) else "invalid patch result"
+            return f"Patch application failed: {detail or 'patch was not applied'}"
+        return f"Patch applied successfully: modified {len(result.get('applied_files', files))} file(s)"
     except Exception as exc:
         return f"Patch application failed: {exc}"
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import sys
 from typing import Any
@@ -35,6 +36,12 @@ class SentraREPL:
             return f"[bold yellow]Listener online / not ready ({code})[/bold yellow]"
         return "[bold red]Offline[/bold red]"
 
+    def _effort_label(self) -> str:
+        effort=self.config.reasoning_effort
+        if self.config.model.startswith("sentra/codex/"):
+            return f"[bold cyan]{effort}[/bold cyan] [dim](Codex CLI)[/dim]"
+        return f"[dim]{effort} (Codex only; Web model does not use this setting)[/dim]"
+
     def print_banner(self) -> None:
         health = self.agent.client.probe_health()
         if self.agent.canvas.is_available:
@@ -50,11 +57,17 @@ class SentraREPL:
         table = Table(show_header=False, box=None, padding=(0, 1))
         table.add_row("[bold cyan]Workspace:[/bold cyan]", str(self.config.workspace))
         table.add_row("[bold cyan]Model:[/bold cyan]", self.config.model)
+        table.add_row("[bold cyan]Reasoning:[/bold cyan]", self._effort_label())
         table.add_row("[bold cyan]Conversation:[/bold cyan]", self.agent.session_id)
-        table.add_row(
-            "[bold cyan]SENTRA Gateway:[/bold cyan]",
-            self._gateway_label(health),
-        )
+        if self.config.model.startswith("sentra/codex/"):
+            from .codex_native import authenticated
+            table.add_row("[bold cyan]Codex:[/bold cyan]",
+                          "[green]Authenticated[/green]" if authenticated()
+                          else "[red]Sign-in required[/red]")
+            table.add_row("[bold cyan]Web Gateway:[/bold cyan]", "[dim]Optional for Codex[/dim]")
+        else:
+            table.add_row("[bold cyan]SENTRA Gateway:[/bold cyan]",
+                          self._gateway_label(health))
         table.add_row(
             "[bold cyan]SENTRA Canvas:[/bold cyan]" if self.agent.canvas.is_available else "[bold cyan]Maestri:[/bold cyan]",
             maestri_status,
@@ -258,7 +271,8 @@ class SentraREPL:
                 ("/doctor", "Detailed Gateway and Maestri diagnostics"),
                 ("/gateway start|status|stop", "Manage Web Model runtime"),
                 ("/models", "List models advertised by SENTRA Gateway"),
-                ("/model <id>", "Select one advertised model"),
+                ("/model [id|list]", "Show or change active model (Codex/Web)"),
+                ("/effort [low|medium|high|xhigh]", "Show or change Codex reasoning effort"),
                 ("/diff", "Show current Git diff"),
                 ("/test [target]", "Dispatch pytest in background"),
                 ("/lint", "Dispatch lint gate in background"),
@@ -267,6 +281,7 @@ class SentraREPL:
                 ("/bench", "Dispatch benchmark gate in background"),
                 ("/jobs", "List recent background jobs"),
                 ("/job <id>", "Show background job status/result"),
+                ("[[CANVAS|...]]", "Native Canvas: recruit, connect, dispatch and check peer replies"),
                 ("/collab <goal>", "Create/reuse a two-worker Maestri collaboration without blocking"),
                 ("/maestri dispatch <agent> <prompt>", "Send peer work in background and keep working"),
                 ("/maestri check <agent>", "Read peer progress/result later"),
@@ -285,6 +300,8 @@ class SentraREPL:
             return True
 
         if cmd == "/status":
+            self.console.print(f"Model: [bold cyan]{self.config.model}[/bold cyan]")
+            self.console.print(f"Reasoning: {self._effort_label()}")
             health = self.agent.client.probe_health()
             self.console.print(
                 f"Gateway: {self._gateway_label(health)}"
@@ -301,14 +318,13 @@ class SentraREPL:
                 "Local model: "
                 + ("ready" if health["local"] else "offline")
             )
-            self.console.print(
-                "Maestri: "
-                + (
-                    "connected"
-                    if self.agent.maestri.is_available
-                    else "unavailable"
+            if self.agent.canvas.is_available:
+                self.console.print("SENTRA Canvas: conectado (agentes e mensagens dirigidas)")
+            else:
+                self.console.print(
+                    "Maestri legado: "
+                    + ("connected" if self.agent.maestri.is_available else "unavailable")
                 )
-            )
             self.console.print(
                 git_status(self.config.workspace),
                 markup=False,
@@ -373,25 +389,57 @@ class SentraREPL:
 
         if cmd == "/model":
             if not arg:
-                self.console.print(
-                    f"Current model: [bold]{self.config.model}[/bold]"
-                )
+                self.console.print(f"Current model: [bold cyan]{self.config.model}[/bold cyan]")
+                self.console.print("Use [bold]/models[/bold] or [bold]/model list[/bold] for available models.")
                 return True
-            try:
-                models = self.agent.client.list_models()
-            except Exception as exc:
-                self.console.print(
-                    f"[red]Cannot validate model catalog:[/] {exc}"
-                )
+            if arg.lower() == "list":
+                self._print_models()
                 return True
-            if models and arg not in models:
-                self.console.print(
-                    f"[red]Model not advertised by Gateway:[/] {arg}"
-                )
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}",arg):
+                self.console.print("[red]Invalid model identifier.[/red]")
                 return True
+            if arg.startswith("sentra/codex/"):
+                # The Gateway catalog is unrelated to authenticated native Codex.
+                # Accept syntactically valid explicit Codex IDs, but the provider
+                # is still authoritative for actual model availability.
+                from .codex_native import authenticated
+                suffix=arg.removeprefix("sentra/codex/")
+                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}",suffix):
+                    self.console.print("[red]Invalid native Codex model name.[/red]")
+                    return True
+                if not authenticated():
+                    self.console.print("[red]Codex CLI is not authenticated; model was not changed.[/red]")
+                    return True
+            else:
+                try:
+                    models = self.agent.client.list_models()
+                except Exception as exc:
+                    self.console.print(f"[red]Cannot validate model catalog:[/] {exc}")
+                    return True
+                if not models or arg not in models:
+                    self.console.print(f"[red]Model not advertised by Gateway:[/] {arg}")
+                    return True
             self.config.model = arg
             self.agent.client.active_model = arg
             self.console.print(f"[green]Model selected:[/] {arg}")
+            if arg.startswith("sentra/codex/") and arg != "sentra/codex/current":
+                self.console.print("[dim]Codex validates this explicit model on the next turn.[/dim]")
+            self.console.print(f"Reasoning: {self._effort_label()}")
+            return True
+
+        if cmd == "/effort":
+            if not arg:
+                self.console.print(f"Reasoning effort: {self._effort_label()}")
+                self.console.print("Options: [bold]low[/bold], medium, high, xhigh")
+                return True
+            selected=arg.lower()
+            if selected not in {"low","medium","high","xhigh"}:
+                self.console.print("[yellow]Usage: /effort low|medium|high|xhigh[/yellow]")
+                return True
+            self.config.reasoning_effort=selected
+            self.console.print(f"[green]Reasoning effort:[/] [bold]{selected}[/bold]")
+            if not self.config.model.startswith("sentra/codex/"):
+                self.console.print("[yellow]Stored for this session; effort applies to Codex turns only. Current Web model is unchanged.[/yellow]")
             return True
 
         if cmd == "/diff":

@@ -1,0 +1,191 @@
+{
+  "note": "Pin changes require SENTRA owner review before enabling new integrations.",
+  "repos": [
+    {
+      "name": "a2a",
+      "revision": "12e9d2fbb9badfe98f8ab4f660697870eeb1940b",
+      "upstream": "https://github.com/a2aproject/A2A"
+    },
+    {
+      "name": "acp-registry",
+      "revision": "f44424b681c13cb0f43fdbd743530498921d0d92",
+      "upstream": "https://github.com/agentclientprotocol/registry"
+    },
+    {
+      "name": "activepieces",
+      "revision": "a9b86f6ed9e55b74fdf27028a585135e75815e0e",
+      "upstream": "https://github.com/activepieces/activepieces"
+    },
+    {
+      "name": "agent-client-protocol",
+      "revision": "8c4b8faff61055db8308d4c5dfc49b48b4d3a134",
+      "upstream": "https://github.com/agentclientprotocol/agent-client-protocol"
+    },
+    {
+      "name": "daytona",
+      "revision": "fc98a5032c04e13de737b8d4d45dd2c7e5d1291a",
+      "upstream": "https://github.com/daytonaio/daytona"
+    },
+    {
+      "name": "grype",
+      "revision": "5dbdab183e884c6256aa3bfc3381169142d65ec4",
+      "upstream": "https://github.com/anchore/grype"
+    },
+    {
+      "name": "guacamole-client",
+      "revision": "38e8cb8ff5cd1fbd4c08a1a5d94340c37741230b",
+      "upstream": "https://github.com/apache/guacamole-client"
+    },
+    {
+      "name": "guacamole-server",
+      "revision": "ae12b8e51aa6287d0eca7a50c6cac04af4a71590",
+      "upstream": "https://github.com/apache/guacamole-server"
+    },
+    {
+      "name": "gvisor",
+      "revision": "25e4d4778b06a66f268e13c2b8b0abc433096693",
+      "upstream": "https://github.com/google/gvisor"
+    },
+    {
+      "name": "hcsshim",
+      "revision": "ab8249e8a1110ff5f052d3710fe57f29c45503d3",
+      "upstream": "https://github.com/microsoft/hcsshim"
+    },
+    {
+      "name": "hocuspocus",
+      "revision": "ee7c6e123c3aeedcdb962c18203b2dd1eff25f0a",
+      "upstream": "https://github.com/ueberdosis/hocuspocus"
+    },
+    {
+      "name": "immudb",
+      "revision": "bfdce03649f52d575be46f74425fd18eaf4fa69c",
+      "upstream": "https://github.com/codenotary/immudb"
+    },
+    {
+      "name": "keycloak",
+      "revision": "c7de391ae4d8a83ad62b8386cab85d37fbb6324c",
+      "upstream": "https://github.com/keycloak/keycloak"
+    },
+    {
+      "name": "langfuse",
+      "revision": "c106bb3d945323688e6f6079f65fb0ab28203b53",
+      "upstream": "https://github.com/langfuse/langfuse"
+    },
+    {
+      "name": "langgraph",
+      "revision": "bfcfea554ed5c7f7be562cebf8825e911b493ab1",
+      "upstream": "https://github.com/langchain-ai/langgraph"
+    },
+    {
+      "name": "mcp-typescript-sdk",
+      "revision": "b022522089a0c8b632595c6e7b536453945ed5a9",
+      "upstream": "https://github.com/modelcontextprotocol/typescript-sdk"
+    },
+    {
+      "name": "nats-server",
+      "revision": "6af2d22525d55f08ea72812e799b0397e1cf06f1",
+      "upstream": "https://github.com/nats-io/nats-server"
+    },
+    {
+      "name": "opa",
+      "revision": "4dcda5da919a9cb6174b4998c6304f37783d8f21",
+      "upstream": "https://github.com/open-policy-agent/opa"
+    },
+    {
+      "name": "openfga",
+      "revision": "526995eb202464e2cace266fb5be56c212af9ecf",
+      "upstream": "https://github.com/openfga/openfga"
+    },
+    {
+      "name": "openhands",
+      "revision": "76398bb5c5b94150c0698addc6632715d54b5744",
+      "upstream": "https://github.com/OpenHands/OpenHands"
+    },
+    {
+      "name": "openhands-agent-sdk",
+      "revision": "2804c1273b4093e632e332a7a572894782c7b1e1",
+      "upstream": "https://github.com/OpenHands/software-agent-sdk"
+    },
+    {
+      "name": "opentelemetry-collector",
+      "revision": "cee245c32ca5c271a03e3deafd69d85b8376d4c5",
+      "upstream": "https://github.com/open-telemetry/opentelemetry-collector"
+    },
+    {
+      "name": "osworld-v2",
+      "revision": "acdd3493808e716825975b0f0208194bb2faf3c3",
+      "upstream": "https://github.com/xlang-ai/OSWorld-V2"
+    },
+    {
+      "name": "playwright-mcp",
+      "revision": "b8b4183e099f136cbec0388a6088d4aa2f6b9685",
+      "upstream": "https://github.com/microsoft/playwright-mcp"
+    },
+    {
+      "name": "pywinauto",
+      "revision": "18d2a95cebed2f0061ab4e4c80c3a76ece5dd4f3",
+      "upstream": "https://github.com/pywinauto/pywinauto"
+    },
+    {
+      "name": "rpaframework",
+      "revision": "7a419fb7a7bdc02ac7531328a3d8e308ef2bcc0c",
+      "upstream": "https://github.com/robocorp/rpaframework"
+    },
+    {
+      "name": "rustdesk",
+      "revision": "1d4abd0258bb6678cdd5e2abe3a2af59fd3d7dbe",
+      "upstream": "https://github.com/rustdesk/rustdesk"
+    },
+    {
+      "name": "spire",
+      "revision": "9dbd864e89239e1228246be486874eea69d3c81f",
+      "upstream": "https://github.com/spiffe/spire"
+    },
+    {
+      "name": "temporal",
+      "revision": "bae8771853cff3f127b979310e22dcd61c28375c",
+      "upstream": "https://github.com/temporalio/temporal"
+    },
+    {
+      "name": "tessera",
+      "revision": "0489e17418aa6f6a3acf692d45e03102eeb2b3e5",
+      "upstream": "https://github.com/transparency-dev/tessera"
+    },
+    {
+      "name": "toolhive",
+      "revision": "33ba170aad633e20520f380500a45cd158f24aed",
+      "upstream": "https://github.com/stacklok/toolhive"
+    },
+    {
+      "name": "ufo",
+      "revision": "a795552d976c4c019d7c2f778a0effb5cef7de6b",
+      "upstream": "https://github.com/microsoft/UFO"
+    },
+    {
+      "name": "windows-agent-arena",
+      "revision": "6d39ed88c545a0d40a7a02e39b928e278df7332b",
+      "upstream": "https://github.com/microsoft/WindowsAgentArena"
+    },
+    {
+      "name": "windowsworld",
+      "revision": "fbccd464f94fec9e284e139f97bf96d0b192f580",
+      "upstream": "https://github.com/HITsz-TMG/WindowsWorld"
+    },
+    {
+      "name": "xyflow",
+      "revision": "3d35b57317576b0916c0bfeaaedd573aaacc2839",
+      "upstream": "https://github.com/xyflow/xyflow"
+    },
+    {
+      "name": "y-protocols",
+      "revision": "73b2ff75486c9879843718dc6c7fc52d63aea4fe",
+      "upstream": "https://github.com/yjs/y-protocols"
+    },
+    {
+      "name": "yjs",
+      "revision": "d01eefc997cf12d29d5aabea804df5f69c659a79",
+      "upstream": "https://github.com/yjs/yjs"
+    }
+  ],
+  "schema_version": 1
+}

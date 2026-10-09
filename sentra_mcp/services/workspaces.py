@@ -259,8 +259,6 @@ class WorkspaceRegistry:
                         resolved.relative_to(root)
                     except ValueError:
                         continue
-                    if permission not in set(item["permissions"]):
-                        continue
                     path_matches.append((index, item, len(root.parts)))
                 # For an absolute directory selector choose the narrowest
                 # containing grant. This lets access_scope=user/computer accept
@@ -298,6 +296,8 @@ class WorkspaceRegistry:
         owner: str | None,
         permission: str = "read",
     ) -> dict[str, Any]:
+        if permission not in WORKSPACE_PERMISSIONS:
+            raise ValueError("invalid workspace permission")
         candidate = path.expanduser().resolve()
         matches: list[tuple[int, dict[str, Any], int]] = []
         for index, item in enumerate(self._active_grants(owner)):
@@ -306,13 +306,15 @@ class WorkspaceRegistry:
                 candidate.relative_to(root)
             except ValueError:
                 continue
-            if permission not in set(item["permissions"]):
-                continue
             matches.append((index, item, len(root.parts)))
         if not matches:
             raise PermissionError("path is outside workspaces granting the requested permission")
         # Most specific root wins when roots are nested.
         index, item, _ = max(matches, key=lambda value: value[2])
+        if permission not in set(item["permissions"]):
+            raise PermissionError(
+                f"workspace '{item['alias']}' does not grant {permission} permission"
+            )
         return self._view(item, index)
 
     def request_add(

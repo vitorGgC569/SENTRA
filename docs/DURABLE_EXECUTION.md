@@ -16,6 +16,11 @@ The runtime keeps these identities separate:
 
 Changing a conversation ID does not change the Agent or Run. Rebinding a chat is recorded as an event and preserves role/task history.
 
+The higher-level WorkItem/governance contract is documented in
+[`GOVERNANCE_CONTROL_PLANE.md`](GOVERNANCE_CONTROL_PLANE.md). Recovery
+authority, deterministic validation, review/approval, retry and budget policies
+are layered on this durable execution model rather than replacing it.
+
 ## Durable state
 
 State lives below the configured SENTRA state directory in durable/durable.sqlite3 plus runs/<run_id>/events.jsonl and state.json.
@@ -113,3 +118,57 @@ For OMA conversation hygiene, main.py --clear removes managed remote chats after
 6. Readiness requires an observable signal, not merely a spawned PID.
 7. Invasive fallback is explicit and never silent.
 8. Durable recovery does not bypass deterministic quality, workspace or promotion policy.
+
+
+## Durable Goals and Codex /goal
+
+Goals are first-class Control Plane state. A Goal belongs to a Run and carries
+an objective, acceptance criteria, constraints, priority, budget, optional
+deadline, parent goal and state. The Context Bus may receive a read-only goal
+projection for agent coordination, but it cannot mutate Goal state.
+
+The native Codex /goal command remains owned by the Codex harness. SENTRA does
+not parse or emulate slash commands. When Codex injects its internal goal
+steering into a Web-model turn, the Model Gateway synchronizes that
+already-resolved steering into a durable Goal authority Run keyed by the
+logical conversation (or Codex thread when no conversation URI exists). Web
+turn Runs remain independent execution/lease units and carry a checkpoint link
+to the stable Goal authority.
+
+Goal presence is tracked separately from Goal text. An omitted harness Goal
+context leaves the previous Goal unchanged, which preserves steering across
+ordinary turns and compaction. An explicitly present empty Goal context pauses
+the active harness Goal; a later non-empty context updates/reactivates it. This
+state survives Model Gateway restart.
+
+Research/OMA can decompose a parent objective into durable subgoals. Research
+agents persist `goal_id` alongside `agent_id`, task and chat identity;
+branch failures and synthesis outcomes transition their corresponding subgoal
+instead of being represented only as prompt text. OMA and MCP clients can
+manage their own durable Goal tree through the compact `sentra_run` Goal
+actions.
+
+
+## Native Codex subagents vs SENTRA Research
+
+These are intentionally separate execution systems.
+
+- **Codex native multi-agent** uses the Codex harness collaboration protocol
+  (`spawn_agent`, `wait_agent`, and the native follow-up/message surface).
+  SENTRA's Web-model bridge transports those tool calls but does not replace
+  them with Research. Canonical harness lineage (`parent_thread_id`,
+  `agent_name`, `subagent_kind=thread_spawn`) is projected into a durable
+  Agent/subgoal under the parent's Goal authority. Follow-up turns reuse that
+  binding even when Codex omits lineage metadata, including after Gateway
+  restart. SENTRA records turn delivery evidence but does not invent native
+  terminal-agent state; Codex remains lifecycle authority.
+- **SENTRA Research** creates independent ChatGPT Web conversations and uses
+  `CHAT_START` plus bounded, read-only `CHAT_PEEK` collection. With one
+  principal Edge controller, branches are collected concurrently at the
+  service layer while each browser visit remains short and reclaimable.
+
+A Research branch failure is durable evidence, not a reason to erase successful
+siblings. Successful and failed branch records are retained; synthesis proceeds
+when useful sibling evidence exists and the parent Goal is completed only
+through Control Plane state. If every branch fails, the Research Run is
+`FAILED` with a partial result containing the branch failures.

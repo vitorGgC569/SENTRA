@@ -76,3 +76,42 @@ def test_quality_gate_success_and_confidence_calculation():
     assert package is not None
     assert package.status == "READY_FOR_MASTER"
     assert package.calculated_confidence >= 0.9
+
+
+def test_quality_gate_carries_verified_evidence_ids_into_package():
+    gate = QualityGate(QuorumPolicy(
+        validators_required=2,
+        minimum_approvals=2,
+        min_release_score=9.5,
+    ))
+    task = Task(
+        id="T-evidence",
+        run_id="r",
+        objective="render",
+        metadata={"evidence_ids": ["artifact:unit"]},
+    )
+    cand = Candidate(candidate_id="C-evidence", task_id=task.id)
+    reports = [
+        ValidationReport(validator_role="v1", status="APPROVED", score=9.8),
+        ValidationReport(validator_role="v2", status="APPROVED", score=9.7),
+    ]
+    test_results = {
+        "all_passed": True,
+        "results": [{"passed": True}],
+        "visual_evidence": {
+            "integrity_passed": True,
+            "files": [{
+                "evidence_id": "visual:T-evidence:1",
+                "integrity": {"passed": True},
+            }],
+        },
+    }
+
+    passed, _, package = gate.evaluate(
+        task, cand, reports, test_results=test_results
+    )
+    assert passed is True
+    assert package is not None
+    assert package.evidence_ids == [
+        "artifact:unit", "visual", "visual:T-evidence:1"
+    ]

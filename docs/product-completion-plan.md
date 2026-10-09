@@ -38,3 +38,33 @@ novos prompts reais. Detalhes em [conversas persistentes](fixed-conversations.md
 MASTER_QUEUE, limitador global entre runs, reconciliação operacional de envios
 incertos e prova live repetível continuam abertos. Nenhum requisito completo
 do produto deve ser marcado concluído apenas por esta revisão.
+
+## Revisão de 28/09/2026 — fechamento de brechas de runtime/release
+
+Esta revisão substitui, para operação atual, os estados históricos da tabela inicial:
+o MCP source-tree ativo anuncia contrato compacto (77 tools nesta validação), o
+runtime local passa a persistir uma autoridade `install_dir -> state_dir`, e o
+startup do tunnel exige MCP autoritativo pronto antes de criar um novo processo.
+MCP/relay/tunnel foram unificados no mesmo state-root durante dogfood real.
+
+O incidente de disponibilidade foi diagnosticado até a causa upstream:
+`tunnel-client` inicializava MCP/poller, porém o Control Plane respondeu
+`401 token_invalidated`. O produto agora distingue esse caso como
+`REAUTH_REQUIRED`; reiniciar indefinidamente não é recuperação válida.
+Jobs desacoplados preservam owner de conversa, mas registram a principal
+autenticada para recuperação por uma nova sessão da mesma principal.
+
+A extensão 1.6.52/durable-r27 mantém `recovery-guard.js` autônomo, reinjeção em
+tabs abertas, heartbeat da própria extensão independente do pool de controllers e
+telemetria dos catches que afetam estado/recovery. A identidade é fail-closed por
+version/build/source-hash. Build Windows publica estado legível em
+`.tmp/build-windows-status.json`.
+
+CI/release agora falham quando inputs críticos não estão rastreados, GitHub Actions
+estão pinadas por SHA, Bun 1.4.0 é baixado do release fixo e conferido por SHA-256,
+e `requirements.lock.txt` possui hashes SHA-256 em todas as 76 dependências;
+instalação usa `pip --require-hashes`.
+
+P11 ainda exige um commit/checkout limpo contendo todos os inputs já adicionados ao
+índice e a execução do release E2E assinado. Docker permanece dependência externa
+para execução em modo workspace/sandbox e estava indisponível no host nesta revisão.

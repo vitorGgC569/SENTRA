@@ -26,7 +26,7 @@ class GraphStore:
         self.db.execute("PRAGMA journal_mode=WAL")
         with self._lock, self.db:
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version > 3:
+            if version > 5:
                 raise RuntimeError("newer Canvas graph database; update SENTRA")
             if version == 0:
                 self.db.executescript("""
@@ -71,7 +71,46 @@ class GraphStore:
                 self.db.execute("ALTER TABLE handoffs ADD COLUMN updated REAL NOT NULL DEFAULT 0")
                 self.db.execute("CREATE UNIQUE INDEX handoff_requests ON handoffs(workspace_id,request_key)")
                 self.db.execute("PRAGMA user_version=3")
+        with self._lock, self.db:
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 4:
+                self.db.execute("ALTER TABLE handoffs ADD COLUMN receipt_status TEXT NOT NULL DEFAULT 'pending'")
+                self.db.execute("ALTER TABLE handoffs ADD COLUMN receipt_updated REAL NOT NULL DEFAULT 0")
+                self.db.execute("PRAGMA user_version=4")
         self.db.execute("PRAGMA synchronous=FULL")
+        with self._lock, self.db:
+            if self.db.execute("PRAGMA user_version").fetchone()[0] < 5:
+                self.db.execute("CREATE TABLE collaboration_projection("
+                                "workspace TEXT PRIMARY KEY, revision INTEGER NOT NULL)")
+                self.db.execute("PRAGMA user_version=5")
+
+    def apply_presentation(self, ws: str, revision: int, presentation: dict) -> bool:
+        """Recover a committed CRDT projection in one idempotent transaction.
+
+        Only existing workspace geometry and note text may change. Stale CRDT
+        IDs cannot create resources, recreate removed notes, or alter topology.
+        The authoritative snapshot remains in the ControlPlane store; this
+        revision is an acknowledgement of its local presentation projection.
+        """
+        from sentra_collab.authority import validate_presentation
+        if type(revision) is not int or revision < 0:
+            raise ValueError("invalid collaboration projection revision")
+        validate_presentation(presentation)
+        with self._lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute("SELECT revision FROM collaboration_projection WHERE workspace=?",
+                                  (ws,)).fetchone()
+            if revision <= (row["revision"] if row else 0):
+                return False
+            for ident, node in presentation["nodes"].items():
+                self.db.execute("UPDATE nodes SET x=?,y=?,width=?,height=? "
+                                "WHERE id=? AND workspace_id=?",
+                                (node["x"], node["y"], node["width"], node["height"], ident, ws))
+            for ident, text in presentation["notes"].items():
+                self.db.execute("UPDATE nodes SET body=? WHERE id=? AND workspace_id=? AND kind='note'",
+                                (text, ident, ws))
+            self.db.execute("INSERT INTO collaboration_projection(workspace,revision) VALUES(?,?) "
+                            "ON CONFLICT(workspace) DO UPDATE SET revision=excluded.revision", (ws, revision))
+            return True
 
     def _read(self, ws: str, ident: str) -> dict:
         row = self.db.execute(
@@ -264,6 +303,64 @@ class GraphStore:
             self.db.execute("UPDATE handoffs SET status=?,updated=? WHERE id=?",(status,time.time(),ident))
             return self._handoff_row(self.db.execute("SELECT * FROM handoffs WHERE id=?",(ident,)).fetchone())
 
+    def claim_handoff(self, ws, targets, content):
+        """Claim one exact terminal message; it does NOT claim provider success."""
+        if not isinstance(content, str) or not isinstance(targets, set):
+            raise ValueError("invalid handoff claim")
+        with self._lock, self.db:
+            for row in self.db.execute(
+                "SELECT * FROM handoffs WHERE workspace_id=? AND status IN ('sending','sent') "
+                "AND receipt_status='pending' ORDER BY created ASC", (ws,)
+            ):
+                if row["target"] not in targets:
+                    continue
+                if self._handoff_row(row)["content"] != content:
+                    continue
+                updated = self.db.execute(
+                    "UPDATE handoffs SET receipt_status='running',receipt_updated=? "
+                    "WHERE id=? AND workspace_id=? AND receipt_status='pending'",
+                    (time.time(), row["id"], ws)
+                )
+                if updated.rowcount == 1:
+                    return {"id": row["id"], "receipt_status": "running"}
+            return None
+
+    def complete_handoff(self, ws, ident, targets, receipt):
+        """Only a destination terminal's bound capability may record the receipt."""
+        if receipt not in {"answered", "tool_completed", "failed", "uncertain"}:
+            raise ValueError("invalid handoff receipt")
+        with self._lock, self.db:
+            row = self.db.execute(
+                "SELECT * FROM handoffs WHERE id=? AND workspace_id=?", (ident,ws)
+            ).fetchone()
+            if row is None or row["target"] not in targets:
+                raise PermissionError("handoff receipt is inaccessible")
+            if row["receipt_status"] == receipt:
+                return {"id": ident, "receipt_status": receipt, "idempotent_replay": True}
+            if row["receipt_status"] != "running":
+                raise ValueError("handoff was not claimed by its destination")
+            self.db.execute(
+                "UPDATE handoffs SET receipt_status=?,receipt_updated=? "
+                "WHERE id=? AND workspace_id=?", (receipt,time.time(),ident,ws)
+            )
+            return {"id": ident, "receipt_status": receipt, "idempotent_replay": False}
+
+    def interrupt_handoffs(self, ws, targets):
+        """An exited destination cannot silently leave in-flight work pending."""
+        if not targets:
+            return 0
+        with self._lock, self.db:
+            changed=0
+            for target in targets:
+                result=self.db.execute(
+                    "UPDATE handoffs SET receipt_status='uncertain',receipt_updated=? "
+                    "WHERE workspace_id=? AND target=? "
+                    "AND status IN ('sending','sent') "
+                    "AND receipt_status IN ('pending','running')",
+                    (time.time(),ws,target))
+                changed+=result.rowcount
+            return changed
+
     def recover_handoffs(self,workspaces):
         # Called only for workspaces owned by the current Canvas principal.
         with self._lock,self.db:
@@ -271,6 +368,9 @@ class GraphStore:
                 for row in self.db.execute("SELECT id,content FROM handoffs WHERE workspace_id=? AND content<>'' AND protected_content=''",(ws,)).fetchall():
                     self.db.execute("UPDATE handoffs SET protected_content=?,content='' WHERE id=?",
                                     (self._protected(row["content"]),row["id"]))
+                self.db.execute("UPDATE handoffs SET receipt_status='uncertain',receipt_updated=? "
+                                "WHERE workspace_id=? AND status IN ('sending','sent') "
+                                "AND receipt_status IN ('pending','running')",(time.time(),ws))
                 self.db.execute("UPDATE handoffs SET status='uncertain',updated=? WHERE workspace_id=? AND status='sending'",
                                 (time.time(),ws))
                 self.db.execute("UPDATE handoffs SET status='not_sent',updated=? WHERE workspace_id=? AND status='prepared'",

@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from sentra_mcp.audit import AuditLogger
 from sentra_mcp.config import MCPConfig
 from sentra_mcp.services.jobs import JobService
@@ -204,3 +206,77 @@ def test_registered_operation_outcome_survives_result_paging() -> None:
         "BUILD",
         paged.replace("SUMMARY: BUILD paged", "SUMMARY: TEST paged"),
     ) is False
+
+
+class _ExclusiveBlockingRepository(_BlockingRepository):
+    def execution_resource_key(self, workspace, owner):
+        selector = str(workspace or "").strip()
+        if selector in {"", "sentra", "root:0"}:
+            return "workspace:canonical"
+        return f"workspace:{selector}"
+
+
+def test_build_jobs_are_exclusive_per_canonical_workspace_across_sessions(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    db_path = tmp_path / ".sentra" / "jobs.sqlite3"
+    first_repository = _ExclusiveBlockingRepository()
+    second_repository = _ExclusiveBlockingRepository()
+    primary = JobService(
+        config,
+        AuditLogger(config.audit_log),
+        first_repository,
+        db_path=db_path,
+    )
+    secondary = None
+    try:
+        first = primary.start(
+            "BUILD",
+            "mcp:A",
+            workspace="sentra",
+            idempotency_key="build-once",
+        )
+        assert first_repository.started.wait(1)
+
+        replay = primary.start(
+            "BUILD",
+            "mcp:A",
+            workspace="root:0",
+            idempotency_key="build-once",
+        )
+        assert replay["job_id"] == first["job_id"]
+        assert replay["idempotent_replay"] is True
+
+        secondary = JobService(
+            config,
+            AuditLogger(config.audit_log),
+            second_repository,
+            db_path=db_path,
+        )
+        with pytest.raises(RuntimeError, match="BUILD already running for workspace"):
+            secondary.start(
+                "BUILD",
+                "mcp:B",
+                workspace="root:0",
+                idempotency_key="build-other-session",
+            )
+
+        first_repository.release.set()
+        assert primary.wait(first["job_id"], "mcp:A", 2)["state"] == "COMPLETED"
+
+        second = secondary.start(
+            "BUILD",
+            "mcp:B",
+            workspace="root:0",
+            idempotency_key="build-after-release",
+        )
+        assert second_repository.started.wait(1)
+        second_repository.release.set()
+        assert secondary.wait(second["job_id"], "mcp:B", 2)["state"] == "COMPLETED"
+    finally:
+        first_repository.release.set()
+        second_repository.release.set()
+        if secondary is not None:
+            secondary.close()
+        primary.close()

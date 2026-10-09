@@ -20,6 +20,12 @@ CONTROL_PLANE_NAMESPACES = {
     "plugin_worker": "plugin-workers.sqlite3",
     "session_checkpoint": "session-checkpoints.sqlite3",
     "task_ledger": "tasks.sqlite3",
+    "canvas_collaboration": "canvas-collaboration.sqlite3",
+    "machine_configuration": "machine-configuration.sqlite3",
+    "experience_memory": "experience-memory.sqlite3",
+    "plan_history": "plan-history.sqlite3",
+    "provider_content": "provider-content.sqlite3",
+    "telemetry_pipeline": "telemetry-pipeline.sqlite3",
 }
 
 

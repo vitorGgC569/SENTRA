@@ -5,14 +5,64 @@ const safe = v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">"
 const qp=new URLSearchParams(location.hash.slice(1));
 if(qp.get("token")){sessionStorage.setItem("sentra_native_token",qp.get("token"));history.replaceState(null,"",location.pathname);}
 const token=sessionStorage.getItem("sentra_native_token");
+if(location.pathname==="/canvas"){
+ document.documentElement.classList.add("canvas-web");
+ const label=document.querySelector(".logo .version");if(label)label.textContent="WEB";
+}
 const state={
   ws:null,all:[],detail:null, nodes:[],links:[], selected:null, tool:"select",linkFrom:null,
   x:55,y:55,scale:1,move:null,space:false,cursors:{},polling:false,loading:false,
-  integrations:[],fullscreen:null
+  integrations:[],models:[],fullscreen:null
 };
 let toastTimer=null, modalKind=null, modalAfter=null, modalRequest=null,modalSending=false;
+let graphFrame=null;
+const overlayFocus=new WeakMap();
+function activeOverlay(){return [$("modal-shade"),$("command-overlay")].find(n=>n&&!n.hidden);}
+function overlayControls(container){return [...container.querySelectorAll('button,input,select,textarea,a[href],[tabindex]')]
+ .filter(n=>!n.disabled&&n.tabIndex>=0&&n.getClientRects().length&&!n.closest('[hidden],[inert]'));}
+function beginOverlayFocus(container){
+ if(!overlayFocus.has(container))overlayFocus.set(container,{previous:document.activeElement,inert:$("app").inert});
+ $("app").inert=true;
+}
+function endOverlayFocus(container){
+ const saved=overlayFocus.get(container);overlayFocus.delete(container);if(!saved)return;
+ $("app").inert=saved.inert;
+ const previous=saved.previous;
+ if(previous?.isConnected&&!previous.closest('[hidden],[inert]'))previous.focus();
+ else $("viewport")?.focus();
+}
+document.addEventListener("keydown",e=>{
+ const overlay=activeOverlay();if(!overlay||e.key!=="Tab")return;
+ const controls=overlayControls(overlay),first=controls[0],last=controls.at(-1);
+ if(!first){e.preventDefault();const dialog=overlay.querySelector('[role="dialog"]');if(dialog){dialog.tabIndex=-1;dialog.focus();}return;}
+ if(e.shiftKey&&(document.activeElement===first||!overlay.contains(document.activeElement))){e.preventDefault();last.focus();}
+ else if(!e.shiftKey&&(document.activeElement===last||!overlay.contains(document.activeElement))){e.preventDefault();first.focus();}
+},true);
+document.addEventListener("focusin",e=>{
+ const overlay=activeOverlay();if(overlay&&!overlay.contains(e.target))overlayControls(overlay)[0]?.focus();
+},true);
 const terminalViews=new Map();
-function toast(message){const node=$("toast");node.textContent=message;node.style.display="block";clearTimeout(toastTimer);toastTimer=setTimeout(()=>node.style.display="none",4700);}
+const collaboration=window.SentraCollaborationPanel?.create({api,state,toast,drawEdges,refreshResources});
+$("show-collaboration")?.addEventListener("click",guarded(()=>collaboration?.toggle()));
+$("collab-undo")?.addEventListener("click",guarded(()=>collaboration?.undo()));
+$("collab-redo")?.addEventListener("click",guarded(()=>collaboration?.redo()));
+$("show-machines")?.addEventListener("click",guarded(() =>
+ window.SentraMachinePanel.open({api,state,toast,requireWS})));
+$("show-center")?.addEventListener("click",guarded(() =>
+ window.SentraCenterPanel.open({api,state,toast,requireWS,
+   machines:()=>window.SentraMachinePanel.open({api,state,toast,requireWS})})));
+function toast(message,tone="info"){
+ const stack=$("toast");if(!stack)return;
+ const card=document.createElement("div");card.className="halo-toast";
+ card.dataset.tone=["error","success"].includes(tone)?tone:"info";
+ const body=document.createElement("span");body.className="toast-message";body.textContent=String(message);
+ const close=document.createElement("button");close.type="button";close.textContent="×";
+ close.setAttribute("aria-label","Dispensar notificação");
+ close.addEventListener("click",()=>card.remove());
+ card.append(body,close);stack.prepend(card);
+ while(stack.children.length>4)stack.lastElementChild.remove();
+ setTimeout(()=>card.remove(),tone==="error"?8500:4700);
+}
 async function api(path,data){
   const headers={"Authorization":"Bearer "+token};
   if(data!==undefined)headers["Content-Type"]="application/json";
@@ -24,7 +74,7 @@ async function api(path,data){
   if(!response.ok)throw new Error(payload.error||"HTTP "+response.status);
   return payload;
 }
-function guarded(handler){return (...args)=>Promise.resolve().then(()=>handler(...args)).catch(err=>toast(err.message||String(err)));}
+function guarded(handler){return (...args)=>Promise.resolve().then(()=>handler(...args)).catch(err=>toast(err.message||String(err),"error"));}
 function requireWS(){if(!state.ws)throw Error("Crie ou selecione um workspace primeiro.");return state.ws;}
 function worldAt(sx,sy){return{x:(sx-state.x)/state.scale,y:(sy-state.y)/state.scale};}
 function centerWorld(){
@@ -39,6 +89,45 @@ function setView(){
    (80*state.scale)+"px "+(80*state.scale)+","+(80*state.scale)+"px "+(80*state.scale)+","+
    (16*state.scale)+"px "+(16*state.scale)+","+(16*state.scale)+"px "+(16*state.scale);
  $("zoom-label").textContent=Math.round(state.scale*100)+"%";
+ window.SentraFractalGrid?.setCamera(state.x,state.y,state.scale);
+ scheduleVisibleNodes();
+}
+function scheduleVisibleNodes(){
+ if(graphFrame!==null)return;
+ graphFrame=requestAnimationFrame(()=>{graphFrame=null;renderVisibleNodes();});
+}
+function renderVisibleNodes(){
+ const layer=$("node-layer");if(!layer||!window.SentraGraphView)return;
+ const rect=$("viewport").getBoundingClientRect();
+ const visible=window.SentraGraphView.visibleIDs(state.nodes,{x:state.x,y:state.y,scale:state.scale,width:rect.width,height:rect.height});
+ const known=new Set(state.nodes.map(n=>n.id));
+ for(const element of layer.querySelectorAll("[data-node]"))if(!known.has(element.dataset.node))element.remove();
+ for(const node of state.nodes){
+  const active=node.id===state.selected||node.id===state.move?.n?.id||node.id===state.fullscreen;
+  let element=document.querySelector('[data-node="'+node.id+'"]');
+  const item=resource(node.kind,node.resource_id);
+  const terminal=node.kind==="terminal"?item:node.kind==="agent"?resource("terminal",item?.terminal_id):null;
+  const retain=!!terminal;
+  const show=visible.has(node.id)||active;
+  const owner=node.kind==="terminal"?(state.detail?.agents||[]).find(agent=>agent.terminal_id===terminal?.id):null;
+  const shape=node.kind+":"+(terminal?.id||"")+":"+(owner?.id||"");
+  if(!show&&!retain){
+   if(element&&!element.contains(document.activeElement))element.remove();
+   continue;
+  }
+  if(element&&element.dataset.renderShape!==shape){element.remove();element=null;}
+  if(!element){
+   const template=document.createElement("template");template.innerHTML=nodeHtml(node);
+   element=template.content.firstElementChild;element.dataset.renderShape=shape;layer.append(element);
+  }
+  element.style.left=node.x+"px";element.style.top=node.y+"px";
+  element.style.width=node.width+"px";element.style.height=node.height+"px";
+  element.style.visibility=show?"visible":"hidden";element.style.contentVisibility=show?"visible":"hidden";
+  element.inert=!show;element.classList.toggle("selected",node.id===state.selected);
+  element.tabIndex=show?0:-1;element.setAttribute("role","group");element.setAttribute("aria-label",node.title);
+  if(terminal&&$("term-"+terminal.id))mountTerminal(terminal.id);
+ }
+ layer.dataset.visibleNodes=String(visible.size);layer.dataset.totalNodes=String(state.nodes.length);
 }
 function zoomTo(value,sx,sy){
  const v=$("viewport").getBoundingClientRect();
@@ -82,7 +171,7 @@ async function loadWorkspaces(){
 function emptyView(noWorkspaces=false){
  disposeTerminals();
  state.detail=null;state.nodes=[];state.links=[];
- $("node-layer").replaceChildren();$("edge-paths").replaceChildren();
+ $("node-layer").replaceChildren();window.SentraCablePhysics?.clear();$("edge-paths").replaceChildren();
  $("onboarding").hidden=false;
  $("onboarding-title").textContent=noWorkspaces?"Seu espaço de trabalho, do seu jeito":"Canvas pronto para começar";
  $("onboarding-description").textContent=noWorkspaces
@@ -96,7 +185,9 @@ async function openWorkspace(ws){
  if(state.loading)return;
  state.loading=true;
  try{
+  if(state.ws!==ws)await collaboration?.stop();
   state.ws=ws;state.selected=null;state.linkFrom=null;state.cursors={};
+  window.SentraCablePhysics?.clear();
   disposeTerminals();
   $("inspector").hidden=true;
   const info=await api("/api/graph?ws="+encodeURIComponent(ws));
@@ -139,9 +230,11 @@ function nodeHtml(n){
     '<div class="term-output" id="term-'+safe(id)+'" aria-label="Terminal '+safe(n.title)+'">Carregando saída da sessão…</div>'+
     '<form class="term-form" data-terminal-form="'+safe(id)+'"><span class="term-prompt">❯</span>'+
     '<input data-terminal-input="'+safe(id)+'" '+(running?"":"disabled")+
-    ' aria-label="Enviar para '+safe(n.title)+'" placeholder="'+(running?(agent?"Enviar instrução ou /help":"Digite um comando"):"Histórico da sessão · entrada indisponível")+'" autocomplete="off"></form>'+
+    ' aria-label="Enviar para '+safe(n.title)+'" placeholder="'+(running?(terminal.shell==="sentra-cli"?"Digite uma instrução ou /model · /effort":"Digite um comando"):"Histórico da sessão · entrada indisponível")+'" autocomplete="off"></form>'+
    '<div class="node-foot"><span class="node-status"><i class="mini-dot '+(running?"":"off")+'"></i>'+
-    '<span data-terminal-status="'+safe(id)+'">'+safe(terminal.status||"offline")+'</span></span><span data-terminal-history="'+safe(id)+'">ConPTY</span><span>PID '+safe(terminal.pid||"—")+'</span></div>';
+    '<span data-terminal-status="'+safe(id)+'">'+safe(terminal.status||"offline")+'</span></span>'+
+    (terminal.shell==="sentra-cli"?'<span class="cli-controls"><button type="button" data-cli-command="/model" data-cli-terminal="'+safe(id)+'" title="Consultar modelo atual no SENTRA CLI">/model</button><button type="button" data-cli-command="/effort" data-cli-terminal="'+safe(id)+'" title="Consultar esforço atual do Codex">/effort</button></span>':'<span data-terminal-history="'+safe(id)+'">ConPTY</span>')+
+    '<span>PID '+safe(terminal.pid||"—")+'</span></div>';
   }else if(owner){
     // One xterm per PTY: agent and terminal graph identities share a process.
     // Keep the terminal identity/ports available without a second resize writer.
@@ -177,10 +270,49 @@ function nodeHtml(n){
    '<span class="node-port output" data-port="output" title="Conectar saída"></span>'+
    '<div class="node-resize" data-resize="'+safe(n.id)+'"></div></article>';
 }
+function renderSessionRail(){
+ const host=$("workspace-sessions"),list=$("session-list");
+ if(!host||!list)return;
+ const groups=[
+  {title:"AGENTES",kind:"agent",symbol:"◇"},
+  {title:"TERMINAIS",kind:"terminal",symbol:"▣"}
+ ];
+ const entries=state.nodes.filter(n=>n.kind==="agent"||n.kind==="terminal");
+ host.hidden=!state.ws||entries.length===0;
+ $("session-total").textContent=entries.length;
+ list.innerHTML=groups.map(group=>{
+  const members=entries.filter(n=>n.kind===group.kind);
+  if(!members.length)return "";
+  return '<div class="session-group"><div class="session-group-heading">'+
+    safe(group.title)+' <span>'+members.length+'</span></div>'+
+    members.map(n=>{
+     const resourceItem=resource(n.kind,n.resource_id);
+     const terminal=n.kind==="terminal"?resourceItem:
+       resource("terminal",resourceItem?.terminal_id);
+     const live=terminal?.status==="running";
+     const detail=n.kind==="agent"?resourceItem?.model:terminal?.shell;
+     const provider=detail?.startsWith("sentra/codex/")?"CODEX":detail==="sentra-cli"?"SENTRA":detail?.startsWith("sentra/chatgpt-web/")?"WEB":String(detail||"");
+     return '<button type="button" class="session-nav-item" data-session-node="'+safe(n.id)+'" title="'+safe(n.title)+'">'+
+      '<span class="session-nav-symbol">'+safe(group.symbol)+'</span>'+
+      '<span class="session-nav-name">'+safe(n.title)+'</span>'+
+      '<span class="session-nav-provider">'+safe(provider)+'</span>'+
+      '<i class="session-presence'+(live?" online":"")+'"></i></button>';
+    }).join("")+'</div>';
+ }).join("");
+}
+$("session-list").addEventListener("click",e=>{
+ const button=e.target.closest("[data-session-node]");if(!button)return;
+ const n=nodeBy(button.dataset.sessionNode);if(!n)return;
+ const view=$("viewport").getBoundingClientRect();
+ state.x=view.width/2-(n.x+n.width/2)*state.scale;
+ state.y=view.height/2-(n.y+n.height/2)*state.scale;
+ setView();showInspector(n);
+ document.querySelectorAll(".node").forEach(node=>node.classList.toggle("selected",node.dataset.node===n.id));
+});
 function renderNodes(){
   const expanded=state.fullscreen;
   restoreTerminal(false);
- $("node-layer").innerHTML=state.nodes.map(nodeHtml).join("");
+ renderVisibleNodes();
  // CSP forbids HTML style attributes. Set layout only via safe CSSOM properties.
  for(const n of state.nodes){
    const element=document.querySelector('[data-node="'+n.id+'"]');
@@ -189,6 +321,7 @@ function renderNodes(){
    element.style.width=n.width+"px";element.style.height=n.height+"px";
  }
  $("onboarding").hidden=state.nodes.length>0;
+ renderSessionRail();
  $("canvas-count").textContent=state.nodes.length+" nós · "+state.links.length+" conexões";
  drawEdges();setView();
   const present=new Set((state.detail?.terminals||[]).filter(t=>$("term-"+t.id)).map(t=>t.id));
@@ -253,11 +386,13 @@ function mountTerminal(id){
  const running=resource("terminal",id)?.status==="running";
  const term=new Terminal({fontFamily:'"Cascadia Mono", Consolas, monospace',fontSize:13,
    scrollback:4000,disableStdin:!running,cursorBlink:running,screenReaderMode:true,
-   theme:{background:"#17181c",foreground:"#ccd5dc"},allowProposedApi:false});
+   theme:{background:"#13181e",foreground:"#d8e2e6",cursor:"#9bd0c6",
+          selectionBackground:"#43616c88"},allowProposedApi:false});
  const fit=new FitAddon.FitAddon();term.loadAddon(fit);term.open(host);
  view={id,ws:state.ws,host,term,fit,input:Promise.resolve(),pending:false,resizeTimer:null};
  const resize=()=>{
    if(!host.isConnected)return;
+   if(host.closest(".node")?.style.visibility==="hidden")return;
    const dims=fit.proposeDimensions();if(!dims)return;
    const cols=Math.max(20,Math.min(500,dims.cols)),rows=Math.max(5,Math.min(200,dims.rows));
    if(term.cols===cols&&term.rows===rows&&!view.needsResize)return;
@@ -276,14 +411,19 @@ function mountTerminal(id){
  return view;
 }
 function drawEdges(){
- const graph=$("edge-paths");
- graph.innerHTML=state.links.map(link=>{
+ // Existing running brokers may not yet serve the new module. Retain a safe
+ // static visualization until a new Canvas broker loads rope-physics.js.
+ if(window.SentraCablePhysics){
+   window.SentraCablePhysics.sync($("edge-paths"),state.links,state.nodes);
+   return;
+ }
+ $("edge-paths").innerHTML=state.links.map(link=>{
    const a=nodeBy(link.source),b=nodeBy(link.target);
    if(!a||!b)return "";
    const ax=a.x+a.width,ay=a.y+a.height/2,bx=b.x,by=b.y+b.height/2;
-   const dir=Math.max(75,Math.abs(bx-ax)*.45);
+   const offset=Math.max(75,Math.abs(bx-ax)*.45);
    return '<path class="edge-line" data-edge="'+safe(link.id)+'" d="M '+ax+' '+ay+
-     ' C '+(ax+dir)+' '+ay+' '+(bx-dir)+' '+by+' '+bx+' '+by+'"/>';
+     ' C '+(ax+offset)+' '+ay+' '+(bx-offset)+' '+by+' '+bx+' '+by+'"/>';
  }).join("");
 }
 
@@ -318,6 +458,11 @@ function terminalOptions(){
    (r.id===preferred?" selected":"")+'>'+
    safe(r.name+(r.installed?"":" · indisponível"))+'</option>').join("")+'</select>';
 }
+function canvasModelChoices(){
+ const known=state.models.length?state.models:["sentra/codex/current","sentra/chatgpt-web/auto","sentra/chatgpt-web/gpt-6-instant","sentra/chatgpt-web/gpt-6"];
+ return '<datalist id="canvas-model-choices">'+
+   [...new Set(known)].map(id=>'<option value="'+safe(id)+'"></option>').join("")+'</datalist>';
+}
 function agentOptions(){
  return (state.detail?.agents||[]).map(a=>({value:a.id,label:a.name+" · "+a.role}));
 }
@@ -334,18 +479,26 @@ function openModal(kind){
   title="Novo workspace";hint="PROJETOS";body=field("name","Nome",input("name","","text",true,"novo_projeto"),"Um espaço independente para terminais e agentes.");
  }else if(kind==="terminal"){
   requireWS();title="Novo terminal";hint="EXECUÇÃO NATIVA";
+  const codexReady=state.integrations.some(x=>x.id==="codex"&&x.native_model_authenticated===true);
   body=field("name","Nome",input("name","terminal_"+((state.detail?.terminals.length||0)+1)))+
     field("shell","Ambiente",terminalOptions(),
-    "SENTRA e Codex executam dentro do ConPTY. Antigravity abre editor separado, sem API de agente verificada.");
+    "SENTRA e Codex utilizam ConPTY. Ferramentas externas têm autenticação independente.")+
+    '<div id="terminal-model-wrap">'+field("model","Modelo do SENTRA CLI",
+      input("model",codexReady?"sentra/codex/current":"sentra/chatgpt-web/auto").replace('<input ','<input list="canvas-model-choices" ')+canvasModelChoices(),
+      "Selecione um modelo do catálogo; o acesso real será verificado no turno, não na lista.")+
+    field("effort","Esforço de raciocínio · Codex",dropdown("effort",[
+      {value:"low",label:"Low · Rápido"},{value:"medium",label:"Medium · Equilibrado"},
+      {value:"high",label:"High · Profundo"},{value:"xhigh",label:"Extra High · Intensivo"}
+    ]),"Pode ser alterado depois pelo comando /effort. Modelos Web não usam essa configuração.")+'</div>';
  }else if(kind==="agent"){
   requireWS();title="Novo agente";hint="SENTRA CLI";
   const nativeReady=state.integrations.some(item=>item.id==="codex"&&item.native_model_authenticated===true);
-  const defaultModel=nativeReady?"sentra/codex/current":"sentra/chatgpt-web/high";
+  const defaultModel=nativeReady?"sentra/codex/current":"sentra/chatgpt-web/auto";
   body=field("name","Identificador",input("name","agente_"+((state.detail?.agents.length||0)+1)))+
     field("role","Função",dropdown("role",[{value:"worker",label:"Trabalhador"},{value:"coordinator",label:"Coordenador"},{value:"reviewer",label:"Revisor"}]))+
     field("model","Modelo",input("model",defaultModel).replace('<input ','<input list="canvas-model-choices" ')+
-      '<datalist id="canvas-model-choices"><option value="sentra/codex/current">Codex · sessão existente</option><option value="sentra/chatgpt-web/high">ChatGPT Web</option></datalist>',
-      nativeReady?"Sessão Codex autenticada disponível. Agentes existentes mantêm seu modelo.":"Selecione o modelo; a autenticação será verificada no SENTRA CLI.")+
+      canvasModelChoices(),
+      "O catálogo não concede acesso: o SENTRA verificará modelo e esforço na execução.")+
     '<label class="field row"><input type="checkbox" name="start" checked> Iniciar sessão SENTRA CLI real (ConPTY)</label>';
  }else if(kind==="team"){
   requireWS();title="Nova equipe";hint="COLABORAÇÃO";
@@ -372,8 +525,10 @@ function openModal(kind){
      });
   if(!connected.length){toast("Conecte este nó à entrada de um terminal SENTRA CLI ou Codex ativo.");return;}
   body=field("destination","Destino conectado",dropdown("destination",connected.map(n=>({value:n.id,label:n.title}))))+
-       field("message","Instrução",'<textarea name="message" maxlength="4000" required placeholder="Uma instrução por envio; nenhum comando shell é aceito…"></textarea>',
-       "Envio pelo teclado ConPTY. A resposta do modelo não é presumida nem encaminhada automaticamente.");
+       field("message","Instrução",'<div class="prompt-composer-shell">'+
+         '<textarea name="message" maxlength="4000" required rows="4" placeholder="Descreva a instrução para o agente conectado…"></textarea>'+
+         '<div class="prompt-composer-foot"><span class="composer-indicator">● Terminal conectado · Ctrl+Enter para enviar</span><span id="composer-count">0 / 4000</span></div></div>',
+       "As quebras de linha são unificadas no envio. ConPTY confirma transporte, não conclusão do modelo.");
  }else if(kind==="task"){
   requireWS();title="Delegar tarefa";hint="EXECUÇÃO ASSÍNCRONA";button="Delegar";
   if(!(state.detail?.teams||[]).length){toast("Crie uma equipe antes de delegar tarefas.");return;}
@@ -388,9 +543,21 @@ function openModal(kind){
  $("modal-title").textContent=title;
  $("modal-fields").innerHTML=body;
  $("modal-submit").textContent=button;
+ beginOverlayFocus($("modal-shade"));
  $("modal-shade").hidden=false;
  const first=$("modal-form").querySelector("input:not([type=checkbox]),textarea,select");
  if(first)first.focus();
+ if(kind==="terminal"){
+  const shell=$("modal-form").elements.namedItem("shell");
+  const selectedModel=$("modal-form").elements.namedItem("model");
+  const updateModel=()=>{
+   const enabled=shell.value==="sentra-cli";
+   $("terminal-model-wrap").hidden=!enabled;
+   selectedModel.disabled=!enabled;
+  };
+  shell.addEventListener("change",updateModel);
+  updateModel();
+ }
  if(kind==="task"){
   const team=$("modal-form").elements.namedItem("team");
   const update=guarded(async()=>{
@@ -401,7 +568,7 @@ function openModal(kind){
   team.addEventListener("change",update);update();
  }
 }
-function closeModal(force=false){if(modalSending&&force!==true)return;$("modal-shade").hidden=true;modalKind=null;modalRequest=null;}
+function closeModal(force=false){if(modalSending&&force!==true)return;$("modal-shade").hidden=true;modalKind=null;modalRequest=null;endOverlayFocus($("modal-shade"));}
 async function submitModal(e){
  e.preventDefault();
  if(modalSending||!modalKind)return;
@@ -425,7 +592,9 @@ async function submitModal(e){
     const result=await api("/api/external/antigravity",{ws:requireWS(),approved:true});
     closeModal(true);toast("Antigravity aberto como editor externo (PID "+result.pid+").");
   }else{
-    result=await api("/api/terminals",{ws:requireWS(),name,shell});
+    result=await api("/api/terminals",{ws:requireWS(),name,shell,
+      ...(shell==="sentra-cli"?{model:String(data.get("model")||"").trim(),
+        effort:String(data.get("effort")||"low")}: {})});
     closeModal(true);await openWorkspace(state.ws);
     toast((shell==="sentra-cli"||shell==="codex")?"Sessão CLI iniciada; verifique modelo e autenticação no terminal.":"Terminal ConPTY ativo.");
   }
@@ -445,11 +614,20 @@ async function submitModal(e){
   closeModal(true);await openWorkspace(state.ws);toast("Nota adicionada ao canvas.");
  }else if(kind==="handoff"){
   const source=state.selected;
-  const target=String(data.get("destination")),message=String(data.get("message")||"").trim();
+  const target=String(data.get("destination"));
+  // The handoff contract accepts a single text line, never control characters.
+  const message=String(data.get("message")||"").replace(/[\x00-\x1f\x7f]/g," ").trim();
   attempt.payload??={ws:requireWS(),source,target,message,approved:true,request_key:attempt.key};
   attempt.path="/api/graph/handoff";
   const outcome=await api(attempt.path,attempt.payload);
-  closeModal(true);toast("Instrução enviada via ConPTY ("+outcome.status+"). Confirmação do modelo pendente.");
+  closeModal(true);
+  const cable=state.links.find(l=>l.source===source&&l.target===target);
+  if(cable && outcome.status==="sent"){
+   const line=Array.from($("edge-paths").children).find(el=>el.dataset.edge===cable.id);
+   if(line){line.classList.remove("transmitting");void line.getBoundingClientRect();line.classList.add("transmitting");
+     setTimeout(()=>line.classList.remove("transmitting"),1400);}
+  }
+  toast("Mensagem enviada ao terminal ("+outcome.status+"). A resposta do modelo aparece em Atividade.");
  }else if(kind==="task"){
   const provider=String(data.get("provider"));
   const approved=provider==="sentra-cli";
@@ -516,8 +694,68 @@ function showInspector(n){
    });
  if(targets.length)content+='<div class="inspect-actions"><button data-inspect-action="handoff">Enviar para CLI conectado ↗</button></div>'+
     '<div class="inspect-field"><label>Destinos ativos</label><div>'+targets.map(t=>safe(t.title)).join(', ')+'</div></div>';
- $("inspector-content").innerHTML=content;
+ renderInspectorTabs(n,content,targets);
 }
+let inspectorPanels=null;
+function selectInspectorTab(tab){
+ if(!inspectorPanels)return;
+ const panel=inspectorPanels[tab];
+ if(panel===undefined)return;
+ $("inspector-content").innerHTML=panel;
+ $("inspector-tabs").querySelectorAll("[data-inspector-tab]").forEach(btn=>{
+  const current=btn.dataset.inspectorTab===tab;
+  btn.setAttribute("aria-selected",String(current));
+  btn.tabIndex=current?0:-1;
+ });
+}
+function renderInspectorTabs(n,details,targets){
+ const outbound=state.links.filter(l=>l.source===n.id)
+  .map(l=>({node:nodeBy(l.target),direction:"Envia para"}));
+ const inbound=state.links.filter(l=>l.target===n.id)
+  .map(l=>({node:nodeBy(l.source),direction:"Recebe de"}));
+ const connections=[...outbound,...inbound].filter(x=>x.node);
+ const links=connections.length?connections.map(({node,direction})=>
+   '<div class="connection-row"><span class="connection-direction">'+safe(direction)+'</span>'+
+   '<span class="connection-name">'+safe(node.title)+'</span></div>').join(""):
+   '<p class="inspect-empty">Sem conexões. Use a ferramenta de ligação para conectar nós.</p>';
+ const deliveries=(state.detail?.events||[]).filter(event=>
+   [n.id,n.resource_id].includes(event.subject)).slice(0,30);
+ const activity=deliveries.length?deliveries.map(event=>
+   '<div class="inspect-block"><span class="tiny">'+safe(new Date(event.created*1000).toLocaleString("pt-BR"))+
+   '</span> · '+safe(event.kind)+'<div class="tiny">'+safe(event.detail||"Evento registrado")+
+   '</div></div>').join(""):
+   '<p class="inspect-empty">Nenhum evento específico deste nó até agora.</p>';
+ inspectorPanels={
+   details,
+   connections:'<div class="inspector-connections">'+links+'</div>'+
+     (targets.length?'<div class="inspect-actions"><button data-inspect-action="handoff">Enviar instrução ↗</button></div>':""),
+   activity
+ };
+ const tabs=$("inspector-tabs");tabs.hidden=false;
+ tabs.innerHTML=[
+   ["details","Detalhes"],["connections","Conexões"],["activity","Atividade"]
+ ].map(([id,label])=>
+   '<button type="button" class="halo-tab" role="tab" id="inspector-tab-'+id+
+   '" data-inspector-tab="'+id+'" aria-controls="inspector-content" aria-selected="false">'+label+'</button>').join("");
+ $("inspector-content").setAttribute("role","tabpanel");
+ $("inspector-content").setAttribute("aria-labelledby","inspector-tab-details");
+ selectInspectorTab("details");
+}
+$("inspector-tabs").addEventListener("click",e=>{
+ const button=e.target.closest("[data-inspector-tab]");if(!button)return;
+ selectInspectorTab(button.dataset.inspectorTab);
+ $("inspector-content").setAttribute("aria-labelledby",button.id);
+});
+$("inspector-tabs").addEventListener("keydown",e=>{
+ if(!["ArrowLeft","ArrowRight","Home","End"].includes(e.key))return;
+ const buttons=[...$("inspector-tabs").querySelectorAll("[data-inspector-tab]")];
+ let index=buttons.indexOf(document.activeElement);
+ if(index<0)return;
+ e.preventDefault();
+ index=e.key==="Home"?0:e.key==="End"?buttons.length-1:
+   (index+(e.key==="ArrowRight"?1:-1)+buttons.length)%buttons.length;
+ buttons[index].focus();buttons[index].click();
+});
 async function inspectAction(action){
  const n=nodeBy(state.selected);if(!n)return;
  if(action==="handoff"){
@@ -670,9 +908,9 @@ function pointerUp(e){
  if($("viewport").hasPointerCapture(e.pointerId))$("viewport").releasePointerCapture(e.pointerId);
  if(m.type!=="pan"&&!m.dragging)return;
  if(m.type==="node"){
-  guarded(()=>api("/api/graph/move",{ws:requireWS(),id:m.n.id,x:m.n.x,y:m.n.y}))();
+  guarded(()=>collaboration?.node(m.n)||api("/api/graph/move",{ws:requireWS(),id:m.n.id,x:m.n.x,y:m.n.y}))();
  }else if(m.type==="resize"){
-  guarded(()=>api("/api/graph/resize",{ws:requireWS(),id:m.n.id,width:m.n.width,height:m.n.height}))();
+  guarded(()=>collaboration?.node(m.n)||api("/api/graph/resize",{ws:requireWS(),id:m.n.id,width:m.n.width,height:m.n.height}))();
  }
 }
 async function refreshResources(){
@@ -700,8 +938,23 @@ async function refreshResources(){
   drawEdges();
  }
  $("canvas-count").textContent=state.nodes.length+" nós · "+state.links.length+" conexões";
+ renderSessionRail();
 }
 const canvasSurface=document.querySelector(".main");
+canvasSurface.addEventListener("click",e=>{
+ const button=e.target.closest("[data-cli-command][data-cli-terminal]");
+ if(!button)return;
+ const command=button.dataset.cliCommand;
+ if(!["/model","/effort"].includes(command))return;
+ const terminal=resource("terminal",button.dataset.cliTerminal);
+ if(!terminal||terminal.shell!=="sentra-cli"||terminal.status!=="running"){
+  toast("SENTRA CLI precisa estar em execução para consultar esta configuração.","error");return;
+ }
+ guarded(async()=>{
+  await api("/api/terminal/input",{ws:requireWS(),id:terminal.id,data:command+"\r"});
+  toast(command+" enviado ao terminal. A resposta aparecerá na sessão ConPTY.");
+ })();
+});
 $("terminal-stage").addEventListener("keydown",e=>{
  if(e.key==="Escape"&&state.fullscreen){e.preventDefault();e.stopPropagation();restoreTerminal();}
 },true);
@@ -709,6 +962,33 @@ canvasSurface.addEventListener("pointerdown",e=>{
  if(e.target.closest(".node"))nodePointerDown(e);else pointerDown(e);
 });
 $("viewport").addEventListener("pointermove",pointerMove);
+const graphAnnouncement=document.createElement("div");graphAnnouncement.className="graph-announcement";
+graphAnnouncement.setAttribute("aria-live","polite");graphAnnouncement.setAttribute("aria-atomic","true");
+$("viewport").append(graphAnnouncement);
+$("viewport").addEventListener("keydown",event=>{
+ if(event.target.closest("input,textarea,select,button,.term-output,[contenteditable]")||!state.nodes.length)return;
+ if(event.key==="Enter"&&state.selected){event.preventDefault();showInspector(nodeBy(state.selected));return;}
+ const directions={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1};
+ if(!Object.hasOwn(directions,event.key)&&!["Home","End"].includes(event.key))return;
+ event.preventDefault();
+ let candidates=state.nodes;
+ if(event.shiftKey&&state.selected){
+  const adjacent=new Set(window.SentraGraphView.neighbors(state.nodes,state.links,state.selected));
+  if(adjacent.size)candidates=state.nodes.filter(node=>adjacent.has(node.id));
+ }
+ const index=candidates.findIndex(node=>node.id===state.selected);
+ const next=event.key==="Home"?candidates[0]:event.key==="End"?candidates.at(-1):
+   candidates[(index+directions[event.key]+candidates.length)%candidates.length];
+ state.selected=next.id;const view=$("viewport").getBoundingClientRect();
+ state.x=view.width/2-(next.x+next.width/2)*state.scale;
+ state.y=view.height/2-(next.y+next.height/2)*state.scale;
+ setView();renderVisibleNodes();document.querySelector('[data-node="'+next.id+'"]')?.focus();
+ graphAnnouncement.textContent=next.title+" · nó "+(state.nodes.indexOf(next)+1)+" de "+state.nodes.length;
+});
+$("viewport").addEventListener("pointermove",event=>{
+ const rect=$("viewport").getBoundingClientRect();
+ collaboration?.presence(worldAt(event.clientX-rect.left,event.clientY-rect.top));
+});
 $("viewport").addEventListener("pointerup",pointerUp);
 $("viewport").addEventListener("pointercancel",pointerUp);
 $("viewport").addEventListener("wheel",e=>{
@@ -756,15 +1036,22 @@ canvasSurface.addEventListener("keydown",e=>{
 canvasSurface.addEventListener("change",e=>{
  if(!e.target.matches("[data-note]"))return;
  const id=e.target.dataset.note,body=e.target.value;
- guarded(()=>api("/api/graph/note/update",{ws:requireWS(),id,body}))();
+ guarded(()=>collaboration?.note(id,body)||api("/api/graph/note/update",{ws:requireWS(),id,body}))();
  const note=nodeBy(id);if(note)note.body=body;
 });
-$("edge-paths").addEventListener("click",e=>{
- const link=e.target.closest("[data-edge]");if(!link)return;
- if(confirm("Remover esta conexão entre nós?"))guarded(async()=>{
+function unlinkCable(link){
+ if(!link || !confirm("Remover esta conexão entre nós?"))return;
+ guarded(async()=>{
    await api("/api/graph/unlink",{ws:requireWS(),id:link.dataset.edge});
-   state.links=state.links.filter(x=>x.id!==link.dataset.edge);drawEdges();
+   state.links=state.links.filter(x=>x.id!==link.dataset.edge);
+   drawEdges();toast("Conexão removida.");
  })();
+}
+$("edge-paths").addEventListener("click",e=>unlinkCable(e.target.closest("[data-edge]")));
+$("edge-paths").addEventListener("keydown",e=>{
+ if(e.key!=="Enter"&&e.key!==" ")return;
+ const link=e.target.closest("[data-edge]");if(!link)return;
+ e.preventDefault();unlinkCable(link);
 });
 document.querySelectorAll("[data-tool]").forEach(b=>b.addEventListener("click",()=>guarded(()=>chooseTool(b.dataset.tool))()));
 $("zoom-out").addEventListener("click",()=>zoomTo(state.scale/1.2));
@@ -781,7 +1068,7 @@ $("workspace-list").addEventListener("click",e=>{
  if(button)guarded(()=>openWorkspace(button.dataset.ws))();
 });
 $("close-inspector").addEventListener("click",()=>{
- $("inspector").hidden=true;state.selected=null;document.querySelectorAll(".node.selected").forEach(n=>n.classList.remove("selected"));
+ $("inspector").hidden=true;$("inspector-tabs").hidden=true;inspectorPanels=null;state.selected=null;document.querySelectorAll(".node.selected").forEach(n=>n.classList.remove("selected"));
 });
 $("inspector-content").addEventListener("click",e=>{
  const b=e.target.closest("[data-inspect-action]");
@@ -797,10 +1084,15 @@ $("events-button").addEventListener("click",guarded(async()=>{
  if(!state.ws){toast("Selecione um workspace.");return;}
  state.selected=null;
  $("inspector").hidden=false;
+ $("inspector-tabs").hidden=true;inspectorPanels=null;
  $("inspector-label").textContent="OBSERVABILIDADE";
  $("inspector-title").textContent="Atividade e auditoria";
  const events=state.detail?.events||[];
  const tasks=(state.detail?.tasks||[]).slice().reverse().slice(0,8);
+ const handoffs=await api("/api/graph/handoffs?ws="+encodeURIComponent(state.ws));
+ const receipts={pending:"Aguardando processamento",running:"CLI processando",
+  answered:"Modelo respondeu",tool_completed:"Comando CLI executado",
+  failed:"Modelo falhou",uncertain:"Execução incerta"};
  const governed=await Promise.all(tasks.map(t=>api("/api/task/governance?ws="+
   encodeURIComponent(state.ws)+"&id="+encodeURIComponent(t.id))));
  const workflow={QUEUED:"Na fila",RUNNING:"Em execução",VALIDATING:"Resultado aguarda validação",REPAIRING:"Resultado precisa de correção",
@@ -827,6 +1119,13 @@ $("events-button").addEventListener("click",guarded(async()=>{
       '" data-task-id="'+safe(t.id)+'">'+(governed[i].work_item.state==="BLOCKED"?"Liberar tarefa":"Bloquear tarefa")+'</button>':'')+
      '</div>').join("")
    :'<div>Nenhuma tarefa registrada.</div>')+'</div>'+
+  '<div class="inspect-field"><label>Mensagens entre agentes</label>'+
+  (handoffs.length?handoffs.slice(0,20).map(h=>'<div class="inspect-block">'+
+   '<div>'+safe(receipts[h.receipt_status]||"Aguardando")+
+   ' · '+safe(h.status==="sent"?"Entregue ao terminal":h.status)+'</div>'+
+   '<div class="tiny">'+safe((h.content||"").slice(0,160))+'</div>'+
+   '<div class="tiny">Recibo '+safe(h.id.slice(0,12))+'</div></div>').join("")
+   :'<div>Nenhuma mensagem encaminhada.</div>')+'</div>'+
   '<div class="inspect-field"><label>Eventos de auditoria</label>'+
    events.slice(0,60).map(x=>'<div class="inspect-block"><span class="tiny">'+
    new Date(x.created*1000).toLocaleTimeString("pt-BR")+'</span> · '+
@@ -847,8 +1146,9 @@ $("inspector-content").addEventListener("click",guarded(async e=>{
 $("show-overview").addEventListener("click",()=>$("events-button").click());
 $("show-settings").addEventListener("click",()=>{
  state.selected=null;$("inspector").hidden=false;
+ $("inspector-tabs").hidden=true;inspectorPanels=null;
  $("inspector-label").textContent="CONFIGURAÇÕES";
- $("inspector-title").textContent="SENTRA Desktop";
+ $("inspector-title").textContent=location.pathname==="/canvas"?"SENTRA Canvas Web":"SENTRA Desktop";
  $("inspector-content").innerHTML=
  '<div class="inspect-field"><label>Ambiente</label><div>Aplicativo desktop nativo para Windows, usando WebView2. Servidor de controle somente em 127.0.0.1, autenticado.</div></div>'+
  '<div class="inspect-field"><label>Runtime</label><div>ConPTY: processos interativos reais. Gateway do modelo depende de autenticação externa.</div></div>'+
@@ -858,6 +1158,7 @@ $("show-settings").addEventListener("click",()=>{
 });
 $("help-button").addEventListener("click",()=>{
  state.selected=null;$("inspector").hidden=false;
+ $("inspector-tabs").hidden=true;inspectorPanels=null;
  $("inspector-label").textContent="AJUDA";
  $("inspector-title").textContent="Atalhos e controle";
  $("inspector-content").innerHTML=[
@@ -903,6 +1204,8 @@ if(!token){
 }else{
  guarded(async()=>{
   state.integrations=await api("/api/integrations");
+  api("/api/models").then(catalog=>{state.models=Array.isArray(catalog.models)?catalog.models:[];})
+    .catch(()=>{state.models=[];});
   await loadWorkspaces();
   setInterval(pollAll,400);
   setInterval(()=>guarded(refreshResources)(),5500);
@@ -918,3 +1221,114 @@ function windowAction(name){
 $("window-minimize").addEventListener("click",()=>guarded(()=>windowAction("minimize"))());
 $("window-maximize").addEventListener("click",()=>guarded(()=>windowAction("toggle_maximize"))());
 $("window-close").addEventListener("click",()=>guarded(()=>windowAction("close"))());
+
+/* Keyboard-first quick actions. Cult UI Halo Search/Dock interaction patterns,
+ * implemented locally to preserve the Canvas WebView2/CSP dependency boundary. */
+const commandOverlay=$("command-overlay"),commandInput=$("command-query"),commandResults=$("command-results");
+function commands(){
+ const actions=[
+   {id:"terminal",symbol:"▣",label:"Novo terminal",kind:"Execução"},
+   {id:"agent",symbol:"◇",label:"Novo agente SENTRA CLI",kind:"Orquestração"},
+   {id:"team",symbol:"◎",label:"Criar equipe",kind:"Orquestração"},
+   {id:"note",symbol:"▤",label:"Nova nota",kind:"Canvas"},
+   {id:"fit",symbol:"⛶",label:"Enquadrar todos os nós",kind:"Visualização"},
+   {id:"overview",symbol:"◷",label:"Atividade e auditoria",kind:"Observabilidade"},
+   {id:"workspace",symbol:"＋",label:"Novo workspace",kind:"Projetos"}
+ ];
+ const nodes=state.nodes.map(n=>({
+   id:"node:"+n.id,symbol:{terminal:"▣",agent:"◇",team:"◎",note:"▤"}[n.kind]||"⌁",
+   label:n.title,kind:"Ir para "+{terminal:"terminal",agent:"agente",team:"equipe",note:"nota"}[n.kind]
+ }));
+ return state.ws?[...actions,...nodes]:[actions[6]];
+}
+function renderCommands(){
+ const query=commandInput.value.trim().toLocaleLowerCase("pt-BR");
+ $("command-clear").hidden=!commandInput.value;
+ const items=commands().filter(item=>(item.label+" "+item.kind).toLocaleLowerCase("pt-BR").includes(query)).slice(0,24);
+ commandResults.innerHTML=items.length?items.map(item=>
+ '<button type="button" class="command-result" data-command="'+safe(item.id)+'">'+
+ '<span class="command-symbol" aria-hidden="true">'+safe(item.symbol)+'</span>'+
+ '<span class="command-label">'+safe(item.label)+'</span>'+
+ '<span class="command-kind">'+safe(item.kind)+'</span></button>').join("")
+ :'<div class="command-empty">Nenhum comando ou nó encontrado.</div>';
+}
+function closeCommands(){
+ commandOverlay.hidden=true;commandInput.value="";commandResults.replaceChildren();
+ endOverlayFocus(commandOverlay);
+}
+function showCommands(){
+ if(!$("modal-shade").hidden || state.fullscreen)return;
+ beginOverlayFocus(commandOverlay);
+ commandOverlay.hidden=false;commandInput.value="";renderCommands();commandInput.focus();
+}
+function executeCommand(id){
+ closeCommands();
+ if(id.startsWith("node:")){
+  const node=nodeBy(id.slice(5));
+  if(!node)return;
+  const bounds=$("viewport").getBoundingClientRect();
+  state.x=bounds.width/2-(node.x+node.width/2)*state.scale;
+  state.y=bounds.height/2-(node.y+node.height/2)*state.scale;
+  setView();showInspector(node);return;
+ }
+ if(id==="fit"){fitNodes();return;}
+ if(id==="overview"){$("events-button").click();return;}
+ if(["terminal","agent","team","note","workspace"].includes(id))openModal(id);
+}
+document.addEventListener("keydown",e=>{
+ if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==="k"&&!e.target.closest(".term-output")){
+  e.preventDefault();e.stopPropagation();
+  if(commandOverlay.hidden)showCommands();else closeCommands();
+  return;
+ }
+ if(commandOverlay.hidden)return;
+ if(e.key==="Escape"){e.preventDefault();e.stopPropagation();closeCommands();return;}
+ if(e.key==="ArrowDown"||e.key==="ArrowUp"){
+  e.preventDefault();e.stopPropagation();
+  const controls=[commandInput,...commandResults.querySelectorAll("button")];
+  const current=controls.indexOf(document.activeElement);
+  const delta=e.key==="ArrowDown"?1:-1;
+  controls[(current+delta+controls.length)%controls.length]?.focus();
+ }else if(e.key==="Enter"&&document.activeElement===commandInput){
+  e.preventDefault();e.stopPropagation();
+  commandResults.querySelector("button")?.click();
+ }
+},true);
+$("command-launch").addEventListener("click",showCommands);
+commandInput.addEventListener("input",renderCommands);
+commandResults.addEventListener("click",e=>{
+ const button=e.target.closest("[data-command]");
+ if(button)guarded(()=>executeCommand(button.dataset.command))();
+});
+commandOverlay.addEventListener("pointerdown",e=>{if(e.target===commandOverlay)closeCommands();});
+
+/* Magnetic Dock: spring-like restrained magnification, no React runtime. */
+const sentraDock=document.querySelector(".toolbar");
+const dockTools=[...sentraDock.querySelectorAll(".tool")];
+const noDockMotion=window.matchMedia("(prefers-reduced-motion: reduce)");
+function resetDock(){dockTools.forEach(item=>item.style.removeProperty("--dock-zoom"));}
+sentraDock.addEventListener("pointermove",e=>{
+ if(noDockMotion.matches||e.pointerType==="touch")return;
+ for(const item of dockTools){
+  const rect=item.getBoundingClientRect(),distance=Math.abs(e.clientX-(rect.left+rect.width/2));
+  const value=1+.18*Math.exp(-(distance*distance)/(2*55*55));
+  item.style.setProperty("--dock-zoom",value.toFixed(3));
+ }
+},{passive:true});
+sentraDock.addEventListener("pointerleave",resetDock,{passive:true});
+noDockMotion.addEventListener?.("change",resetDock);
+$("command-clear").addEventListener("click",()=>{
+ commandInput.value="";renderCommands();commandInput.focus();
+});
+/* Composer preserves textarea drafting, but dispatch uses the backend's safe
+ * single-line contract. No implicit shell commands or attachment uploads. */
+$("modal-form").addEventListener("input",e=>{
+ if(e.target.name!=="message")return;
+ const counter=$("composer-count");if(counter)counter.textContent=e.target.value.length+" / 4000";
+});
+$("modal-form").addEventListener("keydown",e=>{
+ if(e.target.tagName==="TEXTAREA"&&(e.ctrlKey||e.metaKey)&&e.key==="Enter"){
+  e.preventDefault();e.stopPropagation();
+  if(!modalSending)$("modal-form").requestSubmit();
+ }
+});

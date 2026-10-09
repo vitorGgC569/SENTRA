@@ -153,3 +153,103 @@ def test_json_files_are_lf_and_parseable(tmp_path):
         raw = (mem.memory_dir / name).read_bytes()
         assert b"\r" not in raw
         json.loads(raw.decode("utf-8"))
+
+
+def test_cross_instance_writes_do_not_lose_updates(tmp_path):
+    import concurrent.futures
+
+    first = _mem(tmp_path)
+    second = ProgramMemory(tmp_path / "ws")
+
+    def write(mem, prefix):
+        for i in range(20):
+            mem.record_candidate(
+                "parallel",
+                f"{prefix}-{i}.diff",
+                "SUCCESS",
+                run_id=f"run-{prefix}",
+                task_id=f"T-{i}",
+            )
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(write, first, "a"),
+            pool.submit(write, second, "b"),
+        ]
+        for future in futures:
+            future.result(timeout=10)
+
+    items = ProgramMemory(tmp_path / "ws").get_candidates("parallel")
+    assert len(items) == 40
+    assert {item["patch_ref"] for item in items} == {
+        *(f"a-{i}.diff" for i in range(20)),
+        *(f"b-{i}.diff" for i in range(20)),
+    }
+
+
+def test_memory_writes_are_idempotent_by_content(tmp_path):
+    mem = _mem(tmp_path)
+    refs = {"run_id": "run-idem", "task_id": "T-1"}
+    assert mem.record_adr("Mesma decisao", "mesma razao", refs) == "ADR-0001"
+    assert mem.record_adr("Mesma decisao", "mesma razao", refs) == "ADR-0001"
+    evidence = "run-idem ver orchestrator/engine.py:1516"
+    assert mem.record_lesson("mesma licao", evidence) == "LES-0001"
+    assert mem.record_lesson("mesma licao", evidence) == "LES-0001"
+    assert mem.record_candidate(
+        "implementation", "patch-ref", "SUCCESS",
+        run_id="run-idem", task_id="T-1", notes="ok",
+    ) == 0
+    assert mem.record_candidate(
+        "implementation", "patch-ref", "SUCCESS",
+        run_id="run-idem", task_id="T-1", notes="ok",
+    ) == 0
+    stats = mem.stats()
+    assert stats["adrs"] == 1
+    assert stats["lessons"] == 1
+    assert stats["candidates"] == 1
+
+
+def test_engine_records_only_settled_evidence_backed_learning(tmp_path):
+    from orchestrator.engine import OMAEngine
+    from orchestrator.models import Candidate, MasterDecision, Task
+
+    mem = _mem(tmp_path)
+    engine = object.__new__(OMAEngine)
+    engine.program_memory = mem
+    engine.run_id = "run-learn"
+
+    task = Task(
+        id="T-1",
+        run_id="run-learn",
+        objective="separate project integration from task execution",
+        metadata={
+            "architecture_decision": "Use one integration coordinator as project writer",
+            "decision_rationale": "candidate publication must stay serialized",
+            "optimistic_rebase": {
+                "applied": True,
+                "touched_files": ["orchestrator/runtime.py"],
+            },
+        },
+    )
+    task.current_repair_round = 2
+    candidate = Candidate(
+        candidate_id="cand-learn",
+        task_id="T-1",
+        run_id="run-learn",
+        patch="--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n",
+    )
+    decision = MasterDecision(
+        decision="APPROVED",
+        reasoning="reviewed package is compatible with the project invariant",
+    )
+
+    engine._record_program_learning(task, candidate, decision)
+    first = mem.stats()
+    assert first["lessons"] == 2
+    assert first["adrs"] == 1
+
+    # Resume/replay of the same settled task is idempotent.
+    engine._record_program_learning(task, candidate, decision)
+    assert mem.stats() == first
+    assert "run-learn" in mem.list_lessons()[0]["evidence"]
+    assert mem.list_adrs()[0]["refs"]["candidate_id"] == "cand-learn"

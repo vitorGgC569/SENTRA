@@ -45,8 +45,49 @@ is outside the allowlist is not discoverable by MCP clients.
 
 Installed workspaces are persisted as locally approved grants in
 `.sentra/workspaces.json` with explicit `read`, `write` and `execute`
-permissions. The MCP's configured root is an isolated default workspace rather
-than the private SENTRA state directory.
+permissions. Filesystem scope is independent from the execution profile:
+`workspace` exposes only individually approved grants, `user` adds the current
+user's home tree, and `computer` adds accessible local/mapped drives.
+More-specific workspace grants take precedence over broader scope grants.
+
+The MCP's configured root is an isolated default workspace rather than the
+private SENTRA state directory. The optional Remote Agent uses that same
+registry as its filesystem authority: Desktop policy sync writes profile,
+scope, surfaces and tool allowlist into the Agent configuration, while actual
+path permissions remain in `.sentra/workspaces.json`. Policy is synchronized
+again before each Agent start so a previously paired device cannot silently
+retain an older, broader Desktop policy. Safe remains read-only regardless of
+filesystem scope.
+
+## Durable multi-agent control plane
+
+The product/governance layer above Durable Run/Operation is specified in
+[`GOVERNANCE_CONTROL_PLANE.md`](GOVERNANCE_CONTROL_PLANE.md), including
+WorkItem ownership, deterministic validation, retry/recovery policy, budgets,
+secrets, routines, plugins, ordered ingress and portable blueprints.
+
+SENTRA separates authoritative state from model conversation state. Durable
+`Run`, `Goal`, `Agent`, `Chat`, `Operation`, lease/fencing and artifact
+records remain in the Control Plane even when a physical ChatGPT or Gemini
+conversation must be replaced. A `Chat` belongs to exactly one logical Agent;
+cross-Agent rebinding fails closed.
+
+The Context Bus transports typed knowledge, targeted agent messages, questions,
+objections, results and evidence. It is non-authoritative: model consensus never
+marks a Goal successful and never promotes a candidate.
+
+`orchestrator/swarm_cycle.py` provides the persistent multi-provider cycle used
+by `sentra swarm ...`. The balanced profile uses ChatGPT and Gemini specialists
+over one Run/Goal, with the bounded phase sequence
+`discover -> peer_questions -> cross_review -> implement -> test -> challenge -> synthesize`.
+Peer questions are targeted rather than unrestricted all-to-all fanout.
+
+When `--execute` is enabled, the swarm's compiled context is handed to the
+existing OMA implementation path. OMA and deterministic validation retain
+mutation/Quality-Gate authority. Browser sends are checkpointed: a known
+`NOT_SENT` failure may be retried, while `IN_FLIGHT`/`UNCERTAIN` delivery is
+never replayed automatically.
+
 ## Browser model
 
 The Edge bridge listens only on loopback and uses a high-entropy local relay

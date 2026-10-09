@@ -101,6 +101,11 @@ class Canvas:
         self.max_task_workers=max_task_workers
         self.max_pending_tasks=max_pending_tasks
         self._task_runtime=None
+        self._machine_host=None
+        self._collab_authority=None
+        self._collab_process=None
+        self._plan_history=None
+        self._network_settings=None
         self._task_runtime_error=None
         self._dispatch_stop=threading.Event()
         self._dispatch_wake=threading.Event()
@@ -112,6 +117,323 @@ class Canvas:
             from .task_runtime import TaskRuntime
             self._task_runtime=TaskRuntime(self.state_dir.parent,self.store)
         return self._task_runtime
+
+    def _machine_service(self):
+        """Share the existing durable state; the host owns only dispatch machinery."""
+        with self._lock:
+            if self._machine_host is None:
+                from sentra_mcp.services.context import ContextBusService
+                from sentra_mcp.services.control_plane import ControlPlaneService
+                from sentra_runtime.machine_host import MachineHost
+                runtime = self._runtime()
+                control = ControlPlaneService(runtime.durable, ContextBusService(self.state_dir.parent))
+                self._machine_host = MachineHost(control, owner=runtime.owner)
+                def validate_scope(config):
+                    workspace = self.store.workspace(config["workspace_id"])
+                    self.store.resource("agents",config["agent_id"],config["workspace_id"])
+                    if Path(workspace["path"]).resolve(strict=True) != Path(config["workspace_root"]).resolve(strict=True):
+                        raise Denied("persisted machine workspace root changed")
+                self._machine_host.restore(validate_scope)
+            return self._machine_host
+
+    def center_machines(self, ws):
+        self.store.workspace(ws)
+        host=self._machine_service()
+        return {"machines": host.inventory(ws), "work_items":host.task_catalog(workspace_id=ws),
+                "restore_errors":host.restore_errors}
+
+    def center_telemetry(self,ws,config=None):
+        self.store.workspace(ws)
+        host=self._machine_service()
+        return host.configure_telemetry(config) if config is not None else host.telemetry_status()
+
+    def agent_working_context(self,ws,agent_id,*,goal=None,expected_revision=None):
+        from .agent_context import AgentWorkingContext
+        contexts=AgentWorkingContext(self.store)
+        if goal is None:return contexts.get(ws,agent_id)
+        return contexts.set(ws,agent_id,goal=goal,expected_revision=expected_revision)
+
+    def center_network(self,ws,configuration=None,*,agent=False):
+        with self._lock:
+            if self._network_settings is None:
+                from .network_settings import WorkspaceNetworkSettings
+                self._network_settings=WorkspaceNetworkSettings(self.store)
+                self._network_settings.restore()
+            network=self._network_settings
+        return network.configure(ws,configuration,agent=agent) if configuration is not None else network.status(ws)
+
+    def center_network_pairing(self,ws):
+        self.center_network(ws)
+        return self._network_settings.pairing_code(ws)
+
+    def _working_context_snapshot(self,ws,agents,origins,state):
+        workspace=self.store.workspace(ws);runtime=self._runtime();run=runtime.run(ws)
+        assignments=runtime.governance.list_work_items(runtime.owner,run_id=run["run_id"],
+            states=["QUEUED","RUNNING","BLOCKED","VALIDATING"],limit=1000)["items"]
+        own=[item for item in assignments if item.get("assignee_agent_id") in agents and
+            item.get("metadata",{}).get("workspace_id")==ws]
+        targets={link["target"] for link in state["links"] if link["source"] in origins}
+        directed=[node for node in state["nodes"] if node["id"] in targets]
+        return {"schema_version":1,"workspace":{"id":ws,"name":workspace["name"],"path":workspace["path"]},
+            "run":{"run_id":run["run_id"],"state":run["state"]},
+            "agents":[{"id":agent,"name":self.store.resource("agents",agent,ws)["name"],
+                "role":self.store.resource("agents",agent,ws)["role"],
+                "working_context":self.agent_working_context(ws,agent)} for agent in sorted(agents)],
+            "work_items":[{key:item.get(key) for key in ("work_item_id","objective","state","required_capabilities","blockers")} for item in own[:32]],
+            "connections":[{key:node[key] for key in ("id","kind","title","resource_id")} for node in directed[:64]],
+            "notes":[{"id":node["id"],"body":str(node.get("body", ""))[:4000]} for node in directed if node["kind"]=="note"][:8],
+            "context_creates_permissions":False,"automatic_coordination_available":True}
+
+    def center_overview(self,ws,*,operation_offset=0,work_item_offset=0):
+        """Current owner-scoped central state, with bounded metadata pages."""
+        self.store.workspace(ws)
+        runtime=self._runtime();host=self._machine_service();run=runtime.run(ws)
+        operations=runtime.durable.list_operations(run["run_id"],runtime.owner,limit=50,offset=operation_offset)
+        work=host.control.list_work_items(runtime.owner,run_id=run["run_id"],limit=50,offset=work_item_offset)
+        visible=[item for item in work["items"] if item.get("metadata",{}).get("workspace_id")==ws]
+        return {"run":{key:run[key] for key in ("run_id","state","desired_state","updated_at","last_event_seq")},
+            "work_items":{"items":[{key:item.get(key) for key in ("work_item_id","objective","state",
+                "assignee_agent_id","required_capabilities","updated_at","blockers")} for item in visible],"page":work["page"]},
+            "operations":operations,"machines":host.inventory(ws),"restore_errors":host.restore_errors,
+            "cost":host.control.cost_summary(runtime.owner,run_id=run["run_id"]),
+            "budget_policies":self.budget_policies(ws)["items"],"telemetry":host.telemetry_status(),
+            "consistency":"current-read","provider_registration_proves_execution":False}
+
+    def center_configure_machine(self, ws, agent_id, kind, *, profiles=None, headless=True,
+                                 recalculation_backends=None,ocr_backends=None,provider_config=None,definitions=None):
+        """Authenticated owner configuration; agent tokens cannot call this method."""
+        workspace = self.store.workspace(ws)
+        self.store.resource("agents", agent_id, ws)
+        host = self._machine_service()
+        if kind == "documents":
+            return host.configure_documents(workspace_id=ws, workspace_root=workspace["path"],
+                                            agent_id=agent_id,recalculation_backends=recalculation_backends,
+                                            ocr_backends=ocr_backends)
+        if kind == "browser":
+            return host.configure_browser(workspace_id=ws, workspace_root=workspace["path"],
+                agent_id=agent_id, profiles=profiles, headless=headless)
+        if kind == "openhands":
+            return host.configure_openhands(workspace_id=ws,workspace_root=workspace["path"],
+                agent_id=agent_id,provider_config=provider_config)
+        if kind == "workflow":
+            return host.configure_workflow(workspace_id=ws,workspace_root=workspace["path"],
+                agent_id=agent_id,definitions=definitions)
+        if kind in {"daytona","guacamole","rustdesk"}:
+            return host.configure_session(workspace_id=ws,workspace_root=workspace["path"],
+                agent_id=agent_id,kind=kind,provider_config=provider_config)
+        raise ValueError("unsupported machine kind")
+
+    def center_prepare_task(self, ws, machine_id, capabilities, objective):
+        """Owner explicitly creates a scoped task/grant for a configured machine."""
+        self.store.workspace(ws)
+        host = self._machine_service()
+        selected = next((m for m in host.inventory(ws) if m["machine_id"] == machine_id), None)
+        if (selected is None or not isinstance(capabilities, list) or not capabilities
+                or any(not isinstance(c, str) for c in capabilities)
+                or not set(capabilities) <= set(selected["capabilities"])
+                or not isinstance(objective, str) or not 1 <= len(objective.strip()) <= 4000):
+            raise ValueError("configured machine, explicit capabilities and objective required")
+        runtime = self._runtime()
+        run = runtime.run(ws)
+        control = host.control
+        if run["state"] == "CREATED":
+            runtime.durable.transition_run(run["run_id"], runtime.owner, "RUNNING",
+                                           reason="owner prepared a machine task")
+        elif run["state"] != "RUNNING":
+            raise Denied("resume the Canvas run before preparing a machine task")
+        control.ensure_agent(run["run_id"], runtime.owner,
+                             agent_id=selected["agent_id"], role="worker")
+        item = control.create_work_item(run["run_id"], runtime.owner,
+            work_item_id="WI-machine-" + secrets.token_hex(12), objective=objective.strip(),
+            assignee_agent_id=selected["agent_id"], required_capabilities=sorted(set(capabilities)),
+            metadata={"workspace_id": ws, "machine_id": machine_id,
+                      "canvas_agent_id": selected["agent_id"], "owner_configured": True})
+        grants = [control.authorization_grant(runtime.owner, principal_type="agent",
+                    principal_id=selected["agent_id"], capability=cap,
+                    scope_type="work_item", scope_id=item["work_item_id"])
+                  for cap in sorted(set(capabilities))]
+        control.transition_work_item(item["work_item_id"], runtime.owner, "RUNNING")
+        return {"work_item": control.work_item_info(item["work_item_id"], runtime.owner),
+                "machine_id": machine_id, "grant_ids": [g["grant_id"] for g in grants]}
+
+    def center_execute(self, ws, work_item_id, machine_id, capability_id, operation_id,
+                       arguments, request_key):
+        self.store.workspace(ws)
+        return self._machine_service().dispatch(workspace_id=ws, work_item_id=work_item_id,
+            machine_id=machine_id, capability_id=capability_id, operation_id=operation_id,
+            arguments=arguments, idempotency_key=request_key)
+
+    def center_operation(self, ws, operation_id, *, as_owner=True):
+        self.store.workspace(ws)
+        return self._machine_service().observe(workspace_id=ws, operation_id=operation_id,
+                                               as_owner=as_owner)
+
+    def center_experiences(self, ws, work_item_id, machine_id, query, limit=5):
+        self.store.workspace(ws)
+        return self._machine_service().experiences(workspace_id=ws,work_item_id=work_item_id,
+            machine_id=machine_id,query=query,limit=limit)
+
+    def center_plan(self, ws, work_item_id, action="read", steps=None, expected_revision=None):
+        self.store.workspace(ws)
+        host=self._machine_service()
+        item=host.control.work_item_info(work_item_id,host.owner)
+        if item.get("metadata",{}).get("workspace_id")!=ws:
+            raise Denied("plan task outside workspace")
+        with self._lock:
+            if self._plan_history is None:
+                from sentra_runtime.plan_history import PlanHistory
+                self._plan_history=PlanHistory(host.control,owner=host.owner)
+        if action=="read":return self._plan_history.current(work_item_id)
+        if action=="revise":return self._plan_history.revise(work_item_id,steps,expected_revision=expected_revision)
+        if action in {"undo","redo"}:
+            return self._plan_history.navigate(work_item_id,direction=action,expected_revision=expected_revision)
+        raise ValueError("unknown plan action")
+
+    def _agent_machine_control(self, token, payload):
+        # Validate a live agent session under the Canvas lock, then release it
+        # before potentially long provider I/O so other agents/UI remain usable.
+        with self._lock:
+            binding = self._agent_tokens.get(token)
+            if binding is None:
+                raise Denied("unknown Canvas agent capability")
+            ws, terminal = binding
+            workspace = self.store.workspace(ws)
+            if payload.get("workspace") != workspace["path"]:
+                raise Denied("Canvas capability belongs to another workspace")
+            if terminal.startswith("task:"):
+                task = self.store.resource("tasks", terminal[5:], ws)
+                process = self._task_processes.get(task["id"])
+                if process is None or process.poll() is not None:
+                    self._revoke_agent(terminal)
+                    raise Denied("Canvas task session is no longer running")
+                agents = {task["agent_id"]}
+            else:
+                session = self._sessions.get(terminal)
+                if session is None or session.pty is None or session.pty.poll() is not None:
+                    self._revoke_agent(terminal)
+                    raise Denied("Canvas agent session is no longer running")
+                agents = {a["id"] for a in self.store.list_resources("agents", ws)
+                          if a.get("terminal_id") == terminal}
+        action = payload["action"]
+        if action == "machine_list":
+            host=self._machine_service()
+            tasks=host.task_catalog(workspace_id=ws,agent_ids=agents)
+            scopes={}
+            for item in tasks:scopes.setdefault(item["machine_id"],set()).update(item["capabilities"])
+            return {"machines":[{**m,"capabilities":sorted(scopes[m["machine_id"]]),
+                "actions":{cap:values for cap,values in m["actions"].items() if cap in scopes[m["machine_id"]]}}
+                for m in host.inventory(ws) if m["machine_id"] in scopes],"work_items":tasks}
+        runtime = self._runtime()
+        if action == "machine_observe":
+            row = runtime.durable.operation_status(payload["operation_id"], runtime.owner)
+            if (row.get("progress") or {}).get("principal_id") not in agents:
+                raise Denied("operation belongs to another Canvas agent")
+            return self.center_operation(ws, payload["operation_id"], as_owner=False)
+        item = runtime.governance.work_item_info(payload["work_item_id"], runtime.owner)
+        if (item.get("assignee_agent_id") not in agents
+                or item.get("metadata", {}).get("workspace_id") != ws):
+            raise Denied("machine task belongs to another Canvas agent")
+        if action == "machine_experiences":
+            return self.center_experiences(ws,payload["work_item_id"],payload["machine_id"],
+                payload["query"],payload.get("limit",5))
+        return self.center_execute(ws, payload["work_item_id"], payload["machine_id"],
+            payload["capability_id"], payload["operation_id"], payload["arguments"],
+            payload["request_key"])
+
+    def _collaboration_service(self):
+        with self._lock:
+            if self._collab_authority is None:
+                from sentra_collab.authority import CollaborationAuthority
+                host = self._machine_service()
+                self._collab_authority = CollaborationAuthority(host.control, owner=host.owner)
+            return self._collab_authority
+
+    def collab_session(self, ws, work_item_id, principal_id, permission="read"):
+        """Owner-issued one-use ticket; grants must already exist in ControlPlane."""
+        self.store.workspace(ws)
+        return self._collaboration_service().issue(workspace_id=ws, principal_id=principal_id,
+            work_item_id=work_item_id, principal_type="user", permission=permission)
+
+    def collab_prepare(self, ws, principal_id):
+        """Explicit owner action creates a user-scoped presentation task only."""
+        from sentra_collab.authority import _id
+        self.store.workspace(ws)
+        principal_id = _id(principal_id)
+        host = self._machine_service()
+        runtime = self._runtime()
+        run = runtime.run(ws)
+        if run["state"] == "CREATED":
+            runtime.durable.transition_run(run["run_id"], runtime.owner, "RUNNING",
+                                           reason="owner enabled Canvas collaboration")
+        elif run["state"] != "RUNNING":
+            raise Denied("resume the Canvas run before enabling collaboration")
+        caps = ["canvas.collab.read", "canvas.collab.write"]
+        item = host.control.create_work_item(run["run_id"], host.owner,
+            work_item_id="WI-collab-" + secrets.token_hex(12),
+            objective="Collaborative Canvas layout and existing note text",
+            assignee_user_id=principal_id, required_capabilities=caps,
+            metadata={"workspace_id":ws,"owner_configured":True,"canvas_collaboration":True})
+        for cap in caps:
+            host.control.authorization_grant(host.owner, principal_type="user",
+                principal_id=principal_id, capability=cap, scope_type="work_item",
+                scope_id=item["work_item_id"])
+        host.control.transition_work_item(item["work_item_id"], host.owner, "RUNNING")
+        return {"work_item_id":item["work_item_id"],"principal_id":principal_id}
+
+    def collab_disable(self, ws, work_item_id, principal_id):
+        self.store.workspace(ws)
+        host = self._machine_service()
+        item = host.control.work_item_info(work_item_id, host.owner)
+        if (item.get("assignee_user_id") != principal_id
+                or item.get("metadata", {}).get("workspace_id") != ws
+                or item.get("metadata", {}).get("canvas_collaboration") is not True):
+            raise Denied("collaboration task identity mismatch")
+        rows = host.control.authorization.list_grants(host.owner,
+            principal_type="user", principal_id=principal_id)["items"]
+        for grant in rows:
+            if grant["scope_type"] == "work_item" and grant["scope_id"] == work_item_id:
+                host.control.authorization.revoke(grant["grant_id"], host.owner)
+        if item["state"] == "RUNNING":
+            host.control.transition_work_item(work_item_id, host.owner, "CANCELLED")
+        return {"disabled":True}
+
+    def collab_host_call(self, method, params):
+        """Private bearer-authenticated callbacks for the owned Node sidecar."""
+        if not isinstance(params, dict):
+            raise ValueError("collaboration callback parameters required")
+        authority = self._collaboration_service()
+        if method == "resolveGrant":
+            self.store.workspace(params["workspaceId"])
+            return authority.resolve(token=params["token"], workspace_id=params["workspaceId"])
+        if method == "checkGrant":
+            self.store.workspace(params["workspaceId"])
+            return authority.check(params, action=params.get("action", "read"))
+        if method == "consumeNonce":
+            self.store.workspace(params["workspaceId"])
+            return authority.consume(params, fingerprint=params["fingerprint"])
+        if method == "loadSnapshot":
+            self.store.workspace(params["workspaceId"])
+            return authority.load(params["workspaceId"])
+        if method == "commitSnapshot":
+            self.store.workspace(params["workspaceId"])
+            context = params["context"]
+            if (context.get("workspaceId") != params["workspaceId"]
+                    or context.get("principalId") != params["principalId"]
+                    or context.get("epoch") != params["epoch"]):
+                raise Denied("collaboration commit identity mismatch")
+            result = authority.commit(context=context, expected_revision=params["expectedRevision"],
+                snapshot=params["snapshot"], presentation=params["presentation"])
+            # Snapshot commits first. A crash during projection is repaired on
+            # the next graph read; an unknown acknowledgement is never replayed.
+            self._apply_collaboration(params["workspaceId"], authority)
+            return result
+        raise ValueError("unsupported collaboration callback")
+
+    def _apply_collaboration(self, ws, authority=None):
+        authority = authority or self._collaboration_service()
+        stored = authority.load(ws)
+        self.graph.apply_presentation(ws, stored["revision"], stored["presentation"])
+        return stored
 
     def _dispatch_loop(self):
         while not self._dispatch_stop.is_set():
@@ -276,7 +598,10 @@ class Canvas:
     def graph_detail(self, ws):
         state=self.workspace_detail(ws)
         canvas=self.graph.sync(ws,state["terminals"],state["agents"],state["teams"])
-        return {**state, **canvas}
+        stored = self._apply_collaboration(ws)
+        canvas = self.graph.snapshot(ws)
+        return {**state, **canvas, "collaboration_revision": stored["revision"],
+                "collaboration_layout": stored["presentation"]["layout"]}
 
     def graph_move(self,ws,ident,x,y):
         self.store.workspace(ws)
@@ -361,6 +686,14 @@ class Canvas:
         return {"id":result["id"],"transport":"conpty-stdin",
                 "status":"sent","model_acknowledged":False}
 
+    def _uncertain_receipts_for_terminal(self,ws,terminal):
+        agents={a["id"] for a in self.store.list_resources("agents",ws)
+                if a["terminal_id"]==terminal}
+        targets={n["id"] for n in self.graph.snapshot(ws)["nodes"]
+                 if (n["kind"]=="terminal" and n["resource_id"]==terminal)
+                 or (n["kind"]=="agent" and n["resource_id"] in agents)}
+        return self.graph.interrupt_handoffs(ws,targets)
+
     def _list_terminals(self,ws):
         result=self.store.list_resources("terminals",ws)
         for terminal in result:
@@ -368,6 +701,7 @@ class Canvas:
             if session and session.pty:
                 status=session.pty.poll()
                 if status is not None and terminal["status"]=="running":
+                    self._uncertain_receipts_for_terminal(ws,terminal["id"])
                     self.store.terminal_state(ws,terminal["id"],"exited")
                     terminal["status"]="exited"
                     terminal["exit_code"]=status
@@ -483,7 +817,16 @@ class Canvas:
                 raise Denied("unique authorized Canvas node required")
             return matches[0]
 
-        parts=value.split("|")
+        parts=value.split("|");brief=None
+        if action=="create_agent" and value.lstrip().startswith("{"):
+            structured=json.loads(value)
+            if not isinstance(structured,dict) or set(structured)-{"name","model","role","brief"}:
+                raise ValueError("unsupported structured agent creation field")
+            parts=[structured.get("name"),structured.get("model"),structured.get("role","worker")]
+            if any(not isinstance(v,str) for v in parts):raise ValueError("agent name/model/role must be text")
+            brief=structured.get("brief")
+            if brief is not None and (not isinstance(brief,str) or not 1<=len(brief)<=3200):
+                raise ValueError("bounded child-agent brief required")
         # Agent nodes survive terminal replacement and keep outgoing coordination.
         source=next((n for n in state["nodes"] if n["id"] in origins and n["kind"]=="agent"),
                     next((n for n in state["nodes"] if n["id"] in origins),None))
@@ -555,6 +898,31 @@ class Canvas:
                 link=self.graph_link(ws,source["id"],node["id"])
                 result={"resource":resource,"node_id":node["id"],"link":link,
                         "status":"started","model_acknowledged":False}
+                # Make the created identities recoverable before an optional
+                # bootstrap delivery. A lost delivery never recreates the child.
+                with self.store.tx():
+                    self.store.db.executemany("INSERT OR IGNORE INTO canvas_agent_nodes VALUES(?,?,?,?)",
+                        [(*binding,ident) for ident in grants])
+                    self.store.db.execute("UPDATE canvas_agent_requests SET result=? WHERE principal=? AND workspace_id=? AND actor=? AND request_key=?",
+                        (json.dumps(result,ensure_ascii=False),*identity))
+                if action=="create_agent":
+                    from .agent_context import AgentWorkingContext
+                    contexts=AgentWorkingContext(self.store)
+                    parent=source["resource_id"] if source["kind"]=="agent" else None
+                    snapshot=self._working_context_snapshot(ws,{parent} if parent else set(),{source["id"]},state)
+                    parent_context=contexts.get(ws,parent) if parent else {"goal":""}
+                    goals=snapshot["work_items"]
+                    goal=brief or parent_context.get("goal") or "\n".join(item["objective"] for item in goals)
+                    if goal:
+                        bounded_goal=goal.encode()[:16000].decode("utf-8",errors="ignore")
+                        result["working_context"]=contexts.set(ws,resource["id"],goal=bounded_goal,expected_revision=0,
+                            parent_agent_id=parent,source_work_item_ids=[item["work_item_id"] for item in goals][:32])
+                        message="Contexto de trabalho recebido do agente coordenador. Seu papel: "+role+". Objetivo: "+goal[:3000]+". Consulte [[CANVAS|context]] para o contexto atual, tarefas e conexões."
+                        message=" ".join(re.sub(r"[\x00-\x1f\x7f]"," ",message).split())
+                        bootstrap_key="bootstrap-"+hashlib.sha256(json.dumps([ws,actor,key],separators=(",",":")).encode()).hexdigest()
+                        delivery=self.handoff(ws,source["id"],node["id"],message,True,bootstrap_key)
+                        result["bootstrap_handoff_id"]=delivery.get("id")
+                        result["bootstrap_model_answered"]=False
             elif action=="connect":
                 result={"link":self.graph_link(ws,source["id"],destination["id"]),"status":"connected"}
             else:
@@ -580,6 +948,8 @@ class Canvas:
 
     def agent_control(self,token,payload):
         """A CLI sees only its own directed graph, not the UI bearer authority."""
+        if payload.get("action") in {"machine_list", "machine_execute", "machine_observe", "machine_experiences"}:
+            return self._agent_machine_control(token, payload)
         with self._lock:
             binding=self._agent_tokens.get(token)
             if binding is None:
@@ -607,6 +977,26 @@ class Canvas:
             origins={n["id"] for n in state["nodes"]
                      if (n["kind"]=="terminal" and n["resource_id"]==terminal)
                      or (n["kind"]=="agent" and n["resource_id"] in agents)}
+            action=payload.get("action")
+            if action=="context":
+                return self._working_context_snapshot(ws,agents,origins,state)
+            if action=="network_settings":return self.center_network(ws)
+            if action=="network_whitelist":
+                value=json.loads(payload.get("value",""))
+                return self.center_network(ws,value,agent=True)
+            if action=="peers":return self.center_network(ws)["presence"]
+            if action in {"claim", "receipt"}:
+                if terminal.startswith("task:"):
+                    raise Denied("task workers cannot claim interactive handoffs")
+                if action=="claim":
+                    value=payload.get("value")
+                    if not isinstance(value,str) or not 1<=len(value)<=4000:
+                        raise ValueError("invalid handoff content")
+                    return self.graph.claim_handoff(ws,origins,value) or {"status":"not_found"}
+                ident=payload.get("handoff_id")
+                if not isinstance(ident,str) or not re.fullmatch(r"[0-9a-f]{32}",ident):
+                    raise ValueError("invalid receipt identifier")
+                return self.graph.complete_handoff(ws,ident,origins,payload.get("receipt_status"))
             connections=[link for link in state["links"] if link["source"] in origins]
             targets={link["target"] for link in connections}
             nodes=[n for n in state["nodes"] if n["id"] in targets]
@@ -637,13 +1027,129 @@ class Canvas:
                     if not ident:
                         return {"status":"configured","text":"","recoverable":False}
                 output=self.terminal_output(ws,ident)
-                return {**output,"text":output["text"][-4000:]}
+                receipts=[{"id":h["id"],"transport_status":h["status"],
+                           "receipt_status":h["receipt_status"],"receipt_updated":h["receipt_updated"]}
+                          for h in self.graph.handoffs(ws,limit=100)
+                          if h["source"]==source and h["target"]==destination["id"]]
+                return {**output,"text":output["text"][-4000:],"handoffs":receipts[:10]}
             if destination["kind"]=="note":
                 if action=="note_read":
                     return {"id":destination["id"],"body":destination["body"]}
                 if action=="note_write":
                     return self.graph_update_note(ws,destination["id"],content)
             raise ValueError("unsupported Canvas agent operation")
+
+    def model_catalog(self):
+        """Advisory model names from the authenticated Gateway; never attest access."""
+        from sentra_cli.client import ModelClient,ProviderHTTPError
+        from sentra_cli.config import CLIConfig
+        cfg=CLIConfig(workspace=self.project_dir,state_root=self.state_dir.parent,
+                      openai_api_key="none",auto_start_gateway=False)
+        try:
+            models=ModelClient(cfg).list_models()
+            return {"models":[name for name in models if isinstance(name,str)
+                              and name.startswith(("sentra/","chatgpt-web/","gemini-web/"))],
+                    "source":"authenticated_catalog",
+                    "model_access_verified":False}
+        except (ProviderHTTPError,OSError,ValueError,RuntimeError):
+            return {"models":[],"source":"unavailable","model_access_verified":False}
+
+    def center_capabilities(self, ws):
+        """Authenticated Canvas read-only view of operational integration."""
+        self.store.workspace(ws)
+        from sentra_runtime.central_authority import CentralDurableIntentAuthority
+        machines = self._machine_host.inventory(ws) if self._machine_host is not None else []
+        return {
+            "center": "SENTRA Control Plane",
+            "authority": "existing DurableRunService / AuthorizationService",
+            "capabilities": ["canvas.workspace.inspect", *sorted({cap for machine in machines
+                                                                  for cap in machine["capabilities"]})],
+            "registered_machines": machines,
+            "remote_executors_enabled": any(machine["kind"] in {"openhands","daytona","guacamole","rustdesk"} for machine in machines),
+            "configured_local_executors_enabled": any(machine["kind"] in {"documents","browser"} for machine in machines),
+            "durable_intent_api": callable(
+                getattr(self._runtime().durable, "reserve_operation_intent", None)),
+            "experimental": True,
+        }
+
+    def center_inspect(self, ws, work_item_id, operation_id, request_key):
+        """Execute a safe lab read through LIVE durable Control Plane authority.
+
+        This compatibility inspection has no
+        filesystem/browser/desktop/terminal execution capability; an explicit
+        existing SQLite grant, host-owned WorkItem and operation ID are needed.
+        """
+        import asyncio
+        from sentra_mcp.services.authorization import AuthorizationService
+        from sentra_runtime.authority_bridge import BoundWorkItemPolicy
+        from sentra_runtime.central_authority import CentralDurableIntentAuthority
+        from sentra_runtime.contracts import (
+            Capability, Machine, OperationRequest, OperationResult,
+        )
+        from sentra_runtime.durable_admission import DurableOperationGate
+        from sentra_runtime.executor import ExecutorRegistry
+
+        workspace = self.store.workspace(ws)
+        runtime = self._runtime()
+        run = runtime.run(ws)
+        item = runtime.governance.work_item_info(work_item_id, runtime.owner)
+        cap_id = "canvas.workspace.inspect"
+        if (item["run_id"] != run["run_id"]
+                or item.get("metadata", {}).get("workspace_id") != ws
+                or item.get("assignee_agent_id") in (None, "")
+                or cap_id not in item.get("required_capabilities", [])):
+            raise Denied("work item not bound to approved Canvas workspace capability")
+        machine = Machine(
+            "canvas-center-" + ws, "canvas-read-only",
+            runtime.owner, (Capability(cap_id, "Read local Canvas workspace summary"),),
+        )
+        authorization = AuthorizationService(self.state_dir.parent)
+        policy = BoundWorkItemPolicy(
+            owner=runtime.owner, principal_type="agent",
+            authorization=authorization, governance=runtime.governance,
+        )
+        request = OperationRequest(
+            operation_id=operation_id,
+            principal_id=item["assignee_agent_id"],
+            machine_id=machine.machine_id,
+            capability_id=cap_id,
+            work_item_id=work_item_id,
+            idempotency_key=request_key,
+            arguments={"workspace_id": ws, "action": "read-only-summary"},
+        )
+
+        class _LocalReadAdapter:
+            async def start(self, req):
+                # The local Canvas Store is the authoritative source of counts;
+                # no terminal or third-party process is started.
+                count = {
+                    "agents": len(self_store.list_resources("agents", ws)),
+                    "teams": len(self_store.list_resources("teams", ws)),
+                    "terminals": len(self_store.list_resources("terminals", ws)),
+                }
+                return OperationResult(req.operation_id, "SUCCEEDED", count)
+
+            async def reconcile(self, oid):
+                return OperationResult(oid, "UNCERTAIN",
+                                       error="durable reconciliation required")
+
+        self_store = self.store
+        registry = ExecutorRegistry(policy)
+        registry.register(machine, _LocalReadAdapter())
+        gate = DurableOperationGate(
+            CentralDurableIntentAuthority(runtime.durable),
+            policy, machine=machine,
+        )
+        result = asyncio.run(gate.submit(
+            run_id=workspace["run_id"], owner=runtime.owner,
+            request=request, effect=registry.submit,
+        ))
+        return {
+            "operation_id": result.operation_id, "state": result.state,
+            "evidence": dict(result.evidence),
+            "run_id": workspace["run_id"], "work_item_id": work_item_id,
+            "source": "real-sentra-control-plane",
+        }
 
     def integrations(self):
         rows=terminal_catalog(self.project_dir)
@@ -653,11 +1159,28 @@ class Canvas:
                 row["native_model_authenticated"]=authenticated()
         return rows
 
-    def create_terminal(self,ws,name,shell="powershell"):
+    def create_terminal(self,ws,name,shell="powershell",model=None,effort=None):
         workspace=Path(self.store.workspace(ws)["path"])
-        command=cli_argv(self.project_dir,workspace,shell)
         if shell=="sentra-cli":
-            command.extend(["--state-dir",str(self.state_dir.parent)])
+            # Use the same authoritative CLI as Canvas agents, never a stale
+            # checkout/dist binary. A selected model must be explicitly bounded.
+            if model is not None and (not isinstance(model,str) or not MODEL_RE.fullmatch(model)):
+                raise ValueError("invalid SENTRA CLI model")
+            args=["--workspace",str(workspace),"--state-dir",str(self.state_dir.parent),
+                  "--session-id",new_id()]
+            if model:
+                args.extend(["--model",model])
+            if effort is not None:
+                if not isinstance(effort,str) or effort not in {"low","medium","high","xhigh"}:
+                    raise ValueError("invalid SENTRA CLI reasoning effort")
+                args.extend(["--effort",effort])
+            command=self._cli_command(args)
+        else:
+            if model is not None:
+                raise ValueError("model selection requires SENTRA CLI")
+            if effort is not None:
+                raise ValueError("effort selection requires SENTRA CLI")
+            command=cli_argv(self.project_dir,workspace,shell)
         return self._start(ws,name,shell,command)
 
     def launch_antigravity(self,ws,approved=False):
@@ -683,6 +1206,8 @@ class Canvas:
                     "persisted":True}
         data=session.output(cursor)
         state=session.pty.poll()
+        if state is not None:
+            self._uncertain_receipts_for_terminal(ws,terminal)
         data.update(status=("running" if state is None else "exited"),
                     exit_code=state,recoverable=True,
                     persisted=session.persistence_error is None,
@@ -712,6 +1237,7 @@ class Canvas:
         self._revoke_agent(terminal)
         session=self._sessions.get(terminal)
         if session and session.pty: session.pty.close(exit_input=session.exit_input)
+        self._uncertain_receipts_for_terminal(ws,terminal)
         self.store.terminal_state(ws,terminal,"closed")
         return {"ok":True}
 
@@ -737,14 +1263,18 @@ class Canvas:
                 ");from sentra_cli.__main__ import main;sys.exit(main())")
         return [sys.executable,"-c",launch,*arguments]
 
-    def create_agent(self,ws,name,model,role="worker",start=False):
+    def create_agent(self,ws,name,model,role="worker",start=False,*,goal=None):
         validated_name(name)
         if not isinstance(model,str) or not MODEL_RE.fullmatch(model):
             raise ValueError("invalid model identifier")
         if not isinstance(role,str) or not 1 <= len(role.strip()) <= 80:
             raise ValueError("invalid agent role")
+        if goal is not None and (not isinstance(goal,str) or len(goal.encode())>16000):
+            raise ValueError("bounded agent working goal required")
         if not start:
-            return self.store.create_agent(ws,name,model,role)
+            agent=self.store.create_agent(ws,name,model,role)
+            if goal is not None:self.agent_working_context(ws,agent["id"],goal=goal,expected_revision=0)
+            return agent
         # Process started is NOT evidence of authenticated model readiness.
         conversation_id=new_id()
         command=self._cli_command(["--workspace",self.store.workspace(ws)["path"],
@@ -752,7 +1282,9 @@ class Canvas:
                                    "--state-dir",str(self.state_dir.parent),"--session-id",conversation_id])
         t=self._start(ws,name[:44]+"_cli","sentra-cli",command)
         try:
-            return self.store.create_agent(ws,name,model,role,t["id"],conversation_id)
+            agent=self.store.create_agent(ws,name,model,role,t["id"],conversation_id)
+            if goal is not None:self.agent_working_context(ws,agent["id"],goal=goal,expected_revision=0)
+            return agent
         except BaseException:
             self.terminal_close(ws,t["id"])
             raise
@@ -920,6 +1452,10 @@ class Canvas:
             for event in self._jobs.values():event.set()
             threads=list(self._task_threads.values())
         self._dispatch_thread.join(timeout=5)
+        if self._collab_process is not None:
+            self._collab_process.close()
+        if self._network_settings is not None:
+            self._network_settings.close()
         deadline=time.monotonic()+25
         for thread in threads:
             thread.join(timeout=max(0,deadline-time.monotonic()))
@@ -933,6 +1469,9 @@ class Canvas:
             if sess.pty:
                 try: sess.pty.close(exit_input=sess.exit_input)
                 except (OSError,TerminalError): pass
+        if self._machine_host is not None:
+            # Keep central databases alive if a physical worker still owns I/O.
+            self._machine_host.close()
         if self._task_runtime:
             # Publish final task states before closing the shared registry.
             try:

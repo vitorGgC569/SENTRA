@@ -217,7 +217,7 @@ class OMAEngine:
             raise ValueError("transient_backoff_base_s must be 0..600 seconds")
         self.transient_max_retries = transient_max_retries
         self.transient_backoff_base_s = float(transient_backoff_base_s)
-        self._running_futures = {}
+        self._running_futures: dict[asyncio.Task[Any], str] = {}
         self._timeout_cancellations: set[str] = set()
         self.checkpoint_callback = checkpoint_callback
         self.task_token_budget = task_token_budget
@@ -228,7 +228,7 @@ class OMAEngine:
         self.required_milestone_evidence = [
             str(item) for item in (required_milestone_evidence or [])
         ]
-        self._task_roles = {}
+        self._task_roles: dict[str, list[ValidatorRole]] = {}
         if resource_manifest is None:
             extra_capabilities = {"browser", "persistent_conversations"} if fixed_conversations else set()
             self.resource_manifest = NodeCapabilityManifest.probe_local(

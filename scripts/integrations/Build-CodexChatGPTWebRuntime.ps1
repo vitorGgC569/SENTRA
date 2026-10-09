@@ -187,13 +187,13 @@ if ($NewFiles.Count -gt 0) {
     & git -C $Source add --intent-to-add -- @NewFiles
     if ($LASTEXITCODE -ne 0) { throw "Could not prepare new integration files for whitespace validation" }
 }
-& git -C $Source diff --check
+& git -c core.autocrlf=false -c core.whitespace=cr-at-eol -C $Source diff --check
 if ($LASTEXITCODE -ne 0) { throw "Patched upstream contains whitespace errors" }
 if ($NewFiles.Count -gt 0) {
     & git -C $Source reset --quiet HEAD -- @NewFiles
     if ($LASTEXITCODE -ne 0) { throw "Could not restore integration worktree index after validation" }
 }
-$TrackedChanges = @(& git -C $Source diff --name-only)
+$TrackedChanges = @(& git -c core.autocrlf=false -C $Source diff --name-only)
 $NewFiles = @(& git -C $Source ls-files --others --exclude-standard)
 $ChangedFiles = @($TrackedChanges + $NewFiles) |
     ForEach-Object { $_.Trim().Replace("\", "/") } |
@@ -213,12 +213,16 @@ Copy-Item -Force -LiteralPath $Patch -Destination $ApprovedPatch
 Set-Content -Encoding ASCII -NoNewline -LiteralPath (Join-Path $StateRoot "approved-patch.sha256") -Value $ExpectedHash
 
 Push-Location $Source
+$BuildPreviousErrorActionPreference = $ErrorActionPreference
 try {
+    # Windows PowerShell 5 projects native stderr as non-terminating ErrorRecords;
+    # Bun prints normal command banners there. Preserve explicit exit-code gates.
+    $ErrorActionPreference = "Continue"
     & $Bun install --frozen-lockfile
     if ($LASTEXITCODE -ne 0) { throw "Root dependency install failed" }
     & $Bun run typecheck
     if ($LASTEXITCODE -ne 0) { throw "Patched upstream typecheck failed" }
-    & $Bun test "tests/gemini-web.test.ts" "tests/gemini-web-adapter.test.ts"
+    & $Bun test "tests/gemini-web.test.ts" "tests/gemini-web-adapter.test.ts" "tests/chatgpt-model-selection.test.ts" "tests/chatgpt-web-models.test.ts" "tests/model-catalog.test.ts" "tests/server-models.test.ts"
     if ($LASTEXITCODE -ne 0) { throw "Patched Gemini Web integration tests failed" }
     Push-Location (Join-Path $Source "launcher")
     try {
@@ -241,6 +245,7 @@ try {
         Remove-Item Env:CODEX_WEB_GPT_BUN -ErrorAction SilentlyContinue
     }
 } finally {
+    $ErrorActionPreference = $BuildPreviousErrorActionPreference
     Pop-Location
 }
 $Executable = Join-Path $Output "win-unpacked\Codex Web GPT.exe"

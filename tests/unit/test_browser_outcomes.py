@@ -18,3 +18,17 @@ def test_prompt_preparation_failure_is_not_sent(code):
 def test_missing_button_is_not_proof_of_account_limit():
     assert classify_probe({"composer_found": True, "send_available": False, "finished": True}) == "UNKNOWN"
     assert classify_probe({"cap_banner": "limit reached"}) == "ACCOUNT_LIMIT"
+
+
+def test_pre_send_not_ready_is_proven_not_sent():
+    result = classify_failure("PRE_SEND_NOT_READY: TAB_ERROR tab=1")
+    assert result["delivery_state"] == "NOT_SENT"
+    assert result["retry_safe"] is True
+    assert result["error_kind"] == "PRE_SEND_NOT_READY"
+
+
+def test_gemini_model_selection_failure_is_proven_pre_send():
+    result = classify_failure("MODEL_SELECTION_FAILED: Gemini model selector not found")
+    assert result["delivery_state"] == "NOT_SENT"
+    assert result["retry_safe"] is True
+    assert result["error_kind"] == "PRE_SEND_MODEL_SELECTION"

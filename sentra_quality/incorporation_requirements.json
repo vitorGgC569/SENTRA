@@ -1,0 +1,872 @@
+{
+  "schema_version": 1,
+  "objective": "Incorporacao integral das capacidades uteis dos37 projetos, implementacao primeiro e validacao integral ao final",
+  "source_report": "docs/SENTRA_REAVALIACAO_REAPROVEITAMENTO_37_PROJETOS_2026-10-09.md",
+  "completion_rule": "Each requirement must have concrete implementation, product integration and runtime evidence matching its acceptance; a fixture or mere module presence is insufficient.",
+  "requirements": [
+    {
+      "id": "reuse-01",
+      "project": "ufo",
+      "features": "transformar execuções bem-sucedidas e malsucedidas em experiências recuperáveis; usar edição com histórico para revisar planos; aproveitar critérios de escolha de dispositivo por capacidade e carga como sugestões para o controlador SENTRA.",
+      "acceptance": "uma segunda tarefa recupera uma experiência pertinente e mostra sua origem; uma experiência obsoleta não é usada; edição do plano gera revisão sem repetir efeitos anteriores.",
+      "source_paths": [
+        "third_party/ufo/ufo/experience/summarizer.py",
+        "third_party/ufo/galaxy/constellation/editor/command_history.py",
+        "third_party/ufo/galaxy/constellation/orchestrator/constellation_manager.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_canvas/service.py",
+        "sentra_canvas/static/machine-panel.js",
+        "sentra_runtime/experience.py",
+        "sentra_runtime/machine_host.py",
+        "sentra_runtime/plan_history.py"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_canvas_experience_and_plan.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Experiences recorded from committed central receipts with source/configuration validity and protected persistence; live scoped retrieval exposed in Canvas/CLI",
+        "Proposal revisions and undo/redo preserve physically started operation provenance; device/load advisory still pending"
+      ]
+    },
+    {
+      "id": "reuse-02",
+      "project": "openhands",
+      "features": "recuperação de eventos após reconexão, representação de relações entre conversas e indicação de backends que falham repetidamente. Isso melhora o Canvas e as sessões existentes sem exigir sua substituição.",
+      "acceptance": "derrubar a conexão durante eventos fora de ordem; reabrir o Canvas e recuperar todos os eventos persistidos sem duplicar mensagem nem lançar outro agente.",
+      "source_paths": [
+        "third_party/openhands/src/utils/session-seq-cursor.ts",
+        "third_party/openhands/src/api/backend-registry/health-store.ts",
+        "third_party/openhands/src/services/child-conversation-launch.ts"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_canvas/static/machine-panel.js",
+        "sentra_interop/openhands.py",
+        "sentra_interop/openhands_local.py",
+        "sentra_interop/openhands_provider.py",
+        "sentra_runtime/interop_machine.py",
+        "sentra_runtime/machine_host.py",
+        "sentra_runtime/provider_content.py"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_sentra_interop_openhands_provider.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Configured provider integrated into central host and native controls; remote IDs generated/bound by host and protected text bound to immutable intent",
+        "Real Agent Server runtime acceptance remains pending"
+      ]
+    },
+    {
+      "id": "reuse-03",
+      "project": "openhands-agent-sdk",
+      "features": "compactação de contexto que preserva o system prompt e eventos iniciais; analisadores estruturados de comandos; política de confirmação por risco; recuperação da posse de sessão com geração e expiração.",
+      "acceptance": "conversa longa resume contexto sem perder instruções ou pendências; servidor reinicia e reanexa à mesma sessão; uma tool call aponta para a Operation correspondente.",
+      "source_paths": [
+        "third_party/openhands-agent-sdk/openhands-sdk/openhands/sdk/context/condenser/llm_summarizing_condenser.py",
+        "third_party/openhands-agent-sdk/openhands-sdk/openhands/sdk/security/defense_in_depth/policy_rails.py",
+        "third_party/openhands-agent-sdk/openhands-agent-server/openhands/agent_server/conversation_lease.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_cli/agent.py",
+        "sentra_core/context.py",
+        "sentra_core/conversations.py",
+        "sentra_interop/central.py",
+        "sentra_interop/central_gate.py",
+        "sentra_runtime/central_authority.py",
+        "sentra_runtime/effect_boundary.py"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_sentra_context_condensation.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Protected full transcript retained; context projection preserves protected instructions/initial events, optional summary callback accounts for usage/budget; final validation pending"
+      ]
+    },
+    {
+      "id": "reuse-04",
+      "project": "agent-client-protocol",
+      "features": "resume, close, list e delete quando anunciados pelo agente; configuração de sessão/modelo; uso/custos reportados; conteúdo estruturado, terminais e arquivos; interação para coletar dados ou decisões do usuário.",
+      "acceptance": "conectar um agente ACP externo, retomar sua sessão e configurar um recurso suportado; updates parciais preservam os campos antigos; recurso não anunciado não aparece como disponível.",
+      "source_paths": [
+        "third_party/agent-client-protocol/agent-client-protocol-schema/src/v2/agent.rs",
+        "third_party/agent-client-protocol/agent-client-protocol-schema/src/v2/tool_call.rs",
+        "third_party/agent-client-protocol/agent-client-protocol-schema/src/v2/elicitation.rs"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_interop/acp.py",
+        "sentra_interop/acp_process.py",
+        "sentra_interop/acp_session.py"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_sentra_interop_acp_lifecycle.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Negotiated lifecycle/session recovery/usage updates and owned process trees implemented; application host provider binding and external CLI validation pending"
+      ]
+    },
+    {
+      "id": "reuse-05",
+      "project": "acp-registry",
+      "features": "seleção de distribuição por sistema/arquitetura, diferenças entre binary/npx/uvx, ambiente reservado, diagnóstico de instalação e encerramento da árvore de processos.",
+      "acceptance": "escolher a variante Windows correta, rejeitar descriptor incompatível e manter a configuração conhecida quando a nova instalação falhar.",
+      "source_paths": [
+        "third_party/acp-registry/agent.schema.json",
+        "third_party/acp-registry/.github/workflows/registry_utils.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_interop/registry.py",
+        "sentra_interop/registry_install.py"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_sentra_interop_registry_install.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Pinned distribution plans for binary/npx/uvx with reserved environment handling; actual explicitly selected installation/launch still pending"
+      ]
+    },
+    {
+      "id": "reuse-06",
+      "project": "a2a",
+      "features": "continuidade de tarefas que aguardam entrada, artefatos em chunks, Agent Card autenticado/estendido, capacidades opcionais e push notifications para tarefas demoradas.",
+      "acceptance": "tarefa externa pausa por entrada e retoma; reconexão recupera o artefato completo sem duplicar chunks; callback de outra identidade não altera a tarefa.",
+      "source_paths": [
+        "third_party/a2a/specification/a2a.proto",
+        "third_party/a2a/specification/a2a.proto",
+        "third_party/a2a/specification/a2a.proto"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_interop/central_gate.py",
+        "sentra_interop/central.py",
+        "sentra_runtime/effect_boundary.py",
+        "sentra_runtime/central_authority.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "DurableInteropGate implemented for real central journal and physical dispatch; protocol feature expansion pending"
+      ]
+    },
+    {
+      "id": "reuse-07",
+      "project": "mcp-typescript-sdk",
+      "features": "negociação de revisão do protocolo, subscriptions de mudança de catálogo, interações `input_required`, validação de respostas e streams com reconexão. São recursos particularmente úteis para ferramentas dinâmicas e solicitações de dados durante uma chamada.",
+      "acceptance": "cliente TS real conversa com servidor SENTRA, anuncia apenas recursos compatíveis e trata uma interação sem executar a mesma ação externa duas vezes.",
+      "source_paths": [
+        "third_party/mcp-typescript-sdk/packages/client/src/client/client.ts",
+        "third_party/mcp-typescript-sdk/packages/core-internal/src/shared/protocol.ts",
+        "third_party/mcp-typescript-sdk/docs/clients/subscriptions.md"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_interop/central_gate.py",
+        "sentra_interop/central.py",
+        "sentra_runtime/effect_boundary.py",
+        "sentra_runtime/central_authority.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Durable central transport injection implemented; TS runtime contract coverage pending"
+      ]
+    },
+    {
+      "id": "reuse-08",
+      "project": "daytona",
+      "features": "PTYs persistentes com conexão/resize/kill; sessões de comandos, entrada stdin e logs separados; previews de serviços; rede e políticas de auto-stop/archive/delete; volumes e metadados de ambiente.",
+      "acceptance": "terminal persiste após desconexão da UI, logs retomam, rede segue o perfil escolhido e o encerramento remove apenas os recursos daquela execução.",
+      "source_paths": [
+        "third_party/daytona/libs/sdk-python/src/daytona/_sync/process.py",
+        "third_party/daytona/libs/sdk-python/src/daytona/_sync/sandbox.py",
+        "third_party/daytona/apps/daemon/pkg/toolbox/process/pty/manager.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/daytona_sessions.py",
+        "sentra_executors/identity_sessions.py",
+        "sentra_runtime/machine_host.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "SDK lifecycle/PTY/commands/streaming and scoped ownership implemented; explicit version/implementation pins and credential references wired into application host",
+        "Actual configured Daytona API/toolbox runtime and acceptance pending"
+      ]
+    },
+    {
+      "id": "reuse-09",
+      "project": "pywinauto",
+      "features": "construir um repertório de seletores por aplicativo, esperar estado do controle em vez de tempos fixos, aproveitar cache de propriedades em observações grandes e combinar backend UIA/Win32 quando necessário.",
+      "acceptance": "fluxo de aplicativo com carregamento variável funciona com timeout limitado; controle recriado não recebe ação por referência antiga; resultado é confirmado semanticamente.",
+      "source_paths": [
+        "third_party/pywinauto/pywinauto/timings.py",
+        "third_party/pywinauto/pywinauto/windows/uia_element_info.py",
+        "third_party/pywinauto/pywinauto/windows/application.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/uia_semantic.py",
+        "sentra_executors/uia_workflow.py",
+        "sentra_executors/windows_identity.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Semantic UIA/workflow/Windows session bindings implemented; actual app/guest acceptance and product integration remain pending."
+      ]
+    },
+    {
+      "id": "reuse-10",
+      "project": "hcsshim",
+      "features": "padrões de JobContainer, limites de recursos, associação de processos, obtenção de token de usuário, lifecycle HCS/uVM, mounts e limpeza de processos descendentes.",
+      "acceptance": "workload headless inicia no host suportado, respeita limites e termina com seus filhos; uma VM com sessão GUI deve ser uma prova separada.",
+      "source_paths": [
+        "third_party/hcsshim/internal/jobcontainers/jobcontainer.go",
+        "third_party/hcsshim/internal/jobcontainers/logon.go",
+        "third_party/hcsshim/internal/uvm/create_wcow.go",
+        "sentra_executors/winhcs_boundary.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/hcs_bridge/main.go",
+        "sentra_executors/hcs_provider.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Owned Go HCS bridge/provider implemented; build, compatible host and real isolation proof pending."
+      ]
+    },
+    {
+      "id": "reuse-11",
+      "project": "gvisor",
+      "features": "perfis de acesso a filesystem, rede e capabilities; diagnóstico de syscalls/workloads incompatíveis; checkpoint/restore de processos quando aplicável.",
+      "acceptance": "um workload Linux representativo passa com o perfil escolhido; tentativa fora do mount/rede é recusada; teste de restore declara exatamente quais estados foram recuperados.",
+      "source_paths": [
+        "third_party/gvisor/runsc/config/config.go",
+        "third_party/gvisor/runsc/cmd/checkpoint.go",
+        "third_party/gvisor/runsc/cmd/restore.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/gvisor_runsc.py",
+        "sentra_executors/gvisor_workload.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "OCI/runsc worker contracts implemented; actual Linux/runsc runtime and isolation proof pending."
+      ]
+    },
+    {
+      "id": "reuse-12",
+      "project": "playwright-mcp",
+      "features": "contextos isolados, configuração explícita de perfil, traces de sessão, evidência de rede/console e capacidades opcionais para PDF/visão/devtools; vincular referências de elementos à observação atual.",
+      "acceptance": "navegar, interagir e gerar resultado em um contexto dedicado; coletar diagnóstico quando falha; descartar contexto sem afetar o perfil principal do usuário.",
+      "source_paths": [
+        "third_party/playwright-mcp/config.d.ts",
+        "third_party/playwright-mcp/config.d.ts",
+        "third_party/playwright-mcp/index.js",
+        "third_party/playwright-mcp/package.json"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/playwright_browser.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Real isolated browser backend implementation delegated to Plato",
+        "Real Playwright browser backend and verifiers implemented; complete final contract/runtime acceptance pending."
+      ]
+    },
+    {
+      "id": "reuse-13",
+      "project": "guacamole-client",
+      "features": "gravação reproduzível com play/pause/seek, estados de conexão, renderização de display e suporte a diferentes canais de entrada/saída. Uma timeline de sessão pode ligar imagem observada, ação e resultado ao journal do SENTRA.",
+      "acceptance": "acompanhar uma sessão real e depois revisar um intervalo gravado, sem qualquer entrada ser enviada durante o playback.",
+      "source_paths": [
+        "third_party/guacamole-client/guacamole-common-js/src/main/webapp/modules/SessionRecording.js",
+        "third_party/guacamole-client/guacamole-common-js/src/main/webapp/modules/Client.js"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/remote_guacamole_tunnel.py",
+        "sentra_executors/remote_guacamole_viewer.js",
+        "sentra_runtime/machine_host.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Actual library viewer/playback module and scoped tunnel implemented; library bundle/native viewer mounting and live desktop acceptance pending"
+      ]
+    },
+    {
+      "id": "reuse-14",
+      "project": "guacamole-server",
+      "features": "gravação com escolha explícita de output/mouse/touch/teclado/clipboard; canais de filesystem, clipboard e áudio separados; lifecycle e metadados de conexão para diagnóstico.",
+      "acceptance": "sessão somente visual rejeita entrada e transferência; gravação respeita os canais escolhidos; revogação encerra o tunnel e deixa recibo no journal.",
+      "source_paths": [
+        "third_party/guacamole-server/src/libguac/recording.c",
+        "third_party/guacamole-server/src/protocols/rdp/rdp.c"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/remote_deployment.py",
+        "sentra_executors/remote_guacamole.py",
+        "sentra_runtime/machine_host.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "TCP/TLS guacd handshake/version/identity pin and scope/cursor/recording operations implemented; explicit host bindings linked centrally",
+        "Actual guacd/guest deployment/login/control/playback acceptance pending"
+      ]
+    },
+    {
+      "id": "reuse-15",
+      "project": "rustdesk",
+      "features": "considerar caminhos de conexão para máquinas fora da rede local, permissões por sessão/canal, clipboard de arquivos, controle de privacidade e gravação. São possibilidades de provider, não motivos para incorporar o cliente inteiro.",
+      "acceptance": "mesma máquina é endereçada pelos IDs internos, sessão pode ser revogada pelo SENTRA e os canais permitidos são demonstrados. Se não houver esse cenário, adiar.",
+      "source_paths": [
+        "third_party/rustdesk/src/server/connection.rs",
+        "third_party/rustdesk/src/clipboard_file.rs",
+        "third_party/rustdesk/src/hbbs_http/record_upload.rs"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/remote_rustdesk.py",
+        "sentra_executors/remote_rustdesk_build.py",
+        "sentra_executors/remote_rustdesk_gate.rs",
+        "sentra_runtime/native_bundle.py",
+        "sentra_runtime/workspace_paths.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Owned launcher with peer-key pin and lease watchdog prepared with reviewable native patch/build manifest",
+        "Host binding path separation fix, native build and real peer/login/frame/control acceptance pending",
+        "Host private bundle copying/hash pins and runtime/manifest/output path separation implemented; native build and real peer acceptance remain pending."
+      ]
+    },
+    {
+      "id": "reuse-16",
+      "project": "langgraph",
+      "features": "checkpoints com parent e pending writes, etapas interrompíveis, recuperação seletiva, timeout por ausência de progresso e memória pesquisável por namespace com TTL.",
+      "acceptance": "subfluxo interrompe por entrada, retoma de checkpoint e preserva etapas concluídas; consulta de memória fica no namespace autorizado. Biblioteca é P1 quando resolve um subfluxo concreto; runtime adicional é P2.",
+      "source_paths": [
+        "third_party/langgraph/libs/checkpoint/langgraph/checkpoint/base/__init__.py",
+        "third_party/langgraph/libs/langgraph/langgraph/pregel/_retry.py",
+        "third_party/langgraph/libs/checkpoint/langgraph/store/base/__init__.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/workflow_machine.py",
+        "sentra_runtime/machine_host.py",
+        "sentra_canvas/service.py",
+        "sentra_canvas/static/workflow-panel.js",
+        "sentra_canvas/static/center-panel.js"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_canvas_workflow_documents_integration.py tests/unit/test_canvas_center_overview_integration.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Existing clone/adapters reviewed; integral feature implementation pending",
+        "Owner-configured document workflows bound to the persistent host and web editor; protected inputs, separate control/activity operations, signals and independent acceptance failures; final runtime validation pending"
+      ]
+    },
+    {
+      "id": "reuse-17",
+      "project": "temporal",
+      "features": "distinguir falha transitória de não repetível, impor expiração e máximo de tentativas, representar atualizações admitidas versus concluídas e estudar evolução de workers de fluxos longos.",
+      "acceptance": "falha não repetível termina sem retry; atividade com resposta incerta reconcilia antes de tentar outra vez; atualização de worker não altera o resultado de um fluxo em andamento.",
+      "source_paths": [
+        "third_party/temporal/service/history/workflow/retry.go",
+        "third_party/temporal/service/history/workflow/update/registry.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/workflow_machine.py",
+        "sentra_runtime/machine_host.py",
+        "sentra_canvas/service.py",
+        "sentra_canvas/static/workflow-panel.js",
+        "sentra_canvas/static/center-panel.js"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_canvas_workflow_documents_integration.py tests/unit/test_canvas_center_overview_integration.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Existing clone/adapters reviewed; integral feature implementation pending",
+        "Owner-configured document workflows bound to the persistent host and web editor; protected inputs, separate control/activity operations, signals and independent acceptance failures; final runtime validation pending"
+      ]
+    },
+    {
+      "id": "reuse-18",
+      "project": "nats-server",
+      "features": "consumers duráveis com ack explícito, MaxAckPending, backoff e limite de redelivery; replay por posição/tempo; retenção e janela de deduplicação configuradas por classe de evento.",
+      "acceptance": "consumer cai depois de receber uma mensagem, recupera e não repete o efeito; backlog permanece limitado e observável. Fila de falhas e reconciliação são decisões da aplicação.",
+      "source_paths": [
+        "third_party/nats-server/server/consumer.go",
+        "third_party/nats-server/server/stream.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/audit_delivery.py",
+        "sentra_runtime/audit_provider_sdk/nats.go",
+        "sentra_runtime/nats_jetstream.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Official Go JetStream client and protected delivery outbox/inbox implemented; AuditHost, SDK build and actual broker/ACL/TLS acceptance pending."
+      ]
+    },
+    {
+      "id": "reuse-19",
+      "project": "toolhive",
+      "features": "descoberta seletiva por descrição/keywords, métricas de economia de tokens, autenticação específica por backend e token exchange com audience/scope. Isso pode evoluir o catálogo MCP do SENTRA com menos consumo de contexto.",
+      "acceptance": "agente encontra ferramentas pertinentes sem receber as não autorizadas; chamada e credencial ficam vinculadas à Operation; parar o host não perde o diagnóstico.",
+      "source_paths": [
+        "third_party/toolhive/pkg/vmcp/optimizer/optimizer.go",
+        "third_party/toolhive/pkg/vmcp/auth/strategies/tokenexchange.go",
+        "third_party/toolhive/pkg/vmcp/auth/outgoing_registry.go",
+        "third_party/toolhive/pkg/runner/policy_gate.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_interop/tool_catalog.py"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_sentra_interop_tool_catalog.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Selective authorized lexical/explicit semantic tool discovery, schema revision invalidation and token savings implemented; product catalog integration/final proof pending"
+      ]
+    },
+    {
+      "id": "reuse-20",
+      "project": "spire",
+      "features": "atestação de processo por seletores, SVID X.509/JWT de curta duração, renovação por subscriptions e bundles de confiança/federação quando houver mais de um domínio.",
+      "acceptance": "worker renova credencial sem identidade instável; processo de outro escopo não obtém o SVID; certificado vencido não permite uma nova operação.",
+      "source_paths": [
+        "third_party/spire/pkg/agent/endpoints/workload/handler.go",
+        "third_party/spire/pkg/agent/attestor/workload/workload.go",
+        "third_party/spire/pkg/agent/manager/cache/x509_lru_cache.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/identity_spire_sdk/main.go",
+        "sentra_runtime/spire_identity.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Official SDK/Workload API client and identity lifecycle implemented; SDK build, attestation/renewal and host integration pending."
+      ]
+    },
+    {
+      "id": "reuse-21",
+      "project": "keycloak",
+      "features": "ciclo de sessão e logout, revogação de tokens, consentimentos e token exchange para uma audience específica. Isso resolve mais do que apenas verificar a assinatura de um JWT.",
+      "acceptance": "login cria Principal coerente; logout/revogação impede novas operações e trata sessões existentes; token de outra audience não é aceito como identidade SENTRA.",
+      "source_paths": [
+        "third_party/keycloak/services/src/main/java/org/keycloak/protocol/oidc/endpoints/TokenRevocationEndpoint.java",
+        "third_party/keycloak/services/src/main/java/org/keycloak/protocol/oidc/tokenexchange/StandardTokenExchangeProvider.java"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/keycloak_identity.py",
+        "sentra_runtime/keycloak_provider.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "OIDC provider/lifecycle modules implemented; real service and final application identity integration pending."
+      ]
+    },
+    {
+      "id": "reuse-22",
+      "project": "openfga",
+      "features": "`ListObjects` para montar um catálogo de recursos acessíveis, `ReadChanges` para invalidar projeções/caches, assertions para testar o modelo e consistência diferenciada para operações sensíveis.",
+      "acceptance": "alteração de relação remove o recurso da descoberta e bloqueia a próxima ação; cache antigo não permite escrita. Adiar o serviço enquanto a autorização individual existente resolver o cenário.",
+      "source_paths": [
+        "third_party/openfga/pkg/server/commands/list_objects.go",
+        "third_party/openfga/pkg/server/commands/read_changes.go",
+        "third_party/openfga/pkg/server/commands/check_command.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/identity_state.py",
+        "sentra_runtime/openfga_rebac.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Model/relationship authorization lifecycle implemented; actual service/model and central policy integration pending."
+      ]
+    },
+    {
+      "id": "reuse-23",
+      "project": "opa",
+      "features": "políticas versionadas em bundles, ativação controlada, logs de decisão com revision/decision ID e mascaramento de campos. Regras contextualizadas podem ficar auditáveis e testáveis fora de condicionais espalhadas pelo código.",
+      "acceptance": "mesma entrada e mesma versão produzem a mesma decisão; troca inválida preserva a última política válida; log explica a regra aplicada sem conteúdo sensível desnecessário.",
+      "source_paths": [
+        "third_party/opa/v1/plugins/bundle/plugin.go",
+        "third_party/opa/v1/plugins/logs/plugin.go",
+        "third_party/opa/v1/sdk/opa.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/opa_pdp.py",
+        "sentra_runtime/policy_bundle.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "PDP/bundle lifecycle and diagnostic log masking implemented; actual service/bundle and application acceptance pending."
+      ]
+    },
+    {
+      "id": "reuse-24",
+      "project": "tessera",
+      "features": "cliente verificador independente, provas de inclusão/consistência, checkpoints assinados, quorum explícito de witnesses e conservação de evidência de divergência.",
+      "acceptance": "verificador com estado anterior detecta checkpoint incompatível; receipt aponta ao evento correto. A cobertura de efeitos precisa ser demonstrada pela instrumentação SENTRA.",
+      "source_paths": [
+        "third_party/tessera/witness.go",
+        "third_party/tessera/client/client.go",
+        "third_party/tessera/append_lifecycle.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/audit_provider_sdk/tessera.go",
+        "sentra_runtime/tessera_provider.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Official checkpoint/inclusion/consistency/witness verification code implemented; AuditHost/build and real trusted log/quorum acceptance pending."
+      ]
+    },
+    {
+      "id": "reuse-25",
+      "project": "immudb",
+      "features": "provas de inclusão e avanço linear, conservação de estado confiável no cliente/verificador e exportação de transações para recuperação/replicação.",
+      "acceptance": "cliente com checkpoint antigo detecta histórico incompatível; restauração recupera os registros previstos e compara o head. Escolher uma necessidade distinta antes de implantar immudb junto de Tessera.",
+      "source_paths": [
+        "third_party/immudb/embedded/store/verification.go",
+        "third_party/immudb/pkg/client/state/state_service.go",
+        "third_party/immudb/pkg/server/stream_replication.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_runtime/audit_provider_sdk/immudb.go",
+        "sentra_runtime/immudb_provider.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Official verifiable transaction/state/proof/export code implemented; AuditHost/build and actual DB/trusted-state acceptance pending."
+      ]
+    },
+    {
+      "id": "reuse-26",
+      "project": "opentelemetry-collector",
+      "features": "batching por tamanho/tempo, limite de cardinalidade, memory limiter, filas limitadas, retries e exportação desacoplada. Isso pode tornar o diagnóstico resistente a indisponibilidade sem bloquear a execução principal.",
+      "acceptance": "sink fica indisponível, o pipeline respeita limites e depois exporta conforme a retenção definida; diagnóstico mostra perda/fila sem fingir completude de auditoria.",
+      "source_paths": [
+        "third_party/opentelemetry-collector/processor/batchprocessor/config.go",
+        "third_party/opentelemetry-collector/exporter/exporterhelper/internal/queuebatch/config.go",
+        "third_party/opentelemetry-collector/processor/memorylimiterprocessor/config.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_canvas/static/machine-panel.js",
+        "sentra_runtime/machine_host.py",
+        "sentra_runtime/otlp_sink.py",
+        "sentra_runtime/telemetry_pipeline.py"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_sentra_runtime_otlp_sink.py tests/unit/test_sentra_runtime_telemetry_pipeline.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Persistent bounded queue, batching, byte/cardinality limits, frozen trace/span IDs, retention, dedupe/retries, loss counters and owner configuration integrated",
+        "Actual loopback receiver acceptance staged; actual Collector deployment/export proof pending"
+      ]
+    },
+    {
+      "id": "reuse-27",
+      "project": "langfuse",
+      "features": "prompts com versão/labels/config, datasets com entrada e saída esperada, ligação entre dataset run e trace, scores numéricos/categóricos/booleanos/textuais e correções humanas.",
+      "acceptance": "comparar duas versões de prompt/provider no mesmo conjunto de casos, mostrando sucesso objetivo, custo, latência e regressões por tarefa.",
+      "source_paths": [
+        "third_party/langfuse/packages/shared/src/domain/prompts.ts",
+        "third_party/langfuse/packages/shared/src/domain/dataset-run-items.ts",
+        "third_party/langfuse/packages/shared/src/features/scores/interfaces/ingestion/validation.ts"
+      ],
+      "status": "pending",
+      "implementation_paths": [],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Existing clone/adapters reviewed; integral feature implementation pending"
+      ]
+    },
+    {
+      "id": "reuse-28",
+      "project": "grype",
+      "features": "registrar versões com correção disponível, motivo do match, validade da base e diferenças entre scans para orientar atualização de dependências.",
+      "acceptance": "scan de um artefato conhecido produz relatório correlacionado ao seu digest; base ausente/obsoleta é diagnosticada; recomendação de atualização distingue vulnerabilidade corrigível de sem correção.",
+      "source_paths": [
+        "third_party/grype/grype/vulnerability/fix.go",
+        "third_party/grype/grype/match/matcher.go",
+        "third_party/grype/cmd/grype/cli/commands/db_check.go"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_quality/__main__.py",
+        "sentra_quality/grype_scan.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Pinned-binary SBOM scanner execution, database freshness diagnostics, fix/matcher recommendations and scan diff implemented in quality CLI; actual scanner/database provisioning and final runtime proof pending"
+      ]
+    },
+    {
+      "id": "reuse-29",
+      "project": "xyflow",
+      "features": "renderizar somente nós visíveis, seleção e bounds de grafo, descoberta de vizinhos/arestas e descrição acessível com aria-live. Adaptar os princípios ao renderer e à física de cabos existentes.",
+      "acceptance": "medir pan/zoom/seleção com 100 e 500 nós; esconder nó não encerra o processo; navegação por teclado encontra nós e anuncia mudanças relevantes.",
+      "source_paths": [
+        "third_party/xyflow/packages/react/src/hooks/useVisibleNodeIds.ts",
+        "third_party/xyflow/packages/system/src/utils/graph.ts",
+        "third_party/xyflow/packages/react/src/components/A11yDescriptions/index.tsx"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_canvas/desktop_ui/src/main.jsx",
+        "sentra_canvas/desktop_ui/src/nodes.jsx",
+        "sentra_canvas/static/desktop.html",
+        "sentra_canvas/static/graph-view.js",
+        "sentra_canvas/static/native.js"
+      ],
+      "validation_commands": [
+        "node --test tests/js/graph_view.test.cjs",
+        "python -B -m pytest -q tests/e2e/test_canvas_collaboration_and_culling.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Native viewport culling retains terminal actors; host graph bounds/neighbors and keyboard live announcements integrated; 100/500-node runtime metrics staged for final validation",
+        "Actual pinned React Flow desktop surface built with terminal nodes, resize/pan/zoom/minimap; rendering inspection completed, user visual acceptance/full flows/scale remain pending."
+      ]
+    },
+    {
+      "id": "reuse-30",
+      "project": "yjs",
+      "features": "undo/redo limitado à origem do usuário, posições relativas em texto colaborativo e sincronização por state vectors/diffs. Isso permite edição concorrente com histórico local e tráfego incremental.",
+      "acceptance": "dois clientes editam notas; desfazer a alteração de um não remove o trabalho do outro; reconexão transmite diferenças; snapshots existentes continuam legíveis na versão escolhida.",
+      "source_paths": [
+        "third_party/yjs/src/utils/UndoManager.js",
+        "third_party/yjs/src/utils/RelativePosition.js",
+        "third_party/yjs/src/utils/updates.js"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_canvas/static/collaboration-panel.js",
+        "sentra_canvas/static/sentra-collab.js",
+        "sentra_collab/server.mjs"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/e2e/test_canvas_collaboration_and_culling.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Yjs13 production browser dependency graph, local-origin UndoManager, concurrent Y.Text note editing and relative cursor positions integrated; legacy note migration admitted/persisted before publication"
+      ]
+    },
+    {
+      "id": "reuse-31",
+      "project": "y-protocols",
+      "features": "expiração de presença, clocks de atualização, remoção de clientes desconectados e vínculos entre awareness client ID e sessão autenticada.",
+      "acceptance": "presença expira e reaparece corretamente; cliente não publica estado de outro usuário; uma sessão revogada não permanece enviando awareness.",
+      "source_paths": [
+        "third_party/y-protocols/src/awareness.js",
+        "third_party/y-protocols/src/sync.js"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_canvas/static/collaboration-panel.js",
+        "sentra_collab/policy.mjs",
+        "sentra_collab/server.mjs"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/e2e/test_canvas_collaboration_and_culling.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Native ephemeral presence uses authenticated sidecar awareness clock/ownership/expiry checks; final disconnect/revoke evidence pending"
+      ]
+    },
+    {
+      "id": "reuse-32",
+      "project": "hocuspocus",
+      "features": "persistência por extensão Database, limites de conexão, reconexão e, somente quando houver múltiplas instâncias, propagação por Redis com coordenação de documentos.",
+      "acceptance": "dois clientes reais editam o Canvas, host recusa update inválido antes de publicar, reinício restaura documento e revogação é aplicada às conexões abertas.",
+      "source_paths": [
+        "third_party/hocuspocus/packages/extension-database/src/Database.ts",
+        "third_party/hocuspocus/packages/extension-throttle/src/index.ts",
+        "third_party/hocuspocus/packages/extension-redis/src/Redis.ts"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_canvas/collaboration.py",
+        "sentra_canvas/service.py",
+        "sentra_collab/authority.py",
+        "sentra_collab/central_bridge.mjs",
+        "sentra_collab/central_sidecar.mjs"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/e2e/test_canvas_collaboration_and_culling.py",
+        "python -B -m pytest -q tests/unit/test_canvas_collaboration_authority.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Real ControlPlane grants, durable one-use ticket consumption and snapshot CAS; read guards order commit against grant/work/run revocation",
+        "Owned loopback sidecar, production browser bundle and native activation; graph projection recovers after interrupted commit; final runtime proof pending"
+      ]
+    },
+    {
+      "id": "reuse-33",
+      "project": "activepieces",
+      "features": "reaproveitar o SDK de peças e conectores específicos; propriedades tipadas para gerar formulários; output schemas; hooks de enable/disable, renovação de webhook e dedupe de triggers.",
+      "acceptance": "um trigger real cria apenas um WorkItem para eventos duplicados; uma ação usa credencial vinculada à conexão escolhida; desligar o trigger remove sua assinatura externa.",
+      "source_paths": [
+        "third_party/activepieces/packages/pieces/framework/src/lib/action/action.ts",
+        "third_party/activepieces/packages/pieces/framework/src/lib/trigger/trigger.ts",
+        "third_party/activepieces/packages/pieces/framework/src/lib/property/authentication/oauth2-prop.ts"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_interop/activepieces_worker.mjs",
+        "sentra_interop/central.py",
+        "sentra_interop/central_gate.py",
+        "sentra_interop/workflow_http.py",
+        "sentra_runtime/central_authority.py",
+        "sentra_runtime/effect_boundary.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Durable provider dispatch injection implemented; real pieces/runtime integration pending",
+        "Real HTTP provider and Node SDK piece worker implemented; complete product/provider integration and external runtime acceptance pending."
+      ]
+    },
+    {
+      "id": "reuse-34",
+      "project": "rpaframework",
+      "features": "leitura/escrita de Excel sem GUI, tabelas com filtros/agrupamento/conversão, extração/manipulação de PDFs e workflows que verificam seus próprios resultados. Priorizar isso antes de macros baseadas em coordenadas.",
+      "acceptance": "tarefa transforma planilha/PDF conhecido e compara conteúdo esperado; falha preserva original; necessidade de recalcular ou renderizar aciona o backend apropriado.",
+      "source_paths": [
+        "third_party/rpaframework/packages/main/src/RPA/Excel/Files.py",
+        "third_party/rpaframework/packages/main/src/RPA/Tables.py",
+        "third_party/rpaframework/packages/pdf/src/RPA/PDF/keywords/document.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_canvas/service.py",
+        "sentra_executors/documents.py",
+        "sentra_executors/rpa.py",
+        "sentra_runtime/machine_host.py"
+      ],
+      "validation_commands": [
+        "python -B -m pytest -q tests/unit/test_canvas_machine_documents_integration.py"
+      ],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Real document executor routed through central gate and owner UI; optional recalculation/OCR providers and semantic acceptance available through explicit host configuration"
+      ]
+    },
+    {
+      "id": "reuse-35",
+      "project": "windows-agent-arena",
+      "features": "comparação entre UIA, visão e observação mista; representação de elementos numerados na imagem; escolha entre janela e tela; harness de VM e captura de trajetória.",
+      "acceptance": "mesmo conjunto pequeno de tarefas é repetido com UIA e modo híbrido; diferenças de sucesso/latência são acompanhadas de evidência, versão do ambiente e reset reproduzível.",
+      "source_paths": [
+        "third_party/windows-agent-arena/src/win-arena-container/client/mm_agents/navi/agent.py",
+        "third_party/windows-agent-arena/src/win-arena-container/client/desktop_env/controllers/vm.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/benchmark_dataset.py",
+        "sentra_executors/benchmark_dataset_metrics.py",
+        "sentra_executors/benchmark_suite.py",
+        "sentra_executors/benchmark_suite_reports.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Real dataset format loaders and separate attempt/evaluate/resume/report implemented; host callbacks, fixture/assets/judge setup and actual evaluated tasks pending. Unsupported formats/assets remain explicit."
+      ]
+    },
+    {
+      "id": "reuse-36",
+      "project": "osworld-v2",
+      "features": "composição de métricas com conjunção/short-circuit, resultado estruturado além do score, avaliação intermediária e backend de avaliador separado do agente executante.",
+      "acceptance": "tarefa apresenta score e evidência de cada critério; checkpoints de avaliação não alteram a conclusão por efeito colateral oculto; resultados se mantêm comparáveis entre providers.",
+      "source_paths": [
+        "third_party/osworld-v2/evaluation_examples/task_class/generated_task_utils.py",
+        "third_party/osworld-v2/desktop_env/evaluators/backends/base.py",
+        "third_party/osworld-v2/lib_run_single.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/benchmark_dataset.py",
+        "sentra_executors/benchmark_dataset_metrics.py",
+        "sentra_executors/benchmark_suite.py",
+        "sentra_executors/benchmark_suite_reports.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Real dataset format loaders and separate attempt/evaluate/resume/report implemented; host callbacks, fixture/assets/judge setup and actual evaluated tasks pending. Unsupported formats/assets remain explicit."
+      ]
+    },
+    {
+      "id": "reuse-37",
+      "project": "windowsworld",
+      "features": "comparar tabelas/CSV e propriedades de documentos, conferir resultado final em arquivo, reset/snapshot do ambiente e explicar quais critérios foram satisfeitos.",
+      "acceptance": "workflow entre aplicativos termina com documento/planilha verificável, critérios por etapa e evidência final; falha no aplicativo é distinguida de falha no avaliador.",
+      "source_paths": [
+        "third_party/windowsworld/desktop_env/evaluators/metrics/table.py",
+        "third_party/windowsworld/desktop_env/desktop_env.py",
+        "third_party/windowsworld/desktop_env/evaluators/getters/replay.py"
+      ],
+      "status": "pending",
+      "implementation_paths": [
+        "sentra_executors/benchmark_dataset.py",
+        "sentra_executors/benchmark_dataset_metrics.py",
+        "sentra_executors/benchmark_suite.py",
+        "sentra_executors/benchmark_suite_reports.py"
+      ],
+      "validation_commands": [],
+      "evidence_paths": [],
+      "implementation_progress": [
+        "Real dataset format loaders and separate attempt/evaluate/resume/report implemented; host callbacks, fixture/assets/judge setup and actual evaluated tasks pending. Unsupported formats/assets remain explicit."
+      ]
+    }
+  ]
+}

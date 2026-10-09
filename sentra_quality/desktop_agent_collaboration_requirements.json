@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "supplements": "incorporation_requirements.json",
+  "user_reference_image": "C:/Users/vitor/AppData/Local/Temp/codex-clipboard-a814b4e9-9c16-48d8-97d4-04cef8d36aec.png",
+  "requirements": [
+    {"id":"desktop-application","requirement":"Primary entry is a Windows desktop application with owned window controls and broker lifecycle; ordinary browser/site is not the product delivery.","acceptance":"Launch current desktop app, close/reopen window without losing owned terminals, render compiled React Flow surface under real CSP; verify packaging and Windows shortcut.","status":"pending"},
+    {"id":"desktop-reference-layout","requirement":"Maestri-like appearance from the supplied screenshot: graphite sidebar, near-full canvas, compact floating icon toolbar, sparse chrome, real terminal nodes and curved dashed links.","acceptance":"Compare captures at reference and normal desktop resolutions; inspect actual PTY nodes, sidebar, compact controls, resize and terminal readability.","status":"pending"},
+    {"id":"reuse-ready-components","requirement":"Research and actually incorporate established components for the UI rather than implementing another canvas renderer from scratch.","sources":["https://reactflow.dev/api-reference/components","https://www.radix-ui.com/primitives/docs/components/dialog","https://lucide.dev/guide/react/"],"acceptance":"Pinned dependency/build manifests and runtime demonstrate React Flow primitives and actual imported controls/icons; no renderer mock substituted.","status":"pending"},
+    {"id":"agent-autonomy-context","requirement":"Agents receive current working goals/roles/tasks/context and autonomously create agents, teams and directed collaborations within delegated scope.","acceptance":"Actual model creates a child with a specific brief; child retrieves inherited protected context and responds; team/collaboration receipts persist; replay does not launch another child or repeat handoff.","status":"pending"},
+    {"id":"hamachi-discovery-collaboration","requirement":"Discover other SENTRA instances on configured network/Hamachi peers using a stable common peer port, establish authenticated collaboration and permit scoped agent cooperation.","acceptance":"Two configured machines on the actual Hamachi network discover and authenticate each other, exchange selected task context, collaborate through admitted local work and persist acknowledgements; unknown/expired/replayed peers cannot execute commands or acquire grants.","status":"pending"}
+  ]
+}

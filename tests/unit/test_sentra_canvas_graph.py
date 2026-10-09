@@ -43,3 +43,29 @@ def test_canvas_graph_notes_links_and_persistence(tmp_path):
         assert len(reopened.graph_detail(alpha)["nodes"])==2
     finally:
         reopened.shutdown()
+
+def test_canvas_graph_v3_receipt_migration_is_non_destructive(tmp_path):
+    """The installed v3 graph can be upgraded to v4 without losing nodes/handoffs."""
+    import sqlite3
+    from sentra_canvas.graph import GraphStore
+    path=tmp_path/"upgrade_graph.sqlite3"
+    old=GraphStore(path)
+    old.sync("ws", [{"id":"terminal-a","name":"A"},{"id":"terminal-b","name":"B"}],[],[])
+    nodes=old.snapshot("ws")["nodes"]
+    edge=old.link("ws",nodes[0]["id"],nodes[1]["id"])
+    handoff=old.record_handoff("ws",nodes[0]["id"],nodes[1]["id"],"migration payload")
+    old.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE handoffs DROP COLUMN receipt_status")
+        connection.execute("ALTER TABLE handoffs DROP COLUMN receipt_updated")
+        connection.execute("PRAGMA user_version=3")
+    migrated=GraphStore(path)
+    try:
+        assert migrated.db.execute("PRAGMA user_version").fetchone()[0]==5
+        assert migrated.snapshot("ws")["links"][0]["id"]==edge["id"]
+        saved=migrated.handoffs("ws")[0]
+        assert saved["id"]==handoff["id"]
+        assert saved["content"]=="migration payload"
+        assert saved["receipt_status"]=="pending"
+    finally:
+        migrated.close()

@@ -19,7 +19,7 @@ def test_from_config_user_shape_five_agents():
             "low_confidence": {"add_agents": 5},
             "critical_task": {"add_agents": 10},
         },
-        "max_agents": 500,
+        "max_agents": 8,
     })
     assert [r.value for r in p.initial_roles] == [
         "validator.logic", "validator.requirements", "validator.adversarial"]
@@ -100,7 +100,7 @@ def _engine_with_policy(tmp_path, policy):
 def test_engine_expands_on_disputed_and_low_confidence(tmp_path):
     from orchestrator.models import Task, ValidationReport
     policy = from_config({"initial_roles": ["logic", "requirements", "adversarial"],
-                          "max_agents": 500})
+                          "max_agents": 8})
     eng = _engine_with_policy(tmp_path, policy)
     task = Task(id="T-1", run_id="pol", objective="x")
     assert [r.value for r in eng.compute_policy.initial_for_task(task)] == [
@@ -123,7 +123,7 @@ def test_engine_options_plumbs_compute_policy(tmp_path):
     opts = engine_options({"oma": {"compute_policy": {
         "initial_agents": 5, "initial_roles": ["logic", "requirements", "adversarial"],
         "escalation": {"disagreement": {"add_agents": 3}},
-        "max_agents": 500}, "fixed_conversations": True, "inter_call_delay_s": 30}})
+        "max_agents": 8}, "fixed_conversations": True, "inter_call_delay_s": 30}})
     assert opts["fixed_conversations"] is True
     assert opts["inter_call_delay_s"] == 30.0
     assert opts["compute_policy"].agent_count(opts["compute_policy"].initial_roles) == 5

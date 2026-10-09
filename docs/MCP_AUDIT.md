@@ -1,79 +1,74 @@
 # SENTRA MCP — auditoria comparativa com Remote Desktop Commander
 
-Data da auditoria: 2026-09-20.
+Data da revisão: 2026-09-28.
 
-A comparação abaixo usa a superfície MCP do Remote Desktop Commander disponível na sessão de implementação e a superfície testada do SENTRA MCP.
+Este documento substitui o snapshot de 2026-09-20. A comparação separa a superfície
+MCP local, a camada remota e recursos deliberadamente fail-closed; uma capability
+existir no código não significa que ela esteja habilitada na superfície padrão.
 
-| Área | Remote Desktop Commander | SENTRA MCP | Resultado |
-|---|---|---|---|
-| listar diretório | list_directory | sentra_list_directory | equivalente |
-| ler arquivo paginado | read_file | sentra_read_file | equivalente |
-| múltiplos arquivos | read_multiple_files | sentra_read_multiple_files | equivalente |
-| metadados | get_file_info | sentra_file_info | equivalente |
-| busca nome/conteúdo | start_search/get_more/stop | sentra_search | SENTRA é síncrono e bounded; menos lifecycle |
-| criar diretório | create_directory | sentra_create_directory | equivalente |
-| mover/renomear | move_file | sentra_move_file | equivalente |
-| escrever | write_file | sentra_write_file | equivalente |
-| edição cirúrgica | edit_block | sentra_edit_block | equivalente, contagem determinística |
-| terminal persistente | start_process | sentra_start_process | equivalente + owner/cwd confinement |
-| output incremental | read_process_output | sentra_read_process_output | equivalente |
-| stdin incremental | interact_with_process | sentra_interact_process | equivalente |
-| sessões | list_sessions | sentra_list_sessions | equivalente |
-| terminar sessão | force_terminate | sentra_terminate_session | equivalente |
-| listar processos | list_processes | sentra_list_processes | SENTRA lista somente managed/owned |
-| kill PID | kill_process | sentra_kill_process | SENTRA é mais restritivo: managed + owner |
-| config runtime | get/set_config_value | config env/CLI + capabilities resource | deliberadamente sem mutação remota |
-| dispositivos remotos | list_devices/ping/who_am_i | não implementado | lacuna da camada remota |
-| desligar agente remoto | shutdown | não implementado | depende da futura camada multi-device |
-| PDF especializado | write_pdf | não implementado | fora do escopo de engenharia local |
-| usage/telemetria | get_usage_stats/recent calls | audit JSONL + OMA evidence | abordagem diferente |
-| repository Git | não é foco central | sentra_repo_* | vantagem SENTRA |
-| testes registrados | terminal genérico | sentra_repo_test | vantagem SENTRA |
-| OMA runs/events/handoff | não | sentra_oma_* | vantagem SENTRA |
-| quality/promotion separation | não | CANDIDATE_READY != APPLIED | vantagem SENTRA |
-| resources/prompts MCP | dependente do servidor | capabilities/project/run + sentra_operator | vantagem SENTRA |
+## Estado validado nesta revisão
 
-## Conclusão funcional
+O MCP source-tree ativo anunciou protocolo `2026-07-28`, capability v4 e 77 tools
+nas superfícies padrão `core + developer + browser`. As superfícies
+`oma`, `remote` e `admin` continuam disponíveis, mas não são expostas por padrão.
 
-Para o objetivo local do SENTRA — engenharia de software auditável em uma máquina — a camada MCP cobre filesystem, busca, terminal persistente e processos com controles mais restritivos de ownership e PID, além de adicionar repository/OMA.
+| Área | Estado atual do SENTRA |
+|---|---|
+| filesystem | leitura, escrita, edição cirúrgica, move/delete, roots allowlisted |
+| processos | sessões persistentes, output/stdin incremental, PID managed/owned e limites |
+| repository | leitura, busca, diff, testes registrados e workspaces aprovados |
+| documentos | inspeção/leitura e `sentra_write_pdf` |
+| browser | Edge/Playwright fail-closed; Edge principal sem criação arbitrária de tabs |
+| execução durável | Runs/Operations, idempotência, eventos, checkpoints, cancel/reconcile |
+| jobs | detached, BUILD exclusivo por workspace, recuperação por principal autenticada |
+| Context Bus | cursor por scanned sequence; mensagens filtradas não travam progresso |
+| governança | autorização, budgets, work items, routines, secrets, plugins e execution workspaces |
+| remoto | pairing/device tokens, ACL por tool, leases, revoke/rotate, contratos e estado UNCERTAIN |
+| atualização | HTTPS/loopback, SHA-256, ZIP traversal guard, Authenticode e rollback |
 
-As lacunas em relação ao Remote Desktop Commander não são da camada local solicitada:
+## Diferenças deliberadas em relação ao Commander
 
-1. pareamento/relay multi-device remoto;
-2. administração remota do agente/dispositivo;
-3. operações especializadas de documentos, como PDF.
+O SENTRA não tenta reproduzir permissividade de um terminal remoto genérico. Processos
+e filesystem continuam presos a workspace/política; kill só alcança processos
+gerenciados; non-loopback MCP exige configuração OAuth; grants remotos são auditáveis.
+Wildcards de ACL continuam suportados, mas dispositivos que usam `*` ou prefixos
+wildcard são marcados como `broad_acl=true`.
 
-Essas três áreas devem ser tratadas como uma camada `sentra_remote_agent` separada, com autenticação forte e threat model próprio. Não é seguro adicioná-las como atalhos ao MCP local.
+A camada remota deixou de ser “futura”: ela existe como subsistema separado do MCP
+local e é surface-gated. Isso preserva a fronteira de confiança em vez de transformar
+o MCP local em um atalho administrativo.
 
-## Segurança observada
+## Incidente de tunnel de 28/09
 
-SENTRA adiciona controles que não devem ser relaxados para copiar a ergonomia do Commander:
+Durante dogfood real, MCP, relay e tunnel chegaram a usar state-roots diferentes.
+O runtime agora persiste uma autoridade `install_dir -> state_dir` fora do próprio
+state-root, valida instance-id/token antes de adotar serviços e mantém singleton
+global por Tunnel ID.
 
-- allowed roots não vazias;
-- paths privados/runtime bloqueados;
-- junction/symlink escape testado no Windows;
-- argv estruturado e shell=False;
-- cwd confinado;
-- env sensível removido;
-- output flooding bounded;
-- owner por sessão;
-- kill somente de PID managed/owned;
-- tree cleanup no Windows testado;
-- lifecycle MCP chama shutdown;
-- queue/OMA observacional sem promoção.
+Também foi observado um tunnel com processo local saudável enquanto o Control Plane
+respondia `401 token_invalidated`. O produto passa a classificar isso como
+`REAUTH_REQUIRED`; o watchdog não reinicia indefinidamente uma credencial revogada.
+Falhas transitórias recebem grace period e backoff antes de restart do tunnel, e o
+startup aguarda MCP autoritativo antes de criar um novo tunnel-client.
 
-## Próximos passos opcionais para paridade remota
+## Edge e observabilidade
 
-Se for desejado transformar o SENTRA também em um produto remoto equivalente ao Commander:
+A extensão usa identidade version/build/source-hash, heartbeat próprio independente
+de controllers e `recovery-guard.js` autônomo. Assim, `workers_online=[]` pode
+representar extensão saudável e ociosa. Catches que afetam persistência, reload,
+reinjeção ou alarms reportam telemetria; probes/cleanup puramente best-effort podem
+continuar fail-soft.
 
-- agente local pareado por device id;
-- relay autenticado e criptografado;
-- leases/heartbeats;
-- escopo por usuário/device;
-- OAuth para o MCP remoto;
-- autorização por tool;
-- multi-device routing;
-- remote audit/telemetry;
-- kill switch e revogação.
+## Release e supply-chain
 
-A camada local atual deve permanecer independente dessa futura camada remota.
+CI e release usam Actions pinadas por commit SHA, exigem inputs críticos rastreados,
+instalam Python com `--require-hashes`, usam um lock com hashes SHA-256 e baixam
+Bun 1.4.0 por URL de release fixa com SHA-256 verificado. Builds Windows publicam
+estado não sensível em `.tmp/build-windows-status.json` além do lock privado.
+
+## Pendências que ainda exigem evidência externa
+
+Não marcar produto como integralmente fechado apenas pelo source. Ainda são gates:
+checkout/commit limpo contendo todos os inputs staged, release E2E assinado, dogfood
+live da extensão 1.6.52 no Edge principal e execução sandbox quando Docker estiver
+disponível. Falha externa não deve ser convertida em sucesso simulado.

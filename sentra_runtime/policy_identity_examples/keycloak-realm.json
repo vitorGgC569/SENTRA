@@ -1,0 +1,33 @@
+{
+  "realm": "sentra",
+  "enabled": true,
+  "sslRequired": "all",
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "clients": [{
+    "clientId": "sentra-host",
+    "enabled": true,
+    "protocol": "openid-connect",
+    "publicClient": false,
+    "clientAuthenticatorType": "client-secret",
+    "standardFlowEnabled": true,
+    "implicitFlowEnabled": false,
+    "directAccessGrantsEnabled": false,
+    "serviceAccountsEnabled": false,
+    "consentRequired": true,
+    "redirectUris": ["https://sentra.example.invalid/oidc/callback"],
+    "webOrigins": ["https://sentra.example.invalid"],
+    "attributes": {
+      "pkce.code.challenge.method": "S256",
+      "backchannel.logout.url": "https://sentra.example.invalid/oidc/backchannel-logout",
+      "backchannel.logout.session.required": "true",
+      "standard.token.exchange.enabled": "true"
+    },
+    "protocolMappers": [{
+      "name": "sentra-api-audience",
+      "protocol": "openid-connect",
+      "protocolMapper": "oidc-audience-mapper",
+      "config": {"included.custom.audience": "sentra-api", "access.token.claim": "true", "id.token.claim": "false"}
+    }]
+  }]
+}

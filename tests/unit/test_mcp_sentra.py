@@ -263,3 +263,13 @@ def test_repository_build_pass_parser_accepts_targetless_spacing(
         assert result["result"].splitlines()[0] == "BUILD  PASS exit=0"
 
     asyncio.run(probe())
+
+
+def test_typecheck_runtime_dependency_is_declared() -> None:
+    requirements = (Path(__file__).resolve().parents[2] / "requirements.txt").read_text(
+        encoding="utf-8"
+    )
+    assert any(
+        line.strip().lower().startswith("mypy")
+        for line in requirements.splitlines()
+    )

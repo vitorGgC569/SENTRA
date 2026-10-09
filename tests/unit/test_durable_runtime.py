@@ -300,7 +300,9 @@ def test_capability_contract_schema_and_surface_budget(tmp_path: Path) -> None:
     runtime = SentraMCPServer(_config(tmp_path))
     try:
         manifest = asyncio.run(runtime.capabilities.manifest())
-        assert manifest["contract"]["tool_count"] < 75
+        # Capability v4 adds candidate generation plus two compact governance
+        # multiplexers without exposing specialized administrative wrappers.
+        assert manifest["contract"]["tool_count"] <= 78
         assert len(manifest["contract"]["schema_hash"]) == 64
         assert manifest["capabilities"]["durable_operation"] is True
         assert manifest["fallback_policy"]["silent_invasive_fallbacks"] is False
@@ -309,7 +311,7 @@ def test_capability_contract_schema_and_surface_budget(tmp_path: Path) -> None:
             client_schema_hash="0" * 64
         ))
         assert mismatch["compatible"] is False
-        assert mismatch["reasons"][0]["code"] == "SCHEMA_MISMATCH"
+        assert mismatch["reasons"][0]["code"] == "CATALOG_STALE"
 
         tools = {
             tool.name: tool for tool in runtime.mcp._tool_manager.list_tools()
@@ -504,3 +506,43 @@ def test_reconcile_marks_linked_agent_chat_stalled_without_evidence(tmp_path: Pa
         assert result["auto_replay"] is False
     finally:
         service.close()
+
+
+def test_durable_goal_tree_and_authority_projection(tmp_path):
+    durable = DurableRunService(tmp_path)
+    try:
+        run = durable.create_run("owner", idempotency_key="goal-run")
+        root_goal = durable.create_goal(
+            run["run_id"], "owner",
+            objective="Ship SENTRA safely",
+            acceptance_criteria=["tests green", "no unsafe replay"],
+            constraints=["Context Bus is not authority"],
+            priority="HIGH",
+            budget={"max_rounds": 8},
+            external_key="primary-goal",
+        )
+        child = durable.create_goal(
+            run["run_id"], "owner",
+            objective="Fix research collection",
+            parent_goal_id=root_goal["goal_id"],
+        )
+        assert child["parent_goal_id"] == root_goal["goal_id"]
+        paused = durable.update_goal(
+            child["goal_id"], "owner", state="PAUSED", reason="waiting on worker"
+        )
+        assert paused["state"] == "PAUSED"
+        resumed = durable.update_goal(child["goal_id"], "owner", state="ACTIVE")
+        assert resumed["state"] == "ACTIVE"
+        detail = durable.run_status(run["run_id"], "owner")
+        assert {item["goal_id"] for item in detail["goals"]} == {
+            root_goal["goal_id"], child["goal_id"]
+        }
+        replay = durable.create_goal(
+            run["run_id"], "owner",
+            objective="ignored duplicate",
+            external_key="primary-goal",
+        )
+        assert replay["idempotent_replay"] is True
+        assert replay["goal_id"] == root_goal["goal_id"]
+    finally:
+        durable.close()

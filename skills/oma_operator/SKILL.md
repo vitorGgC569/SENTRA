@@ -55,13 +55,13 @@ Demo **não** prova inteligência nem Edge — é só fumaça local.
 ```powershell
 # Terminal 1 (deixe aberto): relay autenticado e persistente
 python -B main.py --relay
-# Anote o caminho do token de pareamento (ex.: .oma/relay-token)
+# Builds atuais pareiam a extensão automaticamente por prova install-local.
 ```
 
 No Edge, com sua conta logada no site de chat:
 1. `edge://extensions` → modo desenvolvedor → **Carregar sem compactação** →
    pasta `edge_extension/`.
-2. Detalhes da extensão → **Opções da extensão** → cole o conteúdo de
+2. Em builds atuais, o pareamento com o relay local é automático;
    `.oma/relay-token` no campo Token → marque **Ativar** → salve.
    (Token é segredo: nunca cole em chat nenhum.)
 3. A extensão faz polling em `http://127.0.0.1:8765` sem criar tabs.

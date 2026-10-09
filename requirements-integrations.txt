@@ -1,0 +1,6 @@
+# Optional execution providers used by the central machine host.
+# Existing project lock supplies Playwright/pypdf; documents also need openpyxl.
+playwright==1.62.0
+openpyxl==3.1.5
+pypdf==6.19.0
+websockets==15.0.1

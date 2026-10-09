@@ -4,6 +4,7 @@ import argparse
 import hmac
 import json
 import os
+import mimetypes
 import secrets
 import subprocess
 import sys
@@ -26,8 +27,27 @@ class CanvasServer(ThreadingHTTPServer):
         self.canvas=canvas
         self.secret=secrets.token_urlsafe(36)
         self.runtime_id=uuid.uuid4().hex
+        self._collab_process=None
+        self._collab_lock=threading.RLock()
         super().__init__(("127.0.0.1",port),CanvasHandler)
         canvas._agent_port=self.server_port
+
+    def collaboration(self):
+        from .collaboration import CollaborationProcess
+        with self._collab_lock:
+            if self._collab_process is not None and not self._collab_process.status()["available"]:
+                self._collab_process.close()
+                self._collab_process=None
+            if self._collab_process is None:
+                self._collab_process=CollaborationProcess(port=self.server_port,secret=self.secret)
+                self.canvas._collab_process=self._collab_process
+            return self._collab_process.status()
+
+    def server_close(self):
+        with self._collab_lock:
+            if self._collab_process is not None:
+                self._collab_process.close()
+        super().server_close()
 
     def get_request(self):
         connection,address=super().get_request()
@@ -64,7 +84,7 @@ class CanvasHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options","nosniff")
         self.send_header("X-Frame-Options","DENY")
         self.send_header("Content-Security-Policy",
-            "default-src 'self'; connect-src 'self'; script-src 'self'; "
+            "default-src 'self'; connect-src 'self' ws://127.0.0.1:*; script-src 'self'; "
             "style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; "
             "form-action 'none'; frame-ancestors 'none'")
         self.send_header("Referrer-Policy","no-referrer")
@@ -97,10 +117,18 @@ class CanvasHandler(BaseHTTPRequestHandler):
 
     def _get(self):
         path=urlsplit(self.path)
+        if path.path.startswith("/desktop-assets/"):
+            assets=(STATIC/"desktop-assets").resolve()
+            file=(assets/path.path.removeprefix("/desktop-assets/")).resolve()
+            if not file.is_relative_to(assets) or not file.is_file() or file.suffix.lower() not in {".js",".css",".svg",".png",".woff2"}:
+                self._send(404,{"error":"desktop asset unavailable"});return
+            self._send(200,file.read_bytes(),mimetypes.guess_type(file.name)[0] or "application/octet-stream");return
         if path.path in ("/","/index.html","/app.js","/app.css",
-                         "/native.html","/native.js","/native.css",
+                          "/desktop.html","/native.html","/canvas","/native.js","/native.css","/rope-physics.js","/fractal-grid.js","/machine-panel.js",
+                          "/sentra-collab.js","/collaboration-panel.js","/graph-view.js","/workflow-panel.js","/center-panel.js","/remote-panel.js","/vendor/sentra-collab-runtime.js",
                          "/vendor/xterm.js","/vendor/addon-fit.js","/vendor/xterm.css"):
             file=STATIC/("index.html" if path.path in ("/","/index.html")
+                         else "native.html" if path.path=="/canvas"
                          else path.path.lstrip("/"))
             content_type=("text/html; charset=utf-8" if file.suffix==".html"
                           else "text/javascript; charset=utf-8" if file.suffix==".js"
@@ -122,6 +150,21 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.workspaces());return
         if path.path=="/api/integrations":
             self._send(200,a.integrations());return
+        if path.path=="/api/center/capabilities":
+            self._send(200,a.center_capabilities(ws));return
+        if path.path=="/api/center/machines":
+            self._send(200,a.center_machines(ws));return
+        if path.path=="/api/center/network":
+            self._send(200,a.center_network(ws));return
+        if path.path=="/api/center/overview":
+            self._send(200,a.center_overview(ws,operation_offset=int((qs.get("operation_offset") or ["0"])[0]),
+                work_item_offset=int((qs.get("work_item_offset") or ["0"])[0])));return
+        if path.path=="/api/center/telemetry":
+            self._send(200,a.center_telemetry(ws));return
+        if path.path=="/api/center/operation":
+            self._send(200,a.center_operation(ws,(qs.get("operation_id") or [""])[0]));return
+        if path.path=="/api/models":
+            self._send(200,a.model_catalog());return
         if path.path=="/api/workspace":
             self._send(200,a.workspace_detail(ws));return
         if path.path=="/api/graph":
@@ -156,7 +199,10 @@ class CanvasHandler(BaseHTTPRequestHandler):
         if self.headers.get("Content-Type","").split(";")[0]!="application/json":
             raise ValueError("JSON content type required")
         length=int(self.headers.get("Content-Length","0"))
-        if not 0<length<=16384:
+        body_limit = (1500000 if route == "/api/collab/host" else
+                      2_010_000 if route=="/api/center/machine/configure" else
+                      131072 if route in {"/api/center/execute","/api/agent/control"} else 16384)
+        if not 0<length<=body_limit:
             raise ValueError("invalid request size")
         p=json.loads(self.rfile.read(length))
         if not isinstance(p,dict): raise ValueError("JSON object expected")
@@ -168,6 +214,52 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.agent_control(authorization[7:],p))
             return
         ws=p.get("ws","")
+        if route=="/api/collab/host":
+            self._send(200,{"ok":True,"value":a.collab_host_call(p["method"],p["params"])})
+            return
+        if route=="/api/collab/session":
+            session=a.collab_session(ws,p["work_item_id"],p["principal_id"],p.get("permission","read"))
+            self._send(200,{**session,**self.server.collaboration()})
+            return
+        if route=="/api/collab/prepare":
+            availability=self.server.collaboration()
+            self._send(200,{**a.collab_prepare(ws,p["principal_id"]),**availability})
+            return
+        if route=="/api/collab/disable":
+            self._send(200,a.collab_disable(ws,p["work_item_id"],p["principal_id"]))
+            return
+        if route=="/api/center/machine/configure":
+            self._send(200,a.center_configure_machine(ws,p["agent_id"],p["kind"],
+                profiles=p.get("profiles"),headless=p.get("headless",True),
+                recalculation_backends=p.get("recalculation_backends"),ocr_backends=p.get("ocr_backends"),
+                provider_config=p.get("provider_config"),definitions=p.get("definitions")))
+            return
+        if route=="/api/center/network":
+            self._send(200,a.center_network(ws,p["configuration"]));return
+        if route=="/api/center/network/pairing":
+            self._send(200,a.center_network_pairing(ws));return
+        if route=="/api/center/task/prepare":
+            self._send(200,a.center_prepare_task(ws,p["machine_id"],p["capabilities"],p["objective"]))
+            return
+        if route=="/api/center/execute":
+            self._send(200,a.center_execute(ws,p["work_item_id"],p["machine_id"],
+                p["capability_id"],p["operation_id"],p["arguments"],p["request_key"]))
+            return
+        if route=="/api/center/experiences":
+            self._send(200,a.center_experiences(ws,p["work_item_id"],p["machine_id"],p["query"],p.get("limit",5)))
+            return
+        if route=="/api/center/telemetry":
+            self._send(200,a.center_telemetry(ws,p["configuration"]))
+            return
+        if route=="/api/center/plan":
+            self._send(200,a.center_plan(ws,p["work_item_id"],p.get("action","read"),
+                p.get("steps"),p.get("expected_revision")))
+            return
+        if route=="/api/center/inspect":
+            if p.get("confirm") is not True:
+                raise ValueError("explicit read-only center operation approval required")
+            self._send(200,a.center_inspect(ws,p["work_item_id"],p["operation_id"],p["request_key"]))
+            return
         if route=="/api/runtime/shutdown":
             if p.get("confirm") is not True:
                 raise ValueError("explicit runtime shutdown confirmation required")
@@ -189,7 +281,7 @@ class CanvasHandler(BaseHTTPRequestHandler):
                 task_id=p.get("task_id"),mode=p.get("mode","hard_stop"),
                 policy_id=p.get("policy_id"),enabled=p.get("enabled",True))
         elif route=="/api/terminals":
-            result=a.create_terminal(ws,p["name"],p.get("shell","powershell"))
+            result=a.create_terminal(ws,p["name"],p.get("shell","powershell"),p.get("model"),p.get("effort"))
         elif route=="/api/terminal/input":
             result=a.terminal_input(ws,p["id"],p["data"])
         elif route=="/api/terminal/resize":
@@ -204,7 +296,9 @@ class CanvasHandler(BaseHTTPRequestHandler):
             result=a.terminal_close(ws,p["id"])
         elif route=="/api/agents":
             result=a.create_agent(ws,p["name"],p["model"],
-                                  p.get("role","worker"),p.get("start",False))
+                                  p.get("role","worker"),p.get("start",False),goal=p.get("goal"))
+        elif route=="/api/agent/context":
+            result=a.agent_working_context(ws,p["agent_id"],goal=p.get("goal"),expected_revision=p.get("expected_revision"))
         elif route=="/api/agent/restart":
             result=a.restart_agent(ws,p["id"])
         elif route=="/api/teams":

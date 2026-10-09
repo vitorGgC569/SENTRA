@@ -36,4 +36,8 @@ node_modules/
 /.tmp/
 /release/
 /third_party/
+/edge_extension/sentra-bootstrap.json
 /tests/test_resolvenet_multichat_live.py
+
+/dist.payload-staging-*/
+/dist.payload-backup-*/

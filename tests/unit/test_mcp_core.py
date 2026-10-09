@@ -100,10 +100,18 @@ def test_cli_allowed_root_derives_local_state_boundary(
     assert config.allowed_roots == (root.resolve(),)
     assert config.state_root == (root / ".sentra").resolve()
 
-    explicit = tmp_path / "global-state"
-    monkeypatch.setenv("SENTRA_STATE_DIR", str(explicit))
+    inherited = tmp_path / "inherited-state"
+    monkeypatch.setenv("SENTRA_STATE_DIR", str(inherited))
     env_config = MCPConfig.from_env()
     config = config_from_args(args, env_config)
+    assert config.state_root == (root / ".sentra").resolve()
+
+    explicit = tmp_path / "global-state"
+    explicit_args = parser().parse_args([
+        "--allowed-root", str(root),
+        "--state-dir", str(explicit),
+    ])
+    config = config_from_args(explicit_args, env_config)
     assert config.state_root == explicit.resolve()
 
 
@@ -116,6 +124,9 @@ def test_discovery_list_and_call_tool_in_process(tmp_path: Path) -> None:
             tools = await client.list_tools()
             tool_names = [tool.name for tool in tools.tools]
             assert "sentra_health" in tool_names
+            # Legacy external Maestri bridge is explicitly admin-only;
+            # the default surface stays within its published tool budget.
+            assert "sentra_maestri" not in tool_names
 
             result = await client.call_tool("sentra_health", {})
             assert result.is_error is False
@@ -129,3 +140,31 @@ def test_discovery_list_and_call_tool_in_process(tmp_path: Path) -> None:
         assert (tmp_path / "audit.jsonl").is_file()
 
     asyncio.run(probe())
+
+
+def test_legacy_maestri_requires_admin_surface(tmp_path: Path) -> None:
+    default = SentraMCPServer(MCPConfig(
+        allowed_roots=(tmp_path,), audit_log=tmp_path / "default-audit.jsonl",
+        remote_store_path=tmp_path / "default-remote.sqlite3",
+        state_root=tmp_path / "default-state",
+    ))
+    privileged = SentraMCPServer(MCPConfig(
+        allowed_roots=(tmp_path,), audit_log=tmp_path / "admin-audit.jsonl",
+        remote_store_path=tmp_path / "admin-remote.sqlite3",
+        state_root=tmp_path / "admin-state",
+        tool_surfaces=("core", "developer", "admin"),
+    ))
+    try:
+        default_names = {tool.name for tool in default.mcp._tool_manager.list_tools()}
+        admin_names = {tool.name for tool in privileged.mcp._tool_manager.list_tools()}
+        assert "sentra_maestri" not in default_names
+        assert "sentra_maestri" in admin_names
+        assert "sentra_run" in default_names
+        assert "sentra_coordination" in default_names
+    finally:
+        for server in (default, privileged):
+            server.search.close()
+            server.processes.shutdown()
+            server.remote_store.close()
+            server.durable.close()
+            server.context.close()

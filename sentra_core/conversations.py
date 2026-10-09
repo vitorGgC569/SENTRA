@@ -140,6 +140,11 @@ class ConversationStore:
                     call_id TEXT PRIMARY KEY REFERENCES provider_usage(call_id));
                 CREATE TABLE IF NOT EXISTS provider_context(
                     call_id TEXT PRIMARY KEY REFERENCES calls(id),context_json TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS context_summaries(
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    policy_digest TEXT NOT NULL, revision INTEGER NOT NULL,
+                    summary_digest TEXT NOT NULL, protected_summary TEXT NOT NULL,
+                    created REAL NOT NULL, PRIMARY KEY(conversation_id,policy_digest,revision));
             """)
             columns={row[1] for row in db.execute("PRAGMA table_info(provider_context)")}
             upgraded=False
@@ -306,6 +311,60 @@ class ConversationStore:
                               "id": uuid.uuid5(uuid.NAMESPACE_URL, f"{ident}:{row['seq']}").hex})
                 size += len(text)
         return {"messages": list(reversed(items)), "omitted": total - len(items), "total": total}
+
+    def context_window(self, ident, *, system_prompt, condenser=None, summarizer=None):
+        """Project protected originals; append summary revisions, never rewrite messages.
+
+        Caller performing model work should hold executing(ident). The summary
+        cache is optimistic: a concurrent summary revision is never overwritten.
+        OS protected storage is mandatory, including summary content.
+        """
+        from dataclasses import asdict
+        from .context import ContextSummary, RollingContextCondenser, digest
+        condenser = condenser or RollingContextCondenser()
+        policy = digest({"system":system_prompt,"max_chars":condenser.max_chars,
+                         "keep_first":condenser.keep_first,"keep_recent":condenser.keep_recent,
+                         "summary_chars":condenser.summary_chars})
+        with self._connect() as db:
+            self._owned(db, ident)
+            row = db.execute("SELECT * FROM context_summaries WHERE conversation_id=? AND policy_digest=? "
+                             "ORDER BY revision DESC LIMIT 1", (ident, policy)).fetchone()
+            previous = ContextSummary(**_decode(row["protected_summary"])) if row else None
+            if previous is not None and previous.sha256 != row["summary_digest"]:
+                raise RuntimeError("context summary digest mismatch")
+            messages = [{"role":r["role"], "content":_decode(r["protected_content"]), "seq":r["seq"],
+                         "id":uuid.uuid5(uuid.NAMESPACE_URL, f"{ident}:{r['seq']}").hex}
+                        for r in db.execute("SELECT * FROM messages WHERE conversation_id=? ORDER BY seq", (ident,))]
+        projection = condenser.project(messages, system_prompt=system_prompt,
+                                       previous=previous, summarizer=summarizer)
+        if projection.summary is not None and projection.summary != previous:
+            summary = projection.summary
+            protected = _encode(asdict(summary))
+            with self._tx() as db:
+                self._owned(db, ident)
+                latest = db.execute("SELECT revision,summary_digest FROM context_summaries "
+                    "WHERE conversation_id=? AND policy_digest=? ORDER BY revision DESC LIMIT 1",
+                    (ident, policy)).fetchone()
+                if (latest["summary_digest"] if latest else None) != (previous.sha256 if previous else None):
+                    raise ConversationBusy("context summary changed concurrently; reload projection")
+                db.execute("INSERT INTO context_summaries VALUES(?,?,?,?,?,?)",
+                    (ident, policy, latest["revision"]+1 if latest else 1, summary.sha256, protected, time.time()))
+                self._event(db, ident, "context.condensed", details={"origin":summary.origin,
+                    "summary_digest":summary.sha256,"source_digest":summary.source_digest,
+                    "through_seq":summary.through_seq,"source_count":summary.source_count})
+        return projection
+
+    def complete_context_call(self, ident, turn, provider_id, summary_digest):
+        """Commit an auxiliary summary call without inserting it into the transcript."""
+        if not isinstance(summary_digest, str) or not re.fullmatch(r"[a-f0-9]{64}", summary_digest):
+            raise ValueError("invalid summary digest")
+        with self._tx() as db:
+            self._owned(db, ident)
+            changed = db.execute("UPDATE calls SET state='completed',protected_result=?,updated=? "
+                "WHERE conversation_id=? AND turn_id=? AND kind='provider' AND provider_id=? AND state='received'",
+                (_encode({"kind":"context_summary","sha256":summary_digest}), time.time(), ident, turn, provider_id))
+            if changed.rowcount != 1:
+                raise RuntimeError("summary provider call is not ready to commit")
 
     def search(self, workspace, query, *, limit=20):
         return self.search_page(workspace, query, limit=limit)["items"]
