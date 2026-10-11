@@ -1,5 +1,14 @@
 # SENTRA CI/CD — contrato de entrega (08/10/2026)
 
+> **Resultado atualizado em 09/10/2026:** `tests/unit` agora **passou**
+> com 1.962 passed, 37 skipped e zero falhas/erros. A última execução encerrada
+> de `tests/failure` + `tests/integration` teve 183 passed, 10 skipped;
+> nova repetição ainda em andamento. `npm test --prefix sentra_collab`
+> passou 54/54. O contrato de inputs passou no checkpoint anterior, mas a
+> verificação de whitespace do HEAD `e4b3968` reprovou. O job `CI required`
+> e o instalador assinado **ainda não** têm aceite de release.
+
+
 A cadeia de distribuição Windows é **fail-closed**: falha de teste,
 integridade, dependência ou assinatura impede publicação. Todo arquivo
 usado no build e nos testes do Canvas precisa estar **commitado**:

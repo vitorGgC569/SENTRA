@@ -1022,10 +1022,14 @@ class DurableRunService:
         project_id: str | None = None,
         project_url: str | None = None,
         reason: str = "recovery",
+        expected_conversation_id: str | None = None,
     ) -> dict[str, Any]:
         """Replace the physical chat while preserving logical Run/Agent identity."""
         with self.lock:
             row = self._chat_row(chat_id, owner)
+            if (expected_conversation_id is not None and
+                    row["conversation_id"] != expected_conversation_id):
+                raise DurableStateConflict("chat conversation changed before rebinding")
             previous = {
                 "conversation_id": row["conversation_id"],
                 "conversation_url": row["conversation_url"],

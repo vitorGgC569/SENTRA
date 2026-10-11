@@ -12,6 +12,8 @@ import uuid
 from sentra_core.conversation import ConversationIdentity
 
 from .authorization import AuthorizationService
+from .chat_access import ChatAccessService
+from .browser_evidence import BrowserEvidenceService
 from .budget_policy import BudgetPolicyService
 from .context import ContextBusService
 from .control_store import SQLiteControlPlaneStore
@@ -20,7 +22,11 @@ from .event_ingress import EventIngressService
 from .execution_workspace import ExecutionWorkspaceService
 from .governance import GovernanceService
 from .plugin_host import PluginWorkerHost
-from .session_checkpoint import SessionCheckpointService
+from .plugin_bundles import MCPBBundleCatalog
+from .mcpb_http import MCPHttpRegistry
+from .session_checkpoint import SessionCheckpointService, SessionCheckpointConflict
+from .skill_library import SkillLibrary
+from .tool_exposure import ToolExposureRegistry
 from .task_ledger import DurableTaskLedger
 
 
@@ -31,8 +37,16 @@ class ControlPlaneService:
         self.durable = durable
         self.context = context
         self.store = SQLiteControlPlaneStore(durable.state_root)
+        self.tool_exposure = ToolExposureRegistry(self.store)
         self.task_ledger = DurableTaskLedger(durable.state_root, store=self.store)
         self.authorization = AuthorizationService(durable.state_root, store=self.store)
+        self.chat_access = ChatAccessService(durable.state_root, store=self.store)
+        self.browser_evidence = BrowserEvidenceService(durable.state_root, store=self.store, chat_access=self.chat_access)
+        self.bundle_catalog = MCPBBundleCatalog(durable.state_root)
+        # One owner-scoped MCP HTTP catalog on the existing central SQLite,
+        # not an alternate host or authority. Endpoint enrollment never grants
+        # tool execution or starts a plugin worker.
+        self.mcp_http = MCPHttpRegistry(self)
         self.governance = GovernanceService(
             durable.state_root, durable=durable, store=self.store
         )
@@ -44,6 +58,7 @@ class ControlPlaneService:
         self.execution_workspaces = ExecutionWorkspaceService(
             durable.state_root, durable=durable, store=self.store
         )
+        self.skill_library = SkillLibrary(self)
         self.plugin_host: PluginWorkerHost | None = None
 
     def _run(self, run_id: str, owner: str) -> dict[str, Any]:
@@ -815,6 +830,151 @@ class ControlPlaneService:
     def install_skill(self, owner: str, **kwargs: Any) -> dict[str, Any]:
         return self.governance.install_skill(owner, **kwargs)
 
+    def mcp_http_list(self, owner: str, workspace: str) -> dict[str, Any]:
+        """Read-only owner/workspace catalog; does not discover or call tools."""
+        from pathlib import Path
+        root = str(Path(workspace).resolve(strict=True))
+        with self.store.connect("plugin_bundle") as db:
+            records = db.execute(
+                "SELECT server_id,endpoint,enabled,revision FROM mcp_http_endpoints "
+                "WHERE owner=? AND workspace=? ORDER BY server_id",
+                (owner, root),
+            ).fetchall()
+        return {"servers": [dict(row) for row in records],
+                "grants_created": False, "remote_chatgpt_tools_verified": False,
+                "http_server_spawned": False}
+
+    def mcp_http_register(self, owner: str, workspace: str, server_id: str,
+                          endpoint: str, *, approved: bool = False) -> dict[str, Any]:
+        if approved is not True:
+            raise PermissionError("explicit authenticated operator approval required")
+        result = self.mcp_http.register(owner, workspace, server_id, endpoint, approved=True)
+        self.governance.activity(owner, "mcp_http.register", "ok", actor_type="system",
+                                 payload={"server_id":server_id,"grants_created":False})
+        return {**result,"grants_created":False,"worker_started":False}
+
+    def mcp_http_disable(self, owner: str, workspace: str, server_id: str,
+                         *, approved: bool = False) -> dict[str, Any]:
+        if approved is not True:
+            raise PermissionError("explicit authenticated operator approval required")
+        result = self.mcp_http.disable(owner, workspace, server_id, approved=True)
+        self.governance.activity(owner, "mcp_http.disable", "ok", actor_type="system",
+                                 payload={"server_id":server_id})
+        return {**result,"grants_created":False,"worker_started":False}
+
+    async def mcp_http_call_tool(self, *, owner: str, workspace: str,
+                                 server_id: str, run_id: str, work_item_id: str,
+                                 agent_id: str, tool_name: str, arguments: dict,
+                                 operation_id: str, idempotency_key: str,
+                                 access_token=None):
+        """Host-only durable WorkItem effect, never a model-facing HTTP route.
+
+        The HTTP registry independently verifies each grant and fences effects.
+        A credential callback must be supplied by the trusted host, not the
+        Canvas browser or an MCP request.
+        """
+        return await self.mcp_http.execute(
+            owner=owner, workspace=workspace, server_id=server_id,
+            run_id=run_id, work_item_id=work_item_id, agent_id=agent_id,
+            tool_name=tool_name, arguments=arguments,
+            operation_id=operation_id, idempotency_key=idempotency_key,
+            access_token=access_token)
+
+    def bundle_list(self, owner: str, workspace: str) -> dict[str, Any]:
+        """Central, owner-scoped projection; publication is never authority."""
+        packages = self.bundle_catalog.list(owner, workspace)
+        for item in packages:
+            item["registration"] = self.bundle_catalog.registration(
+                owner, workspace, item["package_sha256"])
+            item["execution_supported"] = False
+        return {"packages": packages, "activation_requires_authorized_work_item": True,
+                "standard_mcp_stdio_host_available": False}
+
+    def bundle_stage(self, owner: str, workspace: str, source: str, *,
+                     expected_sha256: str | None = None) -> dict[str, Any]:
+        return self.bundle_catalog.stage(owner, workspace, source,
+                                         expected_sha256=expected_sha256)
+
+    def bundle_inspect(self, owner: str, workspace: str, package_sha256: str) -> dict[str, Any]:
+        return self.bundle_catalog.describe(owner, workspace, package_sha256)
+
+    def bundle_register(self, owner: str, workspace: str, package_sha256: str) -> dict[str, Any]:
+        """Operator-reviewed catalog admission, explicitly *not* worker admission."""
+        result = self.bundle_catalog.register(owner, workspace, package_sha256, self.governance)
+        self.governance.activity(owner, "bundle.register", "ok", actor_type="system",
+                                 payload={"plugin_id": result["plugin_id"],
+                                          "sha256": package_sha256,
+                                          "worker_started": False, "grants_created": False})
+        return result
+
+    def bundle_activation_plan(
+        self, owner: str, workspace: str, package_sha256: str, *,
+        run_id: str, work_item_id: str, agent_id: str,
+    ) -> dict[str, Any]:
+        """Admission-checked, pinned launch candidate; absolutely no execution.
+
+        The real MCP stdio subprocess must subsequently pass a durable
+        reservation, fenced effect and supervision. A grant here cannot be
+        recycled to bypass that later boundary.
+        """
+        from pathlib import Path
+        from sentra_runtime.authority_bridge import BoundWorkItemPolicy
+        from sentra_runtime.contracts import Machine, Capability, OperationRequest
+        run=self._run(run_id,owner)
+        work=self.work_item_info(work_item_id,owner)
+        if (run.get("state") not in {"CREATED","RUNNING"} or
+                work.get("run_id")!=run_id or
+                str(Path(run.get("workspace") or "").resolve()) !=
+                str(Path(workspace).resolve(strict=True))):
+            raise PermissionError("MCPB WorkItem is not bound to this active workspace run")
+        spec=self.bundle_catalog.launch_spec(owner,workspace,package_sha256,self.governance)
+        machine=Machine("mcpb-"+package_sha256[:32],"mcpb",owner,
+                        (Capability("mcp:launch","Launch reviewed MCPB"),))
+        request=OperationRequest("mcpb-admission-"+uuid.uuid4().hex,agent_id,
+            machine.machine_id,"mcp:launch",work_item_id,
+            "mcpb-plan-"+uuid.uuid4().hex,
+            {"executable":spec["executable"],"args":spec["args"],
+             "cwd":spec["cwd"],"server_id":spec["server_id"]})
+        evaluator=BoundWorkItemPolicy(owner=owner,principal_type="agent",
+            authorization=self.authorization,governance=self.governance)
+        decision=evaluator(request)
+        if decision.allowed is not True:
+            raise PermissionError("SENTRA WorkItem authorization denied for MCPB launch")
+        return {**spec, "work_item_id":work_item_id,"run_id":run_id,
+                "agent_id":agent_id,"machine_id":machine.machine_id,
+                "policy_constraints":{
+                    "executable_paths":[spec["executable"]],
+                    "cwd_roots":[spec["cwd"]],
+                    "argv_sha256":spec["argv_sha256"],
+                    "work_item_ids":[work_item_id],
+                    "principal_ids":[agent_id]},
+                "grant_checked":True,"durable_operation_reserved":False,
+                "worker_started":False,"ready_to_execute":False}
+
+    async def bundle_call_tool(self, owner: str, workspace: str, package_sha256: str, *,
+                               run_id: str, work_item_id: str, agent_id: str,
+                               tool_name: str, arguments: dict,
+                               operation_id: str, idempotency_key: str):
+        """One-shot Docker MCP stdio execution under SENTRA durable WorkItem gate.
+
+        Host-only Python facade. Never expose arbitrary Docker argv, images or
+        environment through a plugin or browser request.
+        """
+        from .mcpb_sandbox import execute_bundle_tool
+        return await execute_bundle_tool(
+            self, owner=owner, workspace=workspace, package_sha256=package_sha256,
+            run_id=run_id, work_item_id=work_item_id, agent_id=agent_id,
+            tool_name=tool_name, arguments=arguments,
+            operation_id=operation_id, idempotency_key=idempotency_key)
+
+    def bundle_disable(self, owner: str, workspace: str, package_sha256: str) -> dict[str, Any]:
+        result = self.bundle_catalog.disable(owner, workspace, package_sha256, self.governance)
+        self.tool_exposure.disable(result["plugin_id"])
+        self.governance.activity(owner, "bundle.disable", "ok", actor_type="system",
+                                 payload={"plugin_id": result["plugin_id"],
+                                          "sha256": package_sha256})
+        return result
+
     def register_plugin(self, owner: str, **kwargs: Any) -> dict[str, Any]:
         return self.governance.register_plugin(owner, **kwargs)
 
@@ -1453,3 +1613,94 @@ class ControlPlaneService:
     def tick_routines(self, *, now: float | None = None) -> dict[str, Any]:
         from .routine_scheduler import RoutineSchedulerService
         return RoutineSchedulerService(self).tick(now=now)
+
+    def _continuation_chat(self, owner, item):
+        run = self._run(item["run_id"], owner)
+        chat = next((c for c in run.get("chats", [])
+                     if c.get("chat_id") == item["chat_id"]), None)
+        if chat is None:
+            raise FileNotFoundError("chat does not belong to this run")
+        return chat
+
+    def prepare_chat_continuation(self, owner, *, run_id, chat_id,
+                                  target_conversation_id, request_key,
+                                  checkpoint_id=None):
+        """Pin a checkpoint for a one-way local chat switch; do not send."""
+        chat = self._continuation_chat(owner, {"run_id":run_id,"chat_id":chat_id})
+        source = chat.get("conversation_id")
+        if not source:
+            raise ValueError("source conversation is not bound")
+        checkpoint = self.latest_session_checkpoint(owner, run_id=run_id, chat_id=chat_id)
+        if checkpoint_id is not None and checkpoint["checkpoint_id"] != checkpoint_id:
+            raise SessionCheckpointConflict("checkpoint changed before transfer")
+        if checkpoint.get("conversation_id") != source:
+            raise SessionCheckpointConflict("checkpoint source differs from current binding")
+        row = self.session_checkpoints.prepare_continuation(
+            owner,run_id=run_id,chat_id=chat_id,
+            checkpoint_id=checkpoint["checkpoint_id"],
+            source_conversation_id=source,target_conversation_id=target_conversation_id,
+            request_key=request_key)
+        return {**row, "checkpoint_sha256":checkpoint["payload_sha256"],
+                "remote_target_attested":False}
+
+    def commit_chat_continuation(self, owner, continuation_id, *,
+                                 operator_approved=False):
+        """Rebind logical chat only; external provider acceptance is not proved."""
+        if operator_approved is not True:
+            raise PermissionError("operator must approve conversation rebinding")
+        item = self.session_checkpoints.continuation(owner, continuation_id)
+        current = self._continuation_chat(owner,item).get("conversation_id")
+        if item["state"] == "COMMITTED":
+            if current != item["target_conversation_id"]:
+                raise SessionCheckpointConflict("committed chat was rebound elsewhere")
+            return {**item,"idempotent_replay":True,"remote_target_attested":False}
+        if item["state"] != "PREPARED" or current != item["source_conversation_id"]:
+            raise SessionCheckpointConflict("continuation needs operator reconciliation")
+        latest = self.latest_session_checkpoint(owner,run_id=item["run_id"],chat_id=item["chat_id"])
+        if latest["checkpoint_id"] != item["checkpoint_id"]:
+            raise SessionCheckpointConflict("newer chat checkpoint exists; rebuild continuation")
+        self.session_checkpoints.transition_continuation(
+            owner,continuation_id,expected="PREPARED",state="REBINDING")
+        try:
+            self.durable.rebind_chat(
+                item["chat_id"],owner,
+                conversation_id=item["target_conversation_id"],conversation_url=None,
+                expected_conversation_id=item["source_conversation_id"],
+                reason="local_checkpoint_continuation")
+        except Exception:
+            self.session_checkpoints.transition_continuation(
+                owner,continuation_id,expected="REBINDING",state="UNCERTAIN")
+            raise
+        done = self.session_checkpoints.transition_continuation(
+            owner,continuation_id,expected="REBINDING",state="COMMITTED")
+        return {**done,"idempotent_replay":False,"remote_target_attested":False}
+
+    def reconcile_chat_continuation(self, owner, continuation_id):
+        """Inspect durable binding after crash; never blindly retry rebinding."""
+        item = self.session_checkpoints.continuation(owner,continuation_id)
+        current = self._continuation_chat(owner,item).get("conversation_id")
+        if item["state"] in {"REBINDING","UNCERTAIN"}:
+            state = ("COMMITTED" if current == item["target_conversation_id"]
+                     else "UNCERTAIN")
+            if state != item["state"]:
+                item = self.session_checkpoints.transition_continuation(
+                    owner,continuation_id,expected=item["state"],state=state)
+        diverged = current not in {item["source_conversation_id"],item["target_conversation_id"]}
+        return {**item,"binding_matches_target":current==item["target_conversation_id"],
+                "requires_operator_reconciliation":item["state"]=="UNCERTAIN" or diverged,
+                "remote_target_attested":False}
+
+    def cancel_chat_continuation(self, owner, continuation_id, *,
+                                 operator_approved=False):
+        if operator_approved is not True:
+            raise PermissionError("operator approval required")
+        item = self.session_checkpoints.continuation(owner,continuation_id)
+        if item["state"] == "CANCELLED":
+            return item
+        if item["state"] not in {"PREPARED","UNCERTAIN"}:
+            raise SessionCheckpointConflict("cannot cancel committed or rebinding chat")
+        current = self._continuation_chat(owner,item).get("conversation_id")
+        if current != item["source_conversation_id"]:
+            raise SessionCheckpointConflict("source binding has changed")
+        return self.session_checkpoints.transition_continuation(
+            owner,continuation_id,expected=item["state"],state="CANCELLED")

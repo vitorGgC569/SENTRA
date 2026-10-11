@@ -6,6 +6,29 @@ and the native SENTRA Canvas for collaboration. Maestri's public CLI remains an
 optional external adapter.
 It also shares protected conversation memory with SENTRA Canvas and the local MCP.
 
+## Escolher modelos pelo terminal — `/model`
+
+No SENTRA CLI interativo, digite **`/model`** para abrir um catálogo
+**numerado e selecionável**. O terminal mostra o modelo ativo com uma marca,
+recebe o número e troca o modelo da sessão somente após validação. Digitar
+`0`, Enter vazio, `q` ou cancelar mantém a seleção anterior.
+
+- `/model list` ou `/models`: listar sem selecionar.
+- `/model sentra/codex/current`: selecionar o Codex CLI autenticado atual.
+- `/model <id>`: selecionar diretamente um identificador anunciado pelo Gateway
+  ou um Codex explícito cuja autenticação local esteja disponível.
+- `/effort low|medium|high|xhigh`: mudar o esforço de raciocínio usado pelo
+  **Codex CLI**. Os modelos Web não usam essa configuração.
+- Um modelo Web só aparece se for anunciado pelo Gateway ativo; o Codex
+  nativo `current` só aparece quando o Codex CLI estiver autenticado.
+  A lista não inventa acesso a GPT-6 High, modelos pagos ou contas não conectadas.
+- Alterar a seleção vale para os próximos turnos. O SENTRA não troca
+  automaticamente a conta, não modifica credenciais, não reinicia os terminais
+  e não reexecuta chamadas com resultado incerto.
+
+Esse menu está no **novo código** do CLI: processos `sentra-cli.exe` anteriores
+à nova compilação não recebem a interface sem upgrade/reabertura controlada.
+
 ## Native Codex model
 
 `--model sentra/codex/current` uses the installed Codex CLI and its authenticated

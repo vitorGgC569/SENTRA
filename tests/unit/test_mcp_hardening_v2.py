@@ -985,9 +985,12 @@ def test_absolute_workspace_selector_uses_most_specific_broad_grant(tmp_path: Pa
     read_view = registry.resolve(str(nested), "mcp:A", "read")
     assert read_view["alias"] == "nested-read"
 
-    # Execute cannot use the read-only nested grant, so the broader approved
-    # access scope is selected.
-    execute_view = registry.resolve(str(nested), "mcp:A", "execute")
+    # An explicit narrower read-only workspace OVERRIDES broad access:
+    # an absolute path must not become an implicit privilege escalation.
+    with pytest.raises(PermissionError, match="does not grant execute"):
+        registry.resolve(str(nested), "mcp:A", "execute")
+    # The user can explicitly choose the broader scope by its alias.
+    execute_view = registry.resolve("@user", "mcp:A", "execute")
     assert execute_view["alias"] == "@user"
     process = ProcessService(config, workspaces=registry)
     try:

@@ -5,8 +5,8 @@ from test_sentra_runtime_canvas_center_http import running_canvas,request
 
 
 def setup_workflow(app,server,*,with_wait=True):
-    ws=app.create_workspace("Workflow documents")["id"]
-    agent=app.create_agent(ws,"Workflow worker","sentra/test",start=False)
+    ws=app.create_workspace("Workflow_documents")["id"]
+    agent=app.create_agent(ws,"Workflow_worker","sentra/test",start=False)
     root=Path(app.store.workspace(ws)["path"])
     source,output,expected=root/"source.csv",root/"result.csv",root/"expected.csv"
     source.write_text("name,value,extra\nAda,10,x\nLinus,20,y\n",encoding="utf-8")
@@ -55,7 +55,7 @@ def test_canvas_workflow_real_output_signal_and_restart_without_replay(tmp_path)
         artifact=result["evidence"]["payload"]["artifacts"][0]
         assert artifact["durable_capture"] is True and artifact["artifact_id"]
         durable=app._runtime().durable
-        assert durable.read_artifact(artifact["artifact_id"])==output.read_bytes()
+        assert durable.read_artifact(artifact["artifact_id"],max_bytes=100_000)==output.read_bytes()
         assert output.read_text(encoding="utf-8").splitlines()==expected.read_text(encoding="utf-8").splitlines()
         assert source.read_text(encoding="utf-8").startswith("name,value,extra")
         mtime=output.stat().st_mtime_ns

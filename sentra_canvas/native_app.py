@@ -78,6 +78,10 @@ def launch_native(server, *, serve=True) -> None:
             zoomable=False,
         )
         controls._window = window
+        # An .exe's embedded icon does not automatically become the icon of
+        # pywebview's native WinForms HWND (or its taskbar button).
+        from .native_brand import apply_native_icon
+        window.events.shown += apply_native_icon
         webview.start(gui="edgechromium", debug=False, private_mode=True)
     finally:
         if thread is not None:

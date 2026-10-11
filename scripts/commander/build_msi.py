@@ -104,6 +104,8 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
         raise FileNotFoundError("MSI staging is missing: " + ", ".join(missing))
     if not (source / "docs" / "onboarding_media" / "SENTRA_SETUP_GUIDE.html").is_file():
         raise FileNotFoundError("MSI staging missing visual setup guide")
+    if not (source / "docs" / "SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md").is_file():
+        raise FileNotFoundError("MSI staging missing first-install Canvas/ChatGPT app guide")
     if not (source / "docs" / "onboarding_media" / "mcp-create-tunnel.mp4").is_file():
         raise FileNotFoundError("MSI staging missing first-run tutorial video")
     if not (source / "docs" / "onboarding_media" / "mcp-connect-connector.mp4").is_file():
@@ -163,7 +165,7 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
     file_ids = _add_tree(db, cab, feature, install, source)
 
     desktop_id = file_ids["sentra-desktop.exe"]
-    human_id = file_ids["sentra-human.exe"]
+    canvas_id = file_ids["sentra-canvas.exe"]
     root_component = _component_id(Path("."))
     add_data(db, "Registry", [
         (
@@ -214,13 +216,14 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
 
     program_menu = Directory(db, cab, target, ".", "ProgramMenuFolder", ".")
     sentra_menu = Directory(db, cab, program_menu, ".", "SENTRAMenu", "SENTRA")
+    desktop_folder = Directory(db, cab, target, ".", "DesktopFolder", ".")
     add_data(db, "Shortcut", [
         (
             "SENTRA_App_Shortcut",
             sentra_menu.logical,
             "SENTRA",
             root_component,
-            f"[#{human_id}]",
+            f"[#{canvas_id}]",
             None,
             "Open SENTRA",
             None,
@@ -241,6 +244,20 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
             None,
             None,
             2,
+            install.logical,
+        ),
+        (
+            "SENTRA_Desktop_Shortcut",
+            desktop_folder.logical,
+            "SENTRA",
+            root_component,
+            f"[#{canvas_id}]",
+            None,
+            "Open SENTRA Canvas",
+            None,
+            None,
+            None,
+            3,
             install.logical,
         ),
     ])

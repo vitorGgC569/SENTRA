@@ -7,8 +7,35 @@ import threading
 from pathlib import Path
 
 from native_bridge.relay import RelayServer
+from sentra_mcp.services.context import ContextBusService
+from sentra_mcp.services.control_plane import ControlPlaneService
+from sentra_mcp.services.durable import DurableRunService
 
 from .product import ProductPaths, ensure_browser_token
+
+
+def create_relay(*, state_dir: Path, extension_dir: Path, host: str = "127.0.0.1",
+                 port: int = 8765, control: ControlPlaneService | None = None) -> RelayServer:
+    """Compose the installed relay with the existing central SQLite authority.
+
+    An embedded host can pass its ControlPlane instance. The standalone process
+    opens the same state root, never a detached BrowserEvidence database.
+    Construction does not enroll a collector, grant permission or dispatch jobs.
+    """
+    state_dir = Path(state_dir).expanduser().resolve()
+    extension_dir = Path(extension_dir).expanduser().resolve()
+    if not extension_dir.is_dir():
+        raise FileNotFoundError(f"Edge extension directory is missing: {extension_dir}")
+    if control is None:
+        control = ControlPlaneService(DurableRunService(state_dir), ContextBusService(state_dir))
+    elif Path(control.durable.state_root).resolve() != state_dir:
+        raise ValueError("relay and Control Plane must use the same state directory")
+    paths = ProductPaths(extension_dir.parent, state_dir)
+    database = paths.browser_dir / "relay.sqlite3"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    return RelayServer(host=host, port=port, extension_dir=extension_dir,
+                       token=ensure_browser_token(paths), db_path=database,
+                       authenticated_control=control)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,17 +50,8 @@ def main(argv: list[str] | None = None) -> int:
     extension_dir = Path(args.extension_dir).expanduser().resolve()
     if not extension_dir.is_dir():
         raise FileNotFoundError(f"Edge extension directory is missing: {extension_dir}")
-    paths = ProductPaths(extension_dir.parent, state_dir)
-    token = ensure_browser_token(paths)
-    database = paths.browser_dir / "relay.sqlite3"
-    database.parent.mkdir(parents=True, exist_ok=True)
-    relay = RelayServer(
-        host=args.host,
-        port=args.port,
-        extension_dir=extension_dir,
-        token=token,
-        db_path=database,
-    ).start()
+    relay = create_relay(state_dir=state_dir, extension_dir=extension_dir,
+                         host=args.host, port=args.port).start()
     stopped = threading.Event()
 
     def stop(*_args) -> None:

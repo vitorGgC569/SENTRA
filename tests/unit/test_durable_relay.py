@@ -212,7 +212,7 @@ def test_production_windows_cover_long_model_generations():
     assert protocol.PROGRESS_WINDOW_S >= 900
 
 
-def test_worker_telemetry_match_and_url_canonicalization():
+def test_tab_worker_rejects_telemetry_alias_and_canonicalizes_url():
     store = JobStore()
     conv_url = "https://chatgpt.com/c/67d6a4bf-427c-800a-b333-a292be9665bc"
     jid = store.submit(ChatJob(task_id="T-1", prompt="write code", new_chat=False,
@@ -220,7 +220,7 @@ def test_worker_telemetry_match_and_url_canonicalization():
     leased = store.poll("TAB-1003142828")
     assert leased is not None
 
-    # Extension posts with full telemetry in worker string and query params in URL
+    # V2 binds the exact tab; telemetry cannot substitute another worker ID.
     res = ChatResult(
         job_id=jid,
         task_id="T-1",
@@ -229,6 +229,10 @@ def test_worker_telemetry_match_and_url_canonicalization():
         conversation_url=conv_url + "?temporary-chat=false",
         worker="BROWSER_WORKER_1003142828 sw=1.6.1 cs=1.6.1 err=0 hb=3 slices=1 cshb=0 rec=0",
     )
+    with pytest.raises(ValueError, match="UNKNOWN_OR_FOREIGN_JOB"):
+        store.store_result(res, leased["lease_token"])
+    assert store.counts()["completed"] == 0
+    res.worker = "TAB-1003142828"
     store.store_result(res, leased["lease_token"])
     assert store.counts()["completed"] == 1
     stored = store.result(jid)

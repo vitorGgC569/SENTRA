@@ -11,6 +11,8 @@ EXTENSION_IDENTITY_FILES = (
     "recovery-guard.js",
     "selectors.js",
     "observer.js",
+    "conversation-evidence.js",
+    "COS-NOTICE.txt",
 )
 
 

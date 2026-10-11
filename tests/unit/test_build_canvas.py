@@ -15,7 +15,11 @@ def test_canvas_builder_includes_native_ui_and_webview(tmp_path, monkeypatch):
     for name in ("native.html", "native.css", "native.js"):
         (ui / name).write_text(name, encoding="utf-8")
     import shutil
-    shutil.copytree(bc.ROOT / "sentra_canvas" / "static" / "vendor", ui / "vendor")
+    actual = bc.ROOT / "sentra_canvas" / "static"
+    shutil.copytree(actual / "vendor", ui / "vendor")
+    # Building a release must now include the current hashed React UI too.
+    shutil.copy2(actual / "desktop.html", ui / "desktop.html")
+    shutil.copytree(actual / "desktop-assets", ui / "desktop-assets")
     monkeypatch.setattr(bc, "ROOT", tmp_path)
     seen = []
     def fake_build(name, entry, dist, work, spec, **kwargs):
@@ -30,6 +34,7 @@ def test_canvas_builder_includes_native_ui_and_webview(tmp_path, monkeypatch):
     assert entry == "canvas_entry.py"
     assert kwargs["windowed"] is True
     assert "webview" in kwargs["extra"]
+    assert "pypdfium2" in kwargs["extra"]
     assert "sentra_canvas/static" in " ".join(kwargs["extra"])
 
 

@@ -81,6 +81,7 @@ class CLIConfig:
     reasoning_effort: str = field(
         default_factory=lambda: os.environ.get("SENTRA_CLI_REASONING_EFFORT", "low").strip().lower()
     )
+    web_reasoning_effort: str | None = None
     fallback_model: str = os.environ.get(
         "SENTRA_CLI_FALLBACK_MODEL", "gpt-4o"
     )
@@ -207,7 +208,7 @@ class CLIConfig:
         if env_token:
             return (env_token,)
 
-        candidates: list[Path] = []
+        candidates: list[Path] = [self.state_root / "web-models" / "gateway-admin.token"]
         try:
             from sentra_remote.product import ProductPaths
 

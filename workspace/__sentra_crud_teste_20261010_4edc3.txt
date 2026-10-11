@@ -1,0 +1,2 @@
+SENTRA CRUD smoke test 2026-10-10
+Estado: editado

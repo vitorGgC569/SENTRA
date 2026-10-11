@@ -4,7 +4,10 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import replace
 import asyncio
+import hashlib
+import json
 import os
+import sqlite3
 from typing import Any
 
 from mcp.server import MCPServer
@@ -15,6 +18,7 @@ from starlette.responses import JSONResponse
 from sentra_remote.auth import IntrospectionSettings, IntrospectionTokenVerifier
 from sentra_remote.gateway import RemoteGatewayService
 from sentra_remote.store import RemoteStore
+from sentra_remote.connector_proof import ConnectorProof
 
 from .audit import AuditLogger
 from .config import MCPConfig
@@ -56,7 +60,8 @@ from .tool_policy import ToolPolicyProxy
 class SentraMCPServer:
     """SENTRA local/remote MCP server with one policy/lifecycle boundary."""
 
-    def __init__(self, config: MCPConfig | None = None) -> None:
+    def __init__(self, config: MCPConfig | None = None, *,
+                 web_receipt_ref=None, verified_web_account=None) -> None:
         self.config = config or MCPConfig()
         self.audit = AuditLogger(self.config.audit_log)
         self.workspaces = WorkspaceRegistry(self.config, self.audit)
@@ -64,6 +69,13 @@ class SentraMCPServer:
         self.durable = DurableRunService(self.config.resolved_state_root)
         self.context = ContextBusService(self.config.resolved_state_root)
         self.control_plane = ControlPlaneService(self.durable, self.context)
+        from .services.web_account_dispatch import guard_from_durable_web_receipts
+        self._web_receipt_ref = web_receipt_ref or (lambda _ctx: None)
+        self._web_dispatch_guard = guard_from_durable_web_receipts(
+            control=self.control_plane, host_receipt_ref=self._web_receipt_ref,
+            verified_account=verified_web_account,
+        )
+        self.connector_proof = ConnectorProof(self.config.resolved_state_root)
         self.routine_scheduler = RoutineSchedulerService(self.control_plane)
         self.processes = ProcessService(
             self.config, self.audit, self.workspaces, durable=self.durable
@@ -174,6 +186,9 @@ class SentraMCPServer:
                 "service": "sentra-mcp",
                 "server_version": SERVER_VERSION,
                 "instance_id": instance_id,
+                "tool_exposure": {"core_name_reservation_ready":
+                    not bool(getattr(self, "_local_tool_exposure_error", None)),
+                    "error_type": getattr(self, "_local_tool_exposure_error", None)},
                 "policy": {
                     "enabled_surfaces": sorted(self.config.enabled_surfaces),
                     "process_mode": self.config.process_mode,
@@ -184,6 +199,39 @@ class SentraMCPServer:
             })
 
         self._register_tools()
+        self._publish_local_schema()
+
+    def _publish_local_schema(self) -> None:
+        """Fingerprint the SDK's registered tools, not a proposed catalog.
+
+        Useful to detect local changes, but it is NOT evidence that a remote
+        ChatGPT client refreshed its cached MCP tool definitions.
+        """
+        self._local_tool_exposure_error = None
+        try:
+            registered = self.mcp._tool_manager.list_tools()
+            registry = getattr(getattr(self, "control_plane", None), "tool_exposure", None)
+            if registry is not None:
+                registry.reserve_core_names([tool.name for tool in registered])
+        except (AttributeError, ValueError, PermissionError, OSError, sqlite3.Error) as exc:
+            # A catalog diagnostic must not kill the MCP server or model session.
+            # Keep a visible degraded condition; plugin admission remains gated.
+            self._local_tool_exposure_error = type(exc).__name__
+        try:
+            registered=self.mcp._tool_manager.list_tools()
+            contracts=[{"name":tool.name,
+                        "input":tool.parameters,
+                        "output":tool.output_schema}
+                       for tool in registered]
+            contracts.sort(key=lambda contract:contract["name"])
+            canonical=json.dumps(contracts,sort_keys=True,separators=(",",":"),
+                                 ensure_ascii=False,default=str).encode("utf-8")
+            self.connector_proof.record_local_schema(
+                surface="core",schema_sha256=hashlib.sha256(canonical).hexdigest(),
+                method_count=len(contracts))
+        except (OSError,ValueError,TypeError,AttributeError,sqlite3.Error):
+            # A diagnostic fingerprint must not make the MCP unavailable.
+            pass
 
     def _effective_config(self) -> dict[str, Any]:
         return {
@@ -233,6 +281,48 @@ class SentraMCPServer:
         self.oma.max_read_bytes = self.config.max_read_bytes
         return {key: getattr(self.config, key) for key in changes}
 
+    def _enforce_web_mcp_request(self, ctx, name: str) -> None:
+        """Compose Web identity denial with the existing local tool policy.
+
+        Only the host may supply a receipt reference. Enrolled browser requests
+        must pass the receipt/account guard even when no host reference is
+        available. Unattributed local clients retain their existing policy;
+        strict ChatAccess continues to deny unknown origins before this observer.
+        """
+        if ctx is not None:
+            from .identity import _principal_binding
+            try:
+                request_id = ctx.request_context.request.headers.get("x-request-id")
+            except (AttributeError, RuntimeError):
+                request_id = None
+            with self.control_plane.chat_access._db() as db:
+                enrolled = db.execute(
+                    "SELECT 1 FROM browser_request_messages WHERE principal=? AND request_id=?",
+                    (_principal_binding(ctx), request_id),
+                ).fetchone()
+            if enrolled or self._web_receipt_ref(ctx) is not None:
+                self._web_dispatch_guard.tool_observer(ctx, name)
+        self._observe_mcp_request(ctx, name)
+
+    def _observe_mcp_request(self, ctx, _name: str) -> None:
+        """Record reachability only; never assert plugin installation from a call."""
+        if ctx is None:
+            return
+        from .identity import _transport_kind
+        from mcp.server.auth.middleware.auth_context import get_access_token
+        try:
+            token=get_access_token()
+        except LookupError:
+            token=None
+        try:
+            self.connector_proof.record_tool(
+                surface="core",transport=_transport_kind(ctx) or "unknown",
+                authenticated=token is not None,
+            )
+        except (OSError,ValueError):
+            # Diagnostics must not turn a legitimate tool call into a failure.
+            pass
+
     def _register_tools(self) -> None:
         @self.mcp.tool()
         def sentra_health() -> ResponseEnvelope:
@@ -251,7 +341,10 @@ class SentraMCPServer:
                 },
             })
 
-        tool_server = ToolPolicyProxy(self.mcp, self.config.tool_allowlist)
+        tool_server = ToolPolicyProxy(
+            self.mcp, self.config.tool_allowlist, chat_access=self.control_plane.chat_access,
+            request_observer=self._enforce_web_mcp_request
+        )
         if self.config.deployment_mode == "cloud":
             register_remote_tools(tool_server, self.remote)
             return

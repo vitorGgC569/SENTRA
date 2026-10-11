@@ -56,6 +56,7 @@ def test_failed_update_restores_deep_files_and_installation_identity(tmp_path, m
     monkeypatch.setattr(update_helper.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=2))
     with pytest.raises(RuntimeError, match="setup exited"):
         update_helper.apply_update(setup, root, parent_pid=0, version="new", manifest_url="",
+                                   state_dir=tmp_path / "isolated-upgrade-state",
                                    restart_desktop=False)
     assert stopped == [root.resolve()]
     assert deep.read_bytes() == b"original runtime"

@@ -21,7 +21,7 @@ $folder=Join-Path $programs 'SENTRA'
 $items=@(
  @{path=(Join-Path $folder 'SENTRA Desktop.lnk'); exe='sentra-human.exe'},
  @{path=(Join-Path $folder 'SENTRA Canvas.lnk'); exe='sentra-canvas.exe'},
- @{path=(Join-Path $desktop 'SENTRA.lnk'); exe='sentra-human.exe'}
+ @{path=(Join-Path $desktop 'SENTRA.lnk'); exe='sentra-canvas.exe'}
 )
 $changed=@()
 foreach($item in $items) {

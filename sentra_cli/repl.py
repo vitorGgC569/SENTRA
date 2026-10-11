@@ -40,6 +40,9 @@ class SentraREPL:
         effort=self.config.reasoning_effort
         if self.config.model.startswith("sentra/codex/"):
             return f"[bold cyan]{effort}[/bold cyan] [dim](Codex CLI)[/dim]"
+        if self.config.model.startswith("sentra/chatgpt-web/"):
+            requested = self.config.web_reasoning_effort or "provider default"
+            return f"[bold cyan]{requested}[/bold cyan] [dim](Web requested; physical confirmation required)[/dim]"
         return f"[dim]{effort} (Codex only; Web model does not use this setting)[/dim]"
 
     def print_banner(self) -> None:
@@ -102,23 +105,76 @@ class SentraREPL:
             table.add_row("Error", str(status["error"]))
         self.console.print(table)
 
-    def _print_models(self) -> None:
+    def _print_models(self) -> list[str]:
+        """Display only provider-advertised models plus authenticated Codex."""
         try:
-            models = self.agent.client.list_models()
-        except Exception as exc:
-            self.console.print(f"[red]Model catalog unavailable:[/] {exc}")
-            return
-        table = Table(title="Available models", border_style="cyan")
-        table.add_column("Model")
-        table.add_column("Selected", justify="center")
-        for model in models:
-            table.add_row(
-                model,
-                "✓" if model == self.config.model else "",
-            )
+            models = list(dict.fromkeys(self.agent.client.list_models()))
+        except Exception:
+            models = []
+            self.console.print("[yellow]Live model catalog unavailable.[/yellow]")
+        table = Table(title="SENTRA · Selecionar modelo", border_style="cyan")
+        table.add_column("#", justify="right", style="bold cyan")
+        table.add_column("Modelo")
+        table.add_column("Ativo", justify="center")
+        for index, model in enumerate(models, 1):
+            table.add_row(str(index), model,
+                          "✓" if model == self.config.model else "")
         if not models:
-            table.add_row("(none)", "")
+            table.add_row("—", "Nenhum modelo autenticado/disponível", "")
         self.console.print(table)
+        return models
+
+    def _select_model(self, selected: str, *, catalog: list[str] | None = None) -> None:
+        """Preserve existing selection until the chosen provider is validated."""
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}", selected):
+            self.console.print("[red]Identificador de modelo inválido.[/red]")
+            return
+        if selected.startswith("sentra/codex/"):
+            from .codex_native import authenticated
+            suffix = selected.removeprefix("sentra/codex/")
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}", suffix):
+                self.console.print("[red]Invalid native Codex model name.[/red]")
+                return
+            if not authenticated():
+                self.console.print("[red]Codex CLI is not authenticated; model was not changed.[/red]")
+                return
+        else:
+            try:
+                known = catalog if catalog is not None else self.agent.client.list_models()
+            except Exception:
+                self.console.print("[red]Cannot validate model catalog; current model preserved.[/red]")
+                return
+            if selected not in known:
+                self.console.print(f"[red]Model not advertised by Gateway:[/] {selected}")
+                return
+        self.config.model = selected
+        self.agent.client.active_model = selected
+        if hasattr(self.agent, "persist_model_preferences"):
+            self.agent.persist_model_preferences()
+        self.console.print(f"[green]Model selected:[/] {selected}")
+        if selected.startswith("sentra/codex/") and selected != "sentra/codex/current":
+            self.console.print("[dim]Codex validates this explicit model on the next turn.[/dim]")
+        self.console.print(f"Reasoning: {self._effort_label()}")
+
+    def _choose_model(self) -> None:
+        models = self._print_models()
+        if not models:
+            self.console.print("[yellow]Conecte um provedor pelo Quick Start e tente novamente.[/yellow]")
+            return
+        self.console.print("[dim]Digite o número do modelo e pressione Enter; 0 cancela.[/dim]")
+        try:
+            answer = self.console.input("[bold cyan]Modelo › [/]").strip()
+        except (EOFError, KeyboardInterrupt):
+            self.console.print("[dim]Seleção cancelada.[/dim]")
+            return
+        if answer in {"", "0", "q", "Q", "cancel"}:
+            self.console.print("[dim]Modelo mantido.[/dim]")
+            return
+        if (len(answer) > 4 or not answer.isascii() or not answer.isdecimal()
+                or not 1 <= int(answer) <= len(models)):
+            self.console.print("[yellow]Escolha inválida; modelo mantido.[/yellow]")
+            return
+        self._select_model(models[int(answer) - 1], catalog=models)
 
     def _maestri_command(self, arg: str) -> None:
         if not self.agent.maestri.is_available:
@@ -271,8 +327,11 @@ class SentraREPL:
                 ("/doctor", "Detailed Gateway and Maestri diagnostics"),
                 ("/gateway start|status|stop", "Manage Web Model runtime"),
                 ("/models", "List models advertised by SENTRA Gateway"),
-                ("/model [id|list]", "Show or change active model (Codex/Web)"),
-                ("/effort [low|medium|high|xhigh]", "Show or change Codex reasoning effort"),
+                ("/model", "Abrir menu numerado para escolher um modelo disponível"),
+                ("/model list|<id>", "Exibir catálogo ou selecionar modelo pelo ID"),
+                ("/effort [low|medium|high|xhigh]", "Choose provider-supported reasoning effort"),
+                ("/delivery", "Show the protected durable Web delivery projection"),
+                ("/compact-resume prepare|status|resume <JSON>", "Protected checkpoint and receipt-gated successor"),
                 ("/diff", "Show current Git diff"),
                 ("/test [target]", "Dispatch pytest in background"),
                 ("/lint", "Dispatch lint gate in background"),
@@ -288,6 +347,8 @@ class SentraREPL:
                 ("/maestri ...", "Use the complete native Maestri CLI surface"),
                 ("/clear", "Reset conversation context"),
                 ("/session", "Show the persistent conversation and uncertain calls"),
+                ("/goal set <objective>|status|stop", "Manage the durable conversation Goal"),
+                ("/loop start|status|stop|step <objective>", "Control the bounded central loop; requires existing grants"),
                 ("/sessions", "List saved conversations for this workspace"),
                 ("/resume <id>", "Open saved context without submitting a model request"),
                 ("/continue", "Continue the unfinished turn from its durable journal"),
@@ -389,42 +450,11 @@ class SentraREPL:
 
         if cmd == "/model":
             if not arg:
-                self.console.print(f"Current model: [bold cyan]{self.config.model}[/bold cyan]")
-                self.console.print("Use [bold]/models[/bold] or [bold]/model list[/bold] for available models.")
-                return True
-            if arg.lower() == "list":
+                self._choose_model()
+            elif arg.lower() == "list":
                 self._print_models()
-                return True
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_./:-]{0,127}",arg):
-                self.console.print("[red]Invalid model identifier.[/red]")
-                return True
-            if arg.startswith("sentra/codex/"):
-                # The Gateway catalog is unrelated to authenticated native Codex.
-                # Accept syntactically valid explicit Codex IDs, but the provider
-                # is still authoritative for actual model availability.
-                from .codex_native import authenticated
-                suffix=arg.removeprefix("sentra/codex/")
-                if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}",suffix):
-                    self.console.print("[red]Invalid native Codex model name.[/red]")
-                    return True
-                if not authenticated():
-                    self.console.print("[red]Codex CLI is not authenticated; model was not changed.[/red]")
-                    return True
             else:
-                try:
-                    models = self.agent.client.list_models()
-                except Exception as exc:
-                    self.console.print(f"[red]Cannot validate model catalog:[/] {exc}")
-                    return True
-                if not models or arg not in models:
-                    self.console.print(f"[red]Model not advertised by Gateway:[/] {arg}")
-                    return True
-            self.config.model = arg
-            self.agent.client.active_model = arg
-            self.console.print(f"[green]Model selected:[/] {arg}")
-            if arg.startswith("sentra/codex/") and arg != "sentra/codex/current":
-                self.console.print("[dim]Codex validates this explicit model on the next turn.[/dim]")
-            self.console.print(f"Reasoning: {self._effort_label()}")
+                self._select_model(arg)
             return True
 
         if cmd == "/effort":
@@ -436,10 +466,24 @@ class SentraREPL:
             if selected not in {"low","medium","high","xhigh"}:
                 self.console.print("[yellow]Usage: /effort low|medium|high|xhigh[/yellow]")
                 return True
-            self.config.reasoning_effort=selected
+            if self.config.model.startswith("sentra/chatgpt-web/"):
+                try:
+                    available = self.agent.client.supported_efforts(self.config.model)
+                except (OSError, ValueError, RuntimeError, AttributeError):
+                    self.console.print("[yellow]Current Web effort capabilities unavailable; choice preserved.[/yellow]")
+                    return True
+                if selected not in available:
+                    self.console.print("[yellow]Web provider does not advertise this effort; choice preserved.[/yellow]")
+                    return True
+                self.config.web_reasoning_effort = selected
+            elif self.config.model.startswith("sentra/codex/"):
+                self.config.reasoning_effort=selected
+            else:
+                self.console.print("[yellow]This provider has no verified effort control.[/yellow]")
+                return True
+            if hasattr(self.agent, "persist_model_preferences"):
+                self.agent.persist_model_preferences()
             self.console.print(f"[green]Reasoning effort:[/] [bold]{selected}[/bold]")
-            if not self.config.model.startswith("sentra/codex/"):
-                self.console.print("[yellow]Stored for this session; effort applies to Codex turns only. Current Web model is unchanged.[/yellow]")
             return True
 
         if cmd == "/diff":
@@ -510,8 +554,23 @@ class SentraREPL:
             self.console.print("[green]Conversation context cleared.[/green]")
             return True
 
+        if cmd in {"/goal", "/loop"}:
+            action, _, objective = arg.strip().partition(" ")
+            result = self.agent.goal_loop_command(cmd[1:], action or "status", objective=objective)
+            self.console.print(json.dumps(result, ensure_ascii=False, indent=2), markup=False)
+            return True
+        if cmd == "/compact-resume":
+            action, _, raw = arg.strip().partition(" ")
+            result = self.agent.compact_resume_command(action, json.loads(raw or "{}"))
+            self.console.print(json.dumps(result, ensure_ascii=False, indent=2), markup=False)
+            return True
+
         if cmd == "/session":
             self.console.print(json.dumps(self.agent.store.status(self.agent.session_id), ensure_ascii=False, indent=2), markup=False)
+            return True
+        if cmd == "/delivery":
+            view = self.agent.store.web_delivery_status(self.agent.session_id, workspace=self.config.workspace)
+            self.console.print(json.dumps(view, ensure_ascii=False, indent=2), markup=False)
             return True
         if cmd == "/sessions":
             self.console.print(json.dumps(self.agent.store.list(self.config.workspace), ensure_ascii=False, indent=2), markup=False)

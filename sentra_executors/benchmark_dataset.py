@@ -8,7 +8,7 @@ import ast
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from .rpa import AuthorizedPaths,ExecutorFailure,effect_checkpoint,digest
 
@@ -161,7 +161,7 @@ class DatasetCatalog:
                     if not isinstance(payload,dict):raise ExecutorFailure('dataset_task_object_required')
                     if payload.get('id',payload.get('task_id'))!=task_id:issues.append('manifest_payload_id_mismatch')
                     task=self._task(source,payload,str(resolved),hashlib.sha256(raw).hexdigest(),'',category,issues,
-                                    (manifest_relative,) if manifest_data is not None else ())
+                                    (manifest_relative,) if manifest_data is not None else (),task_id)
                 except FileNotFoundError:
                     payload={'id':task_id};issues=['official_gated_task_not_local' if source.layout=='osworld-v2-python' else 'manifest_payload_missing']
                     task=self._task(source,payload,str(path),'','',category,issues,(manifest_relative,))
@@ -169,13 +169,29 @@ class DatasetCatalog:
                     task=self._task(source,{'id':task_id},str(path),digest(path),'',category,['invalid_payload:'+type(exc).__name__])
                 self._add(tasks,task)
         self.tasks=tasks;return self
-    def _task(self,source,payload,path,file_sha,pointer,category,issues=(),memberships=()):
+    def _task(self,source,payload,path,file_sha,pointer,category,issues=(),memberships=(),manifest_task_id=None):
         task_id=payload.get('id',payload.get('task_id'))
         if type(task_id) is not str or not task_id:raise ExecutorFailure('dataset_task_id_required')
-        return DatasetTask(f'{source.name}:{source.layout}:{category}:{task_id}',source,task_id,str(category),path,file_sha,pointer,
+        # A pinned manifest's filename ID is the source authority. Some real
+        # Arena JSON payloads have copied embedded IDs from sibling variants.
+        # Keep the payload unchanged and record the mismatch in indexing_issues.
+        identity=manifest_task_id if manifest_task_id is not None else task_id
+        if type(identity) is not str or not identity:raise ExecutorFailure('dataset_task_id_required')
+        return DatasetTask(f'{source.name}:{source.layout}:{category}:{identity}',source,identity,str(category),path,file_sha,pointer,
                            canonical(payload),fingerprint(payload),tuple(memberships),tuple(issues))
     def _add(self,tasks,task):
-        if task.key in tasks:raise ExecutorFailure('duplicate_dataset_task_identity')
+        if task.key in tasks:
+            old=tasks[task.key]
+            # Some actual Arena clones contain distinct task files with the
+            # SAME embedded task ID (e.g. a -2 file variant). Preserve both
+            # source file identities, rather than silently discarding either.
+            if (task.source.layout=='arena-json' and not task.memberships
+                    and old.source_path!=task.source_path
+                    and task.source_file_sha256 and old.source_file_sha256):
+                relative=str(Path(task.source_path).relative_to(task.source.clone_root)).replace('\\','/')
+                suffix=hashlib.sha256(relative.encode()).hexdigest()[:16]
+                task=replace(task,key=task.key+'@'+suffix)
+            if task.key in tasks:raise ExecutorFailure('duplicate_dataset_task_identity')
         tasks[task.key]=task
     def _python_metadata(self,raw,task_id):
         # AST only. No exec/import/call or attempt to run a gated evaluator.

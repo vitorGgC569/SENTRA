@@ -6,7 +6,7 @@ from test_sentra_runtime_canvas_center_http import running_canvas,request
 
 def test_owner_can_save_empty_vpn_whitelist_and_retrieve_pairing_secret_privately(tmp_path):
     with running_canvas(tmp_path) as (app,server):
-        ws=app.create_workspace('VPN configuration')['id']
+        ws=app.create_workspace('VPN_configuration')['id']
         code,value=request(server,'/api/center/network?ws='+ws)
         assert code==200 and value['configuration']['revision']==0 and value['presence']['peers']==[]
         body={'ws':ws,'configuration':{'enabled':False,'adapter_kind':'radmin','allowed_ips':[],
@@ -27,7 +27,7 @@ def test_owner_can_save_empty_vpn_whitelist_and_retrieve_pairing_secret_privatel
 def test_agent_whitelist_config_cannot_extract_or_replace_pairing_material(tmp_path):
     from sentra_canvas.network_settings import WorkspaceNetworkSettings
     with running_canvas(tmp_path) as (app,server):
-        ws=app.create_workspace('Agent whitelist')['id']
+        ws=app.create_workspace('Agent_whitelist')['id']
         settings=WorkspaceNetworkSettings(app.store)
         result=settings.configure(ws,{'enabled':False,'allowed_ips':['25.1.2.3','25.1.2.3'],
             'interface_address':'25.4.5.6','expected_revision':0},agent=True)

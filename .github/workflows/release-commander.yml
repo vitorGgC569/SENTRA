@@ -25,6 +25,29 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Require independently coordinated source freeze before any build
+        shell: pwsh
+        env:
+          SENTRA_RELEASE_FREEZE_SHA: ${{ vars.SENTRA_RELEASE_FREEZE_SHA }}
+        run: |
+          if ($env:SENTRA_RELEASE_FREEZE_SHA -notmatch '^[0-9a-fA-F]{40}$') {
+            throw "No independently approved SENTRA_RELEASE_FREEZE_SHA; no build or install permitted"
+          }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne $env:SENTRA_RELEASE_FREEZE_SHA) {
+            throw "Release source differs from approved freeze; refuse build"
+          }
+
+      - name: Install checksum-pinned actionlint for release
+        shell: pwsh
+        run: ./scripts/ci/install_actionlint.ps1 -WriteGitHubEnv
+
+      - name: Validate release workflow semantics
+        shell: pwsh
+        run: |
+          & $env:SENTRA_ACTIONLINT .github/workflows/ci.yml .github/workflows/release-commander.yml .github/workflows/release-mcp-registry.yml
+          if ($LASTEXITCODE -ne 0) { throw "Release workflow actionlint failed" }
+
       - name: Verify tracked release inputs
         shell: pwsh
         run: |
@@ -63,6 +86,22 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install --require-hashes -r requirements.lock.txt
+
+      - name: Install SHA-256-pinned PDFium for Canvas packaging
+        shell: pwsh
+        run: |
+          python -m pip install --no-deps --only-binary=:all: --require-hashes -r scripts/commander/requirements-pdfium-win-amd64.txt
+          if ($LASTEXITCODE -ne 0) { throw "Pinned PDFium wheel install failed" }
+          python -B -c "from scripts.commander.pdfium_pin import require_pdfium; require_pdfium()"
+          if ($LASTEXITCODE -ne 0) { throw "PDFium 4.30.0 build pin failed" }
+
+      - name: Install pinned Electron display runtime
+        shell: pwsh
+        run: |
+          npm ci --prefix sentra_electron --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw "Pinned Electron display install failed" }
+          npm test --prefix sentra_electron
+          if ($LASTEXITCODE -ne 0) { throw "Electron display sandbox tests failed" }
 
       - name: Fail closed on missing or uncommitted inputs
         shell: pwsh
@@ -161,6 +200,17 @@ jobs:
           $webExe = "dist\web-models\win-unpacked\Codex Web GPT.exe"
           & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $webExe
           if ($LASTEXITCODE -ne 0) { throw "Signing failed for Web Models Electron" }
+          $displayExe = "sentra_electron\\node_modules\\electron\\dist\\electron.exe"
+          if (-not (Test-Path $displayExe)) { throw "SENTRA Electron display runtime missing" }
+          & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $displayExe
+          if ($LASTEXITCODE -ne 0) { throw "Signing failed for SENTRA Electron display" }
+
+      - name: Seal signed payload build provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          python -B scripts/commander/seal_payload.py --dist dist --trusted-signer "$env:SENTRA_SIGNER_THUMBPRINT"
+          if ($LASTEXITCODE -ne 0) { throw "Signed payload seal failed" }
 
       - name: Build Setup with signed payload
         shell: pwsh
@@ -207,6 +257,12 @@ jobs:
         shell: pwsh
         run: |
           python scripts/commander/release_assets.py --release release --finalize-only --signer-thumbprint "$env:SENTRA_SIGNER_THUMBPRINT"
+
+      - name: Audit immutable release, SBOM, update ZIP and payload provenance
+        shell: pwsh
+        run: |
+          python -B scripts/commander/release_doctor.py --release release --dist dist --trusted-signer "$env:SENTRA_SIGNER_THUMBPRINT"
+          if ($LASTEXITCODE -ne 0) { throw "Release Doctor rejected artifacts" }
 
       - name: Verify stable Authenticode signatures
         if: startsWith(github.ref, 'refs/tags/v')
@@ -274,6 +330,9 @@ jobs:
           if (-not (Test-Path "$install\sentra-cli.exe")) { throw "interactive SENTRA CLI not installed" }
           if (-not (Test-Path "$install\sentra-canvas.exe")) { throw "native SENTRA Canvas not installed" }
           if (-not (Test-Path "$install\docs\START_HERE.md")) { throw "START HERE onboarding guide not installed" }
+          if (-not (Test-Path "$install\docs\SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md")) {
+            throw "Canvas and ChatGPT plugin first-install guide not installed"
+          }
           if (-not (Test-Path "$install\docs\onboarding_media\SENTRA_SETUP_GUIDE.html")) { throw "visual setup guide not installed" }
           if (-not (Test-Path "$install\docs\onboarding_media\mcp-create-tunnel.mp4")) { throw "tunnel tutorial not installed" }
           if (-not (Test-Path "$install\docs\onboarding_media\mcp-connect-connector.mp4")) { throw "connector tutorial not installed" }
@@ -284,6 +343,8 @@ jobs:
           if (-not (Test-Path "$install\web-models\win-unpacked\resources\runtime\manifest.json")) { throw "Web Models runtime not installed" }
           if (-not (Test-Path "$install\web-models\licenses\codex-chatgpt-web\LICENSE")) { throw "Web Models license notice not installed" }
           if (-not (Test-Path "$install\web-models\integration-build.json")) { throw "Web Models integration metadata not installed" }
+          if (-not (Test-Path "$install\sentra-electron\electron.exe")) { throw "SENTRA Electron runtime not installed" }
+          if (-not (Test-Path "$install\sentra-electron\sentra-surface-build.json")) { throw "SENTRA Electron provenance not installed" }
           if (Get-NetTCPConnection -LocalPort 18000,18765 -State Listen -ErrorAction SilentlyContinue) {
             throw "stop-after-doctor left test services running"
           }
@@ -293,7 +354,9 @@ jobs:
           )
           $uninstall = Start-Process -FilePath "$install\sentra-installer.exe" -ArgumentList $uninstallArgs -PassThru -Wait -NoNewWindow
           if ($uninstall.ExitCode -ne 0) { throw "uninstall failed with $($uninstall.ExitCode)" }
-          for ($i = 0; $i -lt 20 -and (Test-Path $install); $i++) { Start-Sleep -Milliseconds 250 }
+          # Uninstall returns after handing cleanup to the external helper.
+          # Wait for actual deletion; a 5-second polling loop was racy on slow CI disks.
+          for ($i = 0; $i -lt 120 -and (Test-Path $install); $i++) { Start-Sleep -Milliseconds 500 }
           if (Test-Path $install) { throw "install directory remained after uninstall" }
           if (Test-Path $state) { throw "state directory remained after uninstall" }
       - name: Verify release checksums
@@ -328,6 +391,10 @@ jobs:
       contents: write
       actions: read
     steps:
+      - name: Read-only checkout for fail-closed publication gate
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       - name: Download only validated artifacts from this workflow run
         shell: pwsh
         env:
@@ -347,6 +414,32 @@ jobs:
               throw "Release checksum mismatch: $file"
             }
           }
+      - name: Import independently reviewed disposable-VM QA artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SENTRA_QA_VM_RUN_ID: ${{ vars.SENTRA_QA_VM_RUN_ID }}
+        run: |
+          if ($env:SENTRA_QA_VM_RUN_ID -notmatch '^[1-9][0-9]{5,19}$') {
+            throw "Separate approved VM QA workflow run id is missing"
+          }
+          if ($env:SENTRA_QA_VM_RUN_ID -eq "${{ github.run_id }}") {
+            throw "VM QA cannot be this same release build run"
+          }
+          gh run download $env:SENTRA_QA_VM_RUN_ID --repo "${{ github.repository }}" --name sentra-vm-qa-evidence --dir release
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'release/qa-vm-evidence.json')) {
+            throw "No independently reviewed disposable VM QA evidence available"
+          }
+
+      - name: Block publication without independent clean VM QA evidence
+        shell: pwsh
+        env:
+          SENTRA_QA_VM_EVIDENCE_SHA256: ${{ secrets.SENTRA_QA_VM_EVIDENCE_SHA256 }}
+        run: |
+          # The separate disposable VM QA must upload release/qa-vm-evidence.json
+          # from the SAME candidate. This workflow does not manufacture proof.
+          python -B scripts/commander/release_publish_gate.py --release release --evidence release/qa-vm-evidence.json --expected-sha256 "$env:SENTRA_QA_VM_EVIDENCE_SHA256" --version "$($env:GITHUB_REF_NAME.TrimStart('v'))"
+          if ($LASTEXITCODE -ne 0) { throw "Independent clean-install evidence missing; stable release blocked" }
       - name: Create immutable GitHub Release
         shell: pwsh
         env:
@@ -354,7 +447,11 @@ jobs:
         run: |
           gh release view $env:GITHUB_REF_NAME --repo "${{ github.repository }}" 2>$null
           if ($LASTEXITCODE -eq 0) { throw "Release already exists; published versions are immutable" }
-          $assets = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
-          if ($assets.Count -lt 5) { throw "Release has incomplete asset set" }
+          # Exclude the independent VM QA attestation; it is internal evidence,
+          # not a public release asset or a redistributable diagnostic.
+          $assets = @(Get-ChildItem release -File | Where-Object {
+            $_.Name -match "^(SENTRA-Setup-[0-9].*\\.exe|SENTRA-Desktop-[0-9].*-x64\\.msi|SENTRA-Desktop-[0-9].*-update\\.zip|SENTRA-Desktop-[0-9].*\\.cdx\\.json|SHA256SUMS\\.txt|release-manifest\\.json)$"
+          } | ForEach-Object { $_.FullName })
+          if ($assets.Count -ne 6) { throw "Release must have exactly six approved public assets" }
           gh release create $env:GITHUB_REF_NAME @assets --verify-tag --repo "${{ github.repository }}" --generate-notes --title "SENTRA Desktop $($env:GITHUB_REF_NAME.TrimStart('v'))"
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release publication failed" }

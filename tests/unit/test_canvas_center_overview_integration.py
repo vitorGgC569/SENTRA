@@ -40,7 +40,7 @@ def test_durable_operation_metadata_pagination_is_owner_scoped(tmp_path):
     service=DurableRunService(tmp_path)
     try:
         run=service.create_run("owner",run_id="run-overview",workspace=str(tmp_path))
-        for i in range(3):service.create_operation(run["run_id"],"owner",kind="example",operation_id="op-page-"+str(i))
+        for i in range(3):service.create_operation(run["run_id"],"owner",kind="example",operation_id="op-page-"+str(i),idempotency_key="page-key-"+str(i))
         first=service.list_operations(run["run_id"],"owner",limit=2)
         second=service.list_operations(run["run_id"],"owner",limit=2,offset=first["page"]["next_offset"])
         assert first["page"]["total"]==3 and second["page"]["returned"]==1

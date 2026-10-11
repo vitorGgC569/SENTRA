@@ -13,11 +13,13 @@ from typing import Protocol, runtime_checkable
 
 CONTROL_PLANE_NAMESPACES = {
     "authorization": "authorization.sqlite3",
+    "chat_access": "chat-access.sqlite3",
     "budget_policy": "budget-policies.sqlite3",
     "event_ingress": "event-ingress.sqlite3",
     "execution_workspace": "execution-workspaces.sqlite3",
     "governance": "governance.sqlite3",
     "plugin_worker": "plugin-workers.sqlite3",
+    "plugin_bundle": "plugin-bundles.sqlite3",
     "session_checkpoint": "session-checkpoints.sqlite3",
     "task_ledger": "tasks.sqlite3",
     "canvas_collaboration": "canvas-collaboration.sqlite3",

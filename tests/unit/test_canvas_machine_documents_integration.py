@@ -10,7 +10,7 @@ from test_sentra_runtime_canvas_center_http import running_canvas, request
 
 def configured(app, server, *, name="Documents"):
     ws = app.create_workspace(name)["id"]
-    agent = app.create_agent(ws, "Document worker", "sentra/test", start=False)
+    agent = app.create_agent(ws, "Document_worker", "sentra/test", start=False)
     code, machine = request(server, "/api/center/machine/configure", json_body={
         "ws": ws, "agent_id": agent["id"], "kind": "documents"})
     assert code == 200, machine

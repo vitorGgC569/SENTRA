@@ -23,7 +23,7 @@ def test_owner_agent_goal_is_protected_revisioned_and_survives_reopen(tmp_path):
         code,_=request(server,"/api/agent/context",json_body={"ws":ws,"agent_id":agent["id"],"goal":"stale","expected_revision":1})
         assert code==400
         assert AgentWorkingContext(app.store).get(ws,agent["id"])==new
-        other=app.create_workspace("Other context")["id"]
+        other=app.create_workspace("Other_context")["id"]
         code,_=request(server,"/api/agent/context",json_body={"ws":other,"agent_id":agent["id"]})
         assert code!=200
         code,_=request(server,"/api/agent/context",json_body={"ws":ws,"agent_id":agent["id"]},authorized=False)
@@ -32,7 +32,7 @@ def test_owner_agent_goal_is_protected_revisioned_and_survives_reopen(tmp_path):
 
 def test_invalid_goal_is_rejected_before_agent_registration(tmp_path):
     with running_canvas(tmp_path) as (app,server):
-        ws=app.create_workspace("Validation before start")["id"]
+        ws=app.create_workspace("Validation_before_start")["id"]
         code,_=request(server,"/api/agents",json_body={"ws":ws,"name":"Must_not_exist","model":"sentra/test",
             "start":True,"goal":"x"*16001})
         assert code==400
@@ -42,7 +42,7 @@ def test_invalid_goal_is_rejected_before_agent_registration(tmp_path):
 
 def test_context_snapshot_excludes_unconnected_notes_and_other_agent_tasks(tmp_path):
     with running_canvas(tmp_path) as (app,server):
-        ws=app.create_workspace("Directed context")["id"]
+        ws=app.create_workspace("Directed_context")["id"]
         a=app.create_agent(ws,"Self","sentra/test",goal="Own goal")
         b=app.create_agent(ws,"Other","sentra/test",goal="OTHER_AGENT_PRIVATE_GOAL")
         graph=app.graph_detail(ws)

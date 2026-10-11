@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>SENTRA — Canvas</title>
+  <link rel="icon" type="image/png" href="/sentra-logo.png">
   <link rel="stylesheet" href="/native.css">
   <link rel="stylesheet" href="/vendor/xterm.css">
   <script src="/vendor/xterm.js" defer></script>
@@ -22,13 +23,13 @@
 </head>
 <body>
 <header class="native-titlebar">
-  <div class="title-drag pywebview-drag-region"><span class="title-mark">S</span><span>SENTRA</span><span class="native-caption-sub">CANVAS</span></div>
+  <div class="title-drag pywebview-drag-region"><img src="/sentra-logo.png" alt="" width="18" height="18" style="border-radius:3px"><span class="title-mark" hidden>S</span><span>SENTRA</span><span class="native-caption-sub">CANVAS</span></div>
   <div class="title-buttons"><button id="window-minimize" title="Minimizar" aria-label="Minimizar">−</button><button id="window-maximize" title="Restaurar ou maximizar" aria-label="Maximizar">□</button><button id="window-close" class="title-close" title="Fechar SENTRA" aria-label="Fechar">×</button></div>
 </header>
 <div id="app">
   <aside class="sidebar" id="sidebar">
     <div class="side-top">
-      <div class="logo"><span class="logo-shape" aria-hidden="true">S</span><strong>SENTRA</strong><span class="version">CANVAS</span></div>
+      <div class="logo"><img src="/sentra-logo.png" alt="" width="26" height="26" style="border-radius:4px"><span class="logo-shape" aria-hidden="true" hidden>S</span><strong>SENTRA</strong><span class="version">CANVAS</span></div>
       <div class="filter-row"><span class="icon-search">⌕</span><input id="workspace-filter" placeholder="Filtrar workspaces" aria-label="Filtrar workspaces" autocomplete="off"><button id="new-workspace" title="Criar workspace" aria-label="Novo workspace">＋</button></div>
       <div class="side-label">WORKSPACES <span id="ws-total">0</span></div>
     </div>

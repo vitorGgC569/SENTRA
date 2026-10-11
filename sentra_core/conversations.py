@@ -145,6 +145,12 @@ class ConversationStore:
                     policy_digest TEXT NOT NULL, revision INTEGER NOT NULL,
                     summary_digest TEXT NOT NULL, protected_summary TEXT NOT NULL,
                     created REAL NOT NULL, PRIMARY KEY(conversation_id,policy_digest,revision));
+                CREATE TABLE IF NOT EXISTS conversation_model_preferences(
+                    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+                    protected_preferences TEXT NOT NULL,updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS conversation_web_delivery_views(
+                    conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+                    protected_view TEXT NOT NULL,updated REAL NOT NULL);
             """)
             columns={row[1] for row in db.execute("PRAGMA table_info(provider_context)")}
             upgraded=False
@@ -426,6 +432,66 @@ class ConversationStore:
             row["telemetry_pending"] = db.execute("SELECT COUNT(*) FROM telemetry_outbox").fetchone()[0]
             row["telemetry_error"] = self.telemetry_error
             return row
+
+    def set_model_preferences(self, session_id, model, effort, *, workspace=None):
+        """Persist requested choices only; provider observation is separate."""
+        for name, value in (("model", model), ("effort", effort)):
+            if value is not None and (not isinstance(value, str) or not 1 <= len(value) <= 160
+                                      or value != value.strip() or any(ord(c) < 32 for c in value)):
+                raise ValueError("bounded requested " + name + " required")
+        with self._tx() as db:
+            owned = self._owned(db, session_id, workspace)
+            protected = _encode({"session_id": session_id, "owner": owned["owner"],
+                                 "workspace": owned["workspace"], "requested_model": model,
+                                 "requested_effort": effort})
+            db.execute("INSERT INTO conversation_model_preferences VALUES(?,?,?) "
+                       "ON CONFLICT(conversation_id) DO UPDATE SET "
+                       "protected_preferences=excluded.protected_preferences,updated=excluded.updated",
+                       (session_id, protected, time.time()))
+        return self.model_preferences(session_id, workspace=workspace)
+
+    def model_preferences(self, session_id, *, workspace=None):
+        with self._connect() as db:
+            owned = self._owned(db, session_id, workspace)
+            row = db.execute("SELECT protected_preferences FROM conversation_model_preferences "
+                             "WHERE conversation_id=?", (session_id,)).fetchone()
+        value = _decode(row[0]) if row else {}
+        if row and (value.get("session_id"), value.get("owner"), value.get("workspace")) != (
+                session_id, owned["owner"], owned["workspace"]):
+            raise PermissionError("protected model preference identity mismatch")
+        return {"requested_model": value.get("requested_model"),
+                "requested_effort": value.get("requested_effort"), "requested": True, "observed": False}
+
+    def record_web_delivery(self, session_id, view, *, workspace=None):
+        """Cache an authenticated gateway projection for display only.
+
+        This cache is never read by admission, grants, receipts or send gates.
+        Its contents are deliberately excluded from messages/provider context.
+        """
+        if not isinstance(view, dict) or len(json.dumps(view, allow_nan=False).encode()) > 256_000:
+            raise ValueError("bounded Web delivery projection required")
+        with self._tx() as db:
+            owned = self._owned(db, session_id, workspace)
+            protected = _encode({"session_id": session_id, "owner": owned["owner"],
+                                 "workspace": owned["workspace"], "view": view})
+            db.execute("INSERT INTO conversation_web_delivery_views VALUES(?,?,?) "
+                       "ON CONFLICT(conversation_id) DO UPDATE SET "
+                       "protected_view=excluded.protected_view,updated=excluded.updated",
+                       (session_id, protected, time.time()))
+        return {**view, "display_only": True}
+
+    def web_delivery_status(self, session_id, *, workspace=None):
+        with self._connect() as db:
+            owned = self._owned(db, session_id, workspace)
+            row = db.execute("SELECT protected_view FROM conversation_web_delivery_views WHERE conversation_id=?",
+                             (session_id,)).fetchone()
+        if row is None:
+            return None
+        value = _decode(row[0])
+        if (value.get("session_id"), value.get("owner"), value.get("workspace")) != (
+                session_id, owned["owner"], owned["workspace"]):
+            raise PermissionError("protected Web delivery projection identity mismatch")
+        return {**value["view"], "display_only": True}
 
     def tool_receipt(self,ident):
         """Read the single protected call in a dedicated automation receipt."""

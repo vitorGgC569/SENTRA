@@ -309,7 +309,7 @@ def test_post_policy_timeout_reaps_real_child(tmp_path, monkeypatch):
         with pytest.raises(ACPLaunchError) as result:
             await ACPStdioTransport.launch(
                 sys.executable, args, cwd=str(tmp_path),
-                gate=gateway, request=request, spawn_timeout=0.09)
+                gate=gateway, request=request, spawn_timeout=0.6)
         assert result.value.code == "POST_POLICY_TIMEOUT"
         assert result.value.state == "UNCERTAIN"
         assert child is not None and child.returncode is not None

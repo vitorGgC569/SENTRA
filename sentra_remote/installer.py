@@ -208,10 +208,25 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         raise ValueError("Web Models install target escaped install directory")
     shutil.copytree(_filesystem_path(source / "web-models"), _filesystem_path(web_target), dirs_exist_ok=True)
 
+    # The optional Electron view is not a second control plane. Only the
+    # staged, fingerprinted renderer is copied, never node_modules/npm hooks.
+    electron_source = source / "sentra-electron"
+    if electron_source.exists():
+        from scripts.commander.stage_electron import validate_electron_payload
+        validate_electron_payload(electron_source)
+        electron_target = (install_dir / "sentra-electron").resolve()
+        if not electron_target.is_relative_to(install_dir.resolve()):
+            raise ValueError("Electron installation escaped product directory")
+        shutil.copytree(_filesystem_path(electron_source), _filesystem_path(electron_target),
+                        dirs_exist_ok=True)
+        validate_electron_payload(electron_target)
+
     docs = docs_source()
     start_here = docs / "START_HERE.md"
     if not start_here.is_file():
         raise FileNotFoundError("SENTRA product education docs are missing START_HERE.md")
+    if not (docs / "SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md").is_file():
+        raise FileNotFoundError("SENTRA ChatGPT app and Canvas onboarding guide is missing")
     docs_target = (install_dir / "docs").resolve()
     if not docs_target.is_relative_to(install_dir.resolve()):
         raise ValueError("docs install target escaped install directory")
@@ -220,7 +235,10 @@ def _copy_product_files(install_dir: Path) -> list[str]:
     if getattr(sys, "frozen", False):
         shutil.copy2(_filesystem_path(Path(sys.executable)), _filesystem_path(install_dir / "sentra-installer.exe"))
     owned = list(PRODUCTS)
-    for folder, prefix in ((ext_source, "edge_extension"), (source / "web-models", "web-models"), (docs, "docs")):
+    folders = [(ext_source, "edge_extension"), (source / "web-models", "web-models"), (docs, "docs")]
+    if electron_source.exists():
+        folders.append((electron_source, "sentra-electron"))
+    for folder, prefix in folders:
         owned.extend(_owned_tree_files(folder, prefix))
     if getattr(sys, "frozen", False):
         owned.append("sentra-installer.exe")
@@ -460,7 +478,7 @@ def _register_uninstall(install_dir: Path) -> None:
             "DisplayVersion": PRODUCT_VERSION,
             "Publisher": "SENTRA",
             "InstallLocation": str(install_dir),
-            "DisplayIcon": str(install_dir / "sentra-human.exe"),
+            "DisplayIcon": str(install_dir / "sentra-canvas.exe"),
             "UninstallString": f'"{install_dir / "sentra-installer.exe"}" --uninstall --keep-config --install-dir "{install_dir}"',
         }
         for name, value in values.items():
@@ -586,7 +604,13 @@ def install(
     result["web_models"] = _enable_web_models_autostart(paths, install_dir)
     notify("Installing secure tunnel client", 45)
     result["tunnel_client"] = download_tunnel_client(install_dir, tunnel_archive)
-    _write_install_marker(install_dir, owned_files + ["tunnel-client.exe"])
+    tunnel_license_dir = install_dir / "licenses" / "tunnel-client"
+    tunnel_license_files = _owned_tree_files(
+        tunnel_license_dir, "licenses/tunnel-client"
+    ) if tunnel_license_dir.is_dir() else []
+    _write_install_marker(
+        install_dir, owned_files + ["tunnel-client.exe"] + tunnel_license_files
+    )
     notify("Applying local settings", 60)
     fresh_settings = not paths.settings.is_file()
     settings = ProductSettings.load(paths.settings)
@@ -644,6 +668,18 @@ def install(
     result["startup"] = verification["started"]
     result["connect_verify"] = verification
     result["doctor"] = verification["status"]
+    # The native Canvas and CLI are shipped regardless of OpenAI login.
+    # ChatGPT plugin connection is an account-owned action, never silently
+    # marked installed merely because an MCP tunnel responds.
+    from .onboarding import chatgpt_plugin_install_plan
+    result["canvas"] = {
+        "installed": (install_dir / "sentra-canvas.exe").is_file(),
+        "launcher": str(install_dir / "sentra-canvas.exe"),
+        "desktop_shortcut": "SENTRA",
+    }
+    result["chatgpt_plugin"] = chatgpt_plugin_install_plan(
+        verification.get("status") or {}, tunnel_id=tunnel_id,
+    )
     ready = _installation_ready(verification, openai_required=bool(tunnel_id))
     notify("Ready" if ready else "Installed — local services need attention", 100 if ready else 90)
 

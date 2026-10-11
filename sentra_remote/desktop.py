@@ -206,6 +206,11 @@ class SentraDesktop:
         self.ttk = ttk
         self.root = tk.Tk()
         self.root.title(f"SENTRA Desktop {PRODUCT_VERSION}")
+        from sentra_canvas.native_brand import icon_path
+        try:
+            self.root.iconbitmap(str(icon_path()))
+        except (OSError, tk.TclError):
+            pass  # Windows should still show the executable's embedded icon.
         self.root.geometry("1060x760")
         self.root.minsize(900, 650)
         self.paths = ProductPaths.default(_install_dir())
@@ -839,6 +844,7 @@ class SentraDesktop:
         ).pack(anchor="w", pady=(0, 10))
         start_here = ttk.LabelFrame(self.onboarding_tab, text="Start here — no account required", padding=10)
         start_here.pack(fill="x", pady=(4, 10))
+        ttk.Button(start_here, text="Open SENTRA Canvas", command=self.open_canvas).pack(side="left", padx=3)
         ttk.Button(start_here, text="Open SENTRA Terminal", command=self.open_terminal).pack(side="left", padx=3)
         ttk.Button(start_here, text="Open starter project", command=self.open_starter_project).pack(side="left", padx=3)
         ttk.Button(start_here, text="Add an existing project", command=self.add_workspace).pack(side="left", padx=3)
@@ -1020,6 +1026,8 @@ class SentraDesktop:
                         tunnel_id = str(tunnel_data.get("tunnel_id") or "").strip()
                     except (OSError, ValueError, TypeError):
                         pass
+                from .connector_proof import ConnectorProof
+                status["plugin_proof"] = ConnectorProof(self.paths.state_dir).status(tunnel_id)
                 plan = chatgpt_plugin_install_plan(
                     status, tunnel_id=tunnel_id
                 )
@@ -1364,6 +1372,19 @@ class SentraDesktop:
         except (OSError, ValueError) as exc:
             messagebox.showerror("SENTRA Workspace", str(exc))
 
+    def open_canvas(self) -> None:
+        """Launch the packaged React/WebView2 Canvas as the primary surface."""
+        from tkinter import messagebox
+        binary = (self.paths.install_dir / "sentra-canvas.exe").resolve()
+        if not binary.is_file() or binary.parent != self.paths.install_dir.resolve():
+            messagebox.showerror("SENTRA Canvas", "Canvas executable missing. Repair SENTRA Setup.")
+            return
+        try:
+            subprocess.Popen([str(binary)], cwd=str(self.paths.install_dir),
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("SENTRA Canvas", type(exc).__name__)
+
     def open_terminal(self) -> None:
         from tkinter import messagebox
         project = first_workspace(self.paths, self.settings)
@@ -1611,6 +1632,11 @@ class SentraDesktop:
                 self.quick_status.configure(text=headline)
                 self.quick_detail.configure(text=detail)
                 self.refresh_async()
+                if ready:
+                    # The final ChatGPT plugin install/authorization is
+                    # account-owned. Handoff only after real tunnel readiness;
+                    # never claim that a local setup silently installed it.
+                    self.finish_chatgpt_plugin_setup()
 
             self.root.after(0, apply)
         except Exception as exc:
@@ -1894,10 +1920,15 @@ class SentraDesktop:
             from PIL import Image, ImageDraw
         except ImportError:
             return
-        image = Image.new("RGBA", (64, 64), (28, 28, 32, 255))
-        draw = ImageDraw.Draw(image)
-        draw.rectangle((10, 10, 54, 54), outline=(245, 245, 245, 255), width=4)
-        draw.text((23, 18), "S", fill=(245, 245, 245, 255))
+        from sentra_canvas.native_brand import icon_path
+        approved = icon_path().with_name("SENTRA-LOGO.png")
+        if approved.is_file():
+            with Image.open(approved) as source:
+                image = source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
+        else:
+            image = Image.new("RGBA", (64, 64), (0, 0, 0, 255))
+            draw = ImageDraw.Draw(image)
+            draw.text((24, 18), "S", fill=(255, 255, 255, 255))
         menu = pystray.Menu(
             pystray.MenuItem("Open SENTRA", lambda *_: self.root.after(0, self.show)),
             pystray.MenuItem("Start services", lambda *_: self.root.after(0, self.start_services)),

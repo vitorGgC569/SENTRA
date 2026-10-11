@@ -169,18 +169,20 @@ async def spawn_owned(executable: str, args: tuple[str, ...], *, checkpoint=None
             job.attach_and_resume(process.pid)
         return process, ACPProcessOwner(process, job)
     except BaseException:
+        # The shielded spawn must be CANCELLED when its deadline/caller
+        # expires. Awaiting it without cancellation could create a child
+        # after the host has already returned UNCERTAIN.
         if process is None:
+            spawn.cancel()
             try:
                 process = await spawn
             except BaseException:
-                if job is not None:
-                    job.close()
-                raise
+                process = None
         if job is not None:
             job.close()
-            if process.returncode is None:
+            if process is not None and process.returncode is None:
                 process.kill()
                 await process.wait()
-        else:
+        elif process is not None:
             await ACPProcessOwner(process, None).close()
         raise

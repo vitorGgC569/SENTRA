@@ -90,13 +90,16 @@ class SentraAgent:
         self.store = ConversationStore(config.state_root)
         self.session_id = self.store.open(config.workspace, session_id=config.session_id,
                                           resume=config.resume_session)
+        self._restore_model_preferences()
         self._turn_id = None
         self.client = ModelClient(config)
         self.client.bind_conversation(self.session_id)
         self.client.on_delivery = self._delivery
         self.client.on_usage = self._usage
         self.client.on_before_provider = self._before_provider
+        self.client.on_web_delivery = self._web_delivery
         self._usage_ledger = None
+        self._provider_usage_context = None
         self.usage_error = None
         self.maestri = MaestriBridge(config)
         self.canvas = CanvasBridge(config)
@@ -114,9 +117,11 @@ class SentraAgent:
             prompt = "\n".join(line for line in prompt.splitlines()
                                if not line.startswith("- [[MAESTRI|") and not line.startswith("5. No Maestri,"))
             prompt += "\nCANVAS NATIVO: use [[CANVAS|list]] para listar apenas conexões dirigidas deste terminal. " \
-                "[[CANVAS|create_agent|nome|modelo|papel]] cria um agente SENTRA CLI real com terminal, " \
+                "[[CANVAS|create_agent|Worker_2|sentra/codex/current|worker]] cria um agente SENTRA CLI real com terminal, " \
                 "sessão persistente e conexão dirigida deste solicitante, dentro da quota existente. " \
-                "[[CANVAS|create_terminal|nome|modelo]] cria um terminal SENTRA CLI real conectado. " \
+                "[[CANVAS|create_terminal|Terminal_4|sentra/codex/current]] cria um terminal SENTRA CLI real conectado. " \
+                "Use identificadores únicos sem espaços (apenas letras ASCII, dígitos, _ e -); use um model ID disponível real, " \
+                "NUNCA os placeholders 'nome' ou 'modelo'. Cada criação já conecta o novo nó ao seu terminal. " \
                 "Guarde node_id e resource do resultado. [[CANVAS|connect|id]] conecta este terminal " \
                 "a um nó autorizado; [[CANVAS|connect|origem|destino]] conecta pares criados por você. " \
                 "[[CANVAS|create_team|nome|coordenador|worker_id1,worker_id2]] organiza agentes autorizados. " \
@@ -124,7 +129,8 @@ class SentraAgent:
                 "o resultado confirma transporte, nunca resposta do modelo. [[CANVAS|check|id]] lê saída recente " \
                 "e handoffs com receipt_status (answered, tool_completed, failed, uncertain ou pending); " \
                 "apenas answered confirma uma resposta do modelo. " \
-                "[[CANVAS|note_read|id]] e [[CANVAS|note_write|id|texto]] acessam notas conectadas. " \
+                "[[CANVAS|note_read|id]] lê notas conectadas; notas apontando para este terminal são somente leitura, " \
+                "e [[CANVAS|note_write|id|texto]] só altera notas nas conexões de saída autorizadas. " \
                 "Os requests têm identidade persistente: started prova só início do processo, nunca inferência. " \
                 "Não use MAESTRI para controlar este Canvas. Não recrie nem reenvie operações incertas."
             prompt += '\nCONTEXTO E AUTONOMIA: [[CANVAS|context]] recupera seu objetivo, papel, tarefas e conexões atuais. ' \
@@ -151,6 +157,16 @@ class SentraAgent:
             prompt += '\nEXPERIÊNCIAS: [[CANVAS|machine_experiences|{"work_item_id":"...","machine_id":"...","query":"..."}]] ' \
                 'recupera sugestões com Operation de origem e validade. São conhecimento: revalide entradas, permissões e critérios da tarefa atual antes de reutilizar.'
         self._context_system_prompt = prompt
+        from sentra_mcp.services.control_store import SQLiteControlPlaneStore
+        with SQLiteControlPlaneStore(self.store.telemetry_root).connect("execution_workspace") as db:
+            has_goals = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_goal_bindings'").fetchone()
+        if has_goals:
+            current_goal = self.goal_loop_command("goal", "status")
+            if current_goal.get("state") == "ACTIVE":
+                goal = current_goal["goal"]
+                prompt += "\nOBJETIVO ATIVO DA CONVERSA (contexto; permissões e limites permanecem na autoridade central): " + json.dumps(
+                    {"goal_id": current_goal["goal_id"], "objective": goal["objective"]}, ensure_ascii=False)
+                self._context_system_prompt = prompt
         runner = None
         if self._context_summary_config is not None and self._turn_id is not None:
             provider, model, complete = self._context_summary_config
@@ -173,8 +189,33 @@ class SentraAgent:
 
     def _delivery(self, provider, ident, state):
         if self._turn_id is not None:
-            context=self._ledger().context(self.session_id,self.config.workspace) if state=="submitted" else None
+            context=self._approved_provider_context(provider) if state=="submitted" else None
             self.store.provider_state(self.session_id, self._turn_id, provider, ident, state,context=context)
+
+    def _approved_provider_context(self, provider):
+        approved = self._provider_usage_context
+        if approved is None or approved[:3] != (self.session_id, self._turn_id, provider):
+            raise PermissionError("provider has no matching approved authority context")
+        return dict(approved[3])
+
+    def _restore_model_preferences(self):
+        prefs = self.store.model_preferences(self.session_id, workspace=self.config.workspace)
+        if prefs["requested_model"]:
+            self.config.model = prefs["requested_model"]
+            if self.config.model.startswith("sentra/chatgpt-web/"):
+                self.config.web_reasoning_effort = prefs["requested_effort"]
+            elif prefs["requested_effort"]:
+                self.config.reasoning_effort = prefs["requested_effort"]
+
+    def persist_model_preferences(self):
+        effort = (self.config.web_reasoning_effort if self.config.model.startswith("sentra/chatgpt-web/")
+                  else self.config.reasoning_effort)
+        return self.store.set_model_preferences(self.session_id, self.config.model, effort,
+                                                workspace=self.config.workspace)
+
+    def _web_delivery(self, view):
+        # Evidence is protected and excluded from ordinary prompt history.
+        self.store.record_web_delivery(self.session_id, view, workspace=self.config.workspace)
 
     def _ledger(self):
         if self._usage_ledger is None:
@@ -182,14 +223,154 @@ class SentraAgent:
             self._usage_ledger=UsageLedger(self.store)
         return self._usage_ledger
 
+    def goal_loop_command(self, kind: str, action: str = "status", *,
+                          objective: str = "", max_steps: int = 2,
+                          max_cost_usd: float = 0.0, deadline_seconds: float = 120):
+        """Operator commands act on the central Goal, never a model prompt."""
+        from sentra_executors.goal_loop import ConversationGoalLoop
+        from sentra_mcp.services.context import ContextBusService
+        from sentra_mcp.services.control_plane import ControlPlaneService
+        from sentra_mcp.services.durable import DurableRunService
+
+        binding = self._ledger().context(self.session_id, self.config.workspace)
+        owner = binding["owner"]
+        durable = DurableRunService(self.store.telemetry_root)
+        context = ContextBusService(self.store.telemetry_root)
+        try:
+            control = ControlPlaneService(durable, context)
+            goals = ConversationGoalLoop(control, conversations=self.store)
+            if kind == "goal":
+                if action == "status":
+                    return goals.status(owner, self.session_id)
+                if action == "stop":
+                    return goals.stop(owner, self.session_id, operator_approved=True)
+                if action != "set":
+                    raise ValueError("use /goal set <objective>|status|stop")
+                run_id = binding.get("run_id")
+                if not run_id:
+                    run_id = durable.create_run(
+                        owner, workspace=str(self.config.workspace),
+                        idempotency_key="cli-conversation:" + self.session_id,
+                        required_capabilities=[],
+                    )["run_id"]
+                control.ensure_agent(run_id, owner,
+                    agent_id=binding.get("agent_id") or "cli:" + self.session_id, role="coordinator")
+                return goals.set(owner, self.session_id, run_id=run_id,
+                                 objective=objective, operator_approved=True)
+            if kind != "loop":
+                raise ValueError("unknown conversation control")
+            if action == "status":
+                return goals.loop_status(owner, self.session_id)
+            if action == "stop":
+                return goals.loop_stop(owner, self.session_id, operator_approved=True)
+            if action == "start":
+                return goals.open(owner, self.session_id,
+                                  principal_id=binding.get("agent_id") or "cli:" + self.session_id,
+                                  max_steps=max_steps, max_cost_usd=max_cost_usd,
+                                  deadline_seconds=deadline_seconds, operator_approved=True)
+            if action == "step":
+                return goals.advance(owner, self.session_id, objective=objective,
+                                     operator_approved=True)
+            raise ValueError("use /loop start|status|stop|step <objective>")
+        finally:
+            context.close()
+            durable.close()
+
+    def compact_resume_command(self, action: str, arguments: dict):
+        """Use the existing checkpoint and continuation gates without model I/O."""
+        from native_bridge.conversation_continuation import ConversationWebContinuation
+        from native_bridge.job_store import JobStore
+        from sentra_mcp.services.context import ContextBusService
+        from sentra_mcp.services.control_plane import ControlPlaneService
+        from sentra_mcp.services.durable import DurableRunService
+        if not isinstance(arguments, dict):
+            raise ValueError("Compact&Resume requires an object")
+        allowed = ({"run_id", "chat_id", "work_item_id", "principal_id", "request_key", "summary", "cursor", "target_url"}
+                   if action == "prepare" else {"allocation_id", "continuation_id"})
+        if action not in {"prepare", "status", "resume"} or set(arguments) - allowed:
+            raise ValueError("use /compact-resume prepare|status|resume <JSON arguments>")
+        owner = self._ledger().context(self.session_id, self.config.workspace)["owner"]
+        durable = DurableRunService(self.store.telemetry_root)
+        context = ContextBusService(self.store.telemetry_root)
+        outbox = self.store.telemetry_root / "browser" / "relay.sqlite3"
+        outbox.parent.mkdir(parents=True, exist_ok=True)
+        jobs = JobStore(outbox)
+        try:
+            control = ControlPlaneService(durable, context)
+            continuity = ConversationWebContinuation(control, jobs, conversations=self.store)
+            method = getattr(continuity, action)
+            kwargs = dict(arguments)
+            if action != "status":
+                kwargs["operator_approved"] = True
+            return method(owner, self.session_id, **kwargs)
+        finally:
+            jobs.close()
+            context.close()
+            durable.close()
+
     def _before_provider(self,provider):
-        self._ledger().require(self.session_id,self.config.workspace,provider)
+        ledger = self._ledger()
+        context = ledger.context(self.session_id, self.config.workspace)
+        ledger.require(self.session_id,self.config.workspace,provider,authority_context=context)
+        if provider == "gateway" and self.config.model.startswith(("sentra/chatgpt-web/", "chatgpt-web/")):
+            self._bind_existing_web_authority(authority_context=context)
+        self._provider_usage_context = (self.session_id, self._turn_id, provider, dict(context))
         self.usage_error=None
+
+    def _bind_existing_web_authority(self, *, authority_context=None):
+        from sentra_mcp.services.control_store import SQLiteControlPlaneStore
+        from sentra_mcp.services.authorization import AuthorizationService
+        store = SQLiteControlPlaneStore(self.store.telemetry_root)
+        with store.connect("session_checkpoint") as db:
+            exists = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gateway_web_transport_mode'").fetchone()
+            row = db.execute("SELECT mode FROM gateway_web_transport_mode WHERE singleton=1").fetchone() if exists else None
+        if not exists or (row and row["mode"] == "legacy"):
+            return
+        if row is None or row["mode"] != "durable_v2":
+            raise PermissionError("Web transport is not activated for production")
+        binding = self._ledger().context(self.session_id, self.config.workspace)
+        if authority_context is not None and binding != authority_context:
+            raise PermissionError("Web authority changed after the budget check")
+        with store.connect("session_checkpoint") as db:
+            pinned = db.execute("SELECT owner,run_id,work_item_id,principal_id,grant_id FROM gateway_web_bindings "
+                "WHERE conversation_uri=? AND owner=?", (self.client._conversation_uri, binding["owner"])).fetchone()
+        if pinned is not None:
+            for field, pinned_field in (("run_id", "run_id"), ("work_item_id", "work_item_id"), ("agent_id", "principal_id")):
+                if binding.get(field) and binding[field] != pinned[pinned_field]:
+                    raise PermissionError("Web authority differs from the conversation budget scope")
+            binding = {**binding, "grant_id": pinned["grant_id"]}
+        if not all(binding.get(field) for field in ("run_id", "work_item_id", "agent_id")):
+            if pinned is None:
+                raise PermissionError("Web conversation requires its existing central Run/WorkItem/agent binding")
+            for field, pinned_field in (("run_id", "run_id"), ("work_item_id", "work_item_id"), ("agent_id", "principal_id")):
+                if binding.get(field) and binding[field] != pinned[pinned_field]:
+                    raise PermissionError("Web authority differs from the conversation budget scope")
+            binding = {**binding, **dict(pinned), "agent_id": pinned["principal_id"]}
+        from sentra_mcp.services.durable import DurableRunService
+        durable = DurableRunService(self.store.telemetry_root)
+        try:
+            run = durable.run_status(binding["run_id"], binding["owner"], include_details=False)
+            if run.get("workspace") != str(self.config.workspace):
+                raise PermissionError("Web Run differs from the conversation workspace")
+        finally:
+            durable.close()
+        auth = AuthorizationService(self.store.telemetry_root)
+        grant = auth.require(binding["owner"], principal_type="agent", principal_id=binding["agent_id"],
+            capability="web:send", scope_type="work_item", scope_id=binding["work_item_id"],
+            context={"provider": "chatgpt"}, local_owner=False)
+        if binding.get("grant_id") and grant["grant_id"] != binding["grant_id"]:
+            raise PermissionError("Web conversation requires its original pinned grant")
+        ok, detail = self.client._gateway_admin_post("/sentra/web-transport/bind", timeout=5,
+            json_body={"conversation_uri": self.client._conversation_uri, "owner": binding["owner"],
+                "run_id": binding["run_id"], "work_item_id": binding["work_item_id"],
+                "principal_id": binding["agent_id"], "grant_id": grant["grant_id"]})
+        if not ok:
+            raise PermissionError("Authenticated Web authority binding unavailable: " + detail)
 
     def _usage(self,provider,ident,model,usage):
         if self._turn_id is None:raise RuntimeError("usage reported without an active turn")
         ledger=self._ledger()
-        context=ledger.context(self.session_id,self.config.workspace)
+        context=self._approved_provider_context(provider)
         self.store.record_provider_usage(self.session_id,self._turn_id,provider,ident,model,usage,context)
         try:
             ledger.flush(ident=self.session_id)
@@ -201,7 +382,9 @@ class SentraAgent:
         if self._turn_id is not None:
             raise RuntimeError("cannot switch conversations while executing a turn")
         self.session_id = self.store.open(self.config.workspace, session_id=session_id, resume=True)
+        self._restore_model_preferences()
         self.client.bind_conversation(self.session_id)
+        self.client.active_model = self.config.model
         self.messages = self._history()
 
     def reset(self) -> None:

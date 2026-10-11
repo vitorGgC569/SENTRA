@@ -13,8 +13,8 @@
     "react-dom": "19.3.0"
   },
   "files": {
-    "desktop.js": "6c0298eadd9ec9cd066222bec390c86885df0db153b1c9b54b648a5f606af926",
-    "desktop.css": "f65e027c5d751de78512b07645bf2865436b05aca95f857801ab449885da5f62",
+    "desktop.js": "23aa44a6c0a9c9ff7b3a1bdd26ed1d33eae958bdd27cb5622b6815047710cf0c",
+    "desktop.css": "1888558e788b14c0f6ff1a1dcfcd53c8cf114838bcc9bfe4c55a5578eac9e141",
     "bootstrap.js": "b4b79dd3babf2bf9df1370cb97f6f4dc003921939d1a8fa8cfd3518262ddcc24"
   },
   "entry": "/desktop.html",

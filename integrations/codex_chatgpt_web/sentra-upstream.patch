@@ -1,8 +1,390 @@
 diff --git a/launcher/electron/browser-host.cjs b/launcher/electron/browser-host.cjs
-index 9025c18..d36c9ce 100644
 --- a/launcher/electron/browser-host.cjs
 +++ b/launcher/electron/browser-host.cjs
-@@ -1419,6 +1419,7 @@ class BrowserHost {
+@@ -301,6 +301,328 @@
+   });
+ }
+ 
++// This collector reads only UI identity primitives. No session endpoints, storage or credentials.
++function collectSentraUiIdentity() {
++  if (location.origin !== "https://chatgpt.com") return { reason: "wrong_origin" };
++  const identity = globalThis.__SENTRA_WEB_DOCUMENT__;
++  if (!identity) return { reason: "document_unowned" };
++  const accounts = new Set(), users = new Set();
++  const primitiveId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
++  const own = (object, key) => {
++    if (!object || typeof object !== "object") return undefined;
++    const descriptor = Object.getOwnPropertyDescriptor(object, key);
++    return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
++  };
++  // Restrict traversal to the committed account-menu ancestry. Never walk session objects.
++  for (const element of document.querySelectorAll('[data-testid="accounts-profile-button"], [data-testid="profile-button"]')) {
++    for (const key of Object.keys(element).filter(key => key.startsWith("__reactFiber$"))) {
++      let fiber = element[key], root = fiber;
++      let depth = 0;
++      while (root?.return && depth++ < 80) root = root.return;
++      if (root?.tag !== 3 || root.stateNode?.current !== root) continue;
++      let reachedRoot = false;
++      const candidateAccounts = new Set(), candidateUsers = new Set();
++      for (depth = 0; fiber && depth++ < 80; fiber = fiber.return) {
++        const props = own(fiber, "memoizedProps");
++        const accountId = own(own(props, "account"), "id");
++        const userId = own(own(props, "user"), "id");
++        if (primitiveId(accountId)) candidateAccounts.add(accountId);
++        if (primitiveId(userId)) candidateUsers.add(userId);
++        if (fiber === root) { reachedRoot = true; break; }
++      }
++      if (reachedRoot) {
++        for (const value of candidateAccounts) accounts.add(value);
++        for (const value of candidateUsers) users.add(value);
++      }
++    }
++  }
++  const selectionText = selector => {
++    const values = [...document.querySelectorAll(selector)].map(element => element.textContent?.trim()).filter(Boolean);
++    return values.length === 1 && values[0].length <= 160 ? values[0] : null;
++  };
++  const visible = element => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
++  const picked = [...document.querySelectorAll('[role="menuitemradio"][aria-checked="true"]')].filter(visible);
++  const sliders = [...document.querySelectorAll('[data-model-reasoning-effort-slider], [data-model-picker-power-slider]')].filter(visible);
++  const providerSelection = { model: null, effort: null, selection_verified: false,
++    selected_radio_text: picked.length === 1 ? picked[0].textContent?.trim().slice(0, 160) : null,
++    slider_min: null, slider_max: null, slider_value: null, slider_description: null };
++  if (picked.length === 1 && sliders.length === 1) {
++    const slider = sliders[0], item = slider.closest('[role="menuitem"]');
++    const attributes = ["aria-valuemin", "aria-valuemax", "aria-valuenow"].map(key => slider.getAttribute(key));
++    const [min, max, value] = attributes.map(Number);
++    const described = (item?.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean)
++      .map(id => document.getElementById(id)?.textContent || "").filter(Boolean);
++    const description = (described.length === 1 ? described[0] : item?.textContent || "").trim();
++    providerSelection.slider_description = description.slice(0, 160);
++    if (attributes.every(attribute => attribute !== null && /^\d+$/.test(attribute))
++      && min <= value && value <= max && max - min <= 4) {
++      Object.assign(providerSelection, { slider_min: min, slider_max: max, slider_value: value });
++      const radioFamily = /^(?:GPT[-\s]?)?(5\.6|6)(?:\s+(?:Sol|Astra))?(?:\s+Pro)?$/i.exec(providerSelection.selected_radio_text || "");
++      const detail = /^(?:GPT[-\s]?)?(5\.6|6)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i.exec(description);
++      const effort = ["low", "medium", "high", "xhigh", "max"][value - min];
++      if (radioFamily && detail && radioFamily[1] === detail[1] && effort
++        && (!detail[2] || detail[2].toLowerCase() === (detail[1] === "6" ? "astra" : "sol"))
++        && (effort === "max" ? /^Pro$/i.test(detail[3].trim()) : !/^Pro$/i.test(detail[3].trim()))) {
++        Object.assign(providerSelection, { model: "gpt-" + detail[1], effort, selection_verified: true });
++      }
++    }
++  }
++  const approval = document.querySelector('[data-testid="connector-approval"], [data-testid="tool-approval"], [data-testid="approval-card"]');
++  return { document_id: identity.document_id, identity_epoch: identity.identity_epoch,
++    surface_id: identity.surface_id, account_id: accounts.size === 1 ? [...accounts][0] : null,
++    user_id: users.size === 1 ? [...users][0] : null,
++    model_selection_text: selectionText('[data-testid="model-switcher-dropdown-button"]'),
++    effort_selection_text: selectionText('[data-testid="thinking-effort-dropdown-button"]'),
++    provider_selection: providerSelection, approval_state: approval ? "pending" : null,
++    reason: accounts.size > 1 || users.size > 1 ? "identity_conflict"
++      : accounts.size === 0 ? "account_ui_identity_unavailable" : "collector_schema_unverified" };
++}
++
++async function sentraIdentitySnapshot(binding) {
++  requireAutomaticBrowserInspection(this, "SENTRA UI identity observation");
++  if (!binding || typeof binding.traceId !== "string" || typeof binding.surface_id !== "string"
++    || typeof binding.document_id !== "string" || typeof binding.identity_epoch !== "string") {
++    throw new Error("SENTRA identity binding is invalid");
++  }
++  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === binding.traceId
++    && tab.surfaceId === binding.surface_id && tab.status === "running" && tab.interactionMode === "automatic");
++  if (matches.length !== 1) throw new Error("SENTRA identity requires one owned active turn");
++  const tab = matches[0], contents = tab.view.webContents, documentIdentity = tab.sentraDocument;
++  const revision = this.authenticationRevision;
++  const validate = () => {
++    if (contents.isDestroyed() || this.turnTabs.get(tab.id) !== tab || tab.status !== "running"
++      || tab.sentraDocument !== documentIdentity || this.authenticationRevision !== revision
++      || documentIdentity?.document_id !== binding.document_id
++      || documentIdentity?.identity_epoch !== binding.identity_epoch
++      || documentIdentity?.surface_id !== binding.surface_id
++      || new URL(contents.getURL()).origin !== CHATGPT_ORIGIN) throw new Error("SENTRA identity changed");
++  };
++  validate();
++  const observation = await contents.executeJavaScript(`(${collectSentraUiIdentity.toString()})()`, false);
++  validate();
++  for (const field of ["document_id", "identity_epoch", "surface_id"]) {
++    if (observation?.[field] !== binding[field]) throw new Error("SENTRA identity document mismatch");
++  }
++  return { ...observation, ok: true, account_verified: false, profile: this.profile, partition: this.partition, observed_at: new Date().toISOString(), authentication_revision: revision,
++    collector_id: "sentra-committed-account-menu-v1",
++    collector_sha256: createHash("sha256").update(collectSentraUiIdentity.toString()).digest("hex"),
++    host_source_sha256: createHash("sha256").update(fs.readFileSync(__filename)).digest("hex") };
++}
++
++// Independent Host collector. The challenge never enters the renderer reader.
++function collectSentraCommittedMessages() {
++  const unknown = reason => ({ state: "UNKNOWN", reason, messages: [], approval_state: "UNKNOWN", approval_source: null });
++  const own = (object, key) => {
++    if (!object || typeof object !== "object") return undefined;
++    const descriptor = Object.getOwnPropertyDescriptor(object, key);
++    return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
++  };
++  const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(value);
++  const identity = own(globalThis, "__SENTRA_WEB_DOCUMENT__");
++  if (location.origin !== "https://chatgpt.com" || !identity
++    || !/^[a-f0-9]{32}$/.test(own(identity, "document_id"))
++    || !/^[a-f0-9]{32}$/.test(own(identity, "identity_epoch"))) return unknown("document_unowned");
++  const route = /^\/c\/([A-Za-z0-9_-]{8,160})(?:\/|$)/.exec(location.pathname)?.[1] || null;
++  const messages = new Map(), approvalStates = new Set();
++  let conversation = null, budget = 20000;
++  const elements = [...document.querySelectorAll('[data-message-id],[data-turn-key],[data-turn-id-container]')];
++  if (elements.length > 200) return unknown("collector_budget");
++  for (const element of elements) {
++    const keys = Object.keys(element).filter(key => key.startsWith("__reactFiber$"));
++    if (keys.length > 1) return unknown("fiber_ambiguous");
++    if (!keys.length) continue;
++    let node = own(element, keys[0]);
++    const path = [], visited = new Set();
++    while (node && own(node, "tag") !== 3 && path.length < 2048 && !visited.has(node)) {
++      visited.add(node); path.push(node); node = own(node, "return");
++    }
++    const root = own(node, "stateNode"), current = own(root, "current");
++    if (!current || (current !== node && current !== own(node, "alternate"))) continue;
++    node = current;
++    const props = [own(node, "memoizedProps") || {}];
++    let valid = true;
++    for (const expected of path.reverse()) {
++      let selected;
++      const siblings = new Set();
++      for (let child = own(node, "child"); child; child = own(child, "sibling")) {
++        if (--budget < 0 || siblings.has(child)) return unknown("collector_budget");
++        siblings.add(child);
++        if (child !== expected && child !== own(expected, "alternate")) continue;
++        if (selected) { valid = false; break; }
++        selected = child;
++      }
++      if (!valid || !selected || own(root, "current") !== current) { valid = false; break; }
++      node = selected; props.push(own(node, "memoizedProps") || {});
++    }
++    if (!valid) continue;
++    let branch = null;
++    const values = [];
++    for (const p of props.slice(-80)) {
++      for (const value of [own(p, "conversationId"), own(p, "clientThreadId"),
++        own(own(p, "conversation"), "id"), own(own(p, "turn"), "conversationId")]) {
++        if (!id(value)) continue;
++        if (branch && value !== branch) return unknown("conversation_conflict");
++        branch = value;
++      }
++      const approval = own(p, "approvalState");
++      if (["idle", "pending", "awaiting_approval"].includes(approval)) approvalStates.add(approval === "awaiting_approval" ? "pending" : approval);
++      for (const list of [own(p, "messages"), own(p, "allMessages"), own(own(p, "turn"), "messages")]) {
++        if (!Array.isArray(list)) continue;
++        if (list.length > 600) return unknown("collector_budget");
++        values.push(...list);
++      }
++      if (own(p, "message")) values.push(own(p, "message"));
++    }
++    if (!branch) continue;
++    if ((route && branch !== route) || (conversation && branch !== conversation)) return unknown("conversation_conflict");
++    conversation = branch;
++    for (const message of values) {
++      if (--budget < 0) return unknown("collector_budget");
++      const messageId = own(message, "id"), role = own(own(message, "author"), "role");
++      if (!id(messageId)) continue;
++      // Never derive role from the challenge, a selector, text or a parent ID.
++      if (!["user", "assistant"].includes(role)) {
++        const old = messages.get(messageId);
++        if (old) return unknown("message_conflict");
++        messages.set(messageId, { message_id: messageId, role: "UNKNOWN" });
++        continue;
++      }
++      const parts = own(own(message, "content"), "parts");
++      if (!Array.isArray(parts) || parts.some(part => typeof part !== "string")) {
++        return unknown("message_content_unsupported");
++      }
++      const body = parts.join("\n");
++      if (body.length > 2000000) return unknown("message_too_large");
++      const metadata = own(message, "metadata"), request = own(metadata, "request_id"), parent = own(message, "parent_id");
++      const providerRevision = own(metadata, "revision"), status = own(message, "status");
++      const observed = { message_id: messageId, role, body,
++        metadata_request_id: id(request) ? request : null, parent_id: id(parent) ? parent : null,
++        provider_revision: Number.isSafeInteger(providerRevision) && providerRevision >= 0 ? providerRevision : null,
++        complete: status === "finished_successfully" ? true : status === "in_progress" ? false : null };
++      const old = messages.get(messageId);
++      if (old && JSON.stringify(old) !== JSON.stringify(observed)) return unknown("message_conflict");
++      messages.set(messageId, observed);
++    }
++  }
++  const visible = element => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
++  const pending = [...document.querySelectorAll('[data-testid="connector-approval"],[data-testid="tool-approval"],[data-testid="approval-card"]')].some(visible);
++  let approval = "UNKNOWN", approvalSource = null;
++  if (pending) { approval = "pending"; approvalSource = "visible-approval-card"; }
++  else if (approvalStates.size === 1) { approval = [...approvalStates][0]; approvalSource = "committed-react:approvalState"; }
++  return { state: conversation ? "OBSERVED" : "UNKNOWN", reason: conversation ? null : "conversation_unobserved",
++    document_id: own(identity, "document_id"), identity_epoch: own(identity, "identity_epoch"), surface_id: own(identity, "surface_id"),
++    conversation_id: conversation, messages: [...messages.values()], approval_state: approval, approval_source: approvalSource };
++}
++
++async function sentraMessageChallenge(payload) {
++  requireAutomaticBrowserInspection(this, "SENTRA committed message challenge");
++  const allowed = new Set(["traceId", "surface_id", "document_id", "identity_epoch",
++    "conversation_id", "message_id", "expected_role", "observed_request_id", "parent_user_message_id", "body_sha256", "complete"]);
++  const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(value);
++  if (!payload || typeof payload !== "object" || Array.isArray(payload) || Object.keys(payload).some(key => !allowed.has(key))
++    || !id(payload.traceId) || !id(payload.surface_id) || !id(payload.conversation_id) || !id(payload.message_id)
++    || !id(payload.observed_request_id) || !["user", "assistant"].includes(payload.expected_role)
++    || !/^[a-f0-9]{32}$/.test(payload.document_id || "") || !/^[a-f0-9]{32}$/.test(payload.identity_epoch || "")
++    || !/^[a-f0-9]{64}$/.test(payload.body_sha256 || "")
++    || (payload.expected_role === "assistant" && !id(payload.parent_user_message_id))
++    || (payload.expected_role === "user" && payload.parent_user_message_id !== undefined)
++    || (payload.complete !== undefined && typeof payload.complete !== "boolean")) throw new Error("SENTRA message challenge is invalid");
++  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === payload.traceId && tab.surfaceId === payload.surface_id
++    && tab.status === "running" && tab.interactionMode === "automatic");
++  if (matches.length !== 1) throw new Error("SENTRA message challenge surface is unowned");
++  const tab = matches[0], doc = tab.sentraDocument, contents = tab.view.webContents;
++  if (contents.isDestroyed() || doc?.document_id !== payload.document_id || doc?.identity_epoch !== payload.identity_epoch
++    || doc?.surface_id !== payload.surface_id || new URL(contents.getURL()).origin !== CHATGPT_ORIGIN) throw new Error("SENTRA message challenge document changed");
++  const started = Date.now();
++  this.sentraMessageChallenges ||= new Map();
++  for (const [nonce, record] of this.sentraMessageChallenges) if (record.expiry <= started) this.sentraMessageChallenges.delete(nonce);
++  if (this.sentraMessageChallenges.size >= 256) throw new Error("SENTRA message challenge capacity reached");
++  const challengeId = randomBytes(16).toString("hex");
++  const challenge = Object.freeze(Object.fromEntries([...allowed].filter(key => Object.hasOwn(payload, key)).map(key => [key, payload[key]])));
++  const digest = createHash("sha256").update(JSON.stringify(challenge)).digest("hex");
++  this.sentraMessageChallenges.set(challengeId, { challenge, digest, expiry: started + 10000,
++    tab, doc, authenticationRevision: this.authenticationRevision, profile: this.profile, partition: this.partition });
++  return { ok: true, state: "CHALLENGED", role: "UNKNOWN", challenge_id: challengeId,
++    challenge_sha256: digest, expires_at: new Date(started + 10000).toISOString(), account_verified: false };
++}
++
++async function sentraMessageSnapshot(payload) {
++  requireAutomaticBrowserInspection(this, "SENTRA committed message observation");
++  if (!payload || Object.keys(payload).length !== 1 || !/^[a-f0-9]{32}$/.test(payload.challenge_id || "")) throw new Error("SENTRA message snapshot challenge is invalid");
++  const record = this.sentraMessageChallenges?.get(payload.challenge_id);
++  // One-use, Host-issued challenge. Caller cannot replace expectations at snapshot time.
++  this.sentraMessageChallenges?.delete(payload.challenge_id);
++  const started = Date.now();
++  const base = { ok: true, matched: false, state: "UNKNOWN", role: "UNKNOWN", challenge_id: payload.challenge_id,
++    challenge_sha256: record?.digest || null, account_verified: false, collector_id: "sentra-committed-message-v1",
++    collector_sha256: createHash("sha256").update(collectSentraCommittedMessages.toString()).digest("hex"),
++    host_source_sha256: createHash("sha256").update(fs.readFileSync(__filename)).digest("hex") };
++  const unknown = reason => ({ ...base, reason, approval_state: "UNKNOWN", observed_at: new Date().toISOString() });
++  if (!record) return unknown("challenge_unknown_or_consumed");
++  if (record.expiry <= started) return unknown("challenge_expired");
++  const challenge = record.challenge;
++  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === challenge.traceId && tab.surfaceId === challenge.surface_id
++    && tab.status === "running" && tab.interactionMode === "automatic");
++  if (matches.length !== 1) return unknown("surface_unowned");
++  const tab = matches[0], contents = tab.view.webContents, doc = tab.sentraDocument, authRevision = record.authenticationRevision;
++  const valid = () => tab === record.tab && doc === record.doc && this.profile === record.profile && this.partition === record.partition
++    && !contents.isDestroyed() && this.turnTabs.get(tab.id) === tab && tab.status === "running"
++    && tab.sentraDocument === doc && this.authenticationRevision === authRevision
++    && doc?.document_id === challenge.document_id && doc?.identity_epoch === challenge.identity_epoch
++    && doc?.surface_id === challenge.surface_id && new URL(contents.getURL()).origin === CHATGPT_ORIGIN;
++  if (!valid()) return unknown("document_changed");
++  if (tab.sentraMessageObservationBusy) return unknown("observation_busy");
++  tab.sentraMessageObservationBusy = true;
++  let timeout;
++  try {
++    const read = () => contents.executeJavaScript(`(${collectSentraCommittedMessages.toString()})()`, false);
++    const observations = await Promise.race([
++      (async () => [await read(), await read()])(),
++      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("snapshot_timeout")), 5000); }),
++    ]);
++    if (!valid() || Date.now() - started > 5000) return unknown("document_changed");
++    if (JSON.stringify(observations[0]) !== JSON.stringify(observations[1])) return unknown("observation_changed");
++    const observed = observations[1];
++    if (observed?.state !== "OBSERVED") return unknown(observed?.reason || "snapshot_unavailable");
++    for (const field of ["document_id", "identity_epoch", "surface_id", "conversation_id"]) {
++      if (observed[field] !== challenge[field]) return unknown("document_or_conversation_changed");
++    }
++    const exact = observed.messages.filter(message => message.message_id === challenge.message_id);
++    if (exact.length !== 1 || exact[0].role !== challenge.expected_role) return unknown("message_role_unverified");
++    const message = exact[0];
++    if (message.role === "user" && message.metadata_request_id !== challenge.observed_request_id) return unknown("request_mismatch");
++    if (message.role === "assistant") {
++      if (message.parent_id !== challenge.parent_user_message_id) return unknown("parent_mismatch");
++      const parents = observed.messages.filter(parent => parent.message_id === message.parent_id && parent.role === "user");
++      if (parents.length !== 1 || parents[0].metadata_request_id !== challenge.observed_request_id) return unknown("parent_request_unverified");
++    }
++    const bodySha = createHash("sha256").update(message.body, "utf8").digest("hex");
++    if (bodySha !== challenge.body_sha256) return unknown("body_changed");
++    if (challenge.complete !== undefined && message.complete !== challenge.complete) return unknown("completion_unverified");
++    tab.sentraMessageObservations ||= new Map();
++    const observationKey = JSON.stringify([observed.document_id, observed.identity_epoch, observed.conversation_id, message.message_id]);
++    if (!tab.sentraMessageObservations.has(observationKey) && tab.sentraMessageObservations.size >= 2048) return unknown("revision_capacity");
++    const signature = JSON.stringify([message.role, message.metadata_request_id, message.parent_id, bodySha, message.complete, message.provider_revision]);
++    const prior = tab.sentraMessageObservations.get(observationKey);
++    if (prior && (prior.role !== message.role || prior.parent !== message.parent_id || prior.request !== message.metadata_request_id)) return unknown("message_binding_changed");
++    if (prior && prior.provider_revision !== null && (message.provider_revision === null || message.provider_revision < prior.provider_revision)) return unknown("provider_revision_regressed");
++    const hostRevision = prior ? prior.revision + (prior.signature !== signature ? 1 : 0) : 1;
++    tab.sentraMessageObservations.set(observationKey, { signature, revision: hostRevision, role: message.role,
++      parent: message.parent_id, request: message.metadata_request_id, provider_revision: message.provider_revision });
++    return { ...base, matched: true, state: "OBSERVED", role: message.role, reason: null,
++      document_id: observed.document_id, identity_epoch: observed.identity_epoch, surface_id: observed.surface_id,
++      conversation_id: observed.conversation_id, message_id: message.message_id, metadata_request_id: message.metadata_request_id,
++      observed_request_id: message.role === "user" ? message.metadata_request_id
++        : observed.messages.find(parent => parent.message_id === message.parent_id && parent.role === "user").metadata_request_id,
++      parent_user_message_id: message.role === "assistant" ? message.parent_id : null, body_sha256: bodySha,
++      body_length: message.body.length, host_revision: hostRevision, revision_source: "host-observation",
++      provider_revision: message.provider_revision, complete: message.complete,
++      approval_state: observed.approval_state, approval_source: observed.approval_source,
++      authentication_revision: authRevision, observed_at: new Date().toISOString() };
++  } catch { return unknown("snapshot_unavailable"); }
++  finally { clearTimeout(timeout); tab.sentraMessageObservationBusy = false; }
++}
++
+ class BrowserHost {
+   constructor({
+     window,
+@@ -816,6 +1138,9 @@
+       tab.url = url;
+       tab.loading = true;
+       if (!inPlace) {
++        tab.sentraDocument = null;
++        tab.sentraMessageObservations = new Map();
++        this.writeDescriptor();
+         tab.rendererReady = false;
+         tab.deviceEmulationDirty = true;
+       }
+@@ -894,6 +1219,18 @@
+     });
+   }
+ 
++  async sentraMessageChallenge(expected) {
++    return sentraMessageChallenge.call(this, expected);
++  }
++
++  async sentraMessageSnapshot(challenge) {
++    return sentraMessageSnapshot.call(this, challenge);
++  }
++
++  async sentraIdentitySnapshot(binding) {
++    return sentraIdentitySnapshot.call(this, binding);
++  }
++
+   async markTurnTabSurface(tab) {
+     requireAutomaticBrowserInspection(this, "ChatGPT turn surface ownership marking");
+     const contents = tab?.view?.webContents;
+@@ -902,13 +1239,24 @@
+     }
+     void contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => {});
+     const encoded = JSON.stringify(tab.surfaceId);
++    if (process.env.SENTRA_TURN_AUTHORITY_TOKEN && !tab.sentraDocument) {
++      tab.sentraDocument = { document_id: randomBytes(16).toString("hex"),
++        identity_epoch: randomBytes(16).toString("hex"), surface_id: tab.surfaceId };
++    }
++    const documentIdentity = JSON.stringify(tab.sentraDocument || null);
+     await contents.executeJavaScript(`(() => {
+       Object.defineProperty(globalThis, "__CODEX_WEB_GPT_SURFACE_ID__", {
+         value: ${encoded}, configurable: true, enumerable: false, writable: false,
+       });
++      if (${documentIdentity} && !globalThis.__SENTRA_WEB_DOCUMENT__) {
++        Object.defineProperty(globalThis, "__SENTRA_WEB_DOCUMENT__", {
++          value: Object.freeze(${documentIdentity}), configurable: false, writable: false, enumerable: false,
++        });
++      }
+       document.documentElement.dataset.codexWebGptSurface = ${encoded};
+       (${configureChatGptAnnouncementDismissal.toString()})(true);
+     })()`, true);
++    this.writeDescriptor();
+   }
+ 
+   async configureAnnouncementDismissal(enabled) {
+@@ -1419,6 +1767,7 @@
        tab.deviceEmulationDirty = true;
        this.syncViewVisibility();
      }
@@ -10,10 +392,12 @@ index 9025c18..d36c9ce 100644
      return this.snapshot();
    }
  
-@@ -3039,6 +3040,20 @@ class BrowserHost {
+@@ -3039,6 +3388,24 @@
        idleUrl: IDLE_BROWSER_URL,
        surfaceId: this.surfaceId,
        surfaceTargets,
++      sentraMessageCollector: { id: "sentra-committed-message-v1", sha256: createHash("sha256").update(collectSentraCommittedMessages.toString()).digest("hex") },
++      sentraIdentityCollector: { id: "sentra-committed-account-menu-v1", sha256: createHash("sha256").update(collectSentraUiIdentity.toString()).digest("hex"), verified: false },
 +      sentraManaged: Boolean(process.env.SENTRA_TURN_AUTHORITY_TOKEN),
 +      sentraIntegrationPatchSha256: process.env.SENTRA_INTEGRATION_PATCH_SHA256 || null,
 +      sentraTabs: [...this.turnTabs.values()]
@@ -21,6 +405,8 @@ index 9025c18..d36c9ce 100644
 +        .map(tab => ({
 +          tabId: tab.id,
 +          surfaceId: tab.surfaceId,
++          documentId: tab.sentraDocument?.document_id || null,
++          identityEpoch: tab.sentraDocument?.identity_epoch || null,
 +          traceId: tab.traceId,
 +          conversationKey: tab.conversationKey || null,
 +          helperPid: tab.helperPid,
@@ -31,8 +417,16 @@ index 9025c18..d36c9ce 100644
        createdAt: new Date().toISOString(),
      };
      writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
+@@ -3098,6 +3465,8 @@
+ }
+ 
+ module.exports = {
++  collectSentraCommittedMessages,
++  collectSentraUiIdentity,
+   allowedAuthUrl,
+   BrowserHost,
+   BrowserTurnCancelledError,
 diff --git a/launcher/electron/connector-identity.cjs b/launcher/electron/connector-identity.cjs
-index 320ec5a..406d2f1 100644
 --- a/launcher/electron/connector-identity.cjs
 +++ b/launcher/electron/connector-identity.cjs
 @@ -1,6 +1,6 @@
@@ -44,7 +438,7 @@ index 320ec5a..406d2f1 100644
  
  function validateConnectorName(value) {
    if (typeof value !== "string" || !value.trim() || value.length > 80) {
-@@ -14,29 +14,40 @@ function isLegacyConnectorName(value) {
+@@ -14,29 +14,40 @@
  }
  
  function connectorNameForSetup(value) {
@@ -93,10 +487,9 @@ index 320ec5a..406d2f1 100644
  
  module.exports = {
 diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
-index 2c9c565..b27ba9e 100644
 --- a/launcher/electron/control-server.cjs
 +++ b/launcher/electron/control-server.cjs
-@@ -38,12 +38,13 @@ function writeJson(response, status, body) {
+@@ -38,12 +38,13 @@
  }
  
  class BrowserControlServer {
@@ -111,24 +504,29 @@ index 2c9c565..b27ba9e 100644
      this.token = randomBytes(32).toString("base64url");
      this.port = 0;
      this.server = createServer((request, response) => {
-@@ -102,6 +103,7 @@ class BrowserControlServer {
+@@ -100,8 +101,12 @@
+       || request.url === "/v1/turn/usage"
+       || request.url === "/v1/turn/end";
      const isTurnRelease = request.url === "/v1/turn/release";
++    const isSentraMessageChallenge = request.url === "/v1/sentra/message-challenge";
++    const isSentraMessageSnapshot = request.url === "/v1/sentra/message-snapshot";
++    const isSentraIdentitySnapshot = request.url === "/v1/sentra/identity-snapshot";
      const isSessionInspect = request.url === "/v1/session/inspect";
      const isProxyResolution = request.url === "/v1/network/resolve-proxy";
 +    const isSentraRuntimeControl = Boolean(this.controlRuntime) && request.url === "/v1/sentra/runtime-control";
      const manualAction = new Map([
        ["/v1/manual/start", "start"],
        ["/v1/manual/wait-sent", "wait-sent"],
-@@ -110,7 +112,7 @@ class BrowserControlServer {
+@@ -110,7 +115,7 @@
        ["/v1/manual/end", "end"],
        ["/v1/manual/cancel", "cancel"],
      ]).get(request.url);
 -    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
-+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !isSentraRuntimeControl && !manualAction)) {
++    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isSentraIdentitySnapshot && !isSentraMessageSnapshot && !isSentraMessageChallenge && !isProxyResolution && !isSentraRuntimeControl && !manualAction)) {
        writeJson(response, 404, { error: "not_found" });
        return;
      }
-@@ -119,6 +121,35 @@ class BrowserControlServer {
+@@ -119,6 +124,35 @@
          request,
          manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : MAX_BODY_BYTES,
        );
@@ -164,11 +562,32 @@ index 2c9c565..b27ba9e 100644
        if (isProxyResolution) {
          const url = new URL(body?.url);
          if (url.origin !== "https://chatgpt.com" || url.username || url.password
+@@ -135,6 +169,21 @@
+       const preferences = this.getPreferences();
+       const host = this.getBrowserHost();
+       if (!host) throw new Error("browser host is not ready");
++      if (isSentraMessageChallenge) {
++        const result = await host.sentraMessageChallenge(body);
++        writeJson(response, 200, result);
++        return;
++      }
++      if (isSentraMessageSnapshot) {
++        const result = await host.sentraMessageSnapshot(body);
++        writeJson(response, 200, result);
++        return;
++      }
++      if (isSentraIdentitySnapshot) {
++        const result = await host.sentraIdentitySnapshot(body);
++        writeJson(response, 200, result);
++        return;
++      }
+       if (isSessionInspect) {
+         if (host.browserInteractionMode() === "manual") {
+           const error = new Error(
 diff --git a/launcher/electron/main.cjs b/launcher/electron/main.cjs
-index 71b95c2..0b48303 100644
 --- a/launcher/electron/main.cjs
 +++ b/launcher/electron/main.cjs
-@@ -47,6 +47,7 @@ const {
+@@ -47,6 +47,7 @@
  } = require("./window-state.cjs");
  
  const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
@@ -176,7 +595,7 @@ index 71b95c2..0b48303 100644
  const SOURCE_ROOT = path.resolve(__dirname, "../..");
  const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
  const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
-@@ -60,6 +61,7 @@ const X_URL = "https://x.com/miu21590";
+@@ -60,6 +61,7 @@
  const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
  const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
  const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
@@ -184,7 +603,7 @@ index 71b95c2..0b48303 100644
  const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL, LIMITS_SOURCE_URL]);
  const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
  const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
-@@ -513,6 +515,30 @@ function syncFreshConversationPreference(stateStore, config) {
+@@ -513,6 +515,30 @@
    send("launcher:state-changed", state);
    return state;
  }
@@ -215,7 +634,7 @@ index 71b95c2..0b48303 100644
  
  function registerIpc({ logger, stateStore }) {
    const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
-@@ -536,6 +562,7 @@ function registerIpc({ logger, stateStore }) {
+@@ -536,6 +562,7 @@
        manual: "Codex Zero Risk",
      },
      mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
@@ -223,21 +642,21 @@ index 71b95c2..0b48303 100644
      logs: logger.recent(),
      urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
      platform: process.platform,
-@@ -580,6 +607,13 @@ function registerIpc({ logger, stateStore }) {
+@@ -578,6 +605,13 @@
+   handle("launcher:open-external", async (_event, url) => {
+     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
      await openWebUrl(url);
-     return true;
-   });
++    return true;
++  });
 +  handle("launcher:open-sentra-onboarding", async () => {
 +    if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
 +      throw new Error("This launcher is not managed by SENTRA");
 +    }
 +    await shell.openExternal(SENTRA_ONBOARDING_URL);
-+    return true;
-+  });
+     return true;
+   });
  
-   handle("launcher:browser-bounds", (event, bounds) => {
-     browserHost?.setBounds(validateBounds(bounds), event.sender.getZoomFactor());
-@@ -657,7 +691,7 @@ function registerIpc({ logger, stateStore }) {
+@@ -657,7 +691,7 @@
        return report;
      }
      publishOperation({ name: operationName, status: "running", message: "Checking local runtime" });
@@ -246,7 +665,7 @@ index 71b95c2..0b48303 100644
      if (!report.ok) {
        const message = report.checks
          .filter((check) => check.status === "error")
-@@ -681,14 +715,14 @@ function registerIpc({ logger, stateStore }) {
+@@ -681,14 +715,14 @@
            {
              id: "connector",
              status: "warning",
@@ -263,7 +682,7 @@ index 71b95c2..0b48303 100644
        const state = stateStore.update({ mcpSetupComplete: true });
        send("launcher:state-changed", state);
        const successMessage = IS_DEV_PROFILE
-@@ -701,7 +735,7 @@ function registerIpc({ logger, stateStore }) {
+@@ -701,7 +735,7 @@
            ? {
                id: "connector",
                status: "ok",
@@ -272,7 +691,7 @@ index 71b95c2..0b48303 100644
              }
            : check),
        };
-@@ -721,7 +755,7 @@ function registerIpc({ logger, stateStore }) {
+@@ -721,7 +755,7 @@
      }
    });
  
@@ -281,7 +700,7 @@ index 71b95c2..0b48303 100644
    handle("launcher:cancel-turns", () => {
      if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
      return runtimeHost.cancelActiveTurns();
-@@ -817,6 +851,33 @@ function registerIpc({ logger, stateStore }) {
+@@ -817,6 +851,33 @@
        ? currentMode
        : validateBrowserInteractionMode(input.interactionMode);
      const interactionModeChange = interactionMode !== currentMode;
@@ -315,7 +734,7 @@ index 71b95c2..0b48303 100644
      const setup = IS_DEV_PROFILE
        ? runtimeHost.setupDevMcp.bind(runtimeHost)
        : runtimeHost.setupMcp.bind(runtimeHost);
-@@ -917,6 +978,9 @@ function registerIpc({ logger, stateStore }) {
+@@ -917,6 +978,9 @@
    });
    handle("launcher:browser-interaction-mode", async (_event, rawMode) => {
      const mode = validateBrowserInteractionMode(rawMode);
@@ -325,7 +744,7 @@ index 71b95c2..0b48303 100644
      const current = stateStore.read();
      if (current.browserInteractionMode === mode) {
        return { state: current, credentialsRequired: false, targetMode: mode };
-@@ -1037,9 +1101,17 @@ async function start() {
+@@ -1037,9 +1101,17 @@
    app.on("activate", () => showMainWindow());
  
    await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
@@ -345,7 +764,7 @@ index 71b95c2..0b48303 100644
      const packagedRuntimeWasRemoved = app.isPackaged
        && (!installedRuntimeRoot || !fs.existsSync(installedRuntimeRoot));
      if (!runtimeRootResolved || packagedRuntimeWasRemoved) {
-@@ -1064,6 +1136,13 @@ async function start() {
+@@ -1064,6 +1136,13 @@
    await app.whenReady();
  
    const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
@@ -359,7 +778,7 @@ index 71b95c2..0b48303 100644
    limitsController = new LimitsController(path.join(app.getPath("userData"), "limits.json"), {
      getInteractionMode: () => stateStore.read().browserInteractionMode,
    });
-@@ -1096,7 +1175,8 @@ async function start() {
+@@ -1096,7 +1175,8 @@
      filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
      publish: (record) => send("launcher:log", record),
    });
@@ -369,7 +788,7 @@ index 71b95c2..0b48303 100644
    nativeTheme.themeSource = "system";
    mainWindow = createWindow({
      logger,
-@@ -1110,6 +1190,17 @@ async function start() {
+@@ -1110,6 +1190,17 @@
      getPreferences: () => syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
      resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
      limits: limitsController,
@@ -387,7 +806,7 @@ index 71b95c2..0b48303 100644
    }).start();
    runtimeSupervisor = new RuntimeSupervisor({
      app,
-@@ -1179,7 +1270,11 @@ async function start() {
+@@ -1179,7 +1270,11 @@
      logger,
    });
    registerIpc({ logger, stateStore });
@@ -400,7 +819,7 @@ index 71b95c2..0b48303 100644
    if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
    const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
    let startupAuthenticationRefresh = Promise.resolve();
-@@ -1191,7 +1286,7 @@ async function start() {
+@@ -1191,7 +1286,7 @@
      });
    }
    await loadRenderer(mainWindow);
@@ -409,7 +828,7 @@ index 71b95c2..0b48303 100644
    if (launcherSmokeTest) {
      const smokeRuntimeRoot = runtimeRootProvider();
      if (app.isPackaged && !smokeRuntimeRoot) {
-@@ -1230,7 +1325,14 @@ async function start() {
+@@ -1230,7 +1325,14 @@
      app.quit();
      return;
    }
@@ -425,7 +844,7 @@ index 71b95c2..0b48303 100644
      let config = null;
      try {
        config = runtimeSupervisor.readConfig();
-@@ -1417,6 +1519,14 @@ void start().catch(async (error) => {
+@@ -1417,6 +1519,14 @@
    try {
      fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
    } catch {}
@@ -442,7 +861,6 @@ index 71b95c2..0b48303 100644
      // through the existing instance, and release browser resources before a user retry.
 diff --git a/launcher/electron/orphan-runtime-recovery.cjs b/launcher/electron/orphan-runtime-recovery.cjs
 new file mode 100644
-index 0000000..90696a2
 --- /dev/null
 +++ b/launcher/electron/orphan-runtime-recovery.cjs
 @@ -0,0 +1,86 @@
@@ -533,10 +951,9 @@ index 0000000..90696a2
 +  recoverOrphanedRuntimeLock,
 +};
 diff --git a/launcher/electron/preload.cjs b/launcher/electron/preload.cjs
-index 0ed9dfc..a7958b9 100644
 --- a/launcher/electron/preload.cjs
 +++ b/launcher/electron/preload.cjs
-@@ -18,6 +18,7 @@ contextBridge.exposeInMainWorld("codexWebLauncher", {
+@@ -18,6 +18,7 @@
      browserInteractionMode,
    ),
    openExternal: (url) => ipcRenderer.invoke("launcher:open-external", url),
@@ -545,10 +962,9 @@ index 0ed9dfc..a7958b9 100644
    setBrowserSurfaceActive: (active) => ipcRenderer.invoke("launcher:browser-surface-active", active),
    showBrowser: () => ipcRenderer.invoke("launcher:browser-show"),
 diff --git a/launcher/electron/runtime-install.cjs b/launcher/electron/runtime-install.cjs
-index f516eac..33e1efa 100644
 --- a/launcher/electron/runtime-install.cjs
 +++ b/launcher/electron/runtime-install.cjs
-@@ -2,6 +2,7 @@ const { createHash } = require("node:crypto");
+@@ -2,6 +2,7 @@
  const fs = require("node:fs");
  const path = require("node:path");
  const { renameAtomicFile } = require("./atomic-file.cjs");
@@ -556,7 +972,7 @@ index f516eac..33e1efa 100644
  const { runtimeBundlePaths } = require("./runtime-command.cjs");
  
  const DEFAULT_SOURCE_WAIT_TIMEOUT_MS = 30_000;
-@@ -252,6 +253,7 @@ function ensurePackagedRuntime({ app, coreHome, resourcesPath }) {
+@@ -252,6 +253,7 @@
      });
      validateRuntimeBundle(temporary, expectedIdentity);
      if (fs.existsSync(destination)) {
@@ -565,10 +981,9 @@ index f516eac..33e1efa 100644
        previousMoved = true;
      }
 diff --git a/launcher/electron/runtime-supervisor.cjs b/launcher/electron/runtime-supervisor.cjs
-index 682cdd4..130fb45 100644
 --- a/launcher/electron/runtime-supervisor.cjs
 +++ b/launcher/electron/runtime-supervisor.cjs
-@@ -10,7 +10,7 @@ const {
+@@ -10,7 +10,7 @@
    processRunning,
    terminateOwnedProcessTree,
  } = require("./process-tree.cjs");
@@ -577,7 +992,7 @@ index 682cdd4..130fb45 100644
  
  const RESTART_WINDOW_MS = 60_000;
  const MAX_RESTARTS_PER_WINDOW = 5;
-@@ -27,6 +27,11 @@ const BOOT_TIME_CLOCK_TOLERANCE_MS = 5_000;
+@@ -27,6 +27,11 @@
  const CURRENT_BOOT_STARTED_AT_MS = Date.now() - (os.uptime() * 1_000);
  
  const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -589,7 +1004,7 @@ index 682cdd4..130fb45 100644
  
  function collectLines(stream, onLine, onError) {
    let buffered = "";
-@@ -196,6 +201,9 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
+@@ -196,6 +201,9 @@
    } else if (config.purpose !== undefined) {
      throw new Error("Production launcher refuses a DEV harness configuration");
    }
@@ -599,7 +1014,7 @@ index 682cdd4..130fb45 100644
    if (config.solAvailable === undefined) config = { ...config, solAvailable: true };
    if (config.browserInteractionMode === undefined) {
      config.browserInteractionMode = "automatic";
-@@ -300,7 +308,7 @@ function validateConfig(config, descriptorPath, platform = process.platform, lau
+@@ -300,7 +308,7 @@
        }
      }
    };
@@ -608,7 +1023,7 @@ index 682cdd4..130fb45 100644
      validateTunnel(config.tunnel, "tunnel");
      if (config.automaticTunnel !== undefined) validateTunnel(config.automaticTunnel, "automaticTunnel");
      if (config.manualTunnel !== undefined) validateTunnel(config.manualTunnel, "manualTunnel");
-@@ -553,6 +561,13 @@ class RuntimeSupervisor {
+@@ -553,6 +561,13 @@
  
    runtimeCommand(args) {
      if (this.runtimeRootProvider) this.installedRuntimeRoot = this.runtimeRootProvider();
@@ -622,7 +1037,7 @@ index 682cdd4..130fb45 100644
      return this.runtimeInvocationFactory({
        app: this.app,
        sourceRoot: this.sourceRoot,
-@@ -985,7 +1000,7 @@ class RuntimeSupervisor {
+@@ -985,7 +1000,7 @@
    }
  
    async startTunnel(config, operationName = "runtime-start", { forceRestart = false } = {}) {
@@ -631,7 +1046,7 @@ index 682cdd4..130fb45 100644
      this.assertTunnelClientReady(config);
      // Every acquisition binds diagnostics to this runtime, including adoption of an existing alias.
      this.tunnelHealthBaseUrl = null;
-@@ -1347,11 +1362,11 @@ class RuntimeSupervisor {
+@@ -1347,11 +1362,11 @@
      else if (tunnelOnly) throw new Error("DEV runtime cannot recover a Responses daemon");
      else await this.startDaemon(config);
      if (!tunnelOnly && !this.daemon) throw new Error("Responses proxy is unavailable after runtime recovery");
@@ -645,7 +1060,7 @@ index 682cdd4..130fb45 100644
        await this.waitForTunnel(config, TUNNEL_START_TIMEOUT_MS, "runtime-recovery");
      }
      if (!this.tryWriteState("ready")) {
-@@ -1426,7 +1441,7 @@ class RuntimeSupervisor {
+@@ -1426,7 +1441,7 @@
  
    async ownedRuntimeReady(config) {
      if (this.launcherProfile === "development") {
@@ -654,7 +1069,7 @@ index 682cdd4..130fb45 100644
      }
      const daemon = this.daemon;
      if (!daemon
-@@ -1436,7 +1451,7 @@ class RuntimeSupervisor {
+@@ -1436,7 +1451,7 @@
        || !await this.proxyHealth(config, 2_000, daemon.pid, true)) {
        return false;
      }
@@ -663,7 +1078,7 @@ index 682cdd4..130fb45 100644
      return Boolean(this.tunnel && await this.tunnelHealth(config));
    }
  
-@@ -1569,7 +1584,7 @@ class RuntimeSupervisor {
+@@ -1569,7 +1584,7 @@
    }
  
    async adoptConfiguredTunnelForStop(config) {
@@ -672,7 +1087,7 @@ index 682cdd4..130fb45 100644
      const health = await this.waitForKnownTunnelStatus(config);
      if (tunnelRuntimeStopped(health)) {
        return;
-@@ -1742,7 +1757,7 @@ class RuntimeSupervisor {
+@@ -1742,7 +1757,7 @@
        );
      }
      let managedTunnelRunning = false;
@@ -681,7 +1096,7 @@ index 682cdd4..130fb45 100644
        const tunnelHealth = await this.waitForKnownTunnelStatus(config);
        managedTunnelRunning = !tunnelRuntimeStopped(tunnelHealth);
        if (managedTunnelRunning
-@@ -1966,7 +1981,7 @@ class RuntimeSupervisor {
+@@ -1966,7 +1981,7 @@
          ? await this.proxyHealth(config)
          : false;
        const runtimeMayBeLive = healthyRuntime || runtimeOwnershipMayBeLive(ownershipState);
@@ -690,7 +1105,7 @@ index 682cdd4..130fb45 100644
          && !this.tunnel
          && (runtimeMayBeLive || !ownershipState)) {
          await this.adoptConfiguredTunnelForStop(config);
-@@ -2011,7 +2026,7 @@ class RuntimeSupervisor {
+@@ -2011,7 +2026,7 @@
        return { status: "stopped" };
      } catch (error) {
        const compensationErrors = [];
@@ -700,10 +1115,9 @@ index 682cdd4..130fb45 100644
            await this.startTunnel(config);
          } catch (caught) {
 diff --git a/launcher/src/App.tsx b/launcher/src/App.tsx
-index e9d3fac..54ee3c1 100644
 --- a/launcher/src/App.tsx
 +++ b/launcher/src/App.tsx
-@@ -1281,15 +1281,20 @@ function McpSurface({
+@@ -1281,15 +1281,20 @@
    const busy = localBusy || operation?.status === "running";
    const [doctor, setDoctor] = useState<DoctorReport | null>(null);
    const verified = !configuringInactiveMode && snapshot.state.mcpSetupComplete === true;
@@ -726,7 +1140,7 @@ index e9d3fac..54ee3c1 100644
    const guideMedia = MCP_GUIDE_MEDIA[step];
  
    const move = async (next: number) => {
-@@ -1318,12 +1323,14 @@ function McpSurface({
+@@ -1318,12 +1323,14 @@
      setLocalBusy(true);
      setError(null);
      try {
@@ -743,7 +1157,7 @@ index e9d3fac..54ee3c1 100644
        setRuntimeKey("");
        setTunnelId("");
        setCredentialsConfigured(true);
-@@ -1402,7 +1409,28 @@ function McpSurface({
+@@ -1402,7 +1409,28 @@
                </div>
              </header>
  
@@ -773,7 +1187,7 @@ index e9d3fac..54ee3c1 100644
                <div className="inline-actions">
                  <SecondaryButton icon="external" onClick={() => void openExternal(snapshot.urls.tunnels)}>
                    {copy.openTunnels}
-@@ -1413,22 +1441,28 @@ function McpSurface({
+@@ -1413,22 +1441,28 @@
                </div>
              ) : null}
              {step === 1 ? (
@@ -807,7 +1221,7 @@ index e9d3fac..54ee3c1 100644
                  </div>
                ) : (
                  <div className="field-list">
-@@ -1482,7 +1516,9 @@ function McpSurface({
+@@ -1482,7 +1516,9 @@
                  <NoticeRow icon="alert" tone="warning">
                    {manualInteraction
                      ? copy.manualConnectorNotice
@@ -818,7 +1232,7 @@ index e9d3fac..54ee3c1 100644
                  </NoticeRow>
                  <div className="connector-name">
                    <span>{copy.connectorName}</span>
-@@ -1519,12 +1555,12 @@ function McpSurface({
+@@ -1519,12 +1555,12 @@
            <PrimaryButton
              disabled={
                busy
@@ -834,7 +1248,7 @@ index e9d3fac..54ee3c1 100644
            </PrimaryButton>
          ) : null}
          {step === 2 ? (
-@@ -2236,9 +2272,11 @@ function FieldRow({ children, label }: { children: ReactNode; label: string }) {
+@@ -2236,9 +2272,11 @@
  }
  
  function DoctorSummary({ copy, language, report }: { copy: Copy; language: Language; report: DoctorReport }) {
@@ -850,10 +1264,9 @@ index e9d3fac..54ee3c1 100644
      <div className={`doctor-summary${report.ok ? " is-healthy" : ""}`}>
        <header>
 diff --git a/launcher/src/i18n.ts b/launcher/src/i18n.ts
-index 3ffaf19..e458db4 100644
 --- a/launcher/src/i18n.ts
 +++ b/launcher/src/i18n.ts
-@@ -120,26 +120,26 @@ const en = {
+@@ -120,26 +120,26 @@
    playGuideVideo: "Play video",
    pauseGuideVideo: "Pause video",
    closeGuideVideo: "Close expanded guide video",
@@ -895,10 +1308,9 @@ index 3ffaf19..e458db4 100644
    openConnectors: "Open ChatGPT Plugins",
    connectorName: "Connector name",
 diff --git a/launcher/src/types.ts b/launcher/src/types.ts
-index 4c191f8..7af04e5 100644
 --- a/launcher/src/types.ts
 +++ b/launcher/src/types.ts
-@@ -82,7 +82,7 @@ export interface DoctorCheck {
+@@ -82,7 +82,7 @@
  
  export interface DoctorReport {
    ok: boolean;
@@ -907,7 +1319,7 @@ index 4c191f8..7af04e5 100644
    checks: DoctorCheck[];
  }
  
-@@ -109,6 +109,7 @@ export interface LauncherSnapshot {
+@@ -109,6 +109,7 @@
    connectorName: string;
    connectorNames: Record<BrowserInteractionMode, string>;
    mcpCredentialsConfigured: boolean;
@@ -915,7 +1327,7 @@ index 4c191f8..7af04e5 100644
    logs: LogRecord[];
    urls: {
      github: string;
-@@ -133,6 +134,7 @@ export interface LauncherApi {
+@@ -133,6 +134,7 @@
    openSocial(target: "github" | "x"): Promise<LauncherState>;
    completeOnboarding(language: Language, browserInteractionMode: BrowserInteractionMode): Promise<LauncherState>;
    openExternal(url: string): Promise<boolean>;
@@ -924,13 +1336,14 @@ index 4c191f8..7af04e5 100644
    setBrowserSurfaceActive(active: boolean): Promise<BrowserState>;
    showBrowser(): Promise<BrowserState>;
 diff --git a/launcher/tests/packaging-contract.test.cjs b/launcher/tests/packaging-contract.test.cjs
-index d96cc16..de34cc3 100644
 --- a/launcher/tests/packaging-contract.test.cjs
 +++ b/launcher/tests/packaging-contract.test.cjs
-@@ -25,6 +25,25 @@ test("the full verification gate audits launcher dependencies", () => {
+@@ -23,6 +23,25 @@
+   assert.equal(manifest.scripts.audit, "bun audit");
+   assert.equal(repositoryManifest.scripts["launcher:audit"], "bun run --cwd launcher audit");
    assert.match(verify, /await run\(\["run", "launcher:audit"\]\);/);
- });
- 
++});
++
 +test("SENTRA browser-host-only mode never replaces the durable runtime or starts owned services", () => {
 +  const main = fs.readFileSync(path.join(launcherRoot, "electron", "main.cjs"), "utf8");
 +  assert.match(main, /SENTRA_BROWSER_HOST_ONLY/);
@@ -948,12 +1361,10 @@ index d96cc16..de34cc3 100644
 +    main,
 +    /if \(SENTRA_BROWSER_HOST_ONLY\) \{[\s\S]*app\.exit\(1\);[\s\S]*return;/,
 +  );
-+});
-+
+ });
+ 
  test("launcher publishes native packages for all supported desktop operating systems", () => {
-   assert.equal(manifest.build.appId, "dev.codexwebgpt.launcher");
-   assert.equal(manifest.build.artifactName, "codex-web-gpt-${version}-${os}-${arch}.${ext}");
-@@ -384,3 +403,18 @@ test("Windows packages embed the checksummed Bun baseline runtime for CPUs witho
+@@ -384,3 +403,18 @@
    assert.match(baseline, /Get-FileHash[^\n]+SHA256/);
    assert.match(baseline, /CODEX_CHATGPT_WEB_EMBEDDED_BUN=/);
  });
@@ -974,7 +1385,6 @@ index d96cc16..de34cc3 100644
 +});
 diff --git a/launcher/tests/runtime-install-orphan.test.cjs b/launcher/tests/runtime-install-orphan.test.cjs
 new file mode 100644
-index 0000000..c8956be
 --- /dev/null
 +++ b/launcher/tests/runtime-install-orphan.test.cjs
 @@ -0,0 +1,66 @@
@@ -1045,18 +1455,18 @@ index 0000000..c8956be
 +  }
 +});
 diff --git a/src/adapters/chatgpt-web/browser-helper-main.ts b/src/adapters/chatgpt-web/browser-helper-main.ts
-index 1c497e7..0204cd9 100644
 --- a/src/adapters/chatgpt-web/browser-helper-main.ts
 +++ b/src/adapters/chatgpt-web/browser-helper-main.ts
-@@ -24,6 +24,7 @@ interface RunMessage {
+@@ -24,6 +24,8 @@
    };
    turn: {
      traceId: string;
 +    sentraCapability?: string;
++    sentraDurableWeb?: boolean;
      modelId: string;
      reasoning?: string;
      modelFamily?: "5.6" | "6";
-@@ -161,6 +162,11 @@ async function run(message: RunMessage): Promise<void> {
+@@ -161,6 +163,11 @@
      throw new Error("Browser helper turn identity is invalid");
    }
    if (abortControllers.has(message.id)) throw new Error(`Browser helper turn already exists: ${message.id}`);
@@ -1068,19 +1478,25 @@ index 1c497e7..0204cd9 100644
    if (message.turn.resumeAvailable !== undefined && typeof message.turn.resumeAvailable !== "boolean") {
      throw new Error("Browser helper resume availability is invalid");
    }
-@@ -218,6 +224,7 @@ async function run(message: RunMessage): Promise<void> {
+@@ -218,6 +225,8 @@
    const prepareSelected = async () => ({ ...await promptSelection.wait(), release: () => {} });
    const turn: BrowserTurn = {
      traceId: message.turn.traceId,
 +    ...(message.turn.sentraCapability ? { sentraCapability: message.turn.sentraCapability } : {}),
++    sentraDurableWeb: message.turn.sentraDurableWeb === true,
      modelId: message.turn.modelId,
      reasoning: message.turn.reasoning,
      ...(message.turn.modelFamily ? { modelFamily: message.turn.modelFamily } : {}),
 diff --git a/src/adapters/chatgpt-web/browser-worker.ts b/src/adapters/chatgpt-web/browser-worker.ts
-index c63b9d9..6160d7a 100644
 --- a/src/adapters/chatgpt-web/browser-worker.ts
 +++ b/src/adapters/chatgpt-web/browser-worker.ts
-@@ -56,6 +56,7 @@ import {
+@@ -1,4 +1,4 @@
+-import { randomUUID } from "node:crypto";
++import { createHash, randomUUID } from "node:crypto";
+ import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+ import { join, resolve } from "node:path";
+ import { skillFileTokens, validateSkillFiles } from "./skill-attachments";
+@@ -56,6 +56,7 @@
    CHATGPT_COMPLETION_ACTION_SELECTOR,
    CHATGPT_COMPOSER_SELECTOR,
    CHATGPT_EFFORT_CONTROL_SELECTOR,
@@ -1088,7 +1504,7 @@ index c63b9d9..6160d7a 100644
    CHATGPT_EFFORT_ITEM_SELECTOR,
    CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR,
    CHATGPT_STOP_BUTTON_SELECTOR,
-@@ -76,6 +77,7 @@ import {
+@@ -76,6 +77,7 @@
  } from "../../launcher-browser-host";
  import {
    CHATGPT_WEB_BIGGER_CONTEXT_MULTIPLIER,
@@ -1096,7 +1512,7 @@ index c63b9d9..6160d7a 100644
    resolveChatGptWebContextLimits,
    resolveChatGptWebMessageTokenBudget,
    resolveChatGptWebTransportLimits,
-@@ -132,7 +134,11 @@ export const CHATGPT_COMPLETION_ACTION_GRACE_MS = 60_000;
+@@ -132,7 +134,11 @@
  export const CHATGPT_COMPLETION_SETTLE_MS = 2_000;
  export const CHATGPT_TOOL_CONFIRMATION_TIMEOUT_MS = 60_000;
  export const MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS = 3;
@@ -1109,7 +1525,7 @@ index c63b9d9..6160d7a 100644
  const CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS = 10_000;
  const CHATGPT_SMOKE_TEXT = "Reply with exactly: CODEX WEB GPT READY";
  const CHATGPT_SMOKE_EXPECTED = "CODEX WEB GPT READY";
-@@ -573,10 +579,10 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -573,10 +579,10 @@
    // The visible sheet can be aria-hidden during hydration. Include those controls in the role
    // query but still require visibility; never select a hidden duplicate or switch locator rules.
    const personalized = page
@@ -1122,7 +1538,7 @@ index c63b9d9..6160d7a 100644
      .filter({ visible: true });
    let personalizedCount = await runChatGptPersonalizationStep(() => personalized.count(), deadline, abortSignal);
    let unpersonalizedCount = await runChatGptPersonalizationStep(() => unpersonalized.count(), deadline, abortSignal);
-@@ -622,7 +628,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -622,7 +628,7 @@
          );
        }
        throw chatGptConnectorUnavailableError(
@@ -1131,7 +1547,7 @@ index c63b9d9..6160d7a 100644
        );
      }
    }
-@@ -651,7 +657,7 @@ async function ensureChatGptPersonalizedConnectorAccessWithinDeadline(
+@@ -651,7 +657,7 @@
      );
      const choice = menu
        .locator(CHATGPT_PERSONALIZATION_CHOICE_SELECTOR)
@@ -1140,7 +1556,7 @@ index c63b9d9..6160d7a 100644
      if (await runChatGptPersonalizationStep(() => choice.count(), deadline, abortSignal) !== 1) {
        throw chatGptConnectorUnavailableError(
          "ChatGPT personalization menu did not expose one exact Personalized choice",
-@@ -871,6 +877,7 @@ export class ChatGptSubmissionRejectionObserver {
+@@ -871,6 +877,7 @@
  type SelectedChatGptWebModelMode = ChatGptWebModelMode & {
    modelFamily?: "5.6" | "6";
    selection?: { url: string; label: string };
@@ -1148,7 +1564,7 @@ index c63b9d9..6160d7a 100644
    usageModel?: ChatGptUsageModel;
  };
  
-@@ -937,15 +944,16 @@ export function assertChatGptWebInputWithinLimits(
+@@ -937,15 +944,16 @@
    capabilities: ChatGptWebCapabilities,
    promptChars?: number,
  ): void {
@@ -1168,18 +1584,18 @@ index c63b9d9..6160d7a 100644
        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
      );
    }
-@@ -998,6 +1006,10 @@ export function assertChatGptWebMultipartInputWithinLimits(
+@@ -997,6 +1005,10 @@
+ ): void {
    if (!isChatGptWebMultipartPartCount(partCount)) {
      throw new Error("Bigger Context requires two or six context parts");
-   }
++  }
 +  if (modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL) {
 +    throw new ChatGptWebAdapterError("Bigger Context is unavailable for ChatGPT Auto; the account-default route uses the conservative Free budget.",
 +      { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false });
-+  }
+   }
    if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
      throw new ChatGptWebAdapterError(
-       "Bigger Context is unavailable for Luna because every later browser request includes the accumulated transcript inside the same 28,000-token transport budget.",
-@@ -1078,9 +1090,9 @@ export function resolveChatGptWebMultipartStagingMode(
+@@ -1078,9 +1090,9 @@
    maxStageMessageTokens: number,
    maxStageChars: number,
  ): ChatGptWebModelMode {
@@ -1191,15 +1607,237 @@ index c63b9d9..6160d7a 100644
        { status: 400, errorType: "invalid_request_error", code: "context_length_exceeded", retryable: false },
      );
    }
-@@ -1249,6 +1261,7 @@ function withBrowserTurnAbort<T>(promise: Promise<T>, signal?: AbortSignal): Pro
+@@ -1247,8 +1259,229 @@
+   });
+ }
  
++// SENTRA_BROWSER_DURABLE_V2_BEGIN
++type SentraDocument = { document_id: string; identity_epoch: string; surface_id: string };
++type SentraObservedMessage = { message_id: string; request_id: string; text: string };
++export type SentraPageEvidence = SentraDocument & {
++  conversation_id: string | null; state: string; messages: SentraObservedMessage[];
++  assistants: { message_id: string; request_id?: string; parent_id?: string; text: string }[];
++};
++
++/** Runs in the owned page, reads committed React IDs/content only, never account/session data. */
++export function readSentraPageEvidence(): SentraPageEvidence {
++  const scope = globalThis as typeof globalThis & { __SENTRA_WEB_DOCUMENT__?: SentraDocument };
++  const identity = scope.__SENTRA_WEB_DOCUMENT__;
++  if (!identity || !/^[a-f0-9]{32}$/.test(identity.document_id)
++    || !/^[a-f0-9]{32}$/.test(identity.identity_epoch) || !identity.surface_id
++    || location.origin !== 'https://chatgpt.com') throw new Error('sentra_document_unverified');
++  const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9_-]{8,160}$/.test(value);
++  const route = /^\/c\/([A-Za-z0-9_-]{8,160})(?:\/|$)/.exec(location.pathname)?.[1] ?? null;
++  const messages = new Map<string, SentraObservedMessage>();
++  const requests = new Map<string, string>();
++  const assistants = new Map<string, { message_id: string; request_id?: string; parent_id?: string; text: string }>();
++  let conversation: string | null = null;
++  for (const element of [...document.querySelectorAll('[data-message-id],[data-turn-key],[data-turn-id-container]')].slice(-200)) {
++    // Reconstruct only the committed path, rejecting the stale React alternate.
++    const key = Object.keys(element).find(key => key.startsWith('__reactFiber$'));
++    if (!key) continue;
++    type Fiber = { tag: number; return?: Fiber; child?: Fiber; sibling?: Fiber; alternate?: Fiber;
++      stateNode?: { current?: Fiber }; memoizedProps?: Record<string, any> };
++    let node = (element as unknown as Record<string, Fiber>)[key];
++    const path: Fiber[] = [], visited = new Set<Fiber>();
++    while (node && node.tag !== 3 && path.length < 2048 && !visited.has(node)) {
++      visited.add(node); path.push(node); node = node.return!;
++    }
++    const root = node?.stateNode, current = root?.current;
++    if (!current || (current !== node && current !== node.alternate)) continue;
++    node = current;
++    const props: Record<string, any>[] = [node.memoizedProps ?? {}];
++    let valid = true, budget = 4096;
++    for (const expected of path.reverse()) {
++      let selected: Fiber | undefined;
++      for (let child = node.child; child; child = child.sibling) {
++        if (--budget < 0) { valid = false; break; }
++        if (child !== expected && child !== expected.alternate) continue;
++        if (selected) { valid = false; break; }
++        selected = child;
++      }
++      if (!valid || !selected || root!.current !== current) { valid = false; break; }
++      node = selected; props.push(node.memoizedProps ?? {});
++    }
++    if (!valid) continue;
++    let branch: string | null = null;
++    const values: any[] = [];
++    for (const p of props.slice(-80)) {
++      for (const candidate of [p.conversationId, p.clientThreadId, p.conversation?.id, p.turn?.conversationId]) {
++        if (!id(candidate)) continue;
++        if (branch && candidate !== branch) throw new Error('sentra_conversation_conflict');
++        branch = candidate;
++      }
++      for (const list of [p.messages, p.allMessages, p.turn?.messages]) if (Array.isArray(list)) values.push(...list.slice(0, 200));
++      if (p.message) values.push(p.message);
++    }
++    if (!branch) continue;
++    if ((route && branch !== route) || (conversation && conversation !== branch)) throw new Error('sentra_conversation_conflict');
++    conversation = branch;
++    for (const message of values.slice(0, 600)) {
++      if (!['user', 'assistant'].includes(message?.author?.role) || !id(message.id)) continue;
++      const parts = message.content?.parts;
++      if (!Array.isArray(parts) || parts.some(part => typeof part !== 'string')) continue;
++      const text = parts.join('\n');
++      if (text.length > 2_000_000) throw new Error('sentra_message_too_large');
++      if (message.author.role === 'assistant') {
++        const candidate = { message_id: message.id, text,
++          ...(id(message.metadata?.request_id) ? { request_id: message.metadata.request_id } : {}),
++          ...(id(message.parent_id) ? { parent_id: message.parent_id } : {}) };
++        const prior = assistants.get(message.id);
++        if (prior && JSON.stringify(prior) !== JSON.stringify(candidate)) throw new Error('sentra_assistant_conflict');
++        assistants.set(message.id, candidate);
++        continue;
++      }
++      if (!id(message.metadata?.request_id)) continue;
++      const observed = { message_id: message.id, request_id: message.metadata.request_id, text };
++      const prior = messages.get(message.id), owner = requests.get(observed.request_id);
++      if ((prior && (prior.request_id !== observed.request_id || prior.text !== text)) || (owner && owner !== message.id)) {
++        throw new Error('sentra_message_conflict');
++      }
++      messages.set(message.id, observed); requests.set(observed.request_id, message.id);
++    }
++  }
++  const approval = document.querySelector('[data-testid="connector-approval"],[data-testid="tool-approval"],[data-testid="approval-card"]');
++  return { ...identity, conversation_id: conversation ?? route,
++    state: approval ? 'awaiting_approval' : 'observed', messages: [...messages.values()], assistants: [...assistants.values()] };
++}
++
++export class SentraWebSubmission {
++  private binding?: Record<string, unknown>;
++  private requestId?: string;
++  private baseline = new Set<string>();
++  private receiptAttempted = false;
++  private observedRequestId?: string;
++  private userMessageId?: string;
++  private answerMessageId?: string;
++  private answerRevision = 0;
++  private answerBody?: string;
++  private answerComplete = false;
++  mayHaveSent = false;
++  constructor(private turn: Pick<BrowserTurn, 'sentraCapability' | 'traceId'>,
++    private index: number, private prompt: string, private model: string, private effort: string,
++    private surfaceId: string, private images: number,
++    private transport: (phase: string, data: Record<string, unknown>) => Promise<any> = sentraBrowserPost) {}
++  private check(ack: any, state: string) {
++    if (ack?.ok !== true || ack.state !== state || !this.binding
++      || ack.document_id !== this.binding.document_id || ack.identity_epoch !== this.binding.identity_epoch
++      || ack.prompt_sha256 !== this.binding.prompt_sha256 || ack.submission_index !== this.index
++      || typeof ack.request_id !== 'string' || !/^[A-Za-z0-9_-]{8,160}$/.test(ack.request_id)
++      || (this.requestId && ack.request_id !== this.requestId)) throw new Error('sentra_send_ack_invalid');
++  }
++  private sameDocument(current: SentraPageEvidence) {
++    if (!this.binding || current.document_id !== this.binding.document_id
++      || current.identity_epoch !== this.binding.identity_epoch || current.surface_id !== this.surfaceId
++      || (this.binding.conversation_id && current.conversation_id !== this.binding.conversation_id)
++      || current.state === 'awaiting_approval') throw new Error('sentra_document_changed');
++  }
++  async authorize(page: Pick<Page, 'evaluate'>, verifySelection: () => Promise<void>) {
++    if (this.binding || this.mayHaveSent) throw new Error('sentra_send_already_attempted');
++    await verifySelection();
++    const before = await page.evaluate(readSentraPageEvidence);
++    if (before.surface_id !== this.surfaceId || before.state === 'awaiting_approval') throw new Error('sentra_send_blocked');
++    this.baseline = new Set(before.messages.map(message => message.message_id));
++    this.binding = { capability: this.turn.sentraCapability, traceId: this.turn.traceId,
++      submission_index: this.index, prompt_sha256: createHash('sha256').update(this.prompt, 'utf8').digest('hex'),
++      document_id: before.document_id, identity_epoch: before.identity_epoch,
++      conversation_id: before.conversation_id, surface_id: this.surfaceId, model: this.model, effort: this.effort };
++    const preflight = await this.transport('preflight', { ...this.binding, prompt: this.prompt });
++    this.check(preflight, 'READY');
++    if (preflight.account_verified !== true) throw new Error('sentra_account_unverified');
++    this.requestId = preflight.request_id;
++    await verifySelection();
++    this.sameDocument(await page.evaluate(readSentraPageEvidence));
++    // A lost sending ACK is ambiguous. Latch before the HTTP call and never retry it.
++    this.mayHaveSent = true;
++    const sending = await this.transport('sending', { ...this.binding, request_id: this.requestId });
++    this.check(sending, 'SENDING');
++    await verifySelection();
++    this.sameDocument(await page.evaluate(readSentraPageEvidence));
++  }
++  async receipt(page: Pick<Page, 'evaluate'>) {
++    if (!this.mayHaveSent || !this.requestId || this.receiptAttempted) throw new Error('sentra_receipt_unconfirmed');
++    const current = await page.evaluate(readSentraPageEvidence);
++    this.sameDocument(current);
++    const exact = current.messages.filter(message => !this.baseline.has(message.message_id)
++      && createHash('sha256').update(message.text, 'utf8').digest('hex') === this.binding!.prompt_sha256);
++    if (!current.conversation_id || exact.length !== 1) throw new Error('sentra_message_unconfirmed');
++    this.receiptAttempted = true;
++    const message = exact[0]!;
++    const ack = await this.transport('receipt', { ...this.binding, request_id: this.requestId,
++      message_id: message.message_id, observed_request_id: message.request_id,
++      conversation_id: current.conversation_id, images_attached: this.images });
++    if (ack?.ok !== true || ack.state !== 'SENT' || ack.request_id !== this.requestId
++      || ack.message_id !== message.message_id) throw new Error('sentra_receipt_ack_invalid');
++    this.sameDocument(await page.evaluate(readSentraPageEvidence));
++    this.binding!.conversation_id = current.conversation_id;
++    this.observedRequestId = message.request_id;
++    this.userMessageId = message.message_id;
++    return message.message_id;
++  }
++  async answer(page: Pick<Page, 'evaluate'>, complete: boolean) {
++    if (!this.userMessageId || !this.observedRequestId) throw new Error('sentra_answer_without_receipt');
++    const current = await page.evaluate(readSentraPageEvidence);
++    this.sameDocument(current);
++    const exact = current.assistants.filter(message => message.request_id === this.observedRequestId
++      || (message.parent_id === this.userMessageId && !message.request_id));
++    if (!current.conversation_id || exact.length !== 1) {
++      if (complete) throw new Error('sentra_assistant_unconfirmed');
++      return;
++    }
++    const message = exact[0]!;
++    if (this.answerMessageId && this.answerMessageId !== message.message_id) throw new Error('sentra_assistant_changed');
++    if (this.answerComplete) {
++      if (this.answerBody !== message.text) throw new Error('sentra_answer_changed_after_complete');
++      return;
++    }
++    if (this.answerBody === message.text && !complete) return;
++    this.answerMessageId = message.message_id;
++    this.answerBody = message.text;
++    const ack = await this.transport('answer', { ...this.binding, request_id: this.requestId,
++      conversation_id: current.conversation_id, observed_request_id: this.observedRequestId,
++      message_id: message.message_id, revision: ++this.answerRevision, body: message.text, complete,
++      ...(message.parent_id === this.userMessageId ? { parent_user_message_id: message.parent_id } : {}) });
++    if (ack?.ok !== true || ack.state !== (complete ? 'ANSWERED' : 'ANSWERING')
++      || ack.job_id !== this.requestId || ack.answer_message_id !== message.message_id
++      || ack.answer_revision !== this.answerRevision) throw new Error('sentra_answer_ack_invalid');
++    const after = await page.evaluate(readSentraPageEvidence);
++    this.sameDocument(after);
++    if (complete && !after.assistants.some(candidate => candidate.message_id === message.message_id
++      && candidate.text === message.text)) throw new Error('sentra_final_answer_changed_during_ack');
++    this.answerComplete = complete;
++  }
++  async failure() {
++    // Conservative notification only; it cannot clear a durable sending fence.
++    if (!this.binding) return;
++    await this.transport('failure', { ...this.binding, ...(this.requestId ? { request_id: this.requestId } : {}),
++      may_have_sent: this.mayHaveSent, reason: this.mayHaveSent ? 'delivery_unconfirmed' : 'pre_send_rejected' }).catch(() => {});
++  }
++}
++
++async function sentraBrowserPost(phase: string, data: Record<string, unknown>): Promise<any> {
++  const endpoint = process.env.SENTRA_TURN_AUTHORITY_URL, token = process.env.SENTRA_TURN_AUTHORITY_TOKEN;
++  if (!endpoint || !token) throw new Error('sentra_authority_unavailable');
++  const address = new URL(endpoint);
++  if (address.protocol !== 'http:' || address.hostname !== '127.0.0.1' || address.username || address.password
++    || address.pathname !== '/' || address.search || address.hash) throw new Error('sentra_authority_not_loopback');
++  const response = await fetch(`${endpoint}/internal/turn/browser-${phase}`, { method: 'POST',
++    headers: { 'content-type': 'application/json', authorization: `Bearer ${token}` },
++    body: JSON.stringify(data), redirect: 'error', signal: AbortSignal.timeout(5000) });
++  if (!response.ok) throw new Error(`sentra_${phase}_rejected:${response.status}`);
++  return await response.json();
++}
++// SENTRA_BROWSER_DURABLE_V2_END
++
++
  export interface BrowserTurn {
    traceId: string;
 +  sentraCapability?: string;
++  sentraDurableWeb?: boolean;
    modelId: string;
    reasoning?: string;
    modelFamily?: "5.6" | "6";
-@@ -1392,7 +1405,7 @@ export async function setChatGptThinkMode(
+@@ -1392,7 +1625,7 @@
  ): Promise<void> {
    throwIfPromptAttachmentAborted(abortSignal);
    const controls = composerForm
@@ -1208,7 +1846,7 @@ index c63b9d9..6160d7a 100644
      .filter({ visible: true });
    const count = await controls.count();
    if (count === 0 && !enabled) {
-@@ -2069,7 +2082,7 @@ class ChatGptBrowserDiagnostics {
+@@ -2069,7 +2302,7 @@
  
  export function resolveBrowserConfig(provider: CodexProviderConfig): ResolvedBrowserConfig {
    const configured = provider.chatgptWeb ?? {};
@@ -1217,7 +1855,7 @@ index c63b9d9..6160d7a 100644
    const browserHost = configured.browserHost ?? "managed-chrome";
    const browserHostDescriptorPath = configured.browserHostDescriptorPath?.trim();
    const browserHelperScriptPath = configured.browserHelperScriptPath?.trim();
-@@ -2486,6 +2499,12 @@ export class ChatGptBrowserWorker {
+@@ -2486,6 +2719,12 @@
      const mode = resolveChatGptWebModelMode(modelId, reasoning, capabilities);
      const composer = await this.activeComposer(page);
      const composerForm = composer.locator("xpath=ancestor::form[1]");
@@ -1230,7 +1868,7 @@ index c63b9d9..6160d7a 100644
      const uiEffortIndex = mode.uiEffortIndex;
      if (uiEffortIndex === null) {
        await settleChatGptUi();
-@@ -2502,6 +2521,17 @@ export class ChatGptBrowserWorker {
+@@ -2502,6 +2741,17 @@
        return mode;
      }
      const currentEffort = composerForm.locator(CHATGPT_EFFORT_CONTROL_SELECTOR).filter({ visible: true });
@@ -1248,7 +1886,7 @@ index c63b9d9..6160d7a 100644
      const effortWaitAbort = new AbortController();
      try {
        const ready = await Promise.race([
-@@ -2562,11 +2592,11 @@ export class ChatGptBrowserWorker {
+@@ -2562,11 +2812,11 @@
        const state = await readChatGptEffortSnapshot(container)
          .catch(error => { throw chatGptModelControlUnavailableAdapterError(String(error)); });
        if (uiEffortIndex > state.max - state.min) {
@@ -1265,7 +1903,7 @@ index c63b9d9..6160d7a 100644
          );
        }
        if (!state.available[uiEffortIndex]) {
-@@ -2641,6 +2671,17 @@ export class ChatGptBrowserWorker {
+@@ -2641,6 +2891,17 @@
    }
  
    private async assertSelectedEffort(page: Page, mode: SelectedChatGptWebModelMode, verifyFamily = true): Promise<void> {
@@ -1283,7 +1921,7 @@ index c63b9d9..6160d7a 100644
      if (!mode.selection) return;
      const composer = await this.activeComposer(page);
      const controls = composer.locator("xpath=ancestor::form[1]")
-@@ -3331,6 +3372,7 @@ export class ChatGptBrowserWorker {
+@@ -3331,6 +3592,7 @@
      const appResult = menuRows.filter({
        has: page.getByText(this.config.appName, { exact: true }),
      });
@@ -1291,7 +1929,7 @@ index c63b9d9..6160d7a 100644
      if (new URL(page.url()).searchParams.get("temporary-chat") === "true") await ensureChatGptPersonalizedConnectorAccess(
        page,
        capture,
-@@ -3348,7 +3390,7 @@ export class ChatGptBrowserWorker {
+@@ -3348,7 +3610,7 @@
              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
            });
            await withBrowserTurnAbort(settleChatGptUi(), personalizationSignal);
@@ -1300,7 +1938,7 @@ index c63b9d9..6160d7a 100644
              delay: 25,
              signal: personalizationSignal,
              timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-@@ -3367,9 +3409,9 @@ export class ChatGptBrowserWorker {
+@@ -3367,9 +3629,9 @@
                  ? element.value : element.textContent ?? "",
                focused: element === document.activeElement,
              }), undefined, { timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS, signal: personalizationSignal });
@@ -1312,7 +1950,7 @@ index c63b9d9..6160d7a 100644
                );
              }
            }
-@@ -3404,7 +3446,7 @@ export class ChatGptBrowserWorker {
+@@ -3404,7 +3666,7 @@
          await composer.fill("", { signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
          await composer.focus({ signal: abortSignal, timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS });
          await withBrowserTurnAbort(settleChatGptUi(), abortSignal);
@@ -1321,17 +1959,50 @@ index c63b9d9..6160d7a 100644
            delay: 25,
            signal: abortSignal,
            timeout: CHATGPT_CONNECTOR_ACTION_TIMEOUT_MS,
-@@ -4561,6 +4603,9 @@ export class ChatGptBrowserWorker {
+@@ -3596,6 +3858,7 @@
+     initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0,
+     completionTracker?: ChatGptCompletionTracker,
+     recoverObservation?: ChatGptObservationRecovery,
++    durable?: SentraWebSubmission,
+   ): Promise<ChatGptSubmissionEvidence> {
+     let observationPage = page;
+     let observationBaseline = baseline;
+@@ -3641,6 +3904,7 @@
+     submissionLifecycle?: Pick<BrowserTurn, "onSendActivated" | "onSubmitted">,
+     completionTracker?: ChatGptCompletionTracker,
+     recoverObservation?: ChatGptObservationRecovery,
++    durable?: SentraWebSubmission,
+   ): Promise<ChatGptSubmissionEvidence> {
+     const composer = await this.activeComposer(page);
+     const sendButton = composer
+@@ -3664,6 +3928,7 @@
+     await captureDiagnostic?.("send-ready");
+     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
+     await submissionLifecycle?.onSendActivated?.();
++    if (durable && !durable.mayHaveSent) throw new Error("sentra_send_not_authorized");
+     await sendButton.press("Enter", {
+       noWaitAfter: true,
+       signal: abortSignal,
+@@ -3681,6 +3946,7 @@
+       completionTracker,
+       recoverObservation,
+     );
++    if (durable) await durable.receipt(page);
+     await submissionLifecycle?.onSubmitted?.();
+     return evidence;
+   }
+@@ -4561,6 +4827,10 @@
  
    private async runExclusive(turn: BrowserTurn): Promise<string> {
      if (turn.abortSignal?.aborted) throw new DOMException("ChatGPT web turn aborted", "AbortError");
++    if (turn.sentraDurableWeb && !turn.sentraCapability) throw new Error("sentra_durable_capability_missing");
 +    if (turn.sentraCapability && this.config.browserHost !== "launcher") {
 +      throw new Error("SENTRA managed Web turns require the physical Electron Browser Host");
 +    }
      if (this.config.browserHost !== "launcher") return this.runBrowserTurn(turn);
  
      const lease = await notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
-@@ -4595,7 +4640,19 @@ export class ChatGptBrowserWorker {
+@@ -4595,7 +4865,19 @@
          phase: "heartbeat",
          traceId: turn.traceId,
          helperPid: process.pid,
@@ -1352,7 +2023,7 @@ index c63b9d9..6160d7a 100644
          const now = Date.now();
          if (now - lastHeartbeatFailureAt < 30_000) return;
          lastHeartbeatFailureAt = now;
-@@ -4608,6 +4665,18 @@ export class ChatGptBrowserWorker {
+@@ -4608,6 +4890,18 @@
      };
      try {
        if (!surfaceId) throw new Error("Launcher did not lease a browser tab for the ChatGPT turn");
@@ -1371,7 +2042,7 @@ index c63b9d9..6160d7a 100644
        if (turn.requireRetainedConversation && !reused) {
          throw chatGptRetainedConversationUnavailableError();
        }
-@@ -4617,7 +4686,20 @@ export class ChatGptBrowserWorker {
+@@ -4617,7 +4911,20 @@
        await turn.onPreparedSelected?.(reused);
        heartbeatTimer = setInterval(sendHeartbeat, LAUNCHER_TURN_HEARTBEAT_INTERVAL_MS);
        heartbeatTimer.unref?.();
@@ -1393,11 +2064,114 @@ index c63b9d9..6160d7a 100644
      } catch (error) {
        originalError = error;
        terminal = error instanceof ChatGptCompactionHandoffAccepted
+@@ -4676,6 +4983,15 @@
+       ? { ...turn.capabilities, localToolsEnabled: true }
+       : turn.capabilities;
+     const requestedMode = resolveChatGptWebModelMode(turn.modelId, turn.reasoning, browserCapabilities);
++    const durableSubmissions: SentraWebSubmission[] = [];
++    const newDurableSubmission = (prompt: string, mode: SelectedChatGptWebModelMode, images: number) => {
++      if (!turn.sentraDurableWeb) return undefined;
++      if (!turn.sentraCapability || !launcherSurfaceId) throw new Error("sentra_durable_surface_missing");
++      const submission = new SentraWebSubmission(turn, durableSubmissions.length, prompt,
++        turn.modelFamily ? `gpt-${turn.modelFamily}` : turn.modelId, mode.effort, launcherSurfaceId, images);
++      durableSubmissions.push(submission);
++      return submission;
++    };
+     const prepare = reuseConversation ? turn.prepareResume : turn.prepare;
+     if (!prepare) throw new Error("The retained ChatGPT conversation has no continuation prompt");
+     const prepared = await prepare();
+@@ -4980,6 +5296,7 @@
+           );
+           await diagnostics.capture(page, `multipart-stage-${index + 1}-attachment-complete`);
+           const recordStageUsage = await usageSubmission();
++          const durableStage = newDurableSubmission(stage.text, mode, 0);
+           const evidence = await this.runStage(
+             turn.traceId,
+             `multipart_stage_${index + 1}_send`,
+@@ -4992,6 +5309,7 @@
+               undefined,
+               { onSubmitted: recordStageUsage, onSendActivated: async () => {
+                 await this.assertSelectedEffort(page, mode);
++                if (durableStage) await durableStage.authorize(page, () => this.assertSelectedEffort(page, mode));
+                 submissionRejection.begin(page);
+               } },
+               undefined,
+@@ -5002,6 +5320,7 @@
+                   return recovered;
+                 }
+                 : undefined,
++              durableStage,
+             ),
+           );
+           console.info(
+@@ -5045,6 +5364,7 @@
+             },
+             chatGptSuspensionClock,
+           );
++          if (durableStage) await durableStage.answer(page, true);
+           const stageRejection = await submissionRejection.failure();
+           if (stageRejection) throw stageRejection;
+           await diagnostics.capture(page, `multipart-stage-${index + 1}-acknowledged`);
+@@ -5140,6 +5460,7 @@
+       await diagnostics.capture(page, "file-attachment-complete");
+       const completionTracker = new ChatGptCompletionTracker();
+       const recordFinalUsage = await usageSubmission();
++      const durableFinal = newDurableSubmission(finalPrompt, mode, prepared.images.length);
+       const finalSubmissionEvidence = await this.runStage(
+         turn.traceId,
+         "send",
+@@ -5159,6 +5480,7 @@
+             await this.assertSelectedEffort(page, mode);
+             submissionRejection.begin(page);
+             await turn.onSendActivated?.();
++            if (durableFinal) await durableFinal.authorize(page, () => this.assertSelectedEffort(page, mode));
+           } },
+           completionTracker,
+           launcherObservationRecovery
+@@ -5168,6 +5490,7 @@
+               return recovered;
+             }
+             : undefined,
++          durableFinal,
+         ),
+       );
+       console.info(`[chatgpt-web] browser turn ${turn.traceId} submission accepted evidence=${finalSubmissionEvidence}`);
+@@ -5354,6 +5677,7 @@
+             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
+           }
+           if (textDelta) emitMarkdownDelta(textDelta);
++          if (durableFinal) await durableFinal.answer(page, false);
+           const domError = domHealthTracker.update({
+             responsePresent: snapshot.responsePresent,
+             running,
+@@ -5388,6 +5712,7 @@
+                 await new Promise(resolveSleep => setTimeout(resolveSleep, 250));
+                 continue;
+               }
++              if (durableFinal) await durableFinal.answer(page, true);
+               if (!await turn.completionFence.commit(completionFenceRevision)) {
+                 completionFenceRevision = undefined;
+                 responseDomCache.key = undefined;
+@@ -5396,6 +5721,7 @@
+                 continue;
+               }
+             }
++            if (!turn.completionFence && durableFinal) await durableFinal.answer(page, true);
+             if (snapshot.visibleText === "api_tool unavailable") {
+               throw new Error("ChatGPT selected mode rejected the Codex Native MCP tool (api_tool unavailable)");
+             }
+@@ -5480,6 +5806,7 @@
+       );
+       return finalText;
+     } catch (error) {
++      for (const submission of durableSubmissions) await submission.failure();
+       if (!(error instanceof DOMException && error.name === "AbortError")
+         && !(error instanceof ChatGptWebAdapterError && error.code === "client_cancelled")) {
+         error = await submissionRejection.failure() ?? error;
 diff --git a/src/adapters/chatgpt-web/environment.ts b/src/adapters/chatgpt-web/environment.ts
-index bc9a9ff..e1404d0 100644
 --- a/src/adapters/chatgpt-web/environment.ts
 +++ b/src/adapters/chatgpt-web/environment.ts
-@@ -15,6 +15,8 @@ export interface ChatGptTurnEnvironment {
+@@ -15,6 +15,8 @@
    writableRoots: string[];
    sandboxPolicy: ChatGptSandboxPolicy;
    tools: CodexTool[];
@@ -1407,14 +2181,13 @@ index bc9a9ff..e1404d0 100644
  
  export interface ChatGptTurnIdentity {
 diff --git a/src/adapters/chatgpt-web/index.ts b/src/adapters/chatgpt-web/index.ts
-index 6043500..7396e0d 100644
 --- a/src/adapters/chatgpt-web/index.ts
 +++ b/src/adapters/chatgpt-web/index.ts
-@@ -54,6 +54,17 @@ function brokerSocketPath(provider: CodexProviderConfig): string {
+@@ -54,6 +54,24 @@
    const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
    return resolveBrokerEndpoint(configured || defaultBrokerEndpoint());
  }
-+function sentraTurnCapability(parsed: CodexParsedRequest): string | undefined {
++export function sentraTurnCapability(parsed: CodexParsedRequest): string | undefined {
 +  const raw = parsed._rawBody as Record<string, unknown> | undefined;
 +  const metadata = raw?.client_metadata as Record<string, unknown> | undefined;
 +  if (metadata?.sentra_managed !== true) return undefined;
@@ -1425,10 +2198,17 @@ index 6043500..7396e0d 100644
 +  return capability;
 +}
 +
++
++export function sentraDurableWeb(parsed: CodexParsedRequest): boolean {
++  const metadata = (parsed._rawBody as Record<string, any> | undefined)?.client_metadata;
++  if (metadata?.sentra_durable_web !== true) return false;
++  if (!sentraTurnCapability(parsed)) throw new Error("sentra_durable_capability_missing");
++  return true;
++}
  
  function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; reject: (error: Error) => void } {
    let resolvePromise!: (value: T) => void;
-@@ -296,6 +307,16 @@ function replayEvents(events: AdapterEvent[], emit: (event: AdapterEvent) => voi
+@@ -296,6 +314,16 @@
  
  function submittedTurnFailure(session: ChatGptTurnSession, error: unknown): Error {
    const normalized = error instanceof Error ? error : new Error(String(error));
@@ -1445,23 +2225,25 @@ index 6043500..7396e0d 100644
    if (normalized instanceof ChatGptWebAdapterError) return normalized;
    const phase = session.runtime.submission?.phase;
    if (!phase || phase === "prepared") return normalized;
-@@ -689,6 +710,7 @@ export function createChatGptWebAdapter(
+@@ -689,6 +717,8 @@
      if (!mode.localTools) {
        const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
          traceId,
 +        ...(sentraTurnCapability(parsed) ? { sentraCapability: sentraTurnCapability(parsed) } : {}),
++        sentraDurableWeb: sentraDurableWeb(parsed),
          modelId: parsed.modelId,
          reasoning: parsed.options.reasoning,
          ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
-@@ -760,6 +782,7 @@ export function createChatGptWebAdapter(
+@@ -760,6 +790,8 @@
      };
      const browserTurn = cancellableBrowserTurn(trackBrowserOwner(finalizeCheckpoint(worker.run({
        traceId,
 +      ...(sentraTurnCapability(parsed) ? { sentraCapability: sentraTurnCapability(parsed) } : {}),
++        sentraDurableWeb: sentraDurableWeb(parsed),
        modelId: parsed.modelId,
        reasoning: parsed.options.reasoning,
        ...(parsed._chatgptModelFamily ? { modelFamily: parsed._chatgptModelFamily } : {}),
-@@ -861,6 +884,8 @@ export function createChatGptWebAdapter(
+@@ -861,6 +893,8 @@
          if (mode.localTools) {
            try {
              environment = environmentStore.resolve(parsed);
@@ -1471,22 +2253,53 @@ index 6043500..7396e0d 100644
              const identity = extractChatGptTurnIdentity(parsed);
              console.warn(
 diff --git a/src/adapters/chatgpt-web/launcher-helper-client.ts b/src/adapters/chatgpt-web/launcher-helper-client.ts
-index 9c1ceac..402a429 100644
 --- a/src/adapters/chatgpt-web/launcher-helper-client.ts
 +++ b/src/adapters/chatgpt-web/launcher-helper-client.ts
-@@ -281,6 +281,7 @@ export class LauncherBrowserHelperClient {
+@@ -281,6 +281,8 @@
            },
            turn: {
              traceId: turn.traceId,
 +            ...(turn.sentraCapability ? { sentraCapability: turn.sentraCapability } : {}),
++            sentraDurableWeb: turn.sentraDurableWeb === true,
              modelId: turn.modelId,
              reasoning: turn.reasoning,
              ...(turn.modelFamily ? { modelFamily: turn.modelFamily } : {}),
+diff --git a/src/adapters/chatgpt-web/model.ts b/src/adapters/chatgpt-web/model.ts
+--- a/src/adapters/chatgpt-web/model.ts
++++ b/src/adapters/chatgpt-web/model.ts
+@@ -1,5 +1,6 @@
+ import {
+   CHATGPT_WEB_BACKEND_MODEL,
++  CHATGPT_WEB_AUTO_BACKEND_MODEL,
+   CHATGPT_WEB_LUNA_BACKEND_MODEL,
+ } from "../../chatgpt-web-models";
+ 
+@@ -16,7 +17,7 @@
+ export interface ChatGptWebModelMode {
+   modelId: string;
+   effort: "low" | "medium" | "high" | "xhigh" | "max";
+-  displayLabel: "Luna" | "Think" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
++  displayLabel: "Auto" | "Luna" | "Think" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
+   uiEffortIndex: 0 | 1 | 2 | 3 | 4 | null;
+   thinkEnabled: boolean;
+   localTools: boolean;
+@@ -27,6 +28,12 @@
+   reasoning: string | undefined,
+   capabilities: ChatGptWebCapabilities,
+ ): ChatGptWebModelMode {
++  if (modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL) {
++    if (reasoning && reasoning !== "low") throw new Error("ChatGPT Auto supports only low effort");
++    // Auto is a text-first route, independent of paid MCP app entitlements.
++    return { modelId, effort: "low", displayLabel: "Auto", uiEffortIndex: 0,
++      thinkEnabled: false, localTools: false };
++  }
+   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
+     if (capabilities.solAvailable) {
+       throw new Error("ChatGPT Luna is not available while the account exposes the Sol model selector");
 diff --git a/src/adapters/chatgpt-web/model-selection.ts b/src/adapters/chatgpt-web/model-selection.ts
-index 4529117..aa78bbe 100644
 --- a/src/adapters/chatgpt-web/model-selection.ts
 +++ b/src/adapters/chatgpt-web/model-selection.ts
-@@ -16,7 +16,7 @@ function familyOption(menu: EffortMenu, family: ChatGptWebModelFamily) {
+@@ -16,7 +16,7 @@
    return menu.menu.getByRole("menuitemradio", {
      name: family === "5.6" ? /^GPT[-\s]?5\.6\s+Sol(?:\s+Pro)?$/i
        // Simplified/Traditional Chinese and Japanese share 最新; Korean uses 최신.
@@ -1495,7 +2308,7 @@ index 4529117..aa78bbe 100644
      exact: true,
      includeHidden: true,
    });
-@@ -33,7 +33,10 @@ export async function selectChatGptModelFamily(
+@@ -33,7 +33,10 @@
      const option = familyOption(menu, family);
      if (await option.count() > 1) throw familyError(family);
      if (await option.count() === 1 && await option.getAttribute("aria-checked") === "true") return menu;
@@ -1507,7 +2320,7 @@ index 4529117..aa78bbe 100644
      const powerView = menu.menu.locator('[data-model-picker-view]');
      if (await powerView.count() === 1) {
        const view = await powerView.getAttribute("data-model-picker-view");
-@@ -48,6 +51,7 @@ export async function selectChatGptModelFamily(
+@@ -48,6 +51,7 @@
        if (await trigger.getAttribute("aria-expanded") === "false") await trigger.click({ timeout: 5_000 });
      }
      await option.waitFor({ state: "visible", timeout: 5_000 });
@@ -1515,7 +2328,7 @@ index 4529117..aa78bbe 100644
      await option.click({ timeout: 5_000 });
      await page.keyboard.press("Escape");
      const selected = await reopen();
-@@ -70,9 +74,8 @@ export function chatGptModelFamilyMatches(
+@@ -70,9 +74,8 @@
    family: ChatGptWebModelFamily,
    effort: ChatGptWebAdapterEffort,
  ): boolean {
@@ -1527,7 +2340,7 @@ index 4529117..aa78bbe 100644
    const states = descriptions.flatMap(text => {
      const match = /^(?:GPT[-\s]?)?(\d+(?:\.\d+)?)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i
        .exec(text.replace(/\s+/g, " ").trim());
-@@ -98,10 +101,13 @@ export async function assertChatGptModelFamily(
+@@ -98,10 +101,13 @@
        await menu.slider.getAttribute("aria-valuemin"), await menu.slider.getAttribute("aria-valuemax"),
        await menu.slider.getAttribute("aria-valuenow"),
      );
@@ -1545,44 +2358,10 @@ index 4529117..aa78bbe 100644
      if (checked && state && state.value === state.min + effortIndex && chatGptModelFamilyMatches(descriptions, family, effort)) return;
      if (Date.now() >= deadline) break;
      await new Promise(resolve => setTimeout(resolve, 50));
-diff --git a/src/adapters/chatgpt-web/model.ts b/src/adapters/chatgpt-web/model.ts
-index 6891f10..63d94d9 100644
---- a/src/adapters/chatgpt-web/model.ts
-+++ b/src/adapters/chatgpt-web/model.ts
-@@ -1,5 +1,6 @@
- import {
-   CHATGPT_WEB_BACKEND_MODEL,
-+  CHATGPT_WEB_AUTO_BACKEND_MODEL,
-   CHATGPT_WEB_LUNA_BACKEND_MODEL,
- } from "../../chatgpt-web-models";
- 
-@@ -16,7 +17,7 @@ export interface ChatGptWebCapabilities {
- export interface ChatGptWebModelMode {
-   modelId: string;
-   effort: "low" | "medium" | "high" | "xhigh" | "max";
--  displayLabel: "Luna" | "Think" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
-+  displayLabel: "Auto" | "Luna" | "Think" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
-   uiEffortIndex: 0 | 1 | 2 | 3 | 4 | null;
-   thinkEnabled: boolean;
-   localTools: boolean;
-@@ -27,6 +28,12 @@ export function resolveChatGptWebModelMode(
-   reasoning: string | undefined,
-   capabilities: ChatGptWebCapabilities,
- ): ChatGptWebModelMode {
-+  if (modelId === CHATGPT_WEB_AUTO_BACKEND_MODEL) {
-+    if (reasoning && reasoning !== "low") throw new Error("ChatGPT Auto supports only low effort");
-+    // Auto is a text-first route, independent of paid MCP app entitlements.
-+    return { modelId, effort: "low", displayLabel: "Auto", uiEffortIndex: 0,
-+      thinkEnabled: false, localTools: false };
-+  }
-   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
-     if (capabilities.solAvailable) {
-       throw new Error("ChatGPT Luna is not available while the account exposes the Sol model selector");
 diff --git a/src/adapters/chatgpt-web/turn-broker.ts b/src/adapters/chatgpt-web/turn-broker.ts
-index f218978..9f72a0c 100644
 --- a/src/adapters/chatgpt-web/turn-broker.ts
 +++ b/src/adapters/chatgpt-web/turn-broker.ts
-@@ -81,6 +81,8 @@ interface TurnChannel {
+@@ -81,6 +81,8 @@
    /** Monotonic across activity start/end so a completed request cannot disappear across a fence. */
    activityRevision: number;
    completionCommitted: boolean;
@@ -1591,7 +2370,7 @@ index f218978..9f72a0c 100644
    completionRevision?: number;
    retirementWaiters: Set<SafeWaiter<void>>;
    batchTimer?: ReturnType<typeof setTimeout>;
-@@ -288,6 +290,9 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -288,6 +290,9 @@
      if (ttlMs !== undefined && (!Number.isFinite(ttlMs) || ttlMs <= 0)) {
        throw new Error("ChatGPT web turn broker TTL must be a positive finite number");
      }
@@ -1601,7 +2380,7 @@ index f218978..9f72a0c 100644
      const token = opaqueId(handlePrefix);
      const channel: TurnChannel = {
        traceId,
-@@ -361,7 +366,8 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -361,7 +366,8 @@
      this.prune();
      const channel = this.channels.get(token);
      if (!channel) throw new Error("turn token is invalid or expired");
@@ -1611,7 +2390,7 @@ index f218978..9f72a0c 100644
        throw new Error("Codex turn environment changed during an active ChatGPT tool loop");
      }
      if (channel.safe?.state === "revoked") throw new Error("Zero Risk turn is already terminal");
-@@ -444,11 +450,12 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -444,11 +450,12 @@
      const channel = this.channels.get(token);
      if (!channel) throw new Error("turn token is invalid or expired");
      if (channel.completionCommitted) return channel.completionRevision;
@@ -1625,7 +2404,7 @@ index f218978..9f72a0c 100644
      this.prune();
      if (!Number.isSafeInteger(revision) || revision < 0) {
        throw new Error("turn completion fence revision is invalid");
-@@ -456,9 +463,25 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -456,9 +463,25 @@
      const channel = this.channels.get(token);
      if (!channel) throw new Error("turn token is invalid or expired");
      if (channel.completionCommitted) return channel.completionRevision === revision;
@@ -1652,7 +2431,7 @@ index f218978..9f72a0c 100644
      channel.completionCommitted = true;
      channel.completionRevision = revision;
      console.info(
-@@ -466,6 +489,28 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -466,6 +489,28 @@
      );
      return true;
    }
@@ -1681,7 +2460,7 @@ index f218978..9f72a0c 100644
  
    waitForRetirement(token: string, signal?: AbortSignal): Promise<void> {
      this.prune();
-@@ -612,6 +657,10 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -612,6 +657,10 @@
    revoke(token: string, reason = new Error("Codex turn binding was revoked")): void {
      const channel = this.channels.get(token);
      if (!channel) return;
@@ -1692,7 +2471,7 @@ index f218978..9f72a0c 100644
      console.info(`[chatgpt-web] broker_retired ${JSON.stringify({
        traceId: channel.traceId,
        pendingTools: channel.invocations.size,
-@@ -905,13 +954,19 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -905,12 +954,18 @@
      }
      if (request.method === "safe_complete") {
        if (!request.token) throw new Error("Zero Risk request_id is required");
@@ -1703,17 +2482,16 @@ index f218978..9f72a0c 100644
          await this.waitForSafeSent(request.token, socketSignal);
          this.prune();
          channel = this.channels.get(request.token);
-       }
++      }
 +      if (channel?.safe?.state === "running") {
 +        const revision = this.beginCompletionFence(request.token);
 +        if (revision === undefined || !await this.commitCompletionFence(request.token, revision)) {
 +          throw new Error("Zero Risk completion lost its broker fence");
 +        }
-+      }
+       }
        return this.completeSafeTurn(request.token, request.finalAnswer);
      }
-     if (request.method === "submit_compaction_handoff") {
-@@ -983,7 +1038,7 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -983,7 +1038,7 @@
        if (!Number.isSafeInteger(request.revision) || request.revision! < 0) {
          throw new Error("turn completion fence revision is invalid");
        }
@@ -1722,7 +2500,7 @@ index f218978..9f72a0c 100644
      }
      if (request.method === "owner_wait_retirement") {
        if (!request.token) throw new Error("turn owner token is required");
-@@ -1020,7 +1075,7 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -1020,7 +1075,7 @@
          throw new Error(contract === "safe" ? "request id is required" : "turn token is required");
        }
        const channel = this.channels.get(token);
@@ -1731,7 +2509,7 @@ index f218978..9f72a0c 100644
        const retiredTurn = channel?.completionCommitted ? channel.traceId : this.retiredTokens.get(token);
        console.error(
          `[chatgpt-web] broker claim received (tokenChars=${token.length}, tokenHash=${handleFingerprint(token)}, valid=${Boolean(activeChannel)}`
-@@ -1085,6 +1140,7 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -1085,6 +1140,7 @@
        if (!channel) {
          return { completed: false, retired: this.retiredTokens.has(token) };
        }
@@ -1739,7 +2517,7 @@ index f218978..9f72a0c 100644
        if (channel.completedActivities.has(request.activityId)) {
          return { completed: false, duplicate: true };
        }
-@@ -1117,6 +1173,9 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -1117,6 +1173,9 @@
      }
      if (request.method === "resolve") return { environment: binding.channel.environment };
      this.assertSafeHarnessRunning(binding.channel);
@@ -1749,7 +2527,7 @@ index f218978..9f72a0c 100644
      if (binding.channel.compactionRequested) {
        const result = binding.channel.compactionResult;
        if (!result) throw new Error("Codex context compaction control result is unavailable");
-@@ -1129,6 +1188,12 @@ export class TurnBroker implements TurnBrokerOwner {
+@@ -1129,6 +1188,12 @@
  
      const wireName = request.wireName?.trim();
      if (!wireName) throw new Error("wire tool name is required");
@@ -1763,10 +2541,9 @@ index f218978..9f72a0c 100644
      const toolRequest: BrokerToolRequest = {
        callId,
 diff --git a/src/adapters/chatgpt-web/usage.ts b/src/adapters/chatgpt-web/usage.ts
-index 73d0940..7537a1e 100644
 --- a/src/adapters/chatgpt-web/usage.ts
 +++ b/src/adapters/chatgpt-web/usage.ts
-@@ -70,6 +70,7 @@ export function resolveBiggerContextMultipartParts(
+@@ -70,6 +70,7 @@
    capabilities: ChatGptWebCapabilities,
    experimentalSkillAttachments = false,
  ): ChatGptWebMultipartPartCount | undefined {
@@ -1776,7 +2553,6 @@ index 73d0940..7537a1e 100644
    }
 diff --git a/src/adapters/gemini-web/index.ts b/src/adapters/gemini-web/index.ts
 new file mode 100644
-index 0000000..f73dfec
 --- /dev/null
 +++ b/src/adapters/gemini-web/index.ts
 @@ -0,0 +1,507 @@
@@ -2288,10 +3064,9 @@ index 0000000..f73dfec
 +  return new GeminiWebAdapter(config, route, fetchImpl);
 +}
 diff --git a/src/chatgpt-session.ts b/src/chatgpt-session.ts
-index afe5d7f..3446e69 100644
 --- a/src/chatgpt-session.ts
 +++ b/src/chatgpt-session.ts
-@@ -12,11 +12,14 @@ export const CHATGPT_COMPOSER_SELECTOR = [
+@@ -12,11 +12,14 @@
    "#prompt-textarea",
    '[contenteditable="true"][data-lexical-editor="true"]',
    'form[data-chatgpt-composer] [data-composer-markdown][contenteditable="true"][role="textbox"]',
@@ -2306,7 +3081,7 @@ index afe5d7f..3446e69 100644
  ].join(", ");
  export const CHATGPT_EFFORT_MENU_SELECTOR = [
    '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
-@@ -24,6 +27,14 @@ export const CHATGPT_EFFORT_MENU_SELECTOR = [
+@@ -24,6 +27,14 @@
    '[role="group"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
    '[role="menu"]:has([data-model-picker-power-slider])',
  ].join(", ");
@@ -2321,7 +3096,7 @@ index afe5d7f..3446e69 100644
  export const CHATGPT_EFFORT_ITEM_SELECTOR = '[role="menuitemradio"]';
  export const CHATGPT_EFFORT_SLIDER_CONTAINER_SELECTOR = '[data-model-reasoning-effort-slider], [data-model-picker-power-slider]';
  export const CHATGPT_EFFORT_SLIDER_SELECTOR = '[data-model-reasoning-effort-slider] [role="slider"], [data-model-picker-power-slider] [role="slider"]';
-@@ -198,10 +209,17 @@ export async function readChatGptEffortSnapshot(
+@@ -198,10 +209,17 @@
      });
      const state = parseChatGptEffortSliderState(snapshot.min, snapshot.max, snapshot.value);
      if (!state) throw new Error("ChatGPT effort slider exposed an invalid ARIA range");
@@ -2341,7 +3116,6 @@ index afe5d7f..3446e69 100644
      await new Promise(resolve => setTimeout(resolve, 50));
    } while (true);
 diff --git a/src/chatgpt-web-models.ts b/src/chatgpt-web-models.ts
-index bd0f4eb..a37af37 100644
 --- a/src/chatgpt-web-models.ts
 +++ b/src/chatgpt-web-models.ts
 @@ -1,6 +1,8 @@
@@ -2353,7 +3127,7 @@ index bd0f4eb..a37af37 100644
  /** Internal adapter identity for a turn whose ChatGPT model is selected by the user in the launcher. */
  export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
  /** Internal adapter identity for the explicitly enabled, Pro-sized Zero Risk context profile. */
-@@ -8,7 +10,8 @@ export const CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL = "chatgpt-web-zero-risk-pr
+@@ -8,7 +10,8 @@
  
  export type ChatGptWebAutomaticBackendModel =
    | typeof CHATGPT_WEB_BACKEND_MODEL
@@ -2363,7 +3137,7 @@ index bd0f4eb..a37af37 100644
  export type ChatGptWebBackendModel =
    | ChatGptWebAutomaticBackendModel
    | ChatGptWebZeroRiskBackendModel;
-@@ -130,6 +133,11 @@ export function resolveChatGptWebContextLimits(
+@@ -130,6 +133,11 @@
        CHATGPT_WEB_ZERO_RISK_AUTO_COMPACT_TOKEN_LIMIT,
      );
    }
@@ -2375,7 +3149,7 @@ index bd0f4eb..a37af37 100644
    if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
      // Luna carries continuity through a private checkpoint on every completed browser turn. Codex
      // internally clamps this field to 90% of the model window, but the reported active usage is the
-@@ -173,6 +181,7 @@ export function resolveChatGptWebTransportLimits(
+@@ -173,6 +181,7 @@
  ): ChatGptWebTransportLimits {
    if (isChatGptWebZeroRiskBackendModel(backendModel)) return {};
    if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) return {};
@@ -2383,7 +3157,7 @@ index bd0f4eb..a37af37 100644
    if (!capabilities.proAvailable) {
      if (effort === "low") {
        return { browserComposerCharLimit: CHATGPT_WEB_INSTANT_COMPOSER_CHAR_LIMIT };
-@@ -321,6 +330,18 @@ export const CHATGPT_WEB_LUNA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
+@@ -321,6 +330,18 @@
    requiresPro: false,
  };
  
@@ -2402,11 +3176,10 @@ index bd0f4eb..a37af37 100644
  export const CHATGPT_WEB_LUNA_MODEL_ROUTES: readonly ChatGptWebModelRoute[] = [
    CHATGPT_WEB_LUNA_MODEL_ROUTE,
  ];
-@@ -426,6 +447,30 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[]
-     supportedCodexEfforts: ["max"],
+@@ -427,6 +448,30 @@
      requiresPro: true,
    },
-+  {
+   {
 +    slug: "chatgpt-web/gpt-6-instant",
 +    displayName: "GPT-6 Instant (Web)",
 +    description: "Explicit GPT-6 Instant; browser must confirm the selected family before sending.",
@@ -2430,10 +3203,11 @@ index bd0f4eb..a37af37 100644
 +    supportedCodexEfforts: ["medium", "high", "xhigh"],
 +    requiresPro: false,
 +  },
-   {
++  {
      slug: "chatgpt-web/gpt-6-pro",
      displayName: "GPT-6 Pro (Web)",
-@@ -444,6 +489,7 @@ const routesBySlug = new Map(
+     description: "GPT-6 Pro through ChatGPT. The fixed Max effort selects Pro.",
+@@ -444,6 +489,7 @@
    [
      CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
      CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
@@ -2441,7 +3215,7 @@ index bd0f4eb..a37af37 100644
      ...CHATGPT_WEB_LUNA_MODEL_ROUTES,
      ...CHATGPT_WEB_MODEL_ROUTES,
      CHATGPT_WEB_LEGACY_LUNA_MODEL_ROUTE,
-@@ -470,11 +516,11 @@ export function availableChatGptWebModelRoutes(
+@@ -470,11 +516,11 @@
        : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
    }
    if (!capabilities.solAvailable) return includeLegacy
@@ -2457,7 +3231,7 @@ index bd0f4eb..a37af37 100644
    return candidates.filter(route =>
      (!route.requiresPro || capabilities.proAvailable)
      && (!route.requiresExtraHigh || capabilities.extraHighAvailable));
-@@ -510,6 +556,7 @@ export function requireChatGptWebModelRoute(
+@@ -510,6 +556,7 @@
    if (route.interactionMode === "manual") {
      throw new Error(`${route.displayName} is only available while Zero Risk is enabled`);
    }
@@ -2466,10 +3240,9 @@ index bd0f4eb..a37af37 100644
      if (capabilities.solAvailable) {
        throw new Error(`${route.displayName} is only available for Luna-only accounts`);
 diff --git a/src/cli.ts b/src/cli.ts
-index 006da67..782b2e9 100644
 --- a/src/cli.ts
 +++ b/src/cli.ts
-@@ -16,6 +16,7 @@ import {
+@@ -16,6 +16,7 @@
    activateCodexIntegration,
    deactivateCodexIntegration,
    inspectCodexIntegration,
@@ -2477,7 +3250,7 @@ index 006da67..782b2e9 100644
    readCodexSubagentProtocol,
    setCodexSubagentProtocol,
    uninstallCodexIntegration,
-@@ -385,9 +386,20 @@ async function doctorCommand(args: string[]): Promise<void> {
+@@ -385,9 +386,20 @@
    if (!report.ok) process.exitCode = 1;
  }
  
@@ -2502,10 +3275,9 @@ index 006da67..782b2e9 100644
      ? (() => {
          const status = inspectCodexIntegration();
 diff --git a/src/codex-integration-shared.ts b/src/codex-integration-shared.ts
-index bb685f2..7921bd3 100644
 --- a/src/codex-integration-shared.ts
 +++ b/src/codex-integration-shared.ts
-@@ -264,6 +264,15 @@ export function getCodexJournalRecoveryPath(): string {
+@@ -264,6 +264,15 @@
  }
  
  export function routeUrl(config: AppConfig): string {
@@ -2522,10 +3294,9 @@ index bb685f2..7921bd3 100644
  }
  
 diff --git a/src/config.ts b/src/config.ts
-index 8a64e60..450257f 100644
 --- a/src/config.ts
 +++ b/src/config.ts
-@@ -19,10 +19,10 @@ export type SubagentProtocol = "compatibility-v1" | "native";
+@@ -19,10 +19,10 @@
   * ChatGPT caches a connector's public MCP contract by connector identity. The direct turn-token
   * contract therefore has a new identity instead of mutating the retired connector in place.
   */
@@ -2538,7 +3309,7 @@ index 8a64e60..450257f 100644
  
  export function isLegacyChatGptConnectorName(value: string): boolean {
    return (LEGACY_CHATGPT_CONNECTOR_NAMES as readonly string[]).includes(value);
-@@ -88,6 +88,12 @@ export interface AppConfig {
+@@ -88,6 +88,12 @@
    experimentalSkillAttachments: boolean;
    experimentalFreshConversationPerTurn: boolean;
    useSavedChats: boolean;
@@ -2551,7 +3322,7 @@ index 8a64e60..450257f 100644
    /** Explicitly install the additional Pro-sized model row while Zero Risk is active. */
    zeroRiskProEnabled: boolean;
    /** Optional adapter-silence budget for the Responses watchdog. */
-@@ -220,6 +226,8 @@ export function defaultConfig(mode: RuntimeMode = "browser-only"): AppConfig {
+@@ -220,6 +226,8 @@
      experimentalSkillAttachments: false,
      experimentalFreshConversationPerTurn: false,
      useSavedChats: false,
@@ -2560,7 +3331,7 @@ index 8a64e60..450257f 100644
      zeroRiskProEnabled: false,
      autoApproveToolCalls: false,
      controlToken: randomBytes(32).toString("base64url"),
-@@ -342,11 +350,24 @@ export function defaultChromeExecutable(
+@@ -342,11 +350,24 @@
    }
    return "/usr/bin/google-chrome";
  }
@@ -2586,7 +3357,7 @@ index 8a64e60..450257f 100644
  }
  
  export function loadConfigForSetup(): AppConfig {
-@@ -361,13 +382,7 @@ export function loadConfigForSetup(): AppConfig {
+@@ -361,13 +382,7 @@
      raw.version = 3;
      raw.browserHost = "managed-chrome";
    }
@@ -2601,7 +3372,7 @@ index 8a64e60..450257f 100644
    return parseConfig(raw, path);
  }
  
-@@ -467,7 +482,7 @@ function parseConfig(value: unknown, path: string): AppConfig {
+@@ -467,7 +482,7 @@
        }
      }
    };
@@ -2610,7 +3381,7 @@ index 8a64e60..450257f 100644
      validateTunnel(parsed.tunnel, "tunnel");
      if (parsed.automaticTunnel !== undefined) validateTunnel(parsed.automaticTunnel, "automaticTunnel");
      if (parsed.manualTunnel !== undefined) validateTunnel(parsed.manualTunnel, "manualTunnel");
-@@ -523,6 +538,49 @@ function parseConfig(value: unknown, path: string): AppConfig {
+@@ -523,6 +538,49 @@
      throw new Error(`Invalid useSavedChats in ${path}`);
    }
    const useSavedChats = parsed.useSavedChats === true;
@@ -2660,7 +3431,7 @@ index 8a64e60..450257f 100644
    if (browserInteractionMode === "manual" && experimentalSkillAttachments) {
      throw new Error(`Zero Risk does not support Skills as files in ${path}`);
    }
-@@ -550,6 +608,11 @@ function parseConfig(value: unknown, path: string): AppConfig {
+@@ -550,6 +608,11 @@
      experimentalSkillAttachments,
      experimentalFreshConversationPerTurn,
      useSavedChats,
@@ -2672,7 +3443,7 @@ index 8a64e60..450257f 100644
      zeroRiskProEnabled,
    } as AppConfig;
  }
-@@ -562,6 +625,7 @@ export function saveConfig(config: AppConfig): void {
+@@ -562,6 +625,7 @@
  
  export function providerConfig(config: AppConfig): CodexProviderConfig {
    const manual = config.browserInteractionMode === "manual";
@@ -2680,7 +3451,7 @@ index 8a64e60..450257f 100644
    const model = manual
      ? CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL
      : config.solAvailable ? "gpt-5.6-sol" : "gpt-5.6-luna";
-@@ -590,7 +654,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
+@@ -590,7 +654,7 @@
      ),
      noReasoningModels: [],
      chatgptWeb: {
@@ -2689,7 +3460,7 @@ index 8a64e60..450257f 100644
        browserInteractionMode: config.browserInteractionMode,
        browserHost: config.browserHost,
        browserHostDescriptorPath: config.browserHostDescriptorPath,
-@@ -600,7 +664,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
+@@ -600,7 +664,7 @@
        threadEnvironmentStatePath: join(getConfigDir(), "runtime", "thread-environments.json"),
        lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
        headed: config.headed,
@@ -2700,7 +3471,6 @@ index 8a64e60..450257f 100644
        proAvailable: manual ? false : config.proAvailable,
 diff --git a/src/gemini-web-models.ts b/src/gemini-web-models.ts
 new file mode 100644
-index 0000000..ac7a725
 --- /dev/null
 +++ b/src/gemini-web-models.ts
 @@ -0,0 +1,54 @@
@@ -2759,7 +3529,6 @@ index 0000000..ac7a725
 +  return route;
 +}
 diff --git a/src/model-catalog.ts b/src/model-catalog.ts
-index 3820878..8897ad5 100644
 --- a/src/model-catalog.ts
 +++ b/src/model-catalog.ts
 @@ -1,4 +1,9 @@
@@ -2772,7 +3541,7 @@ index 3820878..8897ad5 100644
  import type { CodexModelContextOverride } from "./codex-integration";
  import {
    availableChatGptWebModelRoutes,
-@@ -48,7 +53,7 @@ function routedModelPriority(
+@@ -48,7 +53,7 @@
    const priority = modelPriority(template);
    if (priority === undefined
      || config.subagentProtocol !== "compatibility-v1"
@@ -2781,7 +3550,7 @@ index 3820878..8897ad5 100644
    if (priority === Number.MAX_SAFE_INTEGER) {
      throw new Error("Native Codex model template priority cannot reserve the Compatibility V1 roster");
    }
-@@ -60,7 +65,9 @@ function nativeTemplateCandidate(value: unknown, requireTools: boolean): value i
+@@ -60,7 +65,9 @@
    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
    const model = value as JsonObject;
    const modelSlug = slug(model);
@@ -2792,7 +3561,7 @@ index 3820878..8897ad5 100644
    // This route forwards ChatGPT authentication. Codex's own model manager keeps every list-visible
    // model in ChatGPT mode even when `supported_in_api` is false; that flag gates API-key mode, not
    // whether the backend row is a valid catalog template. The routed Web row overrides the flag to
-@@ -160,6 +167,51 @@ export function buildChatGptWebModel(
+@@ -160,6 +167,51 @@
    delete model.availability_nux;
    return model;
  }
@@ -2844,7 +3613,7 @@ index 3820878..8897ad5 100644
  
  export function augmentNativeModelCatalog(
    value: unknown,
-@@ -171,7 +223,11 @@ export function augmentNativeModelCatalog(
+@@ -171,7 +223,11 @@
      throw new Error("Native Codex models response is missing a models array");
    }
    const nativeModels = structuredClone(
@@ -2857,7 +3626,7 @@ index 3820878..8897ad5 100644
    );
    if (config.subagentProtocol === "compatibility-v1") {
      for (const candidate of nativeModels) {
-@@ -201,8 +257,10 @@ export function augmentNativeModelCatalog(
+@@ -201,8 +257,10 @@
    }
    const webModels = availableChatGptWebModelRoutes(config, true)
      .map(route => buildChatGptWebModel(template, route, config));
@@ -2870,10 +3639,9 @@ index 3820878..8897ad5 100644
    };
  }
 diff --git a/src/responses/parser.ts b/src/responses/parser.ts
-index ded9b12..2c7920b 100644
 --- a/src/responses/parser.ts
 +++ b/src/responses/parser.ts
-@@ -14,7 +14,10 @@ import type {
+@@ -14,7 +14,10 @@
  import { namespacedToolName } from "../types";
  import { responsesRequestSchema } from "./schema";
  import { compactionItemToText, isNativeTextCompaction } from "./compaction";
@@ -2885,7 +3653,7 @@ index ded9b12..2c7920b 100644
  import { decodeReasoningEnvelope } from "./reasoning-envelope";
  
  function isObj(v: unknown): v is Record<string, unknown> {
-@@ -278,6 +281,7 @@ const REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "
+@@ -278,6 +281,7 @@
  
  export function parseRequest(body: unknown): CodexParsedRequest {
    const replayedInputPrefixLength = previousResponseReplayPrefixLength(body);
@@ -2893,7 +3661,7 @@ index ded9b12..2c7920b 100644
    const parsed = responsesRequestSchema.safeParse(body);
    if (!parsed.success) {
      throw new Error(`responses parse error: ${parsed.error.message}`);
-@@ -626,6 +630,7 @@ export function parseRequest(body: unknown): CodexParsedRequest {
+@@ -626,6 +630,7 @@
    if (data.service_tier !== undefined) options.serviceTier = data.service_tier;
    Object.assign(options, parseTextControls(data.text));
    if (data.prompt_cache_key !== undefined) options.promptCacheKey = data.prompt_cache_key;
@@ -2901,7 +3669,7 @@ index ded9b12..2c7920b 100644
  
    const textCompaction = !compactionRequest && isNativeTextCompaction(body);
    return {
-@@ -636,6 +641,8 @@ export function parseRequest(body: unknown): CodexParsedRequest {
+@@ -636,6 +641,8 @@
      options,
      _rawBody: body,
      ...(replayedInputPrefixLength > 0 ? { _replayPrefixLen: replayedInputPrefixLength } : {}),
@@ -2911,7 +3679,6 @@ index ded9b12..2c7920b 100644
      ...(textCompaction ? { _compactionResponseFormat: "message" as const } : {}),
      ...(opaqueMultiAgentV2Payload ? { _opaqueMultiAgentV2Payload: true } : {}),
 diff --git a/src/responses/state.ts b/src/responses/state.ts
-index a889c3a..54935fa 100644
 --- a/src/responses/state.ts
 +++ b/src/responses/state.ts
 @@ -1,6 +1,7 @@
@@ -2922,7 +3689,7 @@ index a889c3a..54935fa 100644
  
  const MAX_STORED_RESPONSES = 1_000;
  const RESPONSE_TTL_MS = 60 * 60 * 1_000;
-@@ -17,6 +18,7 @@ const SNAPSHOT_TOTAL_MAX_BYTES = 24 * 1024 * 1024;
+@@ -17,6 +18,7 @@
  interface StoredResponseState {
    createdAt: number;
    items: unknown[];
@@ -2930,7 +3697,7 @@ index a889c3a..54935fa 100644
    /** Approximate in-memory size, computed locally at insert time (never trusted from disk). */
    sizeBytes?: number;
  }
-@@ -28,7 +30,10 @@ let storedResponseBytes = 0;
+@@ -28,7 +30,10 @@
  function measuredEntry(entry: Omit<StoredResponseState, "sizeBytes">): StoredResponseState {
    let sizeBytes = 0;
    try {
@@ -2942,7 +3709,7 @@ index a889c3a..54935fa 100644
    } catch {
      /* unserializable items: weightless rather than fatal */
    }
-@@ -56,6 +61,7 @@ function deleteEntry(id: string): void {
+@@ -56,6 +61,7 @@
  // upstream. Consumers use the prefix length to bind trusted history and rolling checkpoints to the
  // exact replayed portion of this request.
  const replayedInputPrefixLengths = new WeakMap<object, number>();
@@ -2950,7 +3717,7 @@ index a889c3a..54935fa 100644
  let loaded = false;
  let persistTimer: ReturnType<typeof setTimeout> | null = null;
  let pendingPersistPath: string | null = null;
-@@ -93,6 +99,9 @@ function ensureLoaded(): void {
+@@ -93,6 +99,9 @@
        setEntry(id, {
          createdAt: rec.createdAt,
          items: rec.items,
@@ -2960,7 +3727,7 @@ index a889c3a..54935fa 100644
        });
      }
      pruneResponses();
-@@ -188,6 +197,9 @@ export function expandPreviousResponseInput(body: unknown): unknown {
+@@ -188,6 +197,9 @@
      input: [...previous.items, ...inputItems(request.input)],
    };
    replayedInputPrefixLengths.set(expanded, previous.items.length);
@@ -2970,7 +3737,7 @@ index a889c3a..54935fa 100644
    return expanded;
  }
  
-@@ -196,6 +208,14 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
+@@ -196,6 +208,14 @@
    if (!body || typeof body !== "object" || Array.isArray(body)) return 0;
    return replayedInputPrefixLengths.get(body) ?? 0;
  }
@@ -2985,7 +3752,7 @@ index a889c3a..54935fa 100644
  
  /**
   * Cache completed output and max_output_tokens partial output for previous_response_id replay.
-@@ -204,7 +224,7 @@ export function previousResponseReplayPrefixLength(body: unknown): number {
+@@ -204,7 +224,7 @@
  export function rememberResponseState(
    requestBody: unknown,
    response: { id?: unknown; output?: unknown; status?: unknown; incomplete_details?: unknown },
@@ -2994,7 +3761,7 @@ index a889c3a..54935fa 100644
  ): void {
    if (!requestBody || typeof requestBody !== "object" || Array.isArray(requestBody)) return;
    const request = requestBody as Record<string, unknown>;
-@@ -224,6 +244,9 @@ export function rememberResponseState(
+@@ -224,6 +244,9 @@
    setEntry(response.id, {
      createdAt: now(),
      items: [...inputItems(request.input), ...response.output],
@@ -3005,7 +3772,6 @@ index a889c3a..54935fa 100644
    pruneResponses();
    schedulePersist();
 diff --git a/src/server.ts b/src/server.ts
-index 8bae1ac..207fbbe 100644
 --- a/src/server.ts
 +++ b/src/server.ts
 @@ -1,4 +1,5 @@
@@ -3014,7 +3780,7 @@ index 8bae1ac..207fbbe 100644
  import { closeChatGptBrowserWorkers } from "./adapters/chatgpt-web/browser-worker";
  import { closeTurnBrokers, TurnBroker } from "./adapters/chatgpt-web/turn-broker";
  import { timingSafeEqual } from "node:crypto";
-@@ -35,6 +36,11 @@ import {
+@@ -35,6 +36,11 @@
    requireChatGptWebModelRoute,
    type ChatGptWebModelRoute,
  } from "./chatgpt-web-models";
@@ -3026,7 +3792,7 @@ index 8bae1ac..207fbbe 100644
  import { forwardNativeCodexRequest, type NativeFetch, type NativeImageEndpoint } from "./native-passthrough";
  import { fetchNativeCodex } from "./native-network";
  import {
-@@ -45,7 +51,12 @@ import {
+@@ -45,7 +51,12 @@
  } from "./responses/compaction";
  import { parseRequest } from "./responses/parser";
  import { expandPreviousResponseInput, flushResponseState, rememberResponseState } from "./responses/state";
@@ -3040,7 +3806,7 @@ index 8bae1ac..207fbbe 100644
  import type { CodexProviderConfig } from "./types";
  import type { ProviderAdapter } from "./adapters/base";
  import { VERSION } from "./version";
-@@ -352,12 +363,18 @@ export class HttpTurnCounter {
+@@ -352,12 +363,18 @@
  }
  
  type ChatGptWebAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
@@ -3059,7 +3825,7 @@ index 8bae1ac..207fbbe 100644
    /** Bind the physical HTTP stream to the exact native Codex turn that owns it. */
    onTurnIdentity?: (identity: NativeCodexTurnIdentity) => void;
  }
-@@ -465,6 +482,144 @@ function toolBridgeMaps(parsed: CodexParsedRequest): {
+@@ -465,6 +482,144 @@
    }
    return { toolNsMap, freeformToolNames, toolSearchToolNames };
  }
@@ -3204,7 +3970,7 @@ index 8bae1ac..207fbbe 100644
  
  export async function responseRequest(
    req: Request,
-@@ -494,7 +649,15 @@ export async function responseRequest(
+@@ -494,7 +649,15 @@
    } catch (error) {
      return formatErrorResponse(400, "invalid_request_error", error instanceof Error ? error.message : String(error));
    }
@@ -3221,7 +3987,7 @@ index 8bae1ac..207fbbe 100644
      try {
        return await forwardNativeCodexRequest(nativeRequest, "responses", undefined, raw);
      } catch (error) {
-@@ -535,9 +698,17 @@ export async function responseRequest(
+@@ -535,9 +698,17 @@
  
    const compaction = parsed._compactionRequest === true;
    const compactionItem = compaction && parsed._compactionResponseFormat !== "message";
@@ -3241,7 +4007,7 @@ index 8bae1ac..207fbbe 100644
        return;
      }
      if (response.status !== "completed") return;
-@@ -726,25 +897,35 @@ export async function compactRequest(
+@@ -726,25 +897,35 @@
    if (typeof raw.model !== "string" || !raw.model) {
      return formatErrorResponse(400, "invalid_request_error", "Compaction request requires a model");
    }
@@ -3290,7 +4056,7 @@ index 8bae1ac..207fbbe 100644
    }
    const input = Array.isArray(raw.input) ? raw.input : [];
    const headers = new Headers(req.headers);
-@@ -1003,8 +1184,7 @@ export function startServer(
+@@ -1003,8 +1184,7 @@
              "codex-chatgpt-web is draining for a requested service operation",
            );
          }
@@ -3300,7 +4066,7 @@ index 8bae1ac..207fbbe 100644
            const started = Date.now();
            const recordResult = (response: Response, failure?: ModelCatalogFailure): Response => {
              const result = { request, at: new Date().toISOString(), status: response.status, ...(failure ? { failure } : {}) };
-@@ -1032,7 +1212,7 @@ export function startServer(
+@@ -1032,7 +1212,7 @@
            }
            let failure: ModelCatalogFailure | undefined;
            const response = await modelsRequest(
@@ -3309,7 +4075,7 @@ index 8bae1ac..207fbbe 100644
              catalogConfig,
              dependencies.fetchUpstream,
              readCodexModelContextOverride,
-@@ -1042,8 +1222,7 @@ export function startServer(
+@@ -1042,8 +1222,7 @@
              successfulModelCatalogRequests += 1;
              lastSuccessfulModelCatalogRequestAt = new Date().toISOString();
            }
@@ -3320,10 +4086,9 @@ index 8bae1ac..207fbbe 100644
        if (req.method === "GET" && url.pathname === "/v1/responses") {
          return new Response("Responses WebSocket transport is not enabled on this local route", {
 diff --git a/src/types.ts b/src/types.ts
-index cccf7e1..4b45636 100644
 --- a/src/types.ts
 +++ b/src/types.ts
-@@ -9,6 +9,8 @@ export interface CodexParsedRequest {
+@@ -9,6 +9,8 @@
    _chatgptModelFamily?: "5.6" | "6";
    /** Number of leading raw input items restored from local previous_response_id state. */
    _replayPrefixLen?: number;
@@ -3333,7 +4098,6 @@ index cccf7e1..4b45636 100644
     * Dedicated native compaction, identified by compaction_trigger or canonical responses/memento
     * metadata. Both run without local tools; their output contracts differ.
 diff --git a/tests/chatgpt-model-selection.test.ts b/tests/chatgpt-model-selection.test.ts
-index c839662..3590b5e 100644
 --- a/tests/chatgpt-model-selection.test.ts
 +++ b/tests/chatgpt-model-selection.test.ts
 @@ -1,15 +1,17 @@
@@ -3355,7 +4119,7 @@ index c839662..3590b5e 100644
          waitFor: async () => { throw new Error("Requested family is absent"); },
        }),
        locator: () => ({ count: async () => 1, getAttribute: async () => "true" }),
-@@ -22,7 +24,9 @@ test("model selection recognizes Latest in the launcher languages without accept
+@@ -22,7 +24,9 @@
  
  test("family confirmation separates Latest staging from the actual Pro response", () => {
    expect(chatGptModelFamilyMatches(["5.6 High, 3 of 5."], "5.6", "high")).toBe(true);
@@ -3366,7 +4130,7 @@ index c839662..3590b5e 100644
    expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "max")).toBe(true);
    expect(chatGptModelFamilyMatches(["GPT-5.6 Sol Pro, 5 of 5."], "5.6", "max")).toBe(true);
    for (const descriptions of [[], ["Try Pro for more reasoning"], ["5.6 High, 3 of 5."], ["5.6 Pro, 5 of 5."],
-@@ -32,3 +36,25 @@ test("family confirmation separates Latest staging from the actual Pro response"
+@@ -32,3 +36,25 @@
    expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "5.6", "max")).toBe(false);
    expect(chatGptModelFamilyMatches(["6 Pro, 5 of 5."], "6", "xhigh")).toBe(false);
  });
@@ -3393,7 +4157,6 @@ index c839662..3590b5e 100644
 +  expect(await isChatGptThinkOnlyComposer(mockForm(0, 1, false))).toBe(false);
 +});
 diff --git a/tests/chatgpt-web-models.test.ts b/tests/chatgpt-web-models.test.ts
-index e245190..66c5c92 100644
 --- a/tests/chatgpt-web-models.test.ts
 +++ b/tests/chatgpt-web-models.test.ts
 @@ -1,8 +1,12 @@
@@ -3409,7 +4172,7 @@ index e245190..66c5c92 100644
    CHATGPT_WEB_LUNA_BACKEND_MODEL,
    CHATGPT_WEB_LUNA_MODEL_ROUTE,
    CHATGPT_WEB_LEGACY_LUNA_MODEL_ROUTE,
-@@ -47,18 +51,21 @@ describe("fixed ChatGPT Web model routes", () => {
+@@ -47,18 +51,21 @@
        ["chatgpt-web/pro", "ultra", "max"],
      ]);
      expect(CHATGPT_WEB_MODEL_ROUTES.map(route => route.displayName)).toEqual([
@@ -3433,7 +4196,7 @@ index e245190..66c5c92 100644
      expect(() => requireChatGptWebModelRoute("chatgpt-web/extra-high", plus))
        .toThrow("Extra High is not available for this account");
      expect(() => requireChatGptWebModelRoute("chatgpt-web/pro", plus))
-@@ -68,7 +75,7 @@ describe("fixed ChatGPT Web model routes", () => {
+@@ -68,7 +75,7 @@
    test("Extra High stays routable without granting Pro or Pro-sized context", () => {
      const config = { ...defaultConfig("full"), extraHighAvailable: true, proAvailable: false };
      expect(availableChatGptWebModelRoutes(config).map(route => route.slug))
@@ -3442,7 +4205,7 @@ index e245190..66c5c92 100644
      const request = parsed("chatgpt-web/extra-high", "low");
      expect(routeChatGptWebRequest(request, config).adapterEffort).toBe("xhigh");
      expect(request.options.reasoning).toBe("xhigh");
-@@ -83,7 +90,7 @@ describe("fixed ChatGPT Web model routes", () => {
+@@ -83,7 +90,7 @@
  
    test("exposes Luna and Think when the authenticated account has no Sol selector", () => {
      const free = { solAvailable: false, extraHighAvailable: false, proAvailable: false };
@@ -3451,10 +4214,12 @@ index e245190..66c5c92 100644
      expect(requireChatGptWebModelRoute("chatgpt-web/luna", free).backendModel)
        .toBe(CHATGPT_WEB_LUNA_BACKEND_MODEL);
      expect(requireChatGptWebModelRoute("chatgpt-web/think", free))
-@@ -96,6 +103,23 @@ describe("fixed ChatGPT Web model routes", () => {
+@@ -94,6 +101,23 @@
+       solAvailable: true,
+       extraHighAvailable: false, proAvailable: false,
      })).toThrow("only available for Luna-only accounts");
-   });
- 
++  });
++
 +  test("Auto never implies GPT-6, is routable on Free and Plus, and has a conservative envelope", () => {
 +    const free={solAvailable:false,extraHighAvailable:false,proAvailable:false};
 +    const route=requireChatGptWebModelRoute("chatgpt-web/auto",free,"low");
@@ -3470,12 +4235,10 @@ index e245190..66c5c92 100644
 +    expect(selected.slug).toBe("chatgpt-web/auto");
 +    expect(parsedAuto.modelId).toBe(CHATGPT_WEB_AUTO_BACKEND_MODEL);
 +    expect(parsedAuto._chatgptModelFamily).toBeUndefined();
-+  });
-+
+   });
+ 
    test("Zero Risk exposes one generic route independent of account capabilities", () => {
-     const manual = {
-       solAvailable: false,
-@@ -352,3 +376,15 @@ describe("fixed ChatGPT Web model routes", () => {
+@@ -352,3 +376,15 @@
      expect(new Set(keys).size).toBe(3);
    });
  });
@@ -3493,7 +4256,6 @@ index e245190..66c5c92 100644
 +});
 diff --git a/tests/gemini-web-adapter.test.ts b/tests/gemini-web-adapter.test.ts
 new file mode 100644
-index 0000000..92c5003
 --- /dev/null
 +++ b/tests/gemini-web-adapter.test.ts
 @@ -0,0 +1,310 @@
@@ -3809,7 +4571,6 @@ index 0000000..92c5003
 +});
 diff --git a/tests/gemini-web.test.ts b/tests/gemini-web.test.ts
 new file mode 100644
-index 0000000..b941995
 --- /dev/null
 +++ b/tests/gemini-web.test.ts
 @@ -0,0 +1,214 @@
@@ -4028,10 +4789,9 @@ index 0000000..b941995
 +  }));
 +});
 diff --git a/tests/model-catalog.test.ts b/tests/model-catalog.test.ts
-index 979e055..664f8a3 100644
 --- a/tests/model-catalog.test.ts
 +++ b/tests/model-catalog.test.ts
-@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
+@@ -2,6 +2,7 @@
  import { defaultConfig } from "../src/config";
  import {
    CHATGPT_WEB_LUNA_MODEL_ROUTE,
@@ -4039,7 +4799,7 @@ index 979e055..664f8a3 100644
    CHATGPT_WEB_LUNA_MODEL_ROUTES,
    CHATGPT_WEB_ZERO_RISK_CONTEXT_WINDOW,
    CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
-@@ -12,6 +13,7 @@ import {
+@@ -12,6 +13,7 @@
    chatGptWebRouteEfforts,
    resolveChatGptWebContextLimits,
  } from "../src/chatgpt-web-models";
@@ -4047,7 +4807,7 @@ index 979e055..664f8a3 100644
  import { augmentNativeModelCatalog, buildChatGptWebModel } from "../src/model-catalog";
  
  function source(): Record<string, unknown> {
-@@ -68,10 +70,10 @@ describe("native /models augmentation", () => {
+@@ -68,10 +70,10 @@
      expect(legacy.map(model => [model.context_window, model.auto_compact_token_limit])).toEqual([
        [111_193, 95_000], [111_193, 95_000], [111_193, 95_000], [111_193, 95_000], [112_193, 95_000],
      ]);
@@ -4061,7 +4821,7 @@ index 979e055..664f8a3 100644
        const limits = resolveChatGptWebContextLimits(route.backendModel, route.adapterEffort, config);
        expect(model).toMatchObject({
          slug: route.slug,
-@@ -93,7 +95,7 @@ describe("native /models augmentation", () => {
+@@ -93,7 +95,7 @@
        expect((model.supported_reasoning_levels as Array<{ effort: string }>).map(level => level.effort))
          .toEqual([...chatGptWebRouteEfforts(route, config)]);
      }
@@ -4070,7 +4830,7 @@ index 979e055..664f8a3 100644
        .toEqual(["medium", "high", "xhigh"]);
      expect(() => buildChatGptWebModel(originalModels[1], {
        ...CHATGPT_WEB_MODEL_ROUTES[1]!, supportedCodexEfforts: ["low", "medium"],
-@@ -132,8 +134,7 @@ describe("native /models augmentation", () => {
+@@ -132,8 +134,7 @@
  
      expect(spawnOverrides).toEqual([
        "gpt-5.6-sol",
@@ -4080,7 +4840,7 @@ index 979e055..664f8a3 100644
      ]);
      expect(models.find(model => model.slug === "chatgpt-web/light")?.priority).toBe(3);
    });
-@@ -184,7 +185,8 @@ describe("native /models augmentation", () => {
+@@ -184,7 +185,8 @@
      const models = second.models as Array<Record<string, unknown>>;
      const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
      expect(web.map(model => model.slug)).toEqual([
@@ -4090,7 +4850,7 @@ index 979e055..664f8a3 100644
        "chatgpt-web/light", "chatgpt-web/medium", "chatgpt-web/high", "chatgpt-web/extra-high",
      ]);
      expect(web.every(model => model.tool_mode === null)).toBe(true);
-@@ -195,6 +197,9 @@ describe("native /models augmentation", () => {
+@@ -195,6 +197,9 @@
        effectiveContextWindowPercent: model.effective_context_window_percent,
        autoCompactTokenLimit: model.auto_compact_token_limit,
      }))).toEqual([
@@ -4100,7 +4860,7 @@ index 979e055..664f8a3 100644
        { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
        { contextWindow: 90_000, effectiveContextWindowPercent: 89, autoCompactTokenLimit: 80_000 },
        { contextWindow: 41_000, effectiveContextWindowPercent: 78, autoCompactTokenLimit: 32_000 },
-@@ -209,10 +214,10 @@ describe("native /models augmentation", () => {
+@@ -209,10 +214,10 @@
      config.solAvailable = false;
      const models = augmentNativeModelCatalog(source(), config).models as Array<Record<string, unknown>>;
      const web = models.filter(model => String(model.slug).startsWith("chatgpt-web/"));
@@ -4114,7 +4874,7 @@ index 979e055..664f8a3 100644
        slug: CHATGPT_WEB_LUNA_MODEL_ROUTE.slug,
        display_name: CHATGPT_WEB_LUNA_MODEL_ROUTE.displayName,
        default_reasoning_level: "low",
-@@ -320,7 +325,7 @@ describe("native /models augmentation", () => {
+@@ -320,7 +325,7 @@
      const result = augmentNativeModelCatalog(native, defaultConfig("full"));
      const web = (result.models as Array<Record<string, unknown>>)
        .filter(model => String(model.slug).startsWith("chatgpt-web/"));
@@ -4123,7 +4883,7 @@ index 979e055..664f8a3 100644
      expect(web.every(model => model.shell_type === "shell_command")).toBe(true);
      expect(web.every(model => model.tool_mode === null)).toBe(true);
    });
-@@ -336,7 +341,7 @@ describe("native /models augmentation", () => {
+@@ -336,7 +341,7 @@
      const web = (result.models as Array<Record<string, unknown>>)
        .filter(model => String(model.slug).startsWith("chatgpt-web/"));
  
@@ -4132,7 +4892,7 @@ index 979e055..664f8a3 100644
      expect(web.every(model => model.supported_in_api === true)).toBe(true);
      expect((result.models as Array<Record<string, unknown>>).slice(0, models.length))
        .toEqual(models);
-@@ -372,3 +377,34 @@ describe("native /models augmentation", () => {
+@@ -372,3 +377,34 @@
      }, defaultConfig("full"))).toThrow("no list-visible, tool-capable model");
    });
  });
@@ -4168,13 +4928,16 @@ index 979e055..664f8a3 100644
 +  }
 +});
 diff --git a/tests/server-lifecycle.test.ts b/tests/server-lifecycle.test.ts
-index 81e4b1d..e4395f2 100644
 --- a/tests/server-lifecycle.test.ts
 +++ b/tests/server-lifecycle.test.ts
-@@ -1155,6 +1155,48 @@ test("health proves that Codex received a successful augmented model catalog", a
-   }
- });
- 
+@@ -1151,6 +1151,48 @@
+     expect(health.successful_model_catalog_requests).toBe(1);
+     expect(typeof health.last_successful_model_catalog_request_at).toBe("string");
+   } finally {
++    await server.stop(true);
++  }
++});
++
 +test("model catalog requests are control-plane traffic, not active user turns", async () => {
 +  const config = { ...defaultConfig("browser-only"), port: 0 };
 +  let releaseCatalog!: () => void;
@@ -4213,18 +4976,13 @@ index 81e4b1d..e4395f2 100644
 +    expect((await pendingCatalog).status).toBe(200);
 +  } finally {
 +    releaseCatalog();
-+    await server.stop(true);
-+  }
-+});
-+
- test("server exposes authenticated standalone Web Search on the routed v1 base URL", async () => {
-   const config = { ...defaultConfig("browser-only"), port: 0 };
-   let upstreamRequest: Request | undefined;
+     await server.stop(true);
+   }
+ });
 diff --git a/tests/server-models.test.ts b/tests/server-models.test.ts
-index 2cc4097..d62f865 100644
 --- a/tests/server-models.test.ts
 +++ b/tests/server-models.test.ts
-@@ -54,9 +54,12 @@ test("proxies official /models auth and query, then appends grouped and legacy W
+@@ -54,9 +54,12 @@
    };
    expect(body.models.map(model => model.slug)).toEqual([
      "gpt-5.6-sol",
@@ -4237,7 +4995,7 @@ index 2cc4097..d62f865 100644
      "chatgpt-web/gpt-6-pro",
      "chatgpt-web/light",
      "chatgpt-web/medium",
-@@ -102,7 +105,7 @@ test("Luna-only account exposes no paid ChatGPT Web routes", async () => {
+@@ -102,7 +105,7 @@
    );
    const body = await response.json() as { models: Array<{ slug: string }> };
    expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/")).map(model => model.slug))
@@ -4246,7 +5004,7 @@ index 2cc4097..d62f865 100644
  });
  
  test("Zero Risk returns one generic Web row without using scanned capabilities", async () => {
-@@ -175,7 +178,7 @@ test("ChatGPT-only native catalog rows do not turn model discovery into a 502",
+@@ -175,7 +178,7 @@
    const body = await response.json() as { models: Array<{ slug: string; supported_in_api?: boolean }> };
    expect(body.models[0]).toMatchObject({ slug: "gpt-chatgpt-only", supported_in_api: false });
    expect(body.models.filter(model => model.slug.startsWith("chatgpt-web/")))

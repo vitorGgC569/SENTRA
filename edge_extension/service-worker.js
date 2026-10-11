@@ -11,6 +11,350 @@ const OMA_POLL_MS = 2000;
 const OMA_SW_VERSION = "1.6.52";
 const OMA_BUILD_ID = chrome.runtime.getManifest().sentra_build_id || "missing-build-id";
 const OMA_SOURCE_HASH = chrome.runtime.getManifest().sentra_source_hash || "missing-source-hash";
+const omaEvidenceBusy = new Set();
+// SENTRA_IDENTITY_REVOCATION_BEGIN — only deny-only evidence; never account proof.
+const OMA_ID_DOC_PREFIX = "sentra_id_doc_";
+const OMA_ID_REVOKE_PREFIX = "sentra_id_revoke_";
+const OMA_ID_PROFILE_KEY = "sentra_id_profile_epoch";
+const OMA_ID_POISON_KEY = "sentra_id_profile_poison";
+const OMA_ID_GLOBAL_DENY = new Set(["signed_out","account_changed","profile_changed","identity_unknown"]);
+const OMA_ID_RECEIPT_BUSY = new Set();
+const omaIdReceiptKey = jobId => "sentra_id_receipt_" + jobId;
+let omaIdProfilePromise = null;
+let omaIdFlushPromise = null;
+const omaIdFresh = () => crypto.randomUUID();
+const omaIdWorker = id => "TAB-" + id;
+const omaIdRoute = url => /^https:\/\/chatgpt\.com\/c\/([A-Za-z0-9_-]{8,160})(?:[/?#]|$)/.exec(String(url || ""))?.[1] || null;
+const omaIdDocumentKey = id => OMA_ID_DOC_PREFIX + id;
+const omaIdRevokeKey = id => OMA_ID_REVOKE_PREFIX + id;
+function omaIdProfileEpoch() {
+  if (!omaIdProfilePromise) {
+    omaIdProfilePromise = (async () => {
+      const saved = await chrome.storage.local.get(OMA_ID_PROFILE_KEY);
+      if (/^[A-Za-z0-9_-]{8,160}$/.test(saved[OMA_ID_PROFILE_KEY] || "")) {
+        return saved[OMA_ID_PROFILE_KEY];
+      }
+      const value = omaIdFresh();
+      await chrome.storage.local.set({ [OMA_ID_PROFILE_KEY]: value });
+      return value;
+    })().catch(error => { omaIdProfilePromise = null; throw error; });
+  }
+  return omaIdProfilePromise;
+}
+async function omaIdFlushInvalidations() {
+  if (omaIdFlushPromise) return omaIdFlushPromise;
+  omaIdFlushPromise = (async () => {
+    const items = await chrome.storage.local.get(null);
+    const keys = Object.keys(items).filter(key => key.startsWith(OMA_ID_REVOKE_PREFIX)).sort();
+    // Too many pending revocations => no new page evidence until operator repair.
+    if (keys.length > 128) return false;
+    let allDelivered = true;
+    for (const key of keys.slice(0, 16)) {
+      const notice = items[key];
+      if (!notice || notice.source_sha256 !== OMA_SOURCE_HASH) {
+        allDelivered = false;
+        continue;
+      }
+      try {
+        const ack = await omaRelay("/browser-evidence/invalidate", {
+          method: "POST", body: JSON.stringify(notice)
+        });
+        // "absent" is NOT proof that a previously published document
+        // was revoked. The relay might be pointed at the wrong SQLite DB,
+        // collector/profile or worker after restart: retain deny-only work.
+        if (!ack || !["invalidated", "unchanged"].includes(ack.state) ||
+            ack.grants_created !== false) {
+          allDelivered = false;
+          continue;
+        }
+        const current = await chrome.storage.local.get(key);
+        if (current[key]?.identity_epoch === notice.identity_epoch) {
+          await chrome.storage.local.remove(key);
+        }
+      } catch (_) {
+        // 404, restart, timeouts or expired pairing: leave durable deny-only
+        // notice and block new proof. Retrying a deny is safe, unlike Web submit.
+        allDelivered = false;
+      }
+    }
+    return allDelivered;
+  })().finally(() => { omaIdFlushPromise = null; });
+  return omaIdFlushPromise;
+}
+async function omaIdInvalidate(tabId, reason) {
+  if (!Number.isSafeInteger(tabId) || tabId < 0) return false;
+  if (!new Set(["tab_closed","navigation","signed_out","account_changed",
+                "profile_changed","identity_unknown"]).has(reason)) return false;
+  // Account/profile uncertainty is a GLOBAL DENY across every tracked tab.
+  // Write the poison and all available deny notices before releasing ANY
+  // document. No DOM/route/account label can clear this durable marker.
+  const globalDeny = OMA_ID_GLOBAL_DENY.has(reason);
+  const stored = await chrome.storage.local.get(null);
+  const tabIds = globalDeny
+    ? Object.keys(stored).filter(k => k.startsWith(OMA_ID_DOC_PREFIX))
+        .map(k => Number(k.slice(OMA_ID_DOC_PREFIX.length)))
+        .filter(n => Number.isSafeInteger(n) && n >= 0)
+    : [tabId];
+  const update = {};
+  if (globalDeny) {
+    update[OMA_ID_POISON_KEY] = { reason, identity_epoch: omaIdFresh() };
+  }
+  const remove = [];
+  for (const id of new Set(tabIds)) {
+    const docKey = omaIdDocumentKey(id), revokeKey = omaIdRevokeKey(id);
+    const doc = stored[docKey];
+    if (!doc) continue;
+    if (!stored[revokeKey]) update[revokeKey] = {
+      source_sha256: OMA_SOURCE_HASH, worker: omaIdWorker(id),
+      document_id: doc.document_id, identity_epoch: doc.identity_epoch,
+      reason,
+    };
+    remove.push(docKey);
+  }
+  if (Object.keys(update).length) await chrome.storage.local.set(update);
+  if (remove.length) await chrome.storage.local.remove(remove);
+  // Retry is only for denial, NEVER Web submit or a delivery receipt.
+  return omaIdFlushInvalidations();
+}
+async function omaIdPrepare(tabId, documentId, route) {
+  if (!/^[A-Za-z0-9_-]{8,160}$/.test(documentId || "") ||
+      !/^[A-Za-z0-9_-]{8,160}$/.test(route || "")) return null;
+  await omaIdFlushInvalidations();
+  const pending = await chrome.storage.local.get(null);
+  if (pending[OMA_ID_POISON_KEY]) return null;
+  if (Object.keys(pending).filter(key => key.startsWith(OMA_ID_REVOKE_PREFIX)).length > 128) {
+    return null; // bounded queue overflow: no attribution or account proof
+  }
+  const docKey = omaIdDocumentKey(tabId), revokeKey = omaIdRevokeKey(tabId);
+  const current = await chrome.storage.local.get([docKey, revokeKey]);
+  if (current[revokeKey]) return null; // missing relay ack => fail closed
+  if (current[docKey] &&
+      (current[docKey].document_id !== documentId || current[docKey].route !== route)) {
+    await omaIdInvalidate(tabId, "navigation");
+    return null;
+  }
+  if (current[docKey]) {
+    const live = await chrome.storage.local.get(OMA_ID_POISON_KEY);
+    return live[OMA_ID_POISON_KEY] ? null : current[docKey];
+  }
+  const profile_epoch = await omaIdProfileEpoch();
+  const doc = { worker: omaIdWorker(tabId), document_id: documentId,
+    identity_epoch: omaIdFresh(), profile_epoch, route, source_sha256: OMA_SOURCE_HASH };
+  await chrome.storage.local.set({ [docKey]: doc });
+  // A concurrent logout or profile revocation may have happened during
+  // the write. Never publish that race's newly created document.
+  const after = await chrome.storage.local.get([docKey, OMA_ID_POISON_KEY]);
+  if (after[OMA_ID_POISON_KEY] ||
+      after[docKey]?.identity_epoch !== doc.identity_epoch) return null;
+  return doc;
+}
+async function omaIdOnTabUpdated(tabId, changeInfo, tab) {
+  if (!changeInfo ||
+      (typeof changeInfo.url !== "string" && changeInfo.status !== "loading")) return;
+  const stored = await chrome.storage.local.get(omaIdDocumentKey(tabId));
+  const old = stored[omaIdDocumentKey(tabId)];
+  // Logout in an untracked tab still invalidates the profile's other tabs.
+  const dest = typeof changeInfo.url === "string" ? (() => {
+    try { return new URL(changeInfo.url); } catch (_) { return null; }
+  })() : null;
+  if (dest?.origin === "https://chatgpt.com" &&
+      /^\/(?:auth\/login|login|logout)(?:\/|$)/.test(dest.pathname)) {
+    await omaIdInvalidate(tabId, "signed_out");
+    return;
+  }
+  if (!old) return;
+  // A reload at the SAME /c URL still creates a different DOM/document.
+  if (typeof changeInfo.url !== "string") {
+    await omaIdInvalidate(tabId, "navigation");
+    return;
+  }
+  const next = omaIdRoute(changeInfo.url);
+  if (next === old.route && changeInfo.status !== "loading") return;
+  const path = (() => { try { return new URL(changeInfo.url).pathname; } catch (_) { return ""; } })();
+  const reason = /^\/(?:auth\/login|login|logout)(?:\/|$)/.test(path)
+    ? "signed_out" : next ? "navigation" : "identity_unknown";
+  await omaIdInvalidate(tabId, reason);
+}
+async function omaIdInvalidateAll(reason) {
+  const saved = await chrome.storage.local.get(null);
+  for (const key of Object.keys(saved).filter(k => k.startsWith(OMA_ID_DOC_PREFIX))) {
+    const tabId = Number(key.slice(OMA_ID_DOC_PREFIX.length));
+    if (Number.isSafeInteger(tabId) && tabId >= 0) {
+      await omaIdInvalidate(tabId, reason);
+    }
+  }
+}
+async function omaIdReconcileTabs() {
+  const saved = await chrome.storage.local.get(null);
+  const docs = Object.keys(saved).filter(key => key.startsWith(OMA_ID_DOC_PREFIX));
+  const tabs = await chrome.tabs.query({});
+  const live = new Map(tabs.map(tab => [String(tab.id), omaIdRoute(tab.url)]));
+  for (const key of docs) {
+    const rawId = key.slice(OMA_ID_DOC_PREFIX.length);
+    const tabId = Number(rawId), old = saved[key];
+    if (!Number.isSafeInteger(tabId) || !old) continue;
+    if (!live.has(rawId) || live.get(rawId) !== old.route) {
+      await omaIdInvalidate(tabId, !live.has(rawId) ? "tab_closed" : "identity_unknown");
+    }
+  }
+  await omaIdFlushInvalidations();
+}
+// SENTRA_IDENTITY_REVOCATION_END
+async function omaRecordDeliveryReceipt(identity, job, sent, sendingConfirmed = false) {
+  const receipt = sent?.result?.delivery_receipt;
+  if (!receipt) return { state: 'unconfirmed', automatic_resend: false };
+  // Durable at-most-once HTTP receipt emission: an ACK lost after SQLite
+  // commit must NEVER cause a second POST, V2->legacy downgrade or Web click.
+  // Repair/reconciliation is a host-only operation.
+  const receiptKey = omaIdReceiptKey(job?.job_id);
+  if (OMA_ID_RECEIPT_BUSY.has(receiptKey)) {
+    return { state:'uncertain', automatic_resend:false };
+  }
+  OMA_ID_RECEIPT_BUSY.add(receiptKey);
+  try {
+    const attempted = await chrome.storage.local.get(receiptKey);
+    if (attempted[receiptKey]) {
+      return { state:'uncertain', automatic_resend:false };
+    }
+    const evidence = { ...receipt, images_attached: Number(sent.result.images_attached || 0) };
+  // The message ID from the submit callback is *not* authenticated by itself.
+  // Do not infer request_id from job_id, prompt, DOM label or web login.
+  // Only a committed metadata.request_id -> same message.id witnessed through
+  // the enrolled document/epoch may promote a preliminary receipt to V2.
+  const tabMatch = /^TAB-([0-9]{1,12})$/.exec(String(identity?.worker || ''));
+  let proof = null;
+  if (sendingConfirmed === true && tabMatch && omaJobProvider(job) === 'chatgpt') {
+    const tabId = Number(tabMatch[1]);
+    const active = await omaLoadActive(tabId);
+    if (active?.job_id === job.job_id && active?.worker === identity.worker &&
+        active?.lease_token === identity.lease_token && active?.sent !== true) {
+      try {
+        proof = await omaObserveConversation(tabId, {
+          messageId: evidence.message_id,
+          conversationId: evidence.conversation_id,
+        });
+      } catch (_) {
+        // No promotion when provenance, relay or account/profile is uncertain.
+        proof = null;
+      }
+    }
+  }
+  if (proof && proof.worker === identity.worker &&
+      proof.message_id === evidence.message_id &&
+      proof.conversation_id === evidence.conversation_id) {
+    // Exactly ONE authenticated receipt attempt. A failed/uncertain HTTP
+    // acknowledgement cannot trigger a fallback POST or another Web send.
+    await chrome.storage.local.set({ [receiptKey]: {worker:identity.worker, v2:true} });
+    return omaRelay('/jobs/delivery-receipt', { method: 'POST', body: JSON.stringify({
+      job_id: job.job_id, worker: identity.worker, lease_token: identity.lease_token,
+      evidence, request_id: proof.request_id, source_sha256: OMA_SOURCE_HASH,
+      document_id: proof.document_id, identity_epoch: proof.identity_epoch,
+    }) });
+  }
+  // Legacy 4-key is explicitly PRELIMINARY and cannot authorize A->B commit.
+  await chrome.storage.local.set({ [receiptKey]: {worker:identity.worker, v2:false} });
+  return omaRelay('/jobs/delivery-receipt', { method: 'POST', body: JSON.stringify({
+    job_id: job.job_id, worker: identity.worker, lease_token: identity.lease_token,
+    evidence,
+  }) });
+  } finally {
+    OMA_ID_RECEIPT_BUSY.delete(receiptKey);
+  }
+}
+async function omaObserveConversation(tabId, expected = null) {
+  if (omaEvidenceBusy.has(tabId)) return;
+  const owned = await omaOwnedTabIds();
+  if (!owned.has(tabId)) return;
+  const before = await chrome.tabs.get(tabId);
+  const initialRoute = omaIdRoute(before.url);
+  if (!initialRoute) {
+    await omaIdInvalidate(tabId, "identity_unknown");
+    return;
+  }
+  omaEvidenceBusy.add(tabId);
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+      files: ['conversation-evidence.js'] });
+    const doc = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+      func: () => globalThis.__sentraConversationEvidence?.documentId || null });
+    const documentId = doc.find(item => item.frameId === 0)?.result;
+    if (!documentId) {
+      await omaIdInvalidate(tabId, "identity_unknown");
+      return;
+    }
+    const tracked = await omaIdPrepare(tabId, documentId, initialRoute);
+    if (!tracked) return; // pending deny-only receipt; do not publish a new proof
+    const challenge = await omaRelay('/browser-evidence/challenge', { method: 'POST',
+      body: JSON.stringify({ source_sha256: OMA_SOURCE_HASH, worker: tracked.worker,
+        document_id: documentId, identity_epoch: tracked.identity_epoch }) });
+    if (!challenge?.nonce) return;
+    const scan = await chrome.scripting.executeScript({ target: { tabId }, world: 'MAIN',
+      func: nonce => globalThis.__sentraConversationEvidence?.observe(nonce) || null,
+      args: [challenge.nonce] });
+    const evidence = scan.find(item => item.frameId === 0)?.result;
+    const after = await chrome.tabs.get(tabId);
+    if (!evidence || before.url !== after.url || evidence.document_id !== documentId) {
+      const trackedNow = (await chrome.storage.local.get(omaIdDocumentKey(tabId)))[omaIdDocumentKey(tabId)];
+      if (trackedNow?.observed) await omaIdInvalidate(tabId, "identity_unknown");
+      return;
+    }
+    const route = omaIdRoute(after.url);
+    if (route !== evidence.conversation_id || route !== evidence.route_conversation_id ||
+        route !== tracked.route) {
+      await omaIdInvalidate(tabId, "identity_unknown");
+      return;
+    }
+    // Navigation/closure can race across the two Chrome scripting awaits.
+    // Before publishing a page observation, re-read the durable generation
+    // and its deny-only queue; neither a stale scan nor an unacknowledged
+    // invalidation may acquire fresh browser authority.
+    const docKey = omaIdDocumentKey(tabId), revokeKey = omaIdRevokeKey(tabId);
+    const atPublish = await chrome.storage.local.get([docKey, revokeKey, OMA_ID_POISON_KEY]);
+    if (atPublish[OMA_ID_POISON_KEY] || atPublish[revokeKey] || atPublish[docKey]?.document_id !== documentId ||
+        atPublish[docKey]?.identity_epoch !== tracked.identity_epoch ||
+        atPublish[docKey]?.source_sha256 !== OMA_SOURCE_HASH) return;
+    // A fresh recipient is valid ONLY for a single committed React message
+    // carrying its own metadata.request_id. Approval/generation/unknown cannot
+    // be interpreted as operator approval. No account or model is inferred.
+    let witnessed = null;
+    if (expected && typeof expected.messageId === 'string' &&
+        expected.conversationId === route && evidence.state === 'idle' &&
+        Array.isArray(evidence.requests)) {
+      const matches = evidence.requests.filter(row =>
+        row?.message_id === expected.messageId &&
+        /^[A-Za-z0-9_-]{8,160}$/.test(row?.request_id || ''));
+      if (matches.length === 1 && evidence.requests.filter(
+          row => row?.request_id === matches[0].request_id).length === 1) {
+        witnessed = matches[0];
+      }
+    }
+    evidence.identity_epoch = tracked.identity_epoch;
+    const reply = await omaRelay('/browser-evidence/observe', { method: 'POST', body: JSON.stringify({
+      source_sha256: OMA_SOURCE_HASH, worker: tracked.worker, evidence }) });
+    if (reply && ["observed", "unchanged"].includes(reply.state)) {
+      const key = omaIdDocumentKey(tabId);
+      const current = (await chrome.storage.local.get([key,omaIdRevokeKey(tabId),OMA_ID_POISON_KEY]));
+      if (!current[OMA_ID_POISON_KEY] && !current[omaIdRevokeKey(tabId)] &&
+          current[key]?.identity_epoch === tracked.identity_epoch) {
+        await chrome.storage.local.set({ [key]: { ...tracked, observed: true } });
+        if (witnessed && reply.grants_created === false &&
+            reply.requests === evidence.requests.length) {
+          const fresh = await chrome.tabs.get(tabId);
+          const afterProof = await chrome.storage.local.get([key, omaIdRevokeKey(tabId), OMA_ID_POISON_KEY]);
+          if (fresh.url === after.url && !afterProof[OMA_ID_POISON_KEY] &&
+              !afterProof[omaIdRevokeKey(tabId)] &&
+              afterProof[key]?.identity_epoch === tracked.identity_epoch) {
+            return { worker: tracked.worker, document_id: documentId,
+              identity_epoch: tracked.identity_epoch, conversation_id: route,
+              message_id: witnessed.message_id, request_id: witnessed.request_id };
+          }
+        }
+      }
+    }
+  } catch (_) {
+    // Disabled or incompatible collector: keep normal relay flow, no fabricated proof.
+  } finally { omaEvidenceBusy.delete(tabId); }
+}
 // Budgets MV3 (somente-leitura; a verdade est├í no servidor/Chrome):
 // - native_bridge/job_store.py concede lease de 120s: renovar < 120s ou o relay
 //   marca expirado e nenhum post tardio ├® aceito. Janela folgada de prop├│sito
@@ -453,11 +797,12 @@ async function omaRenewIdentity(identity) {
 // comportamento volta ao anterior (sem requeue, expira honesto).
 async function omaProgressPhase(tabId, identity, phase) {
   try {
-    await omaRelay("/jobs/progress", { method: "POST", body: JSON.stringify({
+    const ack = await omaRelay("/jobs/progress", { method: "POST", body: JSON.stringify({
       job_id: identity.job_id, worker: identity.worker,
       lease_token: identity.lease_token, phase,
     }) });
-    return true;
+    // HTTP 200 carrying an error/uncertain status cannot fence a Web click.
+    return ack?.ok === true;
   } catch (_) {
     return false;
   }
@@ -517,7 +862,11 @@ async function omaPostResult(identity, jobRef, payload) {
   await omaFlushOutbox();
 }
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  void omaIdOnTabUpdated(tabId, changeInfo, tab);
+});
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void omaIdInvalidate(tabId, "tab_closed");
   void omaReleaseRelayWorker(tabId);
   omaForgetOwned(tabId);
   omaForgetControllerOrigin(tabId);
@@ -1058,13 +1407,18 @@ async function omaProcessJob(tabId, job) {
       }
       const selectedModel = await omaApplyRequestedModel(tabId, job);
       await omaProgressPhase(tabId, identity, "ready");
-      await omaProgressPhase(tabId, identity, "sending");
+      const sendingConfirmed = await omaProgressPhase(tabId, identity, "sending");
+      if (omaJobProvider(job) === "chatgpt" && !sendingConfirmed) {
+        throw new Error("SEND_FENCED: relay did not acknowledge sending before effect");
+      }
       const sent = await omaSendToTab(tabId, {
         operation: "SEND_MESSAGE",
+        delivery_id: job.job_id,
         text: job.prompt,
         images: job.images || [],
       });
       const attached = (sent && sent.result && sent.result.images_attached) || 0;
+      await omaRecordDeliveryReceipt(identity, job, sent, sendingConfirmed);
       await omaSaveActive(tabId, { sent: true, images_attached: attached });
       await omaProgressPhase(tabId, identity, "sent");
       const conv = await omaWaitConversationIdentity(tabId, 20000);
@@ -1524,12 +1878,17 @@ async function omaProcessJob(tabId, job) {
     if (leaseLost) throw new Error("LEASE_LOST");
     await renew();
     await omaProgressPhase(tabId, identity, "ready");
-    await omaProgressPhase(tabId, identity, "sending");
+    const sendingConfirmed = await omaProgressPhase(tabId, identity, "sending");
+    if (omaJobProvider(job) === "chatgpt" && !sendingConfirmed) {
+      throw new Error("SEND_FENCED: relay did not acknowledge sending before effect");
+    }
     // A channel/submit error is not proof that nothing was sent. Never replay.
     const sent = await omaSendToTab(tabId, {
       operation: "SEND_MESSAGE", text: job.prompt, images: job.images || [],
+      delivery_id: job.job_id,
     });
     const attached = (sent && sent.result && sent.result.images_attached) || 0;
+    await omaRecordDeliveryReceipt(identity, job, sent, sendingConfirmed);
     // Envio confirmado: a partir daqui o resume pode esperar+postar sem reenviar.
     await omaSaveActive(tabId, { sent: true, images_attached: attached });
     await omaProgressPhase(tabId, identity, "sent");
@@ -1927,6 +2286,8 @@ async function omaEnsureRecoveryGuardOnExistingTabs() {
 }
 
 chrome.runtime.onInstalled.addListener(async () => {
+  // Updating/reinstalling a build invalidates all previous browser proofs.
+  await omaIdInvalidateAll("identity_unknown");
   await chrome.storage.local.set({ oma_state: "PAIR_IN_OPTIONS" });
   await omaEnsureRecoveryGuardOnExistingTabs();
   try {
@@ -1951,6 +2312,9 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 chrome.runtime.onStartup.addListener(async () => {
+  // A new browser session may have signed out or switched accounts while
+  // the MV3 worker was absent. No account is inferred from a retained tab URL.
+  await omaIdInvalidateAll("identity_unknown");
   await omaStartupCleanup();
   await omaEnsureRecoveryGuardOnExistingTabs();
 });
@@ -2013,6 +2377,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
       const owned = await omaOwnedTabIds();
       if (owned.has(tabId)) {
+        await omaObserveConversation(tabId);
         try {
           await omaRelay("/workers/heartbeat", {
             method: "POST",
@@ -2026,6 +2391,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       return { ok: true, idle_wake: true, owned: owned.has(tabId) };
     }
     if (request.operation === "OMA_LEASE_PING" && typeof tabId === "number") {
+      await omaObserveConversation(tabId);
       try {
         await omaRenewActive(tabId);
       } catch (error) {
@@ -2044,6 +2410,10 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     .catch((e) => { try { sendResponse({ ok: false, error: String((e && e.message) || e) }); } catch (_) {} });
   return true;
 });
+// Revocation reconciliation runs after MV3 restart as well as at browser
+// startup. Missing tabs/routes are deny-only; they do not prove an account.
+void omaIdReconcileTabs();
+setInterval(() => { void omaIdFlushInvalidations(); }, 30000);
 // Bootstrap immediately after extension reload. Reinject the autonomous
 // recovery guard into already-open ChatGPT tabs before normal OMA scheduling.
 void omaEnsureRecoveryGuardOnExistingTabs();

@@ -66,7 +66,14 @@ def test_native_window_can_detach_without_owning_broker_lifecycle(monkeypatch):
     assert {name for name in dir(WindowControls()) if not name.startswith("_")} == {
         "minimize", "toggle_maximize", "close"}
     controls = []
-    window = SimpleNamespace(destroy=lambda: controls.append("closed"))
+    class ShownEvent:
+        on_shown = None
+        def __iadd__(self, callback):
+            self.on_shown = callback
+            return self
+    shown = ShownEvent()
+    window = SimpleNamespace(destroy=lambda: controls.append("closed"),
+                             events=SimpleNamespace(shown=shown))
     def create_window(*args, **kwargs):
         controls.append(kwargs["js_api"])
         return window
@@ -75,6 +82,8 @@ def test_native_window_can_detach_without_owning_broker_lifecycle(monkeypatch):
     monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(create_window=create_window, start=start))
     # Endpoint intentionally has no serve_forever or shutdown methods.
     launch_native(Endpoint(1234, "local-token", "a" * 32, 1234), serve=False)
+    from sentra_canvas.native_brand import apply_native_icon
+    assert shown.on_shown is apply_native_icon
     assert controls[-1] == "closed"
 
 

@@ -61,6 +61,14 @@ def build_staging(dist: Path, staging: Path, tunnel_archive: Path) -> Path:
     if str(build_state.get("patch_sha256") or "").lower() != sha256(patch):
         raise RuntimeError("Web Models payload was built from a stale SENTRA upstream patch")
     _copy_tree(dist / "web-models", staging / "web-models")
+    # MSI has its own staging tree, distinct from the self-extracting Setup.
+    # Without this copy the optional Electron window exists in Setup but
+    # silently disappears from an MSI installation.
+    from scripts.commander.stage_electron import validate_electron_payload
+    electron_payload = dist / "sentra-electron"
+    validate_electron_payload(electron_payload)
+    _copy_tree(electron_payload, staging / "sentra-electron")
+    validate_electron_payload(staging / "sentra-electron")
     stamp_extension_identity(staging / "edge_extension")
     (staging / INSTALL_MARKER).write_text(
         json.dumps(
@@ -86,6 +94,7 @@ def build_staging(dist: Path, staging: Path, tunnel_archive: Path) -> Path:
             shutil.copy2(source, docs / name)
     for name in (
         "START_HERE.md",
+        "SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md",
         "QUICKSTART.md",
         "USING_SENTRA.md",
         "SENTRA_CLI.md",
@@ -122,6 +131,8 @@ def build_update_zip(staging: Path, output: Path) -> Path:
 
 
 def build_sbom(release_dir: Path, assets: list[Path]) -> Path:
+    from scripts.commander.pdfium_pin import require_pdfium, PDFIUM_VERSION
+    require_pdfium()
     components: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for distribution in importlib.metadata.distributions():
@@ -139,6 +150,9 @@ def build_sbom(release_dir: Path, assets: list[Path]) -> Path:
             "version": version,
             "purl": f"pkg:pypi/{name.lower().replace('_', '-')}@{version}",
         })
+    if not any(item["name"].casefold() == "pypdfium2" and item["version"] == PDFIUM_VERSION
+               for item in components):
+        raise ValueError("release SBOM must contain pinned pypdfium2")
     upstream_manifest = json.loads(
         (ROOT / "integrations" / "codex_chatgpt_web" / "upstream.json").read_text(
             encoding="utf-8"

@@ -29,14 +29,40 @@ def _source_fingerprint() -> dict[str, str]:
     folders = (
         "browser", "integrations", "native_bridge", "orchestrator", "repository",
         "sentra_core", "sentra_mcp", "sentra_model_gateway", "sentra_remote",
-        "sentra_cli", "sentra_canvas", "workspace", "scripts/commander", "edge_extension",
+        "sentra_cli", "sentra_canvas", "sentra_runtime", "sentra_executors",
+        "sentra_interop", "sentra_collab", "sentra_quality", "workspace",
+        "scripts/commander", "scripts/integrations", "edge_extension", "sentra_electron",
     )
-    extensions = {".py", ".js", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".ico"}
+    # React desktop sources are JSX today; TS/TSX/SVG inputs must also invalidate
+    # an old payload proof when the UI source changes without a bundle rebuild.
+    # The pinned Web Models patch is a product input just like its PowerShell
+    # builder; both must invalidate provenance before a new Setup is accepted.
+    # Packaged license/notice text is part of the distributed artifact too.
+    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".ico", ".patch", ".txt", ".md"}
     files = {ROOT / name for name in ("main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt")}
+    # The Setup bundles this onboarding guide, while the vendored xterm
+    # licenses have no suffix and would otherwise be missed by the scan.
+    files.update(ROOT / name for name in (
+        "docs/SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md",
+        "sentra_canvas/static/vendor/addon-fit-LICENSE",
+        "sentra_canvas/static/vendor/xterm-LICENSE",
+    ))
+    # Brand PNGs are packaged inputs; excluding them would let an outdated
+    # payload proof pass after a logo change without rebuilding the EXEs.
+    files.update(ROOT / name for name in (
+        "sentra_canvas/assets/SENTRA-LOGO.png",
+        "sentra_canvas/static/sentra-logo.png",
+    ))
+    # The Setup embeds the ENTIRE docs/ tree via --add-data, not just the
+    # onboarding guide. Track nested screenshots, videos, JSON and every
+    # other distributed file regardless of suffix to prevent stale proofs.
+    docs_root = ROOT / "docs"
+    if docs_root.is_dir():
+        files.update(path for path in docs_root.rglob("*") if path.is_file())
     for folder in folders:
         files.update(path for path in (ROOT / folder).rglob("*")
                      if path.is_file() and path.suffix.lower() in extensions
-                     and "__pycache__" not in path.parts)
+                     and not {"__pycache__", "node_modules", ".tmp", "dist", "build"}.intersection(path.parts))
     return {path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(files) if path.is_file()}
 
@@ -233,6 +259,14 @@ def _build(
     prefix: list[str] = []
     if windowed:
         prefix.append("--noconsole")
+    if name in {"sentra-canvas", "sentra-desktop", "sentra-human"}:
+        icon = ROOT / "sentra_canvas" / "assets" / "SENTRA.ico"
+        if not icon.is_file():
+            raise FileNotFoundError("official SENTRA icon is missing: " + str(icon))
+        prefix += ["--icon", str(icon)]
+        # The native WebView2 HWND and the system tray also need image bytes
+        # at runtime; setting only the executable icon is not sufficient.
+        prefix += ["--add-data", f"{ROOT / 'sentra_canvas' / 'assets'}{os.pathsep}sentra_canvas/assets"]
     if mcp_payload:
         prefix += ["--collect-all", "playwright", "--hidden-import", "pyarrow.parquet"]
     if extra:
@@ -615,7 +649,19 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     patch_hash = hashlib.sha256(patch.read_bytes()).hexdigest()
     if str(build_state.get("patch_sha256") or "").lower() != patch_hash:
         raise RuntimeError("Web Models payload was built from a stale SENTRA upstream patch")
-    installer_extra: list[str] = []
+    # Electron is a second *display*, not a parallel executor or MCP server.
+    # If the pinned runtime was installed during build preparation, stage the
+    # complete, versioned optional component; never download at packaging time.
+    electron_source = ROOT / "sentra_electron"
+    electron_payload = dist / "sentra-electron"
+    if not (electron_source / "node_modules" / "electron" / "dist" / "electron.exe").is_file():
+        raise RuntimeError("SENTRA Electron runtime missing: npm ci --prefix sentra_electron")
+    from scripts.commander.stage_electron import stage_electron_surface, validate_electron_payload
+    stage_electron_surface(electron_source, electron_payload)
+    validate_electron_payload(electron_payload)
+    installer_extra: list[str] = [
+        "--add-data", f"{electron_payload}{os.pathsep}payload/sentra-electron",
+    ]
     for name in PAYLOAD_NAMES:
         installer_extra += ["--add-data", f"{dist / name}{os.pathsep}payload"]
     installer_extra += [

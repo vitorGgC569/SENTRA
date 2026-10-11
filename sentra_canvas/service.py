@@ -153,6 +153,227 @@ class Canvas:
         if goal is None:return contexts.get(ws,agent_id)
         return contexts.set(ws,agent_id,goal=goal,expected_revision=expected_revision)
 
+    def center_mcp_http(self,ws,*,action="list",server_id=None,endpoint=None):
+        """Catalog UI only: no direct MCP effect/credential exposure.
+
+        The Canvas owner controls enrollment. Tools still need separate live
+        WorkItem grants and the durable operation gate; this method never
+        calls a server, creates grants or tests ChatGPT account permissions.
+        """
+        workspace=self.store.workspace(ws)
+        owner=self._runtime().owner
+        control=self._machine_service().control
+        if action=="list":
+            return control.mcp_http_list(owner,workspace["path"])
+        if action=="register":
+            return control.mcp_http_register(owner,workspace["path"],
+                server_id,endpoint,approved=True)
+        if action=="disable":
+            try:
+                return control.mcp_http_disable(owner,workspace["path"],server_id,
+                    approved=True)
+            except FileNotFoundError as exc:
+                raise Denied("MCP HTTP endpoint unavailable for this workspace") from exc
+        raise ValueError("unsupported owner MCP HTTP catalog action")
+
+    def center_plugin_bundles(self,ws,*,source=None,expected_sha256=None,
+                              action="list",package_sha256=None):
+        """Owner-scoped MCPB catalog -> centrally registered, inert plugins."""
+        workspace=self.store.workspace(ws)
+        control=self._machine_service().control
+        root=workspace["path"]
+        owner=self.store.principal
+        if action=="list":
+            if source is not None:
+                action="stage"  # Existing Canvas client request compatibility.
+            else:
+                return control.bundle_list(owner,root)
+        if action=="inspect":
+            return control.bundle_inspect(owner,root,package_sha256)
+        if action=="register":
+            return control.bundle_register(owner,root,package_sha256)
+        if action=="disable":
+            return control.bundle_disable(owner,root,package_sha256)
+        if action!="stage":
+            raise ValueError("unsupported MCPB catalog action")
+        if not isinstance(source,str) or not source.strip() or len(source)>4096:
+            raise ValueError("bounded MCPB source path required")
+        from pathlib import Path
+        root_path=Path(root).resolve(strict=True)
+        candidate=Path(source)
+        if not candidate.is_absolute():
+            candidate=root_path/candidate
+        return control.bundle_stage(owner,root_path,candidate,expected_sha256=expected_sha256)
+
+    def center_skill_library(self,ws,*,action="list",parameters=None):
+        workspace=self.store.workspace(ws)
+        control=self._machine_service().control
+        library=control.skill_library
+        owner=self._runtime().owner
+        root=workspace["path"]
+        p=dict(parameters or {})
+        if action=="list":return library.list(owner,root)
+        if action=="import":return library.import_local(owner,root,**p)
+        if action=="git":return library.import_git(owner,root,**p)
+        if action=="github":return library.import_github(owner,root,**p)
+        if action=="revoke":return library.revoke(owner,root,**p)
+        if action in {"activate","disclose"}:
+            work=control.governance.work_item_info(p["work_item_id"],owner)
+            if work.get("metadata",{}).get("workspace_id")!=ws:
+                raise Denied("skill WorkItem belongs to another Canvas workspace")
+            self.store.resource("agents",p["agent_id"],ws)
+            if action=="activate":return library.activate(owner,root,**p)
+            return library.disclose(owner,root,**p)
+        raise ValueError("unsupported skill library action")
+
+    def center_browser_evidence(self,ws,*,configuration=None):
+        workspace=self.store.workspace(ws)
+        service=self._machine_service().control.browser_evidence
+        if configuration is not None:
+            if not isinstance(configuration,dict) or set(configuration)!={
+                "extension_id","principal","source_sha256","enabled","expected_revision"
+            }:
+                raise ValueError("exact browser collector configuration required")
+            return service.configure(workspace=workspace["path"],**configuration)
+        return service.status(workspace["path"])
+
+    def center_mcp_account(self,ws,*,action="status",attempt_id=None,approved=False):
+        """Single local owner path to reattach SENTRA MCP in another ChatGPT account.
+
+        No OAuth, browser cookies or Platform credentials are read or modified.
+        ChatGPT owns installation/selection/revocation, so Plus remains
+        UNKNOWN until an independent account-level attestation exists.
+        """
+        self.store.workspace(ws)
+        from .mcp_account_switch import MCPAccountSwitch
+        wizard=MCPAccountSwitch(self.state_dir.parent)
+        owner=self._runtime().owner
+        if action=="status":return wizard.status(owner)
+        if action=="begin":return wizard.begin(owner,approved=approved)
+        if action=="mark_steps":return wizard.mark_steps(owner,attempt_id,approved=approved)
+        if action=="cancel":return wizard.cancel(owner,attempt_id,approved=approved)
+        raise ValueError("unsupported MCP account migration action")
+
+    def center_plugin_proof(self,ws):
+        """Operator-only status, with no account or tunnel secrets returned."""
+        self.store.workspace(ws)
+        from sentra_remote.connector_proof import ConnectorProof
+        return {**ConnectorProof(self.state_dir.parent).status(),
+                "browser":self.center_browser_evidence(ws)}
+
+    def center_project_review(self,ws,*,path="",action="list",
+                              content=None,expected_sha256=None,page=1,dpi=72):
+        """Owner-scoped editor; mutations require separate approved HTTP action."""
+        from .project_review import list_level,file_preview,git_diff,preview_edit,pdf_text_page,pdf_visual_page
+        workspace=self.store.workspace(ws)
+        if action=="list":return list_level(workspace["path"],path)
+        if action=="preview":return file_preview(workspace["path"],path)
+        if action=="diff":return git_diff(workspace["path"],path)
+        if action=="pdf_text":return pdf_text_page(workspace["path"],path,page=page)
+        if action=="pdf_visual":return pdf_visual_page(workspace["path"],path,page=page,dpi=dpi)
+        if action=="preview_edit":
+            result=preview_edit(workspace["path"],path,content=content,
+                                expected_sha256=expected_sha256)
+            if result["changed"]:
+                with self._lock:
+                    reviews=getattr(self,"_project_edit_reviews",None)
+                    if reviews is None:
+                        reviews={}
+                        self._project_edit_reviews=reviews
+                    now=time.monotonic()
+                    for token,entry in list(reviews.items()):
+                        if entry["expires"]<=now:
+                            reviews.pop(token,None)
+                    if len(reviews)>=128:
+                        raise Denied("too many pending file reviews")
+                    ticket=secrets.token_urlsafe(32)
+                    reviews[ticket]={"ws":ws,"path":path,
+                                     "before":expected_sha256,
+                                     "after":result["after_sha256"],
+                                     "expires":now+300}
+                return {**result,"review_token":ticket,"review_expires_seconds":300}
+            return result
+        if action=="save":
+            raise Denied("use the owner-confirmed reviewed file save")
+        if action=="save_reviewed":
+            raise Denied("reviewed save must be invoked via the authenticated owner route")
+        raise ValueError("unsupported project editor operation")
+
+    def center_project_save_reviewed(self,ws,path,content,expected_sha256,review_token):
+        """Consume a single-use server-side review ticket before any file effect."""
+        workspace=self.store.workspace(ws)
+        if not isinstance(content,str) or not isinstance(review_token,str) or len(review_token)>128:
+            raise Denied("valid reviewed edit is required")
+        digest=hashlib.sha256(content.encode("utf-8")).hexdigest()
+        with self._lock:
+            reviews=getattr(self,"_project_edit_reviews",{})
+            entry=reviews.get(review_token)
+            if (entry is None or entry["expires"]<=time.monotonic() or
+                    entry["ws"]!=ws or entry["path"]!=path or
+                    entry["before"]!=expected_sha256 or entry["after"]!=digest):
+                raise Denied("file review expired or does not match the proposed changes")
+            reviews.pop(review_token,None)
+        from .project_review import save_edit
+        return save_edit(workspace["path"],path,content=content,
+                         expected_sha256=expected_sha256,state_root=self.state_dir)
+
+    def center_conversation_search(self,ws,query,*,limit=20):
+        """Search only this operator's protected CLI history in this workspace."""
+        if not isinstance(query,str) or not query.strip() or len(query)>200:
+            raise ValueError("bounded conversation search query required")
+        if type(limit) is not int or not 1<=limit<=50:
+            raise ValueError("search limit must be 1..50")
+        from sentra_core.conversations import ConversationStore
+        workspace=self.store.workspace(ws)
+        sessions=ConversationStore(self.state_dir.parent,principal=self.store.principal)
+        return sessions.search_page(workspace["path"],query,limit=limit,max_scan=2000,budget_seconds=2)
+
+    def center_conversation_export(self,ws,conversation_id):
+        """Explicit local-only, bounded Markdown export of an owned conversation."""
+        from sentra_core.conversations import ConversationStore
+        workspace=self.store.workspace(ws)
+        sessions=ConversationStore(self.state_dir.parent,principal=self.store.principal)
+        with sessions._connect() as db:
+            sessions._owned(db,conversation_id,workspace["path"])
+            total=db.execute("SELECT COUNT(*) FROM messages WHERE conversation_id=?",(conversation_id,)).fetchone()[0]
+            if total>1000:
+                raise ValueError("conversation exceeds single-export message limit")
+        entries=sessions.messages(conversation_id,limit=1000)
+        fragments=["# SENTRA conversation","",f"Conversation ID: {conversation_id}",""]
+        for msg in entries:
+            fragments.extend([f"## {msg['role'].upper()}","",msg["content"],""])
+        text="\n".join(fragments)
+        if len(text.encode("utf-8"))>2_000_000:
+            raise ValueError("conversation exceeds export byte limit")
+        return {"filename":"sentra-conversation-"+conversation_id+".md",
+                "content":text,"messages":len(entries),"complete":True}
+
+    def center_chat_access(self,ws,conversation_id=None,*,change=None):
+        """Local Canvas operator projection; only blocks/filters ChatGPT tool calls.
+
+        This never binds browser request evidence and never grants a capability.
+        The central Control Plane owns the persisted policy.
+        """
+        self.store.workspace(ws)
+        registry=self._machine_service().control.chat_access
+        principal="local-operator"
+        if change is not None:
+            if not isinstance(change,dict):raise ValueError("chat policy object required")
+            operation=change.get("operation")
+            if operation=="strict":
+                return registry.set_strict(principal,change.get("enabled"),
+                    expected_revision=change.get("expected_revision"))
+            if operation=="chat":
+                conversation_id=change.get("conversation_id")
+                return registry.set_chat(principal,conversation_id,
+                    trusted=change.get("trusted"),blocked=change.get("blocked"),
+                    expected_revision=change.get("expected_revision"))
+            raise ValueError("unsupported chat access policy change")
+        result={"strict_policy":registry.strict_status(principal)}
+        if conversation_id:
+            result["chat"]=registry.chat_status(principal,conversation_id)
+        return result
+
     def center_network(self,ws,configuration=None,*,agent=False):
         with self._lock:
             if self._network_settings is None:
@@ -173,16 +394,133 @@ class Canvas:
         own=[item for item in assignments if item.get("assignee_agent_id") in agents and
             item.get("metadata",{}).get("workspace_id")==ws]
         targets={link["target"] for link in state["links"] if link["source"] in origins}
-        directed=[node for node in state["nodes"] if node["id"] in targets]
+        # A note wired *into* this agent/terminal is owner-supplied context,
+        # not a capability to edit that note or to control its other links.
+        incoming_note_ids={link["source"] for link in state["links"]
+            if link["target"] in origins}
+        incoming_note_ids={node["id"] for node in state["nodes"]
+            if node["kind"]=="note" and node["id"] in incoming_note_ids}
+        directed=[node for node in state["nodes"]
+                  if node["id"] in targets or node["id"] in incoming_note_ids]
         return {"schema_version":1,"workspace":{"id":ws,"name":workspace["name"],"path":workspace["path"]},
             "run":{"run_id":run["run_id"],"state":run["state"]},
             "agents":[{"id":agent,"name":self.store.resource("agents",agent,ws)["name"],
                 "role":self.store.resource("agents",agent,ws)["role"],
                 "working_context":self.agent_working_context(ws,agent)} for agent in sorted(agents)],
             "work_items":[{key:item.get(key) for key in ("work_item_id","objective","state","required_capabilities","blockers")} for item in own[:32]],
-            "connections":[{key:node[key] for key in ("id","kind","title","resource_id")} for node in directed[:64]],
-            "notes":[{"id":node["id"],"body":str(node.get("body", ""))[:4000]} for node in directed if node["kind"]=="note"][:8],
+            "skills":[{"work_item_id":item["work_item_id"],
+                **self._machine_service().control.skill_library.disclose(runtime.owner,workspace["path"],
+                    item["work_item_id"],item["assignee_agent_id"])} for item in own[:32]],
+            "connections":[{**{key:node[key] for key in ("id","kind","title","resource_id")},
+                "access":"read_only" if node["id"] in incoming_note_ids and node["id"] not in targets
+                         else "outgoing"} for node in directed[:64]],
+            "notes":[{"id":node["id"],"title":node["title"],"body":str(node.get("body", ""))[:4000]}
+                     for node in directed if node["kind"]=="note"][:8],
             "context_creates_permissions":False,"automatic_coordination_available":True}
+
+    def center_web_delivery(self, ws, *, limit=50):
+        """Read the owner/run projection of the existing outbox; never resend."""
+        from native_bridge.job_store import JobStore
+        from native_bridge.web_send import WebSendAuthority
+        self.store.workspace(ws)
+        runtime = self._runtime()
+        run = runtime.run(ws)
+        control = self._machine_service().control
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("delivery limit must be 1..100")
+        outbox = self.state_dir.parent / "browser" / "relay.sqlite3"
+        if not outbox.is_file():
+            return {"messages": [], "available": False, "reason": "outbox_not_initialized", "automatic_resend": False}
+        jobs = JobStore(outbox)
+        try:
+            web = WebSendAuthority(control, jobs)
+            with control.store.connect("session_checkpoint") as db:
+                rows = db.execute("SELECT job_id FROM web_send_intents WHERE owner=? AND run_id=? "
+                                  "ORDER BY updated DESC LIMIT ?", (runtime.owner, run["run_id"], limit)).fetchall()
+            messages = []
+            for row in rows:
+                item = web.status(runtime.owner, row["job_id"])
+                receipt = (item.get("delivery") or {}).get("receipt") or {}
+                messages.append({**item, "request_id": item["job_id"],
+                    "message_id": receipt.get("message_id"), "conversation_id": receipt.get("conversation_id")})
+            return {"messages": messages, "available": True, "automatic_resend": False}
+        finally:
+            jobs.close()
+
+    def center_compact_resume(self, ws, *, action, arguments):
+        from native_bridge.conversation_continuation import ConversationWebContinuation
+        from native_bridge.job_store import JobStore
+        self.store.workspace(ws)
+        runtime = self._runtime()
+        run = runtime.run(ws)
+        allowed = ({"chat_id", "work_item_id", "principal_id", "request_key", "summary", "cursor", "target_url"}
+                   if action == "prepare" else {"allocation_id", "continuation_id"})
+        if action not in {"prepare", "status", "resume"} or not isinstance(arguments, dict) or set(arguments) - allowed:
+            raise ValueError("invalid Compact&Resume action or authority fields")
+        outbox = self.state_dir.parent / "browser" / "relay.sqlite3"
+        outbox.parent.mkdir(parents=True, exist_ok=True)
+        jobs = JobStore(outbox)
+        try:
+            service = ConversationWebContinuation(self._machine_service().control, jobs)
+            kwargs = dict(arguments)
+            if action == "prepare":
+                kwargs["run_id"] = run["run_id"]
+            if action != "status":
+                kwargs["operator_approved"] = True
+            result = getattr(service, action)(runtime.owner, "canvas-workspace:" + ws, **kwargs)
+            if result.get("run_id") != run["run_id"]:
+                raise Denied("Compact&Resume belongs to another Canvas workspace")
+            return result
+        finally:
+            jobs.close()
+
+    def center_goal_loop(self, ws, *, action="status", objective="", goal_id=None, loop_id=None,
+                         max_steps=2, max_cost_usd=0.0, deadline_seconds=120):
+        """Owner HTTP projection of the shared durable Goal/Loop authority."""
+        from sentra_executors.goal_loop import ConversationGoalLoop
+        self.store.workspace(ws)
+        runtime = self._runtime()
+        run = runtime.run(ws)
+        service = ConversationGoalLoop(self._machine_service().control)
+        conversation = "canvas-workspace:" + ws
+        current = service.status(runtime.owner, conversation)
+        if goal_id is not None and current.get("goal_id") != goal_id:
+            raise Denied("Goal does not belong to this Canvas conversation")
+        if loop_id is not None and (current.get("loop") or {}).get("loop_id") != loop_id:
+            raise Denied("Loop does not belong to this Canvas conversation")
+        if action == "set":
+            self._machine_service().control.ensure_agent(run["run_id"], runtime.owner,
+                agent_id="canvas-goal:" + ws, role="coordinator")
+            current = service.set(runtime.owner, conversation, run_id=run["run_id"],
+                                  objective=objective, operator_approved=True)
+        elif action == "start":
+            current = service.open(runtime.owner, conversation,
+                                   principal_id="canvas-goal:" + ws, max_steps=max_steps,
+                                   max_cost_usd=max_cost_usd, deadline_seconds=deadline_seconds,
+                                   operator_approved=True)
+        elif action == "stop":
+            current = service.stop(runtime.owner, conversation, operator_approved=True)
+        elif action == "loop-stop":
+            current = service.loop_stop(runtime.owner, conversation, operator_approved=True)
+        elif action == "loop-status":
+            current = service.loop_status(runtime.owner, conversation)
+        elif action == "step":
+            current = service.advance(runtime.owner, conversation, objective=objective, operator_approved=True)
+        elif action != "status":
+            raise ValueError("unsupported Goal/Loop action")
+        view = service.status(runtime.owner, conversation)
+        loop = view.get("loop") or {}
+        goal = view.get("goal") or {}
+        goals = [] if view.get("state") == "UNSET" else [{
+            "goal_id": view.get("goal_id") or goal.get("goal_id"),
+            "loop_id": loop.get("loop_id"), "objective": goal.get("objective", objective),
+            "state": current.get("state") or view.get("state"),
+            "iteration": len(loop.get("steps", [])), "max_steps": loop.get("max_steps"),
+            "cost_usd": None, "next_action": "Requires an authorized WorkItem",
+            "block_reason": current.get("reason"), "history": loop.get("steps", []),
+        }]
+        return {"goals": goals, "conversation_id": conversation,
+                "automatic_execution": False, "grants_created": False}
 
     def center_overview(self,ws,*,operation_offset=0,work_item_offset=0):
         """Current owner-scoped central state, with bounded metadata pages."""
@@ -980,6 +1318,11 @@ class Canvas:
             action=payload.get("action")
             if action=="context":
                 return self._working_context_snapshot(ws,agents,origins,state)
+            if action=="skill_read":
+                parameters=payload.get("parameters")
+                if not isinstance(parameters,dict) or parameters.get("agent_id") not in agents:
+                    raise Denied("skill read requires the current agent identity")
+                return self.center_skill_library(ws,action="disclose",parameters=parameters)
             if action=="network_settings":return self.center_network(ws)
             if action=="network_whitelist":
                 value=json.loads(payload.get("value",""))
@@ -1004,9 +1347,26 @@ class Canvas:
             if action in {"create_agent","create_terminal","connect","create_team"}:
                 actor="agent:"+sorted(agents)[0] if agents else "terminal:"+terminal
                 return self._coordinate_agent(ws,actor,origins,state,payload)
+            # The note->agent direction publishes read-only note context.
+            # It must not grant send, edit, connect or dispatch privileges.
+            incoming_note_ids={link["source"] for link in state["links"]
+                if link["target"] in origins}
+            incoming_notes=[n for n in state["nodes"]
+                if n["kind"]=="note" and n["id"] in incoming_note_ids
+                and n["id"] not in targets]
             if action=="list":
-                return [{k:n[k] for k in ("id","kind","title","resource_id")} for n in nodes]
+                outbound=[{k:n[k] for k in ("id","kind","title","resource_id")}
+                          for n in nodes]
+                return outbound+[{**{k:n[k] for k in ("id","kind","title","resource_id")},
+                                  "access":"read_only","direction":"incoming"}
+                                 for n in incoming_notes]
             value=payload.get("value","")
+            if action=="note_read":
+                matches=[n for n in incoming_notes
+                    if value.strip() in (n["id"],n["title"])]
+                if len(matches)==1:
+                    return {"id":matches[0]["id"],"body":matches[0]["body"],
+                            "access":"read_only"}
             if not isinstance(value,str):
                 raise ValueError("Canvas command value must be text")
             target,_,content=value.partition("|")

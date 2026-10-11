@@ -12,13 +12,15 @@ ROOT = Path(__file__).resolve().parents[2]
 COLLAB = ROOT / "sentra_collab"
 
 
-def test_collab_is_not_auto_loaded_in_existing_canvas():
-    # The coordinator must opt in after validating auth and persistence.
+def test_collab_view_is_bundled_but_never_starts_server_from_html():
+    # The product now ships the VIEW integration. Network authority and
+    # session admission remain server-side, never conferred by the HTML.
     native = (ROOT / "sentra_canvas" / "static" / "native.html").read_text(
         encoding="utf-8"
     )
-    assert "sentra-collab.js" not in native
+    assert 'src="/sentra-collab.js"' in native
     assert "createCollabServer" not in native
+    assert "server.listen(" not in native
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js optional")
@@ -97,7 +99,8 @@ def test_sqlite_host_is_opt_in_and_awareness_frames_are_guarded():
     assert "sqlite_host" not in server
     for native in (native_html, native_js):
         assert "sqlite_host" not in native
-        assert "SentraCollab" not in native
+        assert "createCollabServer(" not in native
+        assert "server.listen(" not in native
 
 def test_phase2_physics_recovery_lifecycle_remain_opt_in():
     native_html = (ROOT / "sentra_canvas" / "static" / "native.html").read_text(
@@ -122,7 +125,8 @@ def test_phase2_physics_recovery_lifecycle_remain_opt_in():
     for native in (native_html, native_js):
         assert "physical_cables" not in native
         assert "createWorkspaceSession" not in native
-        assert "SentraCollab" not in native
+        assert "createCollabServer(" not in native
+        assert "server.listen(" not in native
 
 def test_phase3_graph_snapshot_quota_remain_optional_and_display_only():
     native_html = (ROOT / "sentra_canvas" / "static" / "native.html").read_text(
@@ -147,4 +151,5 @@ def test_phase3_graph_snapshot_quota_remain_optional_and_display_only():
         assert "mountGraphAccessibility" not in native
         assert "verified_snapshot" not in native
         assert "localHealth" not in native
-        assert "SentraCollab" not in native
+        assert "createCollabServer(" not in native
+        assert "server.listen(" not in native

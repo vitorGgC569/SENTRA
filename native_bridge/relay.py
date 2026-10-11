@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlparse
 from .bootstrap import bootstrap_proof, extension_identity, write_extension_bootstrap
 from .protocol import ChatJob, ChatResult
 from .job_store import JobStore
+from .web_send import WebSendConflict
 
 
 class RelayState(JobStore):
@@ -19,9 +20,21 @@ class RelayState(JobStore):
     EXTENSION_ONLINE_WINDOW_S = 90.0
     POOL_LEASE_WINDOW_S = 45.0
 
-    def __init__(self, extension_dir=None, db_path=":memory:"):
+    def __init__(self, extension_dir=None, db_path=":memory:", *, browser_evidence=None,
+                 authenticated_control=None):
         super().__init__(db_path)
         self.extension_dir = extension_dir
+        self.browser_evidence = browser_evidence or (
+            authenticated_control.browser_evidence if authenticated_control is not None else None)
+        self.authenticated_control = authenticated_control
+        self.authenticated_receipt_broker = None
+        self.web_send = None
+        if authenticated_control is not None:
+            from .continuation_web import WebContinuation
+            self.authenticated_receipt_broker = WebContinuation(
+                authenticated_control, self).authenticated_receipts
+            from .web_send import WebSendAuthority
+            self.web_send = WebSendAuthority(authenticated_control, self)
         self._last_poll = {}
         self._worker_status = {}
         self._extension_seen = 0.0
@@ -32,6 +45,163 @@ class RelayState(JobStore):
         self._bootstrap_failures = 0
         self._bootstrap_last_seen = None
         self.started_at = time.time()
+
+    def submit(self, job):
+        """Refuse a new Web effect when a known ChatGPT tab awaits approval.
+
+        Inert for unevidenced/unenrolled chats, preserving legacy transport.
+        It is not a substitute for a fresh DOM check at the actual send point.
+        """
+        if (self.browser_evidence is not None and
+                str(job.provider or "").lower() == "chatgpt" and
+                job.kind in {"CHAT_TASK", "CHAT_START", "CHAT_SEND"} and
+                not job.new_chat and job.conversation_url):
+            from sentra_core.conversation import ConversationIdentity
+            identity = ConversationIdentity.parse(job.conversation_url)
+            if identity.provider != "chatgpt":
+                raise PermissionError("provider/chat URL mismatch")
+            self.browser_evidence.require_dispatch_ready(
+                "local-operator", identity.conversation_id)
+        return super().submit(job)
+
+
+    def attested_web_receipt(self, *, job_id, worker, lease_token, evidence,
+                             extension_id, source_sha256, document_id,
+                             request_id, identity_epoch=None):
+        """Authenticated MV3 callback. IDs of owner/Run/WorkItem come from SQLite.
+
+        The extension supplies only Web observation metadata, NEVER authority.
+        Both the browser enrollment and worker lease must still be valid.
+        Receipt commit and central attestation are two durable databases:
+        a crash between them is recoverable only by attest_existing, NOT resend.
+        """
+        import hashlib
+        import re
+        if self.authenticated_receipt_broker is None:
+            raise PermissionError("host has not enabled authenticated Web receipts")
+        if (not isinstance(worker, str) or not re.fullmatch(r"TAB-[0-9]{1,12}",worker)
+                or not isinstance(request_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{8,160}",request_id)):
+            raise PermissionError("invalid worker or Web request ID")
+        control = self.authenticated_control
+        send = self.web_send.binding(job_id) if self.web_send is not None else None
+        if send is not None:
+            self.web_send.receipt(
+                send["owner"], job_id, worker=worker, lease_token=lease_token,
+                evidence=evidence, request_id=request_id, extension_id=extension_id,
+                source_sha256=source_sha256, document_id=document_id, identity_epoch=identity_epoch)
+            return {"job_id": job_id, "state": "attested", "message_id": evidence["message_id"],
+                    "relay_delivery_state": "sent", "automatic_resend": False}
+        with control.session_checkpoints.store.connect("session_checkpoint") as db:
+            records = db.execute(
+                "SELECT owner,run_id,work_item_id,principal_id,grant_id,prompt_sha256 "
+                "FROM web_continuation_transfers WHERE job_id=? UNION "
+                "SELECT owner,run_id,work_item_id,principal_id,grant_id,prompt_sha256 "
+                "FROM web_target_allocations WHERE job_id=?",(job_id,job_id)
+            ).fetchall()
+        if len(records) != 1:
+            raise PermissionError("Web receipt has no unique authorized continuation")
+        bound = dict(records[0])
+        if not isinstance(evidence,dict) or evidence.get("prompt_sha256") != bound["prompt_sha256"]:
+            raise PermissionError("receipt does not match stored continuation digest")
+        with control.session_checkpoints.store.connect("chat_access") as db:
+            enrollment = db.execute(
+                "SELECT principal,workspace FROM browser_collectors "
+                "WHERE extension_id=? AND source_sha256=? AND enabled=1",
+                (extension_id,source_sha256)
+            ).fetchone()
+        if enrollment is None:
+            raise PermissionError("Web receipt collector not enrolled")
+        item=control.work_item_info(bound["work_item_id"],bound["owner"])
+        if item["run_id"] != bound["run_id"]:
+            raise PermissionError("Web receipt WorkItem/Run binding changed")
+        grant=control.authorization.require(
+            bound["owner"],principal_type="agent",principal_id=bound["principal_id"],
+            capability="web:send",scope_type="work_item",
+            scope_id=bound["work_item_id"],context={"provider":"chatgpt"},
+            local_owner=False)
+        if grant.get("grant_id") != bound["grant_id"]:
+            raise PermissionError("Web receipt original grant revoked or replaced")
+        broker=self.authenticated_receipt_broker
+        with self.lock:
+            self._expire()
+            lease=self.db.execute(
+                "SELECT state,worker,lease,lease_until,deadline,phase "
+                "FROM jobs WHERE id=?",(job_id,)).fetchone()
+            now=self.clock()
+            if (not lease or lease[0]!="LEASED" or lease[1]!=worker
+                    or not isinstance(lease_token,str)
+                    or not secrets.compare_digest(lease[2] or "",lease_token)
+                    or not lease[3] or lease[3] < now
+                    or not lease[4] or lease[4] < now
+                    or lease[5]!="sending"):
+                raise PermissionError("Web receipt requires live exact sending lease")
+            return broker.accept(
+                bound["owner"],run_id=bound["run_id"],job_id=job_id,
+                browser_principal=enrollment["principal"],request_id=request_id,
+                worker=worker,lease_token=lease_token,evidence=evidence,
+                extension_id=extension_id,document_id=document_id,
+                identity_epoch=identity_epoch)
+
+    def reconcile_web_receipt(self, *, job_id, worker, request_id,
+                              extension_id, source_sha256, document_id,
+                              identity_epoch=None):
+        """Host-only restart reconciliation: never asks browser to send again.
+
+        Caller authenticates the local operator. Only a *previously sent*
+        exact relay receipt can be attested against still-live browser evidence.
+        """
+        if self.authenticated_receipt_broker is None:
+            raise PermissionError("authenticated Web receipts are unavailable")
+        control=self.authenticated_control
+        send = self.web_send.binding(job_id) if self.web_send is not None else None
+        if send is not None:
+            self.web_send.reconcile(
+                send["owner"], job_id, worker=worker, request_id=request_id,
+                extension_id=extension_id, source_sha256=source_sha256,
+                document_id=document_id, identity_epoch=identity_epoch)
+            return {"job_id": job_id, "state": "attested", "automatic_resend": False}
+        with control.session_checkpoints.store.connect("session_checkpoint") as db:
+            records=db.execute(
+                "SELECT owner,run_id,work_item_id,principal_id,grant_id,prompt_sha256 "
+                "FROM web_continuation_transfers WHERE job_id=? UNION "
+                "SELECT owner,run_id,work_item_id,principal_id,grant_id,prompt_sha256 "
+                "FROM web_target_allocations WHERE job_id=?",(job_id,job_id)
+            ).fetchall()
+        if len(records)!=1:
+            raise PermissionError("unknown continuation receipt")
+        bound=dict(records[0])
+        item=control.work_item_info(bound["work_item_id"],bound["owner"])
+        if item["run_id"]!=bound["run_id"]:
+            raise PermissionError("Web continuation WorkItem changed")
+        grant=control.authorization.require(
+            bound["owner"],principal_type="agent",principal_id=bound["principal_id"],
+            capability="web:send",scope_type="work_item",
+            scope_id=bound["work_item_id"],context={"provider":"chatgpt"},
+            local_owner=False)
+        if grant.get("grant_id")!=bound["grant_id"]:
+            raise PermissionError("reconciliation requires original active grant")
+        status=self.delivery_status(job_id)
+        if not status or status["state"]!="sent" or not status.get("receipt"):
+            raise PermissionError("Web result uncertain, no authenticated receipt to reconcile")
+        with control.session_checkpoints.store.connect("chat_access") as db:
+            enrollment=db.execute(
+                "SELECT principal FROM browser_collectors WHERE extension_id=? "
+                "AND source_sha256=? AND enabled=1",(extension_id,source_sha256)
+            ).fetchone()
+        if enrollment is None:
+            raise PermissionError("collector not enrolled")
+        broker=self.authenticated_receipt_broker
+        broker._prove_browser(
+            owner=bound["owner"],run_id=bound["run_id"],
+            browser_principal=enrollment["principal"],request_id=request_id,
+            worker=worker,evidence=status["receipt"],extension_id=extension_id,
+            document_id=document_id,identity_epoch=identity_epoch)
+        return broker.attest_existing(
+            bound["owner"],run_id=bound["run_id"],job_id=job_id,
+            browser_principal=enrollment["principal"],request_id=request_id,
+            worker=worker,evidence=status["receipt"],
+            identity_epoch=identity_epoch)
 
     def extension_version(self):
         root = Path(self.extension_dir) if self.extension_dir else None
@@ -105,8 +275,90 @@ class RelayState(JobStore):
             "status": status,
         }
 
+    def _continuation_send_authority(self, jid):
+        if self.authenticated_control is None:
+            return None
+        control = self.authenticated_control
+        with control.session_checkpoints.store.connect("session_checkpoint") as db:
+            rows = db.execute("SELECT owner,run_id,work_item_id,principal_id,grant_id FROM web_continuation_transfers "
+                              "WHERE job_id=? UNION SELECT owner,run_id,work_item_id,principal_id,grant_id "
+                              "FROM web_target_allocations WHERE job_id=?", (jid, jid)).fetchall()
+        if not rows:
+            return None
+        if len(rows) != 1:
+            raise PermissionError("continuation job has conflicting authority")
+        row = dict(rows[0])
+        run = control._run(row["run_id"], row["owner"])
+        control._agent_from_run(run, row["principal_id"])
+        item = control.work_item_info(row["work_item_id"], row["owner"])
+        if (item["run_id"] != row["run_id"] or run["state"] not in {"CREATED", "RUNNING"} or
+                item["state"] in {"COMPLETED", "FAILED", "CANCELLED"} or
+                (item.get("assignee_agent_id") and item["assignee_agent_id"] != row["principal_id"])):
+            raise PermissionError("continuation send authority is inactive or changed")
+        grant = control.authorization.require(row["owner"], principal_type="agent", principal_id=row["principal_id"],
+            capability="web:send", scope_type="work_item", scope_id=row["work_item_id"],
+            context={"provider": "chatgpt"}, local_owner=False)
+        if grant.get("grant_id") != row["grant_id"]:
+            raise PermissionError("original continuation grant revoked or replaced")
+        return row
+
+    def _browser_job_admitted(self, payload):
+        if isinstance(payload, dict):
+            try:
+                self._continuation_send_authority(payload.get("job_id", ""))
+            except (PermissionError, FileNotFoundError):
+                return False
+        if self.web_send is not None and isinstance(payload, dict):
+            bound = self.web_send.binding(payload.get("job_id", ""))
+            if bound is not None:
+                if bound["send_fence"] or bound["stage"] != "QUEUED":
+                    return False
+                try:
+                    self.web_send._authority(bound)
+                except (PermissionError, FileNotFoundError):
+                    return False
+        if self.browser_evidence is None or not isinstance(payload, dict):
+            return True
+        if (payload.get("provider") != "chatgpt" or
+                payload.get("kind") not in {"CHAT_TASK", "CHAT_START", "CHAT_SEND"} or
+                payload.get("new_chat") or not payload.get("conversation_url")):
+            return True
+        from sentra_core.conversation import ConversationIdentity
+        try:
+            identity = ConversationIdentity.parse(payload["conversation_url"])
+            if identity.provider != "chatgpt":
+                return False
+            self.browser_evidence.require_dispatch_ready(
+                "local-operator", identity.conversation_id)
+        except (ValueError, PermissionError):
+            return False
+        return True
+
+    def progress(self, jid, worker, token, phase):
+        bound = self.web_send.binding(jid) if self.web_send is not None else None
+        if bound is not None and phase == "sending":
+            # The browser cannot invent central fencing facts. Derive them
+            # exclusively from the already-authorized Operation's live lease.
+            run = self.authenticated_control.durable.run_status(bound["run_id"], bound["owner"])
+            leases = [lease for lease in run.get("leases", [])
+                      if lease.get("operation_id") == bound["operation_id"] and
+                      lease.get("lease_until", 0) > self.authenticated_control.durable.clock()]
+            if len(leases) != 1:
+                raise PermissionError("pre-Send requires an unambiguous existing central lease")
+            lease = leases[0]
+            return self.web_send.pre_send(bound["owner"], jid, worker=worker, lease_token=token,
+                                          resource_key=lease["resource_key"], fencing_token=lease["fencing_token"])
+        if phase == "sending":
+            with self.lock:
+                legacy = self._continuation_send_authority(jid)
+                if legacy is not None:
+                    if (self.delivery_status(jid) or {}).get("state") != "not_sent":
+                        raise WebSendConflict("continuation pre-Send ACK already consumed; reconcile without resend")
+                    return super().progress(jid, worker, token, phase, single_use_send=True)
+        return super().progress(jid, worker, token, phase)
+
     def poll(self, worker=""):
-        job = super().poll(worker)
+        job = super().poll(worker, candidate_check=self._browser_job_admitted)
         if worker:
             self.mark_worker(worker)
         return job
@@ -265,6 +517,19 @@ def make_handler(state, token):
             state.note_bootstrap(True)
             return self._send({"ok": True, "token": token, **expected_identity})
 
+        def _browser_collector(self, data):
+            if state.browser_evidence is None:
+                raise PermissionError("browser evidence collector unavailable")
+            origin = self.headers.get("Origin", "")
+            if not origin.startswith("chrome-extension://"):
+                raise PermissionError("evidence requires the enrolled extension origin")
+            extension_id = origin.removeprefix("chrome-extension://")
+            identity = state.extension_version()
+            if not identity.get("source_hash") or data.get("source_sha256") != identity["source_hash"]:
+                raise PermissionError("browser evidence extension build changed")
+            return {"extension_id": extension_id, "source_sha256": identity["source_hash"],
+                    "worker": data["worker"]}
+
         def do_POST(self):
             try:
                 if self.path == "/auth/bootstrap":
@@ -277,6 +542,37 @@ def make_handler(state, token):
                 data = self._read_json()
                 if data is None:
                     return
+                if self.path == "/browser-evidence/challenge":
+                    v1 = {"source_sha256", "worker", "document_id"}
+                    v2 = v1 | {"identity_epoch"}
+                    if set(data) not in (v1, v2):
+                        raise ValueError("exact V1/V2 evidence challenge schema required")
+                    collector = self._browser_collector(data)
+                    return self._send(state.browser_evidence.challenge(
+                        **collector, document_id=data["document_id"],
+                        identity_epoch=data.get("identity_epoch")))
+                if self.path == "/browser-evidence/observe":
+                    if set(data) != {"source_sha256", "worker", "evidence"}:
+                        raise ValueError("exact browser observe transport schema required")
+                    # BrowserEvidenceService enforces V2 identity_epoch inside evidence,
+                    # nonce, collector revision and document binding in central SQLite.
+                    collector = self._browser_collector(data)
+                    return self._send(state.browser_evidence.observe(
+                        **collector, evidence=data["evidence"]))
+                if self.path == "/browser-evidence/invalidate":
+                    v1 = {"source_sha256", "worker", "document_id", "reason"}
+                    v2 = v1 | {"identity_epoch"}
+                    if set(data) not in (v1, v2):
+                        raise ValueError("exact V1/V2 browser invalidation schema required")
+                    collector = self._browser_collector(data)
+                    outcome=state.browser_evidence.invalidate_document(
+                        **collector, document_id=data["document_id"], reason=data["reason"],
+                        identity_epoch=data.get("identity_epoch"))
+                    if outcome["state"]=="invalidated":
+                        # Mark only that observed worker offline, never kill or
+                        # requeue a lease whose Web send may already have happened.
+                        state.release_worker(collector["worker"])
+                    return self._send(outcome)
                 if self.path == "/extension/heartbeat":
                     state.mark_extension(data.get("status"))
                     return self._send({"ok": True, "extension": state.extension_status()})
@@ -298,6 +594,7 @@ def make_handler(state, token):
                         "conversation_url", "kind", "images", "target_worker",
                         "browser_action", "browser_args", "project_id",
                         "project_url", "chat_title", "provider", "model",
+                        "delivery_key",
                     }
                     if set(data) - allowed:
                         raise ValueError("unknown job fields")
@@ -305,6 +602,26 @@ def make_handler(state, token):
                 if self.path == "/jobs/result":
                     lease_token = data.pop("lease_token", "")
                     state.store_result(ChatResult(**data), lease_token)
+                elif self.path == "/jobs/delivery-receipt":
+                    legacy={"job_id","worker","lease_token","evidence"}
+                    verified=legacy | {"request_id","source_sha256","document_id"}
+                    verified_v2=verified | {"identity_epoch"}
+                    if set(data) in (verified,verified_v2):
+                        collector=self._browser_collector(data)
+                        result=state.attested_web_receipt(
+                            job_id=data["job_id"],worker=collector["worker"],
+                            lease_token=data["lease_token"],evidence=data["evidence"],
+                            request_id=data["request_id"],document_id=data["document_id"],
+                            extension_id=collector["extension_id"],
+                            source_sha256=collector["source_sha256"],
+                            identity_epoch=data.get("identity_epoch"))
+                        return self._send({**result,"relay_delivery_state":"sent",
+                                           "automatic_resend":False})
+                    if set(data)!=legacy:
+                        raise ValueError("exact preliminary or authenticated receipt schema required")
+                    # Legacy receipt stays preliminary: NEVER permits Web A->B commit.
+                    return self._send(state.delivery_receipt(data["job_id"],data["worker"],
+                        data["lease_token"],data["evidence"]))
                 elif self.path == "/jobs/progress":
                     info = state.progress(data["job_id"], data["worker"], data["lease_token"], data["phase"])
                     return self._send({"ok": True, **info})
@@ -317,6 +634,10 @@ def make_handler(state, token):
                 else:
                     return self._send({"error": "not found"}, 404)
                 return self._send({"ok": True})
+            except PermissionError:
+                return self._send({"error": "browser collector denied; enroll or repair in SENTRA"}, 403)
+            except WebSendConflict as exc:
+                return self._send({"error": str(exc), "automatic_resend": False}, 409)
             except (ValueError, TypeError, KeyError) as exc:
                 return self._send({"error": str(exc)}, 400)
 
@@ -352,6 +673,8 @@ def make_handler(state, token):
                 if parsed.path == "/workers/status":
                     worker = (qs.get("worker") or [""])[0]
                     return self._send(state.worker_status(worker))
+                if parsed.path == "/jobs/delivery":
+                    return self._send(state.delivery_status((qs.get("job_id") or [""])[0]))
                 if parsed.path == "/jobs/poll":
                     return self._send({"job": state.poll((qs.get("worker") or [""])[0])})
                 if parsed.path == "/jobs/wait":
@@ -395,7 +718,8 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 
 
 class RelayServer:
-    def __init__(self, host="127.0.0.1", port=8765, extension_dir=None, token=None, db_path=":memory:"):
+    def __init__(self, host="127.0.0.1", port=8765, extension_dir=None, token=None, db_path=":memory:",
+                 browser_evidence=None, authenticated_control=None):
         if host not in {"127.0.0.1", "localhost"}:
             raise ValueError("relay must bind loopback only")
         self.token = token or secrets.token_urlsafe(32)
@@ -403,7 +727,8 @@ class RelayServer:
             raise ValueError("relay token must contain at least 32 characters")
         if extension_dir is not None:
             write_extension_bootstrap(Path(extension_dir), self.token)
-        self.state = RelayState(extension_dir, db_path)
+        self.state = RelayState(extension_dir, db_path, browser_evidence=browser_evidence,
+                                authenticated_control=authenticated_control)
         try:
             self.server = BoundedHTTPServer((host, port), make_handler(self.state, self.token))
         except OSError:

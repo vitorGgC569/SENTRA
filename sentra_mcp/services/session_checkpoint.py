@@ -9,6 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from sentra_remote.secrets import protect_secret, unprotect_secret
 from .control_store import ControlPlaneStore, SQLiteControlPlaneStore
 
 
@@ -72,6 +73,7 @@ class SessionCheckpointService:
         self.path = self.store.path_for("session_checkpoint")
         self.clock = clock
         with self._connect() as db:
+            db.execute("PRAGMA secure_delete=ON")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS session_checkpoints(
@@ -96,17 +98,121 @@ class SessionCheckpointService:
                         owner,chat_id,source_instance_id,source_epoch,
                         source_seq DESC,created_at DESC
                     );
+                CREATE TABLE IF NOT EXISTS session_continuations(
+                    continuation_id TEXT PRIMARY KEY,
+                    owner TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    chat_id TEXT NOT NULL,
+                    checkpoint_id TEXT NOT NULL,
+                    source_conversation_id TEXT NOT NULL,
+                    target_conversation_id TEXT NOT NULL,
+                    request_key TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    updated_at REAL NOT NULL,
+                    UNIQUE(owner,chat_id,request_key)
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_session_continuation_open
+                    ON session_continuations(owner,chat_id)
+                    WHERE state IN ('PREPARED','REBINDING','UNCERTAIN');
                 """
             )
+            self._migrate_protected_checkpoints(db)
+
+
+    @staticmethod
+    def _protect(value: dict[str, Any], checkpoint_id: str, field: str) -> str:
+        """Bind owner-visible checkpoint/cursor content to its immutable row ID."""
+        if field not in {"cursor", "checkpoint"} or not isinstance(value, dict):
+            raise RuntimeError("invalid session checkpoint payload")
+        raw = _json({"version": 1, "checkpoint_id": checkpoint_id,
+                     "field": field, "value": value})
+        ciphertext = protect_secret(raw)
+        if not isinstance(ciphertext, str) or not ciphertext.startswith(("dpapi:", "keyring:")):
+            raise RuntimeError("OS-protected session checkpoint storage required")
+        return ciphertext
+
+    @staticmethod
+    def _open_protected(raw: str, checkpoint_id: str, field: str) -> dict[str, Any]:
+        if not isinstance(raw, str) or not raw.startswith(("dpapi:", "keyring:")):
+            raise RuntimeError("unprotected session checkpoint rejected")
+        try:
+            envelope = json.loads(unprotect_secret(raw))
+        except Exception as exc:
+            raise RuntimeError("session checkpoint OS decryption failed") from exc
+        if (not isinstance(envelope, dict)
+                or envelope.get("version") != 1
+                or envelope.get("checkpoint_id") != checkpoint_id
+                or envelope.get("field") != field
+                or not isinstance(envelope.get("value"), dict)):
+            raise RuntimeError("session checkpoint ciphertext binding mismatch")
+        return envelope["value"]
+
+    def _migrate_protected_checkpoints(self, db: sqlite3.Connection) -> None:
+        """Fail-closed transaction for legacy plaintext checkpoint/cursor fields.
+
+        The cleanup marker survives a crash between durable UPDATE and VACUUM;
+        this cannot scrub OS snapshots, cloud backups or SSD historical pages.
+        """
+        db.execute("CREATE TABLE IF NOT EXISTS session_checkpoint_storage_security "
+                   "(key TEXT PRIMARY KEY, cleanup_pending INTEGER NOT NULL)")
+        db.commit()
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            migrated = False
+            rows = db.execute(
+                "SELECT checkpoint_id,cursor_json,checkpoint_json FROM session_checkpoints"
+            ).fetchall()
+            for row in rows:
+                ident = row["checkpoint_id"]
+                updates = []
+                for field, column in (("cursor", "cursor_json"),
+                                      ("checkpoint", "checkpoint_json")):
+                    raw = row[column]
+                    if isinstance(raw, str) and raw.startswith(("dpapi:", "keyring:")):
+                        self._open_protected(raw, ident, field)
+                        updates.append(raw)
+                        continue
+                    try:
+                        value = json.loads(raw)
+                    except (ValueError, TypeError) as exc:
+                        raise RuntimeError("invalid legacy checkpoint storage") from exc
+                    if not isinstance(value, dict):
+                        raise RuntimeError("invalid legacy checkpoint object")
+                    updates.append(self._protect(value, ident, field))
+                    migrated = True
+                if updates != [row["cursor_json"], row["checkpoint_json"]]:
+                    db.execute(
+                        "UPDATE session_checkpoints SET cursor_json=?,checkpoint_json=? "
+                        "WHERE checkpoint_id=?", (*updates, ident))
+            if migrated:
+                db.execute("INSERT INTO session_checkpoint_storage_security VALUES('os_crypto',1) "
+                           "ON CONFLICT(key) DO UPDATE SET cleanup_pending=1")
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        pending = db.execute(
+            "SELECT cleanup_pending FROM session_checkpoint_storage_security "
+            "WHERE key='os_crypto'").fetchone()
+        if pending and pending[0]:
+            db.execute("VACUUM")
+            checkpoint = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if checkpoint and checkpoint[0]:
+                raise RuntimeError("session checkpoint WAL cleanup incomplete")
+            db.execute("UPDATE session_checkpoint_storage_security SET cleanup_pending=0 "
+                       "WHERE key='os_crypto'")
+            db.commit()
 
     def _connect(self) -> sqlite3.Connection:
         return self.store.connect("session_checkpoint")
 
-    @staticmethod
-    def _row(row: sqlite3.Row) -> dict[str, Any]:
+    def _row(self, row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
-        item["cursor"] = _load(item.pop("cursor_json"), {})
-        item["checkpoint"] = _load(item.pop("checkpoint_json"), {})
+        ident = item["checkpoint_id"]
+        item["cursor"] = self._open_protected(item.pop("cursor_json"), ident, "cursor")
+        item["checkpoint"] = self._open_protected(
+            item.pop("checkpoint_json"), ident, "checkpoint")
         return item
 
     def write(
@@ -193,7 +299,9 @@ class SessionCheckpointService:
                 (
                     checkpoint_id, owner, run_id, agent_id, chat_id, provider,
                     conversation_id, source_instance_id, source_epoch, source_seq,
-                    _json(cursor_value), _json(checkpoint_value), digest, now,
+                    self._protect(cursor_value, checkpoint_id, "cursor"),
+                    self._protect(checkpoint_value, checkpoint_id, "checkpoint"),
+                    digest, now,
                 ),
             )
             row = db.execute(
@@ -230,3 +338,112 @@ class SessionCheckpointService:
         if row is None:
             raise FileNotFoundError("session checkpoint not found")
         return self._row(row)
+
+    @staticmethod
+    def _continuation_row(row: sqlite3.Row) -> dict[str, Any]:
+        return dict(row)
+
+    def continuation(self, owner: str, continuation_id: str) -> dict[str, Any]:
+        ident = _text("continuation_id", continuation_id, 120, required=True)
+        with self._connect() as db:
+            row = db.execute(
+                "SELECT * FROM session_continuations WHERE owner=? AND continuation_id=?",
+                (owner, ident),
+            ).fetchone()
+        if row is None:
+            raise FileNotFoundError("session continuation not found")
+        return self._continuation_row(row)
+
+    def prepare_continuation(
+        self, owner: str, *, run_id: str, chat_id: str,
+        checkpoint_id: str, source_conversation_id: str,
+        target_conversation_id: str, request_key: str,
+    ) -> dict[str, Any]:
+        """Pin an immutable checkpoint; never dispatch a model turn or grant access.
+
+        Exactly one unresolved handoff per logical chat. Replaying the request
+        key is safe only with identical source, target, run and checkpoint.
+        """
+        run_id = _text("run_id", run_id, 256, required=True)
+        chat_id = _text("chat_id", chat_id, 256, required=True)
+        checkpoint_id = _text("checkpoint_id", checkpoint_id, 120, required=True)
+        source = _text("source_conversation_id", source_conversation_id, 1024, required=True)
+        target = _text("target_conversation_id", target_conversation_id, 1024, required=True)
+        request_key = _text("request_key", request_key, 128, required=True)
+        if target == source:
+            raise ValueError("continuation requires a different target conversation")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute(
+                "SELECT * FROM session_continuations "
+                "WHERE owner=? AND chat_id=? AND request_key=?",
+                (owner, chat_id, request_key),
+            ).fetchone()
+            if existing:
+                current = self._continuation_row(existing)
+                if (current["run_id"], current["checkpoint_id"],
+                    current["source_conversation_id"], current["target_conversation_id"]) != (
+                    run_id, checkpoint_id, source, target
+                ):
+                    raise SessionCheckpointConflict("continuation request identity collision")
+                return current
+            checkpoint = db.execute(
+                "SELECT run_id,chat_id,conversation_id FROM session_checkpoints "
+                "WHERE owner=? AND checkpoint_id=?",
+                (owner, checkpoint_id),
+            ).fetchone()
+            if checkpoint is None or (checkpoint["run_id"],checkpoint["chat_id"],
+                checkpoint["conversation_id"]) != (run_id,chat_id,source):
+                raise SessionCheckpointConflict("checkpoint is not bound to source chat")
+            open_row = db.execute(
+                "SELECT continuation_id FROM session_continuations "
+                "WHERE owner=? AND chat_id=? AND state IN ('PREPARED','REBINDING','UNCERTAIN')",
+                (owner,chat_id),
+            ).fetchone()
+            if open_row:
+                raise SessionCheckpointConflict("logical chat already has unresolved continuation")
+            now = self.clock()
+            ident = "continuation-" + uuid.uuid4().hex
+            db.execute(
+                "INSERT INTO session_continuations VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (ident,owner,run_id,chat_id,checkpoint_id,source,target,
+                 request_key,"PREPARED",now,now),
+            )
+            return self._continuation_row(db.execute(
+                "SELECT * FROM session_continuations WHERE continuation_id=?", (ident,)
+            ).fetchone())
+
+    def transition_continuation(
+        self, owner: str, continuation_id: str, *, expected: str, state: str,
+    ) -> dict[str, Any]:
+        allowed = {
+            ("PREPARED","REBINDING"),
+            ("REBINDING","COMMITTED"),
+            ("REBINDING","UNCERTAIN"),
+            ("UNCERTAIN","COMMITTED"),
+            ("PREPARED","CANCELLED"),
+            ("UNCERTAIN","CANCELLED"),
+        }
+        if (expected,state) not in allowed:
+            raise ValueError("invalid continuation transition")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute(
+                "SELECT * FROM session_continuations WHERE owner=? AND continuation_id=?",
+                (owner,continuation_id),
+            ).fetchone()
+            if row is None:
+                raise FileNotFoundError("session continuation not found")
+            if row["state"] == state:
+                return self._continuation_row(row)
+            if row["state"] != expected:
+                raise SessionCheckpointConflict("continuation state changed; reconcile first")
+            db.execute(
+                "UPDATE session_continuations SET state=?,updated_at=? "
+                "WHERE continuation_id=? AND owner=?",
+                (state,self.clock(),continuation_id,owner),
+            )
+            return self._continuation_row(db.execute(
+                "SELECT * FROM session_continuations WHERE continuation_id=?",
+                (continuation_id,),
+            ).fetchone())

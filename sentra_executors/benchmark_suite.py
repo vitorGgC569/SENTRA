@@ -7,6 +7,7 @@ by trusted host callbacks around its existing central factory.
 from __future__ import annotations
 import dataclasses
 import inspect
+from contextlib import contextmanager
 import json
 import math
 import sqlite3
@@ -95,8 +96,17 @@ class DatasetSuiteState:
           attempt_id TEXT,step_index INTEGER,operation_id TEXT UNIQUE,intent TEXT,intent_sha TEXT,
           state TEXT,result TEXT,PRIMARY KEY(attempt_id,step_index));
         ''')
+    @contextmanager
     def _db(self):
-        db=sqlite3.connect(self.path,timeout=5);db.row_factory=sqlite3.Row;return db
+        # sqlite3.Connection.__exit__ commits but does NOT close the handle.
+        # On Windows, an unclosed connection prevents temp fixture cleanup.
+        db=sqlite3.connect(self.path,timeout=5)
+        db.row_factory=sqlite3.Row
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
     def get(self,attempt_id):
         with self._db() as db:
             row=db.execute('SELECT * FROM dataset_attempts WHERE id=?',(attempt_id,)).fetchone()

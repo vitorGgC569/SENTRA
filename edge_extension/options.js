@@ -4,6 +4,10 @@ const form = document.getElementById("pair");
 const token = document.getElementById("token");
 const enabled = document.getElementById("enabled");
 const status = document.getElementById("status");
+const identity = document.createElement('p');
+identity.textContent = 'ID da extensão: ' + chrome.runtime.id + ' · SHA-256: ' +
+  (chrome.runtime.getManifest().sentra_source_hash || 'indisponível');
+document.body.appendChild(identity);
 
 (async () => {
   const manifestVersion = chrome.runtime.getManifest().version;

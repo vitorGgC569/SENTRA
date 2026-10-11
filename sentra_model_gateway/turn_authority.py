@@ -40,6 +40,10 @@ class TurnCapability:
     agent_id: str | None = None
     codex_thread_id: str | None = None
     native_turn_id: str | None = None
+    shared_run: bool = False
+    work_item_id: str | None = None
+    web_grant_id: str | None = None
+    browser_account_revision: int | None = None
 
 
 class TurnAuthority:
@@ -50,6 +54,76 @@ class TurnAuthority:
         self.clock = clock
         self.lock = threading.RLock()
         self.capabilities: dict[str, TurnCapability] = {}
+        from sentra_mcp.services.control_store import SQLiteControlPlaneStore
+        self.store = SQLiteControlPlaneStore(self.state_root)
+        with self.store.connect("session_checkpoint") as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""CREATE TABLE IF NOT EXISTS gateway_bound_web_turns(
+                token_hash TEXT PRIMARY KEY, owner TEXT NOT NULL, run_id TEXT NOT NULL,
+                operation_id TEXT NOT NULL, work_item_id TEXT NOT NULL,
+                request_hash TEXT NOT NULL, conversation_uri TEXT,
+                thread_id TEXT, turn_id TEXT, UNIQUE(owner,request_hash))""")
+            columns = {row[1] for row in db.execute("PRAGMA table_info(gateway_bound_web_turns)")}
+            if "retired" not in columns:
+                db.execute("ALTER TABLE gateway_bound_web_turns ADD COLUMN retired INTEGER NOT NULL DEFAULT 0")
+            for column in ("principal_id", "grant_id"):
+                if column not in columns:
+                    db.execute(f"ALTER TABLE gateway_bound_web_turns ADD COLUMN {column} TEXT")
+
+    def issue_bound(self, *, control, owner: str, run_id: str, work_item_id: str,
+                    principal_id: str, grant_id: str, request_identity: str,
+                    conversation_uri: str | None = None) -> str:
+        """Admit a turn on an already authorized WorkItem without a second Run.
+
+        Called by the host binding resolver, never directly from model metadata.
+        Permission is rechecked again by WebSendAuthority at the physical fence.
+        """
+        if not isinstance(request_identity, str) or not request_identity:
+            raise ValueError("durable Web turns require a stable request identity")
+        work = control.work_item_info(work_item_id, owner)
+        if work["run_id"] != run_id:
+            raise PermissionError("Web WorkItem belongs to another Run")
+        run = self.durable.run_status(run_id, owner)
+        if run["state"] != "RUNNING" or run.get("desired_state") != "RUNNING":
+            raise PermissionError("Web Run is not active")
+        grant = control.authorization.require(
+            owner, principal_type="agent", principal_id=principal_id,
+            capability="web:send", scope_type="work_item", scope_id=work_item_id,
+            local_owner=False)
+        if grant["grant_id"] != grant_id:
+            raise PermissionError("Web send requires the original grant")
+        request_hash = hashlib.sha256(request_identity.encode()).hexdigest()
+        token = "stc_" + secrets.token_urlsafe(36)
+        key = hashlib.sha256(token.encode()).hexdigest()
+        metadata = self._request_metadata(request_identity)
+        operation_id = "op-web-" + hashlib.sha256(
+            (owner + "|" + request_identity).encode()).hexdigest()[:32]
+        with self.store.connect("session_checkpoint") as db:
+            db.execute("BEGIN IMMEDIATE")
+            existing = db.execute("SELECT 1 FROM gateway_bound_web_turns WHERE owner=? AND request_hash=?",
+                                  (owner, request_hash)).fetchone()
+            if existing:
+                raise DurableStateConflict("duplicate Web turn; reconcile the original intent")
+            operation = self.durable.create_operation(
+                run_id, owner, kind="chatgpt-web-turn", operation_id=operation_id,
+                idempotency_key="web-bound:" + request_hash, initial_state="RUNNING")
+            if operation.get("idempotent_replay"):
+                raise DurableStateConflict("Web operation already exists; reconciliation required")
+            db.execute("INSERT INTO gateway_bound_web_turns "
+                       "(token_hash,owner,run_id,operation_id,work_item_id,request_hash,conversation_uri,thread_id,turn_id,principal_id,grant_id) "
+                       "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                       (key, owner, run_id, operation_id, work_item_id, request_hash,
+                        conversation_uri, metadata.get("thread_id"), metadata.get("turn_id"), principal_id, grant_id))
+        self.durable.heartbeat(operation_id, owner, progress={
+            "work_item_id": work_item_id, "agent_id": principal_id,
+            "codex_thread_id": metadata.get("thread_id"), "shared_run": True})
+        with self.lock:
+            self.capabilities[key] = TurnCapability(
+                key, run_id, operation_id, owner, conversation_uri=conversation_uri,
+                agent_id=principal_id, codex_thread_id=metadata.get("thread_id"),
+                native_turn_id=metadata.get("turn_id"), shared_run=True,
+                work_item_id=work_item_id, web_grant_id=grant_id)
+        return token
 
     @staticmethod
     def _goal_scope(
@@ -875,6 +949,38 @@ class TurnAuthority:
             ]
 
     def _rehydrate(self, key: str) -> TurnCapability | None:
+        with self.store.connect("session_checkpoint") as db:
+            bound = db.execute("SELECT * FROM gateway_bound_web_turns WHERE token_hash=?", (key,)).fetchone()
+        if bound is not None:
+            if bound["retired"] or not bound["principal_id"] or not bound["grant_id"]:
+                return None
+            detail = self.durable.run_status(bound["run_id"], bound["owner"])
+            if detail["state"] != "RUNNING":
+                return None
+            operation = self.durable.operation_status(bound["operation_id"], bound["owner"])
+            if operation["state"] not in {"RUNNING", "SUCCEEDED"}:
+                return None
+            progress = operation.get("progress") or {}
+            result = operation.get("result") or {}
+            cap = TurnCapability(
+                key, bound["run_id"], bound["operation_id"], bound["owner"],
+                conversation_uri=bound["conversation_uri"], trace_id=progress.get("trace_id"),
+                broker_registered=bool(progress.get("broker_registered")),
+                allowed_tools=frozenset(progress["allowed_tools"]) if "allowed_tools" in progress else None,
+                completed_revision=result.get("broker_revision"), agent_id=bound["principal_id"],
+                codex_thread_id=bound["thread_id"], native_turn_id=bound["turn_id"],
+                shared_run=True, work_item_id=bound["work_item_id"], web_grant_id=bound["grant_id"])
+            for lease in detail.get("leases", []):
+                if lease.get("operation_id") != cap.operation_id:
+                    continue
+                resource = str(lease.get("resource_key") or "")
+                for prefix, attr in (("browser-tab:", "physical"), ("conversation-uri:", "logical"),
+                                     ("conversation:", "conversation")):
+                    if resource.startswith(prefix):
+                        setattr(cap, attr + "_key", resource)
+                        setattr(cap, attr + "_fence", lease["fencing_token"])
+            self.capabilities[key] = cap
+            return cap
         owner = "sentra:web-model-gateway"
         runs = self.durable.list_runs(owner, offset=0, limit=1000)
         for run in runs.get("items", []):
@@ -1082,6 +1188,15 @@ class TurnAuthority:
             cap.run_id, cap.owner, kind="chatgpt-web-browser-phase",
             idempotency_key="browser-phase:" + trace_id, initial_state="RUNNING",
         )
+        if cap.shared_run:
+            with self.store.connect("session_checkpoint") as db:
+                changed = db.execute("UPDATE gateway_bound_web_turns SET operation_id=? "
+                                     "WHERE token_hash=? AND operation_id=? AND retired=0",
+                                     (operation["operation_id"], cap.token_hash, cap.operation_id)).rowcount
+                if changed != 1:
+                    raise StaleFenceError("Web phase binding changed or retired")
+            self.durable.heartbeat(operation["operation_id"], cap.owner, progress={
+                "work_item_id": cap.work_item_id, "agent_id": cap.agent_id, "shared_run": True})
         cap.operation_id = operation["operation_id"]
         cap.trace_id = trace_id
         cap.broker_registered = False
@@ -1272,6 +1387,10 @@ class TurnAuthority:
                     },
                     label="codex-subagent-turn",
                 )
+            if cap.shared_run:
+                with self.store.connect("session_checkpoint") as db:
+                    db.execute("UPDATE gateway_bound_web_turns SET retired=1 WHERE token_hash=?", (cap.token_hash,))
+                return
             self.durable.transition_run(cap.run_id, cap.owner,
                                         "SUCCEEDED" if delivered else "BLOCKED",
                                         reason="Web turn completed and response delivery was confirmed" if delivered else "Web model execution or response delivery is uncertain")

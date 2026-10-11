@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import socket
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -14,6 +15,7 @@ import pytest
 import zstandard as zstd
 
 from sentra_model_gateway.gateway import GatewayConfig, GatewayServer, LauncherSupervisor, _extract_codex_goal_context, _extract_codex_goal_signal, _extract_codex_task_text, _extract_codex_subagent_notifications, _upstream_version_from_ref
+from sentra_model_gateway.gateway import _upstream_chunks
 from orchestrator.providers.model_provider import ChatGPTWebModelProvider
 from orchestrator.providers.codex_web_provider import CodexChatGPTWebProvider
 from orchestrator.providers.base import AgentRequest
@@ -24,6 +26,34 @@ UPSTREAM_MANIFEST = json.loads(
     .read_text(encoding="utf-8")
 )
 UPSTREAM_VERSION = _upstream_version_from_ref(str(UPSTREAM_MANIFEST["ref"]))
+
+
+def test_durable_sse_injection_boundaries_survive_byte_fragmentation():
+    raw = b'event: response.output_text.delta\ndata: {"delta":"ok"}\r\n\r\nevent: response.completed\ndata: {}\n\n'
+    class Fragmented:
+        def __init__(self, value):
+            self.chunks = iter(bytes([byte]) for byte in value)
+        def read1(self, _size):
+            return next(self.chunks, b"")
+    frames = list(_upstream_chunks(Fragmented(raw), framed_sse=True))
+    assert b"".join(frames) == raw
+    assert len(frames) == 2
+    assert all(frame.endswith((b"\n\n", b"\r\n\r\n")) for frame in frames)
+    with pytest.raises(http.client.HTTPException, match="inside a frame"):
+        list(_upstream_chunks(Fragmented(raw[:-1]), framed_sse=True))
+
+
+def test_durable_sse_rejects_oversized_complete_frame_before_forwarding():
+    class Oversized:
+        def __init__(self):
+            self.first = True
+        def read1(self, _size):
+            if not self.first:
+                return b""
+            self.first = False
+            return b"data: " + b"x" * 2_000_000 + b"\n\n"
+    with pytest.raises(http.client.HTTPException, match="exceeds limit"):
+        next(_upstream_chunks(Oversized(), framed_sse=True))
 
 
 class UpstreamHandler(BaseHTTPRequestHandler):
@@ -169,6 +199,99 @@ def call(port, method, path, value=None, headers=None):
     return result
 
 
+def test_missing_upstream_keeps_listener_and_proves_no_post_bytes(tmp_path):
+    with socket.socket() as reserve:
+        reserve.bind(("127.0.0.1", 0))
+        closed_port = reserve.getsockname()[1]
+    gateway = GatewayServer(GatewayConfig(
+        upstream=f"http://127.0.0.1:{closed_port}", port=0,
+        state_root=tmp_path / "state", browser_descriptor=tmp_path / "browser.json",
+    ))
+    thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, body, _ = call(gateway.server_port, "POST", "/v1/responses", {"model": "gpt-6-sol", "input": "private"})
+        assert status == 503
+        error = json.loads(body)["error"]
+        assert error["phase"] == "connect"
+        assert error["delivery_state"] == "NOT_SENT"
+        assert error["automatic_retry"] is False
+        assert b"private" not in body
+        assert gateway._web_transport is None
+        assert call(gateway.server_port, "GET", "/livez")[0] == 200
+        # One request failing must not destroy the listener.
+        health_status, health_body, _ = call(gateway.server_port, "GET", "/healthz")
+        assert health_status == 503
+        assert json.loads(health_body)["service"] == "sentra-model-gateway"
+    finally:
+        gateway.shutdown()
+        gateway.server_close()
+        thread.join(timeout=2)
+
+
+def test_disconnect_before_headers_is_uncertain_and_never_replayed(tmp_path):
+    class ResetHandler(BaseHTTPRequestHandler):
+        calls = 0
+
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            type(self).calls += 1
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.connection.shutdown(socket.SHUT_RDWR)
+            self.connection.close()
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), ResetHandler)
+    gateway = GatewayServer(GatewayConfig(
+        upstream=f"http://127.0.0.1:{upstream.server_port}", port=0,
+        state_root=tmp_path / "state", browser_descriptor=tmp_path / "browser.json",
+    ))
+    threads = [threading.Thread(target=s.serve_forever, daemon=True) for s in (upstream, gateway)]
+    for thread in threads:
+        thread.start()
+    try:
+        status, body, _ = call(gateway.server_port, "POST", "/v1/responses", {"model": "gpt-6-sol", "input": "private"})
+        error = json.loads(body)["error"]
+        assert status == 503
+        assert error["delivery_state"] == "UNCONFIRMED"
+        assert error["reconciliation_required"] is True
+        assert error["automatic_retry"] is False
+        assert ResetHandler.calls == 1
+    finally:
+        for server in (gateway, upstream):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)
+
+
+def test_optional_transport_initialization_failure_preserves_legacy_route(servers, monkeypatch):
+    import sentra_model_gateway.web_transport as candidate
+    upstream, gateway = servers
+
+    def broken_candidate(*_args, **_kwargs):
+        raise OSError("candidate storage unavailable")
+
+    monkeypatch.setattr(candidate, "DurableWebTransport", broken_candidate)
+    assert call(gateway.server_port, "POST", "/v1/responses", {"model": "gpt-6-sol", "input": "legacy"})[0] == 200
+    assert gateway._web_transport is None
+    status, _, _ = call(gateway.server_port, "POST", "/internal/turn/browser-preflight", {},
+                        {"Authorization": "Bearer " + gateway.turn_authority_token})
+    assert status == 503
+    assert call(gateway.server_port, "GET", "/healthz")[0] == 200
+
+
+def test_health_local_storage_fault_returns_headers_and_keeps_liveness(servers, monkeypatch):
+    _, gateway = servers
+    def unavailable(_manifest):
+        raise OSError("local storage fault")
+    monkeypatch.setattr(gateway.resources, "ingest_manifest", unavailable)
+    status, body, _ = call(gateway.server_port, "GET", "/healthz")
+    assert status == 503 and json.loads(body)["status"] == "local_state_unavailable"
+    assert call(gateway.server_port, "GET", "/livez")[0] == 200
+
+
 def test_gateway_listener_is_exclusive(tmp_path):
     first = GatewayServer(GatewayConfig(
         upstream="http://127.0.0.1:9",
@@ -276,7 +399,7 @@ def test_upstream_watchdog_restarts_live_launcher_when_upstream_is_dead(tmp_path
         browser_descriptor=tmp_path / "browser-watchdog.json",
     ))
     calls: list[str] = []
-    monkeypatch.setattr(gateway, "_upstream_health", lambda: (False, {}))
+    monkeypatch.setattr(gateway, "_upstream_health", lambda: (False, {"active_http_turns": 0, "active_browser_turns": 0}))
     monkeypatch.setattr(
         gateway.launcher,
         "status",
@@ -312,6 +435,25 @@ def test_upstream_watchdog_restarts_live_launcher_when_upstream_is_dead(tmp_path
     finally:
         gateway.server_close()
         gateway.turn_authority.durable.close()
+
+
+@pytest.mark.parametrize("source,counts", [("owned", {}), ("owned", {"active_http_turns": 1, "active_browser_turns": 0}),
+    ("owned", {"active_http_turns": 0, "active_browser_turns": 1}), ("adopted", {"active_http_turns": 0, "active_browser_turns": 0}),
+    ("stale", {"active_http_turns": 0, "active_browser_turns": 0})])
+def test_watchdog_never_kills_external_or_unverified_active_runtime(tmp_path, monkeypatch, source, counts):
+    gateway = GatewayServer(GatewayConfig(upstream="http://127.0.0.1:9", port=0,
+        state_root=tmp_path / "state", browser_descriptor=tmp_path / "browser.json"))
+    calls = []
+    monkeypatch.setattr(gateway, "_upstream_health", lambda: (False, counts))
+    monkeypatch.setattr(gateway.launcher, "status", lambda: {"running": True, "pid": 1234, "source": source})
+    monkeypatch.setattr(gateway.launcher, "stop", lambda: calls.append("stop"))
+    monkeypatch.setattr(gateway.launcher, "start", lambda **_: calls.append("start"))
+    try:
+        gateway.supervise_upstream_once(now=100)
+        assert gateway.supervise_upstream_once(now=110)["state"] == "RECOVERY_BLOCKED"
+        assert calls == []
+    finally:
+        gateway.server_close()
 
 
 def test_launcher_payload_validation_rejects_stale_build(tmp_path: Path) -> None:
@@ -514,7 +656,8 @@ def test_responses_sse_and_compaction_preserve_turn_header(servers):
     })
     status, payload, headers = call(
         gateway.server_port, "POST", "/v1/responses",
-        {"model": "sentra/chatgpt-web/high", "stream": True, "input": "oi"},
+        {"model": "sentra/chatgpt-web/high", "stream": True, "input": "oi",
+         "client_metadata": {"sentra_durable_web": True, "sentra_turn_capability": "client-forged", "custom": "preserved"}},
         {"x-codex-turn-metadata": turn_metadata},
     )
     assert status == 200 and "response.output_text.delta" in payload.decode()
@@ -523,6 +666,8 @@ def test_responses_sse_and_compaction_preserve_turn_header(servers):
     assert {key: upstream.received["body"][key] for key in ("model", "stream", "input")} == {
         "model": "chatgpt-web/high", "stream": True, "input": "oi"}
     assert upstream.received["body"]["client_metadata"]["sentra_managed"] is True
+    assert "sentra_durable_web" not in upstream.received["body"]["client_metadata"]
+    assert upstream.received["body"]["client_metadata"]["custom"] == "preserved"
     assert upstream.received["body"]["client_metadata"]["sentra_turn_capability"].startswith("stc_")
     assert upstream.received["body"]["client_metadata"]["x-codex-turn-metadata"] == turn_metadata
     assert upstream.received["metadata"] == turn_metadata
@@ -1216,6 +1361,32 @@ def test_model_catalog_auth_and_health_readiness_are_explicit(servers):
     health = json.loads(payload)
     assert health["ready"] is True
     assert health["catalog"]["status"] == "ready"
+
+
+def test_healthz_handles_stale_web_models_launcher_without_dropping_http(servers, monkeypatch):
+    _, gateway = servers
+
+    def stale_launcher_status():
+        raise RuntimeError("Web Models payload is stale; rebuild the integration")
+
+    monkeypatch.setattr(gateway.launcher, "status", stale_launcher_status)
+    status, payload, _ = call(gateway.server_port, "GET", "/healthz")
+    assert status == 200
+    health = json.loads(payload)
+    assert health["service"] == "sentra-model-gateway"
+    assert health["upstream"]["status"] == "ok"
+    assert health["launcher"] == {
+        "running": False,
+        "pid": None,
+        "source": "unverified",
+        "reason": "launcher_status_unavailable",
+        "error_type": "RuntimeError",
+    }
+
+    # A bad packaged patch must not disrupt ordinary routes or turn health
+    # into an empty HTTP response.
+    assert call(gateway.server_port, "GET", "/__diagnostic__")[0] == 404
+
 
 def test_reap_orphan_turns_refuses_when_http_owner_is_active(tmp_path):
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), UpstreamHandler)

@@ -1,5 +1,12 @@
 # SENTRA Zero-Config Quick Start
 
+> **Estado de implementação (09/10/2026):** o Canvas React/WebView2 é o
+> atalho principal, com Quick Start separado para conexão de ChatGPT e MCP.
+> A compilação do Setup completo e a instalação limpa ainda **não** estão
+> homologadas; este guia descreve o fluxo esperado de uma **release validada**.
+> Ver [checklist atualizado](SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md).
+
+
 SENTRA is **local first**. The Desktop/CLI/MCP startup does **not** require a
 Tunnel ID, OpenAI Platform key, Codex, Docker or an Edge extension.
 

@@ -486,7 +486,19 @@ async function omaPasteImages(box, dataUrls) {
   return attached;
 }
 
-async function omaSendMessage(text, images) {
+const omaMessageDeliveryAttempts = new Map();
+function omaSendMessage(text, images, deliveryId = '') {
+  if (deliveryId && omaMessageDeliveryAttempts.has(deliveryId)) {
+    return omaMessageDeliveryAttempts.get(deliveryId);
+  }
+  if (omaMessageDeliveryAttempts.size >= 1000) {
+    throw new Error('DELIVERY_LIMIT: reload only after all deliveries are reconciled');
+  }
+  const pending = omaPrepareAndSendMessage(text, images);
+  if (deliveryId) omaMessageDeliveryAttempts.set(deliveryId, pending);
+  return pending;
+}
+async function omaPrepareAndSendMessage(text, images) {
   const box = await omaWaitForComposer();
   // Composer virtualizado fora da viewport pode n├úo montar a toolbar de envio:
   // traz para a vista + foca + acomoda antes de preencher/enviar.
@@ -614,6 +626,41 @@ async function omaSubmitAttempt(box, text) {
     throw new Error(`PROMPT_MISMATCH: composer divergiu do prompt ├¡ntegro; envio bloqueado. `
       + `len composer=${got.length} len prompt=${text.length} diverge@${divAt} `
       + `composer=${ctx(got)} prompt=${ctx(text)}`);
+  }
+  if (omaProvider() === 'chatgpt') {
+    // One effect only. Empty composer/stop button is not a delivery receipt.
+    const ids = () => [...document.querySelectorAll('[data-message-author-role="user"]')]
+      .map(node => ({ node, id: node.getAttribute('data-message-id') ||
+        node.closest('[data-message-id]')?.getAttribute('data-message-id') }));
+    const baseline = new Set(ids().map(item => item.id).filter(Boolean));
+    const button = [...document.querySelectorAll(OMA_SELECTORS.sendButton.join(','))]
+      .find(node => omaIsVisible(node) && !node.disabled);
+    const form = box.closest('form');
+    if (!button && !form?.requestSubmit) {
+      return { accepted: false, hint: 'no-send-affordance', error: 'SEND_UNAVAILABLE: nothing submitted' };
+    }
+    // Once an effect is attempted, timeout/errors must not select another route.
+    try {
+      if (button) button.click(); else form.requestSubmit();
+    } catch (_) { throw new Error('DELIVERY_UNCONFIRMED: submission effect may have occurred'); }
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      const candidates = ids().filter(item => item.id && !baseline.has(item.id));
+      for (const candidate of candidates) {
+        const clone = candidate.node.cloneNode(true);
+        for (const chip of clone.querySelectorAll('[data-prompt-link-href^="app://"],[app-mention-path]')) chip.remove();
+        const actual = String(clone.innerText || clone.textContent || '').trim();
+        if (actual !== text.trim()) continue;
+        const conversation = omaConversationId();
+        if (!conversation) continue;
+        const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))]
+          .map(value => value.toString(16).padStart(2, '0')).join('');
+        return { accepted: true, method: button ? 'button' : 'form', delivery_receipt: {
+          conversation_id: conversation, message_id: candidate.id, prompt_sha256: digest } };
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    throw new Error('DELIVERY_UNCONFIRMED: no exact new user message receipt; reconcile without resend');
   }
   const tried = [];
   const diag = () => {
@@ -1151,7 +1198,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           count: omaAssistantMessageCount(),
           text: omaLastAssistantText(),
         };
-        return await omaSendMessage(request.text || "", request.images || []);
+        return await omaSendMessage(request.text || "", request.images || [], request.delivery_id || '');
       }
       case "WAIT_RESPONSE": {
         // Fatia do SW (< 30s, ver service-worker.js): cada chamada relata os

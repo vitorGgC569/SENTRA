@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import sqlite3
@@ -59,10 +60,17 @@ class SessionJournal:
                 state TEXT NOT NULL, result TEXT);
             ''')
 
+    @contextmanager
     def _db(self):
+        # SQLite's connection context only commits; explicitly release its
+        # file handle so durable test and provider state can be removed.
         db=sqlite3.connect(self.path,timeout=5)
         db.row_factory=sqlite3.Row
-        return db
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
 
     def reserve_effect(self, operation_id, scope, intent):
         fingerprint=hashlib.sha256(json.dumps(intent,sort_keys=True,allow_nan=False).encode()).hexdigest()

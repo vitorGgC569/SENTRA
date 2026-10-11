@@ -161,6 +161,7 @@ class ExtensionTransport:
             "new_chat": new_chat,
             "conversation_url": conversation_url,
             "provider": provider,
+            "delivery_key": provider+":"+task_id,
         }
         if model:
             body["model"] = model

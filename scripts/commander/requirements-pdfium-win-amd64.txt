@@ -1,0 +1,1 @@
+pypdfium2==4.30.0 --hash=sha256:90dbb2ac07be53219f56be09961eb95cf2473f834d01a42d901d13ccfad64b4c

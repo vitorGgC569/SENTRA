@@ -94,8 +94,23 @@ class ChatJob:
     chat_title: Optional[str] = None
     provider: str = "chatgpt"
     model: Optional[str] = None
+    delivery_key: str = ""
+    # The upstream Responses adapter and MV3 share one outbox. A reserved
+    # external job must never be claimed by the extension's ordinary poll.
+    dispatch_mode: str = "relay"
+    requested_model: Optional[str] = None
+    requested_effort: Optional[str] = None
 
     def validate(self) -> None:
+        if self.dispatch_mode not in {"relay", "external"}:
+            raise ValueError("dispatch_mode must be relay or external")
+        for name in ("requested_model", "requested_effort"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or
+                                      not 1 <= len(value) <= 160 or "\x00" in value):
+                raise ValueError(f"bounded {name} required")
+        if not isinstance(self.delivery_key,str) or len(self.delivery_key)>200 or "\x00" in self.delivery_key:
+            raise ValueError("bounded delivery key required")
         if not isinstance(self.task_id, str) or not 1 <= len(self.task_id) <= 128:
             raise ValueError("task_id required")
         if not isinstance(self.images, list) or len(self.images) > MAX_IMAGES_PER_JOB:

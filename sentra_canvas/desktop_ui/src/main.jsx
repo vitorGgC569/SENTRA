@@ -14,6 +14,14 @@ import { nodeTypes, PtySlot } from './nodes';
 import { EntryDialog, ConfirmDialog } from './dialogs';
 import { openInspector } from './panels';
 import { NetworkDialog } from './network-dialog';
+import { ChatAccessDialog } from './chat-access-dialog';
+import { ConversationSearchDialog } from './conversation-search-dialog';
+import { PluginStatusDialog } from './plugin-status-dialog';
+import { PluginBundlesDialog } from './plugin-bundles-dialog';
+import { ProjectReviewDialog } from './project-review-dialog';
+import { SkillLibraryDialog } from './skill-library-dialog';
+import { BrowserEvidenceDialog } from './browser-evidence-dialog';
+import { DurableWebDialog } from './durable-web-dialog';
 import '@xyflow/react/dist/style.css';
 import '@xterm/xterm/css/xterm.css';
 import './desktop.css';
@@ -30,6 +38,14 @@ function WorkspaceDesktop() {
   const [confirmation, setConfirmation] = useState(null), [expanded, setExpanded] = useState(null);
   const [search, setSearch] = useState(false), [searchText, setSearchText] = useState('');
   const [network, setNetwork] = useState(false);
+  const [chatAccessOpen, setChatAccessOpen] = useState(false);
+  const [conversationSearchOpen, setConversationSearchOpen] = useState(false);
+  const [pluginStatusOpen, setPluginStatusOpen] = useState(false);
+  const [pluginBundlesOpen, setPluginBundlesOpen] = useState(false);
+  const [projectReviewOpen, setProjectReviewOpen] = useState(false);
+  const [skillLibraryOpen, setSkillLibraryOpen] = useState(false);
+  const [browserEvidenceOpen, setBrowserEvidenceOpen] = useState(false);
+  const [durableWebOpen, setDurableWebOpen] = useState(false);
   const [toasts, setToasts] = useState([]), [, terminalChanged] = useState(0);
   const [nativeReady, setNativeReady] = useState(Boolean(window.pywebview?.api));
   const bridge = useRef({ ws: null, detail: null, nodes: [], links: [], x: 55, y: 55, scale: 1, move: null });
@@ -327,11 +343,11 @@ function WorkspaceDesktop() {
           y: (e.clientY - rect.top - viewport.y) / viewport.zoom });
       }}>
         <div className="window-drag pywebview-drag-region" aria-hidden="true" />
-        <div className="window-controls">
+        {new URLSearchParams(window.location.search).get('surface') !== 'electron' && <div className="window-controls">
           <button disabled={!nativeReady} aria-label="Minimizar" onClick={() => guarded(() => window.pywebview.api.minimize())()}><Minus size={12} /></button>
           <button disabled={!nativeReady} aria-label="Restaurar ou maximizar" onClick={() => guarded(() => window.pywebview.api.toggle_maximize())()}><Copy size={11} /></button>
           <button disabled={!nativeReady} className="window-close" aria-label="Fechar SENTRA" onClick={() => guarded(async () => { await flushNotes(); await window.pywebview.api.close(); })()}><X size={14} /></button>
-        </div>
+        </div>}
         <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} colorMode="dark" onlyRenderVisibleElements={false}
           minZoom={.2} maxZoom={2.5} defaultViewport={{ x: 55, y: 55, zoom: 1 }}
           nodesDraggable={tool !== 'pan' && tool !== 'link'} panOnDrag connectOnClick deleteKeyCode={null}
@@ -376,12 +392,28 @@ function WorkspaceDesktop() {
                 { label: 'Máquinas, documentos e sessões remotas', icon: <Monitor size={14} />, action: () => guarded(showPanel)('machines') },
                 { label: 'Central do workspace', icon: <Workflow size={14} />, action: () => guarded(showPanel)('center') },
                 { label: 'Rede · Hamachi / Radmin', icon: <Globe size={14} />, action: () => guarded(() => { requireWS(); setNetwork(true); })() },
+                { label: 'Segurança das conversas', icon: <Settings2 size={14} />, action: () => guarded(() => { requireWS(); setChatAccessOpen(true); })() },
+                { label: 'Pesquisar histórico de conversas', icon: <Search size={14} />, action: () => guarded(() => { requireWS(); setConversationSearchOpen(true); })() },
+                { label: 'Conta e conexão ChatGPT (MCP)', icon: <Globe size={14} />, action: () => guarded(() => { requireWS(); setPluginStatusOpen(true); })() },
+                { label: 'Pacotes MCP externos', icon: <Layers size={14} />, action: () => guarded(() => { requireWS(); setPluginBundlesOpen(true); })() },
+                { label: 'Arquivos e diff do projeto', icon: <Folder size={14} />, action: () => guarded(() => { requireWS(); setProjectReviewOpen(true); })() },
+                { label: 'Biblioteca de skills', icon: <Layers size={14} />, action: () => guarded(() => { requireWS(); setSkillLibraryOpen(true); })() },
+                { label: 'Observação das conversas Web', icon: <Globe size={14} />, action: () => guarded(() => { requireWS(); setBrowserEvidenceOpen(true); })() },
+                { separator: true },
+                { label: 'Abrir estação Electron', icon: <Monitor size={14} />, action: () => guarded(async () => {
+                  const surfaces = await api('/api/desktop/surfaces');
+                  if (!surfaces.electron?.available) throw Error('Electron indisponível neste computador. Instale o pacote opcional sentra_electron.');
+                  const result = await api('/api/desktop/electron', { confirm: true });
+                  notify(result.launched ? 'Estação Electron aberta sobre o mesmo Canvas.' : 'Abertura não confirmada.');
+                })() },
+                { label: 'Nova estação Terminal', icon: <TerminalSquare size={14} />, action: () => actionsRef.current.open('terminal') },
                 { label: 'Atividade', icon: <Activity size={14} />, action: () => guarded(showPanel)('activity') },
                 { label: 'Buscar nós e comandos', icon: <Search size={14} />, action: () => { setSearchText(''); setSearch(true); } },
                 { label: 'Atualizar workspace', icon: <RefreshCw size={14} />, action: () => guarded(refresh)() },
               ]} />
           </Panel>
           <Panel position="top-right" className="utility-tools">
+            <IconButton label="Entrega Web e objetivos" onClick={() => setDurableWebOpen(true)}><Globe size={14} /></IconButton>
             <IconButton label="Atividade" onClick={() => guarded(showPanel)('activity')}><Activity size={14} /></IconButton>
             <IconButton label="Máquinas e documentos" onClick={() => guarded(showPanel)('machines')}><Monitor size={14} /></IconButton>
           </Panel>
@@ -411,7 +443,7 @@ function WorkspaceDesktop() {
         {(failure || phase === 'loading') && <div className={'connection-banner ' + (failure ? 'error' : '')} role="status">
           <span>{failure || 'Consultando workspace…'}</span>{failure && <button onClick={() => loadWorkspaces()}>Consultar novamente</button>}
         </div>}
-        <div className="workspace-caption">{current?.name || 'SENTRA'}{ws && <span> · {nodes.length} nós</span>}</div>
+        <div className="workspace-caption"><img src="/sentra-logo.png" alt="" width="18" height="18" style={{verticalAlign:'middle',marginRight:8,borderRadius:4}} />{current?.name || 'SENTRA'}{ws && <span> · {nodes.length} nós</span>}</div>
         <button id="show-collaboration" hidden aria-pressed="false" type="button" />
       </main>
       <aside id="inspector" className="desktop-inspector" hidden={!inspector}>
@@ -422,6 +454,14 @@ function WorkspaceDesktop() {
     </div>
     {entry && <EntryDialog key={entry.key} request={entry} close={() => setEntry(null)} />}
     {network && <NetworkDialog close={() => setNetwork(false)} />}
+    {chatAccessOpen && ws && <ChatAccessDialog ws={ws} agents={bridge.current.detail?.agents || []} close={() => setChatAccessOpen(false)} />}
+    {conversationSearchOpen && ws && <ConversationSearchDialog ws={ws} close={() => setConversationSearchOpen(false)} />}
+    {pluginStatusOpen && ws && <PluginStatusDialog ws={ws} close={() => setPluginStatusOpen(false)} />}
+    {pluginBundlesOpen && ws && <PluginBundlesDialog ws={ws} close={() => setPluginBundlesOpen(false)} />}
+    {projectReviewOpen && ws && <ProjectReviewDialog ws={ws} close={() => setProjectReviewOpen(false)} />}
+    {skillLibraryOpen && ws && <SkillLibraryDialog ws={ws} close={() => setSkillLibraryOpen(false)} />}
+    {browserEvidenceOpen && ws && <BrowserEvidenceDialog ws={ws} close={() => setBrowserEvidenceOpen(false)} />}
+    {durableWebOpen && ws && <DurableWebDialog key={ws} ws={ws} close={() => setDurableWebOpen(false)} />}
     {confirmation && <ConfirmDialog request={confirmation} close={() => setConfirmation(null)} />}
     {expandedResource && <Modal open onOpenChange={v => { if (!v) setExpanded(null); }} title={expandedGraph.title}
       description={expandedResource.shell + ' · mesma sessão PTY'} className="expanded-terminal"

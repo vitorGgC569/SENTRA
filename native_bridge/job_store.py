@@ -17,6 +17,8 @@ import secrets
 import sqlite3
 import threading
 import time
+from sentra_remote.secrets import protect_secret, unprotect_secret
+from .web_delivery import WebDeliveryJournal
 
 from .protocol import (
     ChatJob,
@@ -34,6 +36,11 @@ def _workers_match(expected: str, actual: str) -> bool:
         return False
     if expected == actual:
         return True
+    # MV3 browser worker identity is the exact Chrome tab ID. Prefix/digit
+    # aliases could let TAB-123 take TAB-12's lease and weaken V2 document
+    # binding. Preserve legacy matching only for non-tab workers.
+    if expected.startswith("TAB-") or actual.startswith("TAB-"):
+        return False
     if actual.startswith(expected) or expected.startswith(actual):
         return True
     exp_digits = re.search(r"\d+", expected)
@@ -65,12 +72,103 @@ class JobStore:
         self.lock = threading.RLock()
         self.db = sqlite3.connect(str(path), check_same_thread=False)
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=FULL")
+        self.db.execute("PRAGMA secure_delete=ON")
         self.db.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, payload TEXT, "
                         "state TEXT, worker TEXT, lease TEXT, lease_until REAL, deadline REAL, "
                         "result TEXT, ack INTEGER DEFAULT 0, updated REAL)")
         self.db.commit()
-        self._ensure_columns()
-        self._backfill_created()
+        try:
+            self._ensure_columns()
+            self._migrate_protected_rows()
+            self._backfill_created()
+            self.delivery = WebDeliveryJournal(
+                self.db, self.clock, decode_payload=self._decode_payload)
+        except BaseException:
+            self.db.close()  # failed migration never starts an unsafe relay
+            raise
+
+    @staticmethod
+    def _seal(value, job_id, field):
+        raw = json.dumps({"version": 1, "job_id": job_id, "field": field,
+                          "value": value}, ensure_ascii=False, separators=(",", ":"))
+        protected = protect_secret(raw)
+        if not protected.startswith(("dpapi:", "keyring:")):
+            raise RuntimeError("OS-protected job storage unavailable")
+        return protected
+
+    @staticmethod
+    def _unseal(raw, job_id, field):
+        if not isinstance(raw, str) or not raw.startswith(("dpapi:", "keyring:")):
+            raise RuntimeError("unprotected relay job rejected")
+        try:
+            obj = json.loads(unprotect_secret(raw))
+        except Exception as exc:
+            raise RuntimeError("relay job could not be opened by OS protection") from exc
+        if (not isinstance(obj, dict) or obj.get("version") != 1
+                or obj.get("job_id") != job_id or obj.get("field") != field
+                or not isinstance(obj.get("value"), dict)):
+            raise RuntimeError("relay job ciphertext identity mismatch")
+        return obj["value"]
+
+    def _decode_payload(self, raw, job_id):
+        return self._unseal(raw, job_id, "payload")
+
+    def _decode_result(self, raw, job_id):
+        return self._unseal(raw, job_id, "result")
+
+    def _migrate_protected_rows(self):
+        """Atomic compatibility migration. Do not expose a partially migrated queue.
+
+        A post-commit VACUUM plus WAL truncation rewrites SQLite free pages;
+        historical filesystem snapshots remain outside this local migration.
+        """
+        self.db.execute("CREATE TABLE IF NOT EXISTS relay_storage_security ("
+                        "key TEXT PRIMARY KEY, cleanup_pending INTEGER NOT NULL)")
+        self.db.commit()
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            migrated = 0
+            for jid, payload, result in self.db.execute(
+                    "SELECT id,payload,result FROM jobs").fetchall():
+                updates = {}
+                for field, raw in (("payload", payload), ("result", result)):
+                    if raw is None:
+                        continue
+                    if isinstance(raw, str) and raw.startswith(("dpapi:", "keyring:")):
+                        self._unseal(raw, jid, field)
+                        continue
+                    if not isinstance(raw, str) or not raw.startswith("{"):
+                        raise RuntimeError("unsupported legacy relay storage encoding")
+                    try:
+                        value = json.loads(raw)
+                    except (TypeError, ValueError) as exc:
+                        raise RuntimeError("invalid legacy relay job") from exc
+                    if not isinstance(value, dict):
+                        raise RuntimeError("invalid legacy relay job envelope")
+                    updates[field] = self._seal(value, jid, field)
+                if updates:
+                    self.db.execute("UPDATE jobs SET payload=COALESCE(?,payload),"
+                                    "result=COALESCE(?,result) WHERE id=?",
+                                    (updates.get("payload"), updates.get("result"), jid))
+                    migrated += 1
+            if migrated:
+                self.db.execute("INSERT INTO relay_storage_security VALUES('job_crypto',1) "
+                                "ON CONFLICT(key) DO UPDATE SET cleanup_pending=1")
+            self.db.commit()
+        except BaseException:
+            self.db.rollback()
+            raise
+        row = self.db.execute("SELECT cleanup_pending FROM relay_storage_security "
+                              "WHERE key='job_crypto'").fetchone()
+        if row and row[0]:
+            self.db.execute("VACUUM")
+            busy = self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if busy and busy[0]:
+                raise RuntimeError("relay legacy WAL cleanup could not complete")
+            self.db.execute("UPDATE relay_storage_security SET cleanup_pending=0 "
+                            "WHERE key='job_crypto'")
+            self.db.commit()
 
     def _ensure_columns(self):
         cols = {row[1] for row in self.db.execute("PRAGMA table_info(jobs)").fetchall()}
@@ -90,7 +188,7 @@ class JobStore:
         rows = self.db.execute("SELECT id,payload,deadline FROM jobs WHERE created IS NULL OR created=0").fetchall()
         for jid, payload, deadline in rows:
             try:
-                timeout = int(json.loads(payload).get("timeout_s", 180))
+                timeout = int(self._decode_payload(payload, jid).get("timeout_s", 180))
             except (ValueError, TypeError, AttributeError):
                 timeout = 180
             created = (deadline or 0) - timeout
@@ -98,11 +196,13 @@ class JobStore:
         self.db.commit()
 
     def _fail(self, jid, task_id, error, now):
+        if hasattr(self,"delivery"):
+            self.delivery.uncertain(jid)
         result = ChatResult(job_id=jid, task_id=task_id, status="FAILED", error=error).to_dict()
         self.db.execute("UPDATE jobs SET state='FAILED',result=?,updated=? WHERE id=?",
-                        (json.dumps(result), now, jid))
+                        (self._seal(result, jid, "result"), now, jid))
 
-    def _expire(self):
+    def _expire(self, *, commit=True):
         now = self.clock()
         rows = self.db.execute(
             "SELECT id,payload,state,lease_until,deadline,phase,progress_at,requeues,may_have_sent "
@@ -112,8 +212,8 @@ class JobStore:
             (now, now, float(self.PROGRESS_WINDOW_S), now)).fetchall()
         for jid, payload, state, lease_until, deadline, phase, progress_at, requeues, may_sent in rows:
             try:
-                job = json.loads(payload)
-            except ValueError:
+                job = self._decode_payload(payload, jid)
+            except (ValueError, TypeError):
                 job = {}
             task_id = job.get("task_id", "")
             phase = phase or ""
@@ -154,13 +254,27 @@ class JobStore:
                                f"WORKER_LOST: no heartbeat nor progress for "
                                f">{float(self.PROGRESS_WINDOW_S):.0f}s ({reason}); "
                                "execution uncertain; not automatically resent" + exhausted, now)
-        self.db.execute("DELETE FROM jobs WHERE state IN ('COMPLETED','FAILED') AND updated<?", (now - 86400,))
-        self.db.commit()
+        self.db.execute("DELETE FROM jobs WHERE state IN ('COMPLETED','FAILED') AND updated<? "
+                        "AND id NOT IN (SELECT job_id FROM web_deliveries)", (now - 86400,))
+        if commit:
+            self.db.commit()
 
     def submit(self, job: ChatJob):
         job.validate()
-        with self.lock:
-            self._expire()
+        with self.lock, self.db:
+            # Take the write lock BEFORE expiry reconciliation: _expire itself
+            # can UPDATE a job. BEGIN after that UPDATE breaks the relay with
+            # "cannot start a transaction within a transaction" on later sends.
+            if self.db.in_transaction:
+                # Preserve the legacy host API's explicit SQL edits on this
+                # connection while upgrading its transaction to a writer.
+                self.db.execute("UPDATE jobs SET updated=updated WHERE id IS NULL")
+            else:
+                self.db.execute("BEGIN IMMEDIATE")
+            self._expire(commit=False)
+            previous=self.delivery.lookup(job)
+            if previous:
+                return previous
             if self.db.execute("SELECT count(*) FROM jobs").fetchone()[0] >= 10000:
                 raise ValueError("QUEUE_FULL")
             now = self.clock()
@@ -173,15 +287,23 @@ class JobStore:
                 "INSERT INTO jobs (id,payload,state,worker,lease,lease_until,deadline,"
                 "result,ack,updated,phase,progress_at,created,requeues,may_have_sent) "
                 "VALUES (?,?, 'QUEUED','', '',0,?,NULL,0,?,'',0,?,0,0)",
-                (job.job_id, json.dumps(job.to_dict()), deadline, now, created))
+                (job.job_id, self._seal(job.to_dict(), job.job_id, "payload"), deadline, now, created))
+            self.delivery.reserve(job)
             self.db.commit()
         return job.job_id
 
-    def poll(self, worker):
+    def poll(self, worker, *, candidate_check=None):
         if not worker or len(worker) > 100:
             raise ValueError("worker required (max 100 chars)")
-        with self.lock:
-            self._expire()
+        with self.lock, self.db:
+            # Multiple host processes can open the same SQLite outbox. The
+            # claim must serialize before reading candidates, not just inside
+            # this Python instance's lock.
+            if self.db.in_transaction:
+                self.db.execute("UPDATE jobs SET updated=updated WHERE id IS NULL")
+            else:
+                self.db.execute("BEGIN IMMEDIATE")
+            self._expire(commit=False)
             if self.db.execute("SELECT id FROM jobs WHERE state='LEASED' AND worker=?", (worker,)).fetchone():
                 return None
             rows = self.db.execute(
@@ -191,9 +313,15 @@ class JobStore:
             fallback = None
             for candidate in rows:
                 try:
-                    payload = json.loads(candidate[1])
-                except ValueError:
+                    payload = self._decode_payload(candidate[1], candidate[0])
+                except (ValueError, TypeError):
                     payload = {}
+                if payload.get("dispatch_mode", "relay") == "external":
+                    continue
+                # Admission is read-only and runs BEFORE taking any new lease.
+                # A human-approval gate cannot silently create a new send.
+                if candidate_check is not None and not candidate_check(payload):
+                    continue
                 target = str(payload.get("target_worker") or "")
                 if target and _workers_match(target, worker):
                     row = candidate
@@ -205,7 +333,7 @@ class JobStore:
             if row is None:
                 return None
             jid, raw, _queue_deadline, created, requeues, phase = row
-            payload = json.loads(raw)
+            payload = self._decode_payload(raw, jid)
             now = self.clock()
             timeout_s = int(payload.get("timeout_s") or 180)
             deadline = now + timeout_s
@@ -219,6 +347,31 @@ class JobStore:
             return {**payload, "lease_token": lease, "deadline": deadline, "lease_until": until,
                     "requeues": requeues or 0, "phase": phase or ""}
 
+    def claim(self, jid, worker):
+        """Claim one externally owned job; no generic poll or physical effect."""
+        if not isinstance(worker, str) or not 1 <= len(worker) <= 100:
+            raise ValueError("worker required (max 100 chars)")
+        with self.lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            self._expire(commit=False)
+            row = self.db.execute("SELECT payload,state FROM jobs WHERE id=?", (jid,)).fetchone()
+            if row is None or row[1] != "QUEUED":
+                raise ValueError("JOB_NOT_QUEUED")
+            payload = self._decode_payload(row[0], jid)
+            target = payload.get("target_worker") or ""
+            if target and target != worker:
+                raise ValueError("FOREIGN_WORKER")
+            if self.db.execute("SELECT 1 FROM jobs WHERE state='LEASED' AND worker=?", (worker,)).fetchone():
+                raise ValueError("WORKER_BUSY")
+            now = self.clock()
+            deadline = now + int(payload.get("timeout_s") or 180)
+            token = secrets.token_urlsafe(32)
+            until = min(deadline, now + float(self.LEASE_WINDOW_S))
+            self.db.execute("UPDATE jobs SET state='LEASED',worker=?,lease=?,lease_until=?,"
+                            "deadline=?,updated=? WHERE id=? AND state='QUEUED'",
+                            (worker, token, until, deadline, now, jid))
+            return {**payload, "lease_token": token, "deadline": deadline, "lease_until": until}
+
     def lease(self, jid, worker, token):
         with self.lock:
             self._expire()
@@ -229,10 +382,14 @@ class JobStore:
                             (min(row[3], self.clock() + float(self.LEASE_WINDOW_S)), self.clock(), jid))
             self.db.commit()
 
-    def progress(self, jid, worker, token, phase):
+    def progress(self, jid, worker, token, phase, *, single_use_send=False):
         ProgressReport(job_id=jid, worker=worker, lease_token=token, phase=phase).validate()
-        with self.lock:
-            self._expire()
+        with self.lock, self.db:
+            if self.db.in_transaction:
+                self.db.execute("UPDATE jobs SET updated=updated WHERE id IS NULL")
+            else:
+                self.db.execute("BEGIN IMMEDIATE")
+            self._expire(commit=False)
             row = self.db.execute(
                 "SELECT state,worker,lease,deadline,lease_until,may_have_sent FROM jobs WHERE id=?",
                 (jid,)).fetchone()
@@ -245,11 +402,42 @@ class JobStore:
             # Invariante: lease nunca passa do deadline (teto = created+timeout_s).
             extended = min(deadline, max(lease_until or 0, now + float(self.PROGRESS_WINDOW_S)))
             latched = 1 if (may_sent or phase not in PRE_SEND_PHASES) else 0
+            if phase=="sending":
+                self.delivery.pending(jid, single_use=single_use_send)
             self.db.execute("UPDATE jobs SET phase=?,progress_at=?,lease_until=?,"
                             "may_have_sent=?,updated=? WHERE id=?",
                             (phase, now, extended, latched, now, jid))
             self.db.commit()
             return {"lease_until": extended, "deadline": deadline}
+
+    def _complete_attested_answer(self, jid, *, worker, receipt, body):
+        """Host-only finalizer AFTER central authenticated final history commit.
+
+        Publishes the original ChatResult and ACK; never acquires another
+        lease or dispatches a message. A late proven final repairs timeout.
+        """
+        with self.lock, self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            row = self.db.execute("SELECT payload,worker,state,result FROM jobs WHERE id=?", (jid,)).fetchone()
+            delivery = self.delivery.status(jid)
+            if (row is None or row[1] != worker or not delivery or delivery["state"] != "sent"
+                    or delivery.get("receipt") != receipt):
+                raise PermissionError("final answer does not match original confirmed job")
+            payload = self._decode_payload(row[0], jid)
+            result = ChatResult(job_id=jid, task_id=payload["task_id"], status="COMPLETED", result=body,
+                                conversation_url="https://chatgpt.com/c/" + receipt["conversation_id"],
+                                conversation_id=receipt["conversation_id"], worker=worker,
+                                images_attached=receipt["images_attached"])
+            result.validate()
+            if row[2] == "COMPLETED":
+                existing = self._decode_result(row[3], jid)
+                if any(existing.get(key) != result.to_dict()[key] for key in
+                       ("task_id", "status", "result", "conversation_id", "worker", "images_attached")):
+                    raise ValueError("final answer conflicts with original completed result")
+                self.db.execute("UPDATE jobs SET ack=1 WHERE id=?", (jid,))
+            else:
+                self.db.execute("UPDATE jobs SET state='COMPLETED',result=?,ack=1,lease_until=0,updated=? WHERE id=?",
+                                (self._seal(result.to_dict(), jid, "result"), self.clock(), jid))
 
     def store_result(self, res: ChatResult, token):
         res.validate()
@@ -258,7 +446,7 @@ class JobStore:
             row = self.db.execute("SELECT payload,state,worker,lease,result FROM jobs WHERE id=?", (res.job_id,)).fetchone()
             if not row or not _workers_match(row[2], res.worker) or not secrets.compare_digest(row[3], token):
                 raise ValueError("UNKNOWN_OR_FOREIGN_JOB")
-            job = json.loads(row[0])
+            job = self._decode_payload(row[0], res.job_id)
             if res.task_id != job['task_id']:
                 raise ValueError("TASK_MISMATCH")
             if res.status == 'COMPLETED' and job.get('kind') not in ('STATUS_PROBE', 'DELETE_CHAT') and not job.get('new_chat'):
@@ -266,16 +454,35 @@ class JobStore:
                 actual_url = (res.conversation_url or '').split('?')[0].rstrip('/')
                 if expected_url and actual_url and expected_url != actual_url:
                     raise ValueError("CONVERSATION_MISMATCH")
-            encoded = json.dumps(res.to_dict())
+            encoded = self._seal(res.to_dict(), res.job_id, "result")
             if row[1] in ('COMPLETED', 'FAILED'):
-                if row[4] == encoded:
-                    return  # safe duplicate result after lost HTTP acknowledgement
+                if row[4] and self._decode_result(row[4], res.job_id) == res.to_dict():
+                    return  # same result after lost HTTP acknowledgement
                 raise ValueError("STALE_OR_CONFLICTING_RESULT")
             if row[1] != 'LEASED':
                 raise ValueError("JOB_NOT_LEASED")
             self.db.execute("UPDATE jobs SET state=?,result=?,updated=? WHERE id=?",
                             (res.status, encoded, self.clock(), res.job_id))
+            self.delivery.uncertain(res.job_id)
             self.db.commit()
+
+    def delivery_receipt(self,jid,worker,token,evidence):
+        with self.lock:
+            row=self.db.execute("SELECT worker,lease FROM jobs WHERE id=?",(jid,)).fetchone()
+            if not row or not _workers_match(row[0],worker) or not secrets.compare_digest(row[1],token):
+                raise ValueError("UNKNOWN_OR_FOREIGN_JOB")
+            try:
+                self.db.execute("BEGIN IMMEDIATE")
+                result=self.delivery.receipt(jid,evidence)
+                self.db.commit()
+                return result
+            except BaseException:
+                self.db.rollback()
+                raise
+
+    def delivery_status(self,jid):
+        with self.lock:
+            return self.delivery.status(jid)
 
     def result(self, jid):
         with self.lock:
@@ -287,13 +494,14 @@ class JobStore:
                 raise ValueError("UNKNOWN_JOB")
             if not row[0]:
                 return None
-            value = json.loads(row[0])
+            value = self._decode_result(row[0], jid)
             if isinstance(value, dict):
                 # Terminal delivery evidence is part of the relay contract.
                 # Clients use this to decide whether a failed START is replay-safe.
                 value["_delivery_phase"] = row[1] or ""
                 value["_may_have_sent"] = bool(row[2])
                 value["_relay_state"] = row[3]
+                value["_web_delivery"] = self.delivery.status(jid)
             return value
 
     def pending_status(self, jid):
@@ -315,6 +523,7 @@ class JobStore:
                 "may_have_sent": bool(row[5]),
                 "created": row[6],
                 "updated": row[7],
+                "web_delivery":self.delivery.status(jid),
             }
 
     def acknowledge(self, jid):
@@ -331,9 +540,10 @@ class JobStore:
                 raise ValueError("UNKNOWN_JOB")
             if row[1] in ('COMPLETED','FAILED'):
                 return
-            res = ChatResult(job_id=jid, task_id=json.loads(row[0])['task_id'], status='FAILED', error='CANCELLED').to_dict()
+            res = ChatResult(job_id=jid, task_id=self._decode_payload(row[0], jid)['task_id'], status='FAILED', error='CANCELLED').to_dict()
             self.db.execute("UPDATE jobs SET state='FAILED',result=?,updated=? WHERE id=?",
-                            (json.dumps(res), self.clock(), jid))
+                            (self._seal(res, jid, "result"), self.clock(), jid))
+            self.delivery.uncertain(jid)
             self.db.commit()
 
     def counts(self):

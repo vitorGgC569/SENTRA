@@ -17,6 +17,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 from typing import Any, Generator
+from urllib.parse import urlsplit
 from sentra_mcp.errors import sanitize_error
 
 from .config import CLIConfig, SENTRA_ROOT
@@ -52,6 +53,8 @@ class ModelClient:
         self.on_delivery = None
         self.on_usage = None
         self.on_before_provider = None
+        self.on_web_delivery = None
+        self.last_web_delivery = None
         # One logical Codex thread per CLI process. Every Responses request gets
         # a distinct native turn id so tool-round follow-ups cannot collide in
         # the Gateway's duplicate-turn / retry budget authority.
@@ -68,6 +71,19 @@ class ModelClient:
         self._conversation_uri = f"conversation://sentra-cli/{self._session_id}"
         self.last_error = None
         self.last_delivery_state = "not_submitted"
+        self.last_web_delivery = None
+
+    def supported_efforts(self, model: str) -> list[str]:
+        """Use current provider capabilities; never invent available efforts."""
+        req = urllib.request.Request(self.config.gateway_url.rstrip("/") + "/models",
+            headers={"Authorization": "Bearer " + self.config.gateway_api_key, "User-Agent": "sentra-cli"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            catalog = self._decode_json(response.read())
+        for item in catalog.get("models", catalog.get("data", [])):
+            if isinstance(item, dict) and (item.get("slug") or item.get("id")) == model:
+                return [level["effort"] for level in item.get("supported_reasoning_levels", [])
+                        if isinstance(level, dict) and isinstance(level.get("effort"), str)]
+        return []
 
     def _delivery(self, provider: str, ident: str, state: str) -> None:
         if state=="submitted" and self.on_before_provider is not None:
@@ -235,6 +251,10 @@ class ModelClient:
         timeout: float = 20.0,
         json_body: dict[str, Any] | None = None,
     ) -> tuple[bool, str]:
+        target = urlsplit(self._gateway_origin())
+        if (target.scheme != "http" or target.hostname not in {"127.0.0.1", "localhost"}
+                or target.username or target.password or target.query or target.fragment or target.path not in {"", "/"}):
+            return False, "gateway administrator credentials require an exact loopback origin"
         tokens = self.config.gateway_admin_tokens
         if not tokens:
             return False, "gateway admin token unavailable"
@@ -1209,6 +1229,8 @@ class ModelClient:
             "stream": True,
             **transport_metadata,
         }
+        if model.startswith("sentra/chatgpt-web/") and self.config.web_reasoning_effort is not None:
+            payload["reasoning"] = {"effort": self.config.web_reasoning_effort}
         url = self.config.gateway_url.rstrip("/") + "/responses"
         headers = {
             "Content-Type": "application/json",
@@ -1302,7 +1324,13 @@ class ModelClient:
                     event_type = str(
                         data.get("type") or current_event or ""
                     )
-                    if event_type == "response.output_text.delta":
+                    if event_type == "sentra.web_delivery":
+                        if data.get("transport") != "durable_v2" or not isinstance(data.get("messages"), list):
+                            raise ProviderHTTPError("gateway", None, "invalid durable Web delivery projection")
+                        self.last_web_delivery = data
+                        if self.on_web_delivery is not None:
+                            self.on_web_delivery(data)
+                    elif event_type == "response.output_text.delta":
                         delta = data.get("delta")
                         if isinstance(delta, str) and delta:
                             emitted = True
@@ -1527,6 +1555,12 @@ class ModelClient:
                     f"automatically: {exc}\n"
                 )
                 return
+        if model.startswith(("sentra/chatgpt-web/", "chatgpt-web/", "sentra/gemini-web/", "gemini-web/")):
+            self.active_provider = "gateway"
+            self.active_model = model
+            self.last_error = "Selected Web provider is not ready; selection preserved and no fallback submitted."
+            yield "\n" + self.last_error + "\n"
+            return
         openai_key = (
             self.config.openai_api_key
             or os.environ.get("OPENAI_API_KEY", "")

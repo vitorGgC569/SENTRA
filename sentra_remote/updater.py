@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import re
+import stat
+import sys
 import shutil
 import subprocess
 import tempfile
@@ -42,27 +44,110 @@ def download_verified(manifest: dict[str, Any], destination: Path) -> Path:
     url = _https_or_loopback(str(manifest["url"]))
     destination.parent.mkdir(parents=True, exist_ok=True)
     digest = hashlib.sha256()
-    with urllib.request.urlopen(url, timeout=60) as response, destination.open("wb") as handle:
-        while True:
-            chunk = response.read(1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            handle.write(chunk)
+    try:
+        with urllib.request.urlopen(url, timeout=60) as response, destination.open("xb") as handle:
+            total = 0
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_UPDATE_DOWNLOAD_BYTES:
+                    raise ValueError("update download exceeds size limit")
+                digest.update(chunk)
+                handle.write(chunk)
+    except Exception:
+        destination.unlink(missing_ok=True)
+        raise
     if digest.hexdigest() != str(manifest["sha256"]).lower():
         destination.unlink(missing_ok=True)
         raise ValueError("update package sha256 mismatch")
     return destination
 
 
+MAX_UPDATE_DOWNLOAD_BYTES = 4 * 1024 * 1024 * 1024
+MAX_UPDATE_ENTRIES = 256
+MAX_UPDATE_UNPACKED_BYTES = 4 * 1024 * 1024 * 1024
+
+
 def _safe_extract(zip_path: Path, destination: Path) -> None:
+    """Extract untrusted update media with Windows-safe names and hard quotas.
+
+    ZIP metadata is not an authority for filesystem ownership. Reject links,
+    duplicate/colliding names and paths that have alternate Windows meanings.
+    Never follow a preexisting destination symlink or replace an existing file.
+    """
     root = destination.resolve()
+    if destination.is_symlink():
+        raise ValueError("unsafe update extraction root")
     with zipfile.ZipFile(zip_path) as archive:
-        for member in archive.infolist():
-            target = (root / member.filename).resolve()
-            if root not in target.parents and target != root:
+        entries = archive.infolist()
+        if len(entries) > MAX_UPDATE_ENTRIES:
+            raise ValueError("update archive contains too many entries")
+        planned: list[tuple[zipfile.ZipInfo, Path]] = []
+        seen: set[str] = set()
+        total = 0
+        for member in entries:
+            name = member.filename.replace("\\", "/")
+            parts = name.rstrip("/").split("/")
+            if (not name or name.startswith("/") or any(
+                not part or part in {".", ".."} or ":" in part or
+                part.endswith((" ", ".")) or any(ord(c) < 32 for c in part)
+                or part.split(".", 1)[0].upper() in {"CON", "PRN", "AUX", "NUL"}
+                or bool(re.fullmatch(r"(?:COM|LPT)[1-9]", part.split(".", 1)[0], re.I))
+                for part in parts
+            )):
                 raise ValueError("unsafe path in update archive")
-        archive.extractall(root)
+            if member.flag_bits & 1:
+                raise ValueError("encrypted update archive is forbidden")
+            mode = (member.external_attr >> 16) & 0xFFFF
+            if stat.S_IFMT(mode) not in (0, stat.S_IFREG, stat.S_IFDIR):
+                raise ValueError("update archive contains a symlink or special file")
+            target = root.joinpath(*parts)
+            if target.resolve() != target or not target.is_relative_to(root):
+                raise ValueError("unsafe path in update archive")
+            normalized = "/".join(parts).casefold()
+            if normalized in seen:
+                raise ValueError("duplicate update archive path")
+            seen.add(normalized)
+            for ancestor in target.parents:
+                if ancestor == root:
+                    break
+                if ancestor.is_symlink() or ancestor.is_file():
+                    raise ValueError("unsafe extraction ancestor")
+            if target.is_symlink() or target.is_file():
+                raise ValueError("refusing existing update destination file")
+            total += member.file_size
+            if total > MAX_UPDATE_UNPACKED_BYTES:
+                raise ValueError("update archive exceeds expanded size limit")
+            planned.append((member, target))
+        # A file cannot also serve as another entry's parent, even when the
+        # filesystem happens to be case sensitive during a build/test.
+        for member, target in planned:
+            if not member.is_dir():
+                key = "/".join(target.relative_to(root).parts).casefold()
+                if any(other.startswith(key + "/") for other in seen):
+                    raise ValueError("update archive file/directory collision")
+        root.mkdir(parents=True, exist_ok=True)
+        written = 0
+        for member, target in planned:
+            if member.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with archive.open(member) as src, target.open("xb") as dst:
+                    while True:
+                        chunk = src.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > MAX_UPDATE_UNPACKED_BYTES:
+                            raise ValueError("update extraction size limit exceeded")
+                        dst.write(chunk)
+            except Exception:
+                target.unlink(missing_ok=True)
+                raise
 
 
 def verify_authenticode(executable: Path, thumbprint: str) -> None:
@@ -82,6 +167,31 @@ def verify_authenticode(executable: Path, thumbprint: str) -> None:
     actual = str(data.get("Thumbprint") or "").replace(" ", "").upper()
     if expected and actual != expected:
         raise ValueError("update signer thumbprint mismatch")
+
+
+def _installed_signer_thumbprint() -> str:
+    """Trust anchor: only a currently installed, valid signed SENTRA binary.
+
+    No signer identity is accepted solely because a remote manifest claims it.
+    Source/unsigned QA builds intentionally cannot auto-update as signed.
+    """
+    if os.name != "nt" or not getattr(sys, "frozen", False):
+        raise ValueError("signed updates require an installed Authenticode publisher")
+    binary = Path(sys.executable).resolve()
+    command = (
+        "$s=Get-AuthenticodeSignature -LiteralPath " + _ps_literal(binary) + ";"
+        "$o=[ordered]@{Status=$s.Status.ToString();Thumbprint=$s.SignerCertificate.Thumbprint};"
+        "$o|ConvertTo-Json -Compress"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-Command", command],
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(result.stdout.strip())
+    signer = str(data.get("Thumbprint") or "").replace(" ", "").upper()
+    if data.get("Status") != "Valid" or not re.fullmatch(r"[A-F0-9]{40,64}", signer):
+        raise ValueError("installed publisher has no valid Authenticode signature")
+    return signer
 
 
 def _version_key(value: str) -> tuple[tuple[int, int, int], int, str]:
@@ -116,6 +226,10 @@ def prepare_update(
     thumbprint = str(manifest.get("signer_thumbprint") or "")
     if require_signature and not thumbprint:
         raise ValueError("automatic update requires an Authenticode signer thumbprint")
+    if require_signature:
+        trusted = _installed_signer_thumbprint()
+        if thumbprint.replace(" ", "").upper() != trusted:
+            raise ValueError("update signer does not match the installed publisher")
     if thumbprint:
         executables = list(extract.rglob("*.exe"))
         if not executables:

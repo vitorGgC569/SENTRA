@@ -14,6 +14,8 @@ EXTENSION_IDENTITY_FILES = (
     "recovery-guard.js",
     "selectors.js",
     "observer.js",
+    "conversation-evidence.js",
+    "COS-NOTICE.txt",
 )
 BOOTSTRAP_FILENAME = "sentra-bootstrap.json"
 BOOTSTRAP_DOMAIN = b"sentra-edge-bootstrap-v1\0"

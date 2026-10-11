@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import re
 import urllib.error
 import urllib.request
 
@@ -16,6 +17,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 class CanvasBridge:
     def __init__(self, config):
         self.workspace = str(config.workspace)
+        self.model = getattr(config, "model", None)
         self._token = os.environ.get("SENTRA_CANVAS_AGENT_TOKEN", "")
         port = os.environ.get("SENTRA_CANVAS_AGENT_PORT", "")
         self.port = int(port) if port.isdigit() and 1 <= int(port) <= 65535 else None
@@ -90,5 +92,25 @@ class CanvasBridge:
                     raise RuntimeError("Canvas response exceeded limit")
                 return json.loads(payload)
         except urllib.error.HTTPError as exc:
-            # Do not expose authorization headers, environment or raw HTML.
-            raise RuntimeError(f"Canvas rejected the operation (HTTP {exc.code})") from None
+            # Show only recognized validation messages. Never echo arbitrary
+            # server text, bearer tokens, workspace paths or raw HTML.
+            reason = ""
+            if exc.code == 400:
+                try:
+                    details = json.loads(exc.read(1025))
+                    candidate = details.get("error", "") if isinstance(details, dict) else ""
+                    known = (
+                        "name must be 1-48 ASCII letters/numbers/_/-",
+                        "invalid Canvas model or role",
+                        "Canvas resource name already exists",
+                        "terminal concurrency quota reached",
+                        "creation requires name|model|optional role",
+                        "Canvas coordination value must contain at most 4000 characters",
+                        "persistent coordination identity required",
+                        "Canvas coordination idempotency collision",
+                    )
+                    if isinstance(candidate, str) and any(candidate.startswith(k) for k in known):
+                        reason = ": " + candidate[:160]
+                except (ValueError, TypeError, UnicodeError, OSError):
+                    pass
+            raise RuntimeError(f"Canvas rejected the operation (HTTP {exc.code}){reason}") from None

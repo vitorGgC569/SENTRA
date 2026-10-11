@@ -17,6 +17,7 @@ import re
 import secrets
 import signal
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -51,6 +52,16 @@ def _upstream_version_from_ref(ref: str) -> str:
 
 
 MAX_REQUEST_BYTES = 128 * 1024 * 1024
+
+
+class UpstreamTransportError(OSError):
+    """Local transport evidence, never permission to replay a POST."""
+
+    def __init__(self, phase: str, cause: Exception):
+        super().__init__(str(cause))
+        self.phase = phase
+
+
 HOP_HEADERS = {"connection", "content-length", "transfer-encoding", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "upgrade", "host"}
 REQUEST_REWRITE_HEADERS = {"content-encoding"}
 _SSE_TERMINAL_EVENT_RE = re.compile(
@@ -69,6 +80,26 @@ def _sse_terminal_seen(data: bytes) -> bool:
         _SSE_TERMINAL_EVENT_RE.search(data)
         or _SSE_DONE_RE.search(data)
     )
+
+
+def _upstream_chunks(response, *, framed_sse=False):
+    """Keep injected delivery events outside fragmented upstream SSE frames."""
+    pending = bytearray()
+    while chunk := response.read1(65536):
+        if not framed_sse:
+            yield chunk
+            continue
+        pending.extend(chunk)
+        while match := re.search(rb"\r?\n\r?\n", pending):
+            end = match.end()
+            if end > 2_000_000:
+                raise http.client.HTTPException("upstream SSE frame exceeds limit")
+            yield bytes(pending[:end])
+            del pending[:end]
+        if len(pending) > 2_000_000:
+            raise http.client.HTTPException("upstream SSE frame exceeds limit")
+    if pending:
+        raise http.client.HTTPException("upstream SSE closed inside a frame")
 
 
 def _web_model_route(model: str) -> tuple[str, str, bool] | None:
@@ -267,19 +298,22 @@ def _load_or_create_private_token(state_root: Path, filename: str) -> str:
     token_path = token_dir / filename
     try:
         current = token_path.read_text(encoding="utf-8").strip()
-        if len(current) >= 32:
-            return current
-    except OSError:
-        pass
-    token = secrets.token_urlsafe(48)
-    temp = token_path.with_suffix(".tmp")
-    temp.write_text(token + "\n", encoding="utf-8")
-    try:
-        os.chmod(temp, 0o600)
-    except OSError:
-        pass
-    os.replace(temp, token_path)
-    return token
+    except FileNotFoundError:
+        token = secrets.token_urlsafe(48)
+        try:
+            fd = os.open(token_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            current = token_path.read_text(encoding="utf-8").strip()
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(token + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            return token
+    # Read errors/corruption never authorize replacement of a live host key.
+    if re.fullmatch(r"[A-Za-z0-9_-]{32,256}", current) is None:
+        raise RuntimeError("gateway private token is invalid; host repair required")
+    return current
 
 
 def load_or_create_gateway_admin_token(state_root: Path) -> str:
@@ -740,6 +774,18 @@ class GatewayServer(ThreadingHTTPServer):
 
     def __init__(self, config: GatewayConfig):
         self.config = config
+        self._web_transport = None
+        self.turn_authority = None
+        # Reserve exclusive ownership before touching state or private tokens.
+        # A competing process must fail without mutating the active host.
+        super().__init__((config.host, config.port), GatewayHandler)
+        try:
+            self._initialize_gateway(config)
+        except BaseException:
+            self.server_close()
+            raise
+
+    def _initialize_gateway(self, config: GatewayConfig):
         state_root = Path(config.state_root or ProductPaths.default().state_dir).resolve()
         if config.launcher_executable and config.launcher_executable.is_file():
             install_root = config.launcher_executable.resolve().parents[2]
@@ -770,7 +816,11 @@ class GatewayServer(ThreadingHTTPServer):
         # ~/.codex-chatgpt-web. That made every browser-start look stale.
         descriptor = self.launcher._browser_descriptor_path()
         self.turn_authority = TurnAuthority(state_root, descriptor)
-        super().__init__((config.host, config.port), GatewayHandler)
+        # Candidate modules are initialized only on their own guarded route.
+        # A rollout/storage/dependency failure must not remove the listener
+        # serving already authorized clients while production is still legacy.
+        self._web_transport = None
+        self._web_transport_lock = threading.RLock()
         self.launcher.authority_port = self.server_port
         self.model_catalog_cache_path = state_root / "web-models" / "model-catalog.json"
         self._model_catalog_lock = threading.RLock()
@@ -783,6 +833,27 @@ class GatewayServer(ThreadingHTTPServer):
             "state": "IDLE",
             "restart_attempts": 0,
         }
+
+    def web_transport_mode(self) -> str:
+        import sqlite3
+        with self.turn_authority.store.connect("session_checkpoint") as db:
+            try:
+                row = db.execute("SELECT mode FROM gateway_web_transport_mode WHERE singleton=1").fetchone()
+            except sqlite3.OperationalError as exc:
+                if "no such table" not in str(exc):
+                    raise
+                return "legacy"
+        if row is None or row[0] not in {"legacy", "candidate_v2", "durable_v2"}:
+            raise RuntimeError("Web transport routing state is invalid; sending is blocked")
+        return row[0]
+
+    @property
+    def web_transport(self):
+        with self._web_transport_lock:
+            if self._web_transport is None:
+                from .web_transport import DurableWebTransport
+                self._web_transport = DurableWebTransport(self.turn_authority)
+            return self._web_transport
 
     def _upstream_health(self) -> tuple[bool, dict[str, Any]]:
         parsed = urlsplit(self.config.upstream)
@@ -879,7 +950,7 @@ class GatewayServer(ThreadingHTTPServer):
 
     def supervise_upstream_once(self, *, now: float | None = None) -> dict[str, Any]:
         stamp = time.monotonic() if now is None else float(now)
-        healthy, _payload = self._upstream_health()
+        healthy, payload = self._upstream_health()
         launcher = self.launcher.status()
         if healthy:
             self._upstream_failure_since = None
@@ -901,6 +972,22 @@ class GatewayServer(ThreadingHTTPServer):
             return dict(self._upstream_supervision)
 
         if stamp - self._upstream_failure_since < 6.0:
+            return dict(self._upstream_supervision)
+
+        counts = (payload.get("active_http_turns"), payload.get("active_browser_turns"))
+        verified_idle = all(type(value) is int and value == 0 for value in counts)
+        with self.turn_authority.lock:
+            pending_turns = bool(self.turn_authority.capabilities)
+        external_launcher = launcher.get("source") in {"adopted", "stale"}
+        if (external_launcher or pending_turns or
+                (launcher.get("running") and not verified_idle) or
+                (payload and not verified_idle)):
+            self._upstream_supervision = {
+                "state": "RECOVERY_BLOCKED",
+                "reason": "external_launcher" if external_launcher else "active_or_unverified_turn_ownership",
+                "restart_attempts": self._upstream_restart_attempts,
+                "automatic_resend": False,
+            }
             return dict(self._upstream_supervision)
 
         backoff = min(5.0 * (2 ** self._upstream_restart_attempts), 60.0)
@@ -1185,7 +1272,10 @@ class GatewayServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         super().server_close()
-        self.turn_authority.durable.close()
+        if self._web_transport is not None:
+            self._web_transport.close()
+        if self.turn_authority is not None:
+            self.turn_authority.durable.close()
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -1231,7 +1321,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         hostname = parsed.hostname
         if not hostname:
             raise ValueError("upstream host is missing")
-        connection = http.client.HTTPConnection(hostname, parsed.port or 80, timeout=timeout)
+        connection = http.client.HTTPConnection(hostname, parsed.port or 80, timeout=min(timeout, 5.0))
         excluded = HOP_HEADERS | {"cookie", "content-type", "accept"}
         if body_reencoded:
             excluded |= REQUEST_REWRITE_HEADERS
@@ -1243,8 +1333,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
             outbound["Content-Type"] = "application/json"
         if headers:
             outbound.update(headers)
-        connection.request(method, path, body=body, headers=outbound)
-        response = connection.getresponse()
+        # Establish the socket before writing any HTTP bytes. Only this failure
+        # proves that this attempt did not reach the upstream. Never reconnect
+        # or repeat a POST after request() has begun.
+        try:
+            connection.connect()
+            if connection.sock is not None:
+                connection.sock.settimeout(timeout)
+        except (OSError, http.client.HTTPException) as exc:
+            connection.close()
+            raise UpstreamTransportError("connect", exc) from exc
+        try:
+            connection.request(method, path, body=body, headers=outbound)
+            response = connection.getresponse()
+        except (OSError, http.client.HTTPException) as exc:
+            connection.close()
+            raise UpstreamTransportError("request_or_headers", exc) from exc
         setattr(response, "_sentra_connection", connection)
         return response
 
@@ -1263,11 +1367,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
         *,
         body_reencoded: bool = False,
         rewrite_web_model_namespace: bool = False,
+        delivery_capability: str | None = None,
     ) -> int | None:
         response = None
         try:
             response = self._upstream(method, path, body, headers, body_reencoded=body_reencoded)
-            self.send_response(response.status)
             response_headers = response.getheaders()
             content_type = next(
                 (value for name, value in response_headers if name.lower() == "content-type"),
@@ -1277,6 +1381,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 (value for name, value in response_headers if name.lower() == "content-encoding"),
                 "",
             ).strip().lower()
+            is_sse = content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
+            if delivery_capability and 200 <= response.status < 300 and not is_sse:
+                try:
+                    self.server.web_transport.require_receipts(delivery_capability)
+                except PermissionError:
+                    self._json(409, {"error": {"type": "web_completion_unconfirmed",
+                        "automatic_retry": False, "reconciliation_required": True}})
+                    return 409
+            self.send_response(response.status)
             if rewrite_web_model_namespace and content_encoding not in {"", "identity"}:
                 raise http.client.HTTPException(
                     f"cannot rewrite compressed upstream response: {content_encoding}"
@@ -1303,9 +1416,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self.send_header("Content-Length", "0")
             self.end_headers()
             if body_allowed:
-                is_sse = content_type.split(";", 1)[0].strip().lower() == "text/event-stream"
+                if is_sse and delivery_capability:
+                    view = self.server.web_transport.delivery_view(delivery_capability)
+                    event = ("event: sentra.web_delivery\ndata: " + json.dumps(view, separators=(",", ":")) + "\n\n").encode()
+                    if downstream_chunked:
+                        self.wfile.write(f"{len(event):X}\r\n".encode() + event + b"\r\n")
+                    else:
+                        self.wfile.write(event)
+                    self.wfile.flush()
                 sse_tail = bytearray()
-                while data := response.read1(65536):
+                sse_terminal_detected = False
+                for data in _upstream_chunks(response, framed_sse=is_sse and bool(delivery_capability)):
                     if rewrite_web_model_namespace:
                         for canonical, upstream in WEB_MODEL_PREFIXES:
                             data = data.replace(
@@ -1326,14 +1447,26 @@ class GatewayHandler(BaseHTTPRequestHandler):
                                 "bytes": len(data),
                                 "events": events[:16],
                                 "done": "data: [DONE]" in preview,
-                                "failed_data": [
-                                    line[6:].strip()[:1500]
-                                    for line in preview.splitlines()
-                                    if "response.failed" in events and line.startswith("data: ")
-                                ][:2],
                             }, separators=(",", ":")),
                             flush=True,
                         )
+                    if is_sse:
+                        sse_tail.extend(data)
+                        if len(sse_tail) > 8192:
+                            del sse_tail[:-8192]
+                        terminal = _sse_terminal_seen(data if delivery_capability else bytes(sse_tail))
+                        sse_terminal_detected = sse_terminal_detected or terminal
+                        if terminal and delivery_capability:
+                            view = self.server.web_transport.delivery_view(delivery_capability)
+                            event = ("event: sentra.web_delivery\ndata: " + json.dumps(view, separators=(",", ":")) + "\n\n").encode()
+                            self.wfile.write(f"{len(event):X}\r\n".encode() + event + b"\r\n")
+                            self.wfile.flush()
+                            # Failure/incomplete events retain upstream semantics.
+                            # Only successful terminal completion needs final
+                            # independently attested ANSWERED receipts.
+                            if (re.search(rb"(?:^|\r?\n)event:\s*response\.completed\s*(?:\r?\n|$)", data, re.IGNORECASE)
+                                    or _SSE_DONE_RE.search(data)):
+                                self.server.web_transport.require_receipts(delivery_capability)
                     if downstream_chunked:
                         self.wfile.write(f"{len(data):X}\r\n".encode("ascii"))
                         self.wfile.write(data)
@@ -1342,19 +1475,29 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         self.wfile.write(data)
                     self.wfile.flush()
 
-                    if is_sse:
-                        sse_tail.extend(data)
-                        if len(sse_tail) > 8192:
-                            del sse_tail[:-8192]
-                        if _sse_terminal_seen(bytes(sse_tail)):
-                            break
+                    if is_sse and terminal:
+                        break
                 if downstream_chunked:
+                    if is_sse and not sse_terminal_detected:
+                        raise http.client.HTTPException("upstream SSE closed without a terminal event")
                     self.wfile.write(b"0\r\n\r\n")
                     self.wfile.flush()
             return response.status
-        except (OSError, http.client.HTTPException) as exc:
+        except (OSError, http.client.HTTPException, sqlite3.Error, RuntimeError, PermissionError) as exc:
             if response is None:
-                self._json(502, {"error": {"type": "upstream_error", "message": str(exc)}})
+                phase = getattr(exc, "phase", "unknown")
+                self._json(503, {"error": {
+                    "type": "upstream_unavailable",
+                    "message": "The upstream transport is unavailable; this request was not retried.",
+                    "phase": phase,
+                    "delivery_state": "NOT_SENT" if phase == "connect" else "UNCONFIRMED",
+                    "automatic_retry": False,
+                    "reconciliation_required": phase != "connect",
+                }})
+            else:
+                # Truncated SSE must remain a broken stream. A clean terminating
+                # chunk would disguise uncertainty as successful completion.
+                self.close_connection = True
         finally:
             if response is not None:
                 self._close_upstream(response)
@@ -1436,7 +1579,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "content_encoding": self.headers.get("Content-Encoding"),
                     "content_type": self.headers.get("Content-Type"),
                     "raw_bytes": len(raw),
-                    "raw_prefix_hex": raw[:16].hex(),
                 }, separators=(",", ":")),
                 flush=True,
             )
@@ -1456,7 +1598,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         "content_encoding": self.headers.get("Content-Encoding"),
                         "content_type": self.headers.get("Content-Type"),
                         "raw_len": len(raw),
-                        "raw_prefix_hex": raw[:96].hex(),
                         "error": str(exc)[:200],
                     }, separators=(",", ":")),
                     flush=True,
@@ -1467,11 +1608,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed_request = urlsplit(self.path)
         path = parsed_request.path
+        if path == "/livez":
+            self._json(200, {"status": "alive", "service": "sentra-model-gateway", "ready": False})
+            return
         if path == "/healthz":
+            response = None
             try:
                 response = self._upstream("GET", "/healthz", timeout=1.5)
-                upstream = json.loads(response.read())
-                self._close_upstream(response)
+                raw_health = response.read(128_001)
+                if len(raw_health) > 128_000:
+                    raise ValueError("upstream health exceeds limit")
+                upstream = json.loads(raw_health)
+                if not isinstance(upstream, dict):
+                    raise ValueError("upstream health must be an object")
                 healthy = (
                     response.status == 200
                     and upstream.get("service") == "codex-chatgpt-web"
@@ -1481,23 +1630,44 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 )
             except (OSError, ValueError, http.client.HTTPException):
                 upstream, healthy = {}, False
+            finally:
+                if response is not None:
+                    self._close_upstream(response)
             catalog = self.server.cached_model_catalog()
             catalog_ready = (
                 catalog.get("status") == "ready"
                 and bool(catalog.get("models"))
             )
-            self.server.resources.ingest_manifest({
-                "resource_type": "model_browser",
-                "resources": [{
-                    "resource_id": "model:chatgpt-web:primary",
-                    "state": "READY" if healthy and catalog_ready else ("DEGRADED" if healthy else "OFFLINE"),
-                    "capacity": 5,
-                    "capabilities": {"responses": True, "sse": True, "compaction": True, "browser_host": "electron"},
-                    "labels": {"provider": "chatgpt-web", "version": str(upstream.get("version") or "")},
-                    "active_turns": upstream.get("active_browser_turns", 0),
-                    "accepting_turns": upstream.get("accepting_turns") is True,
-                }],
-            })
+            # The installed Web Models launcher can be stale while the active
+            # upstream still serves legacy Responses. An invalid integration
+            # patch is a diagnostic condition, never a reason to drop /healthz
+            # without HTTP headers (which makes every Codex client see 503).
+            try:
+                launcher_status = self.server.launcher.status()
+            except (OSError, ValueError, RuntimeError, PermissionError) as exc:
+                launcher_status = {
+                    "running": False,
+                    "pid": None,
+                    "source": "unverified",
+                    "reason": "launcher_status_unavailable",
+                    "error_type": type(exc).__name__,
+                }
+            try:
+                self.server.resources.ingest_manifest({
+                    "resource_type": "model_browser",
+                    "resources": [{
+                        "resource_id": "model:chatgpt-web:primary",
+                        "state": "READY" if healthy and catalog_ready else ("DEGRADED" if healthy else "OFFLINE"),
+                        "capacity": 5,
+                        "capabilities": {"responses": True, "sse": True, "compaction": True, "browser_host": "electron"},
+                        "labels": {"provider": "chatgpt-web", "version": str(upstream.get("version") or "")},
+                        "active_turns": upstream.get("active_browser_turns", 0),
+                        "accepting_turns": upstream.get("accepting_turns") is True,
+                    }],
+                })
+            except (OSError, sqlite3.Error, ValueError, RuntimeError):
+                self._json(503, {"service": "sentra-model-gateway", "status": "local_state_unavailable", "ready": False})
+                return
             self._json(
                 200 if healthy else 503,
                 {
@@ -1506,7 +1676,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "ready": bool(healthy and catalog_ready),
                     "catalog": catalog,
                     "upstream": upstream,
-                    "launcher": self.server.launcher.status(),
+                    "launcher": launcher_status,
                     "supervisor": dict(self.server._upstream_supervision),
                 },
             )
@@ -1530,6 +1700,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             self._json(200, {"leases": self.server.turn_authority.active_leases()})
+            return
+        if path == "/sentra/web-transport":
+            if not self._authorized_admin():
+                self._json(401, {"error": "unauthorized"}); return
+            try:
+                self._json(200, self.server.web_transport.status())
+            except (OSError, sqlite3.Error, RuntimeError, ImportError):
+                self._json(503, {"error": {"type": "web_transport_unavailable", "automatic_retry": False}})
             return
         if path == "/sentra/status":
             if not self._authorized_admin():
@@ -1615,6 +1793,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
+        if path in {"/internal/turn/browser-preflight", "/internal/turn/browser-sending",
+                    "/internal/turn/browser-receipt", "/internal/turn/browser-failure", "/internal/turn/browser-answer"}:
+            if not self._authorized_internal():
+                self._json(401, {"error": "unauthorized"}); return
+            value = self._body()
+            if value is None:
+                return
+            try:
+                result = self.server.web_transport.browser_event(path.rsplit("-", 1)[-1], value)
+                self._json(200, result)
+            except (PermissionError, StaleFenceError, DurableStateConflict, ValueError, RuntimeError) as exc:
+                self._json(409, {"error": {"type": "web_delivery_denied", "message": str(exc)}})
+            except (sqlite3.Error, OSError, ImportError):
+                self._json(503, {"error": {"type": "web_transport_unavailable", "automatic_retry": False}})
+            return
         if path in {"/internal/turn/register", "/internal/turn/tool", "/internal/turn/prepare", "/internal/turn/complete", "/internal/turn/browser-start", "/internal/turn/browser-heartbeat", "/internal/turn/browser-complete"}:
             if not self._authorized_internal():
                 self._json(401, {"error": "unauthorized"})
@@ -1641,6 +1834,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     flush=True,
                 )
             try:
+                if action in {"complete", "browser-complete"} and self.server.turn_authority._capability(value["capability"]).shared_run:
+                    self.server.web_transport.require_receipts(value["capability"])
                 result = self.server.turn_authority.authorize(action, value)
                 self.server.audit.emit("model.browser." + action, "ok", {
                     **self.server.turn_authority.telemetry_metadata(value["capability"]),
@@ -1681,7 +1876,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._json(401, {"error": "unauthorized"})
                 return
             try:
-                if path == "/sentra/launcher/start":
+                if path == "/sentra/web-transport/bind":
+                    value = self._body()
+                    if value is None:
+                        return
+                    if set(value) != {"conversation_uri","owner","run_id","work_item_id","principal_id","grant_id"}:
+                        raise ValueError("exact host Web binding schema required")
+                    self._json(200, self.server.web_transport.bind(**value))
+                elif path == "/sentra/web-transport/mode":
+                    value = self._body()
+                    if value is None:
+                        return
+                    if set(value) != {"mode", "expected_revision"}:
+                        raise ValueError("exact Web transport mode schema required")
+                    self._json(200, self.server.web_transport.set_mode(**value))
+                elif path == "/sentra/launcher/start":
                     self._json(200, self.server.launcher.start())
                 elif path == "/sentra/launcher/stop":
                     self._json(200, self.server.launcher.stop())
@@ -1721,6 +1930,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         self._json(status, json.loads(payload))
                 else:
                     self._json(404, {"error": "not found"})
+            except PermissionError as exc:
+                self._json(403, {"error": str(exc)})
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired, http.client.HTTPException) as exc:
                 self._json(502, {"error": str(exc)})
             return
@@ -1756,6 +1967,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 value["model"] = upstream_prefix + model[len(canonical_prefix):]
             metadata = value.get("client_metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
+            # Routing is selected only by the persisted host release gate.
+            # A client cannot opt itself into an unapproved physical producer.
+            metadata = {key: item for key, item in metadata.items()
+                        if key not in {"sentra_durable_web", "sentra_turn_capability", "sentra_managed"}}
             conversation_uri = metadata.get("sentra_conversation_uri")
             if not isinstance(conversation_uri, str) or not conversation_uri.startswith("conversation://") or len(conversation_uri) > 160:
                 conversation_uri = None
@@ -1774,7 +1989,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
             })
             goal_present, goal_text = _extract_codex_goal_signal(value.get("input"))
             try:
-                capability = self.server.turn_authority.issue(
+                transport_mode = self.server.web_transport_mode()
+                if transport_mode == "candidate_v2" and path == "/v1/responses":
+                    raise PermissionError("candidate Web transport is not activated for production sends")
+                if transport_mode == "durable_v2" and path == "/v1/responses":
+                    capability = self.server.web_transport.admit_responses(
+                        conversation_uri=conversation_uri, request_identity=request_identity, payload=value)
+                    metadata = {**metadata, "sentra_durable_web": True}
+                else:
+                    capability = self.server.turn_authority.issue(
                     conversation_uri=conversation_uri,
                     request_identity=request_identity,
                     goal_text=goal_text,
@@ -1783,7 +2006,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     subagent_notifications=_extract_codex_subagent_notifications(
                         value.get("input")
                     ),
-                )
+                    )
             except DurableStateConflict as exc:
                 self._json(409, {
                     "error": {
@@ -1791,6 +2014,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         "message": str(exc),
                     }
                 })
+                return
+            except (PermissionError, ValueError, RuntimeError) as exc:
+                self._json(403, {"error": {"type": "web_admission_denied", "message": str(exc)}})
+                return
+            except (sqlite3.Error, OSError, ImportError):
+                self._json(503, {"error": {"type": "web_admission_unavailable", "automatic_retry": False}})
                 return
             value["client_metadata"] = {
                 **metadata,
@@ -1809,6 +2038,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 body,
                 body_reencoded=True,
                 rewrite_web_model_namespace=managed_web_model,
+                delivery_capability=capability if capability and metadata.get("sentra_durable_web") is True else None,
             )
             proxy_failed = proxy_status is None or proxy_status >= 400
         finally:
@@ -1834,7 +2064,7 @@ def main() -> None:
     parser.add_argument("--launch-upstream", action="store_true")
     args = parser.parse_args()
     state_root = resolve_gateway_state_root()
-    admin_token = os.getenv("SENTRA_GATEWAY_ADMIN_TOKEN", "").strip() or load_or_create_gateway_admin_token(state_root)
+    admin_token = os.getenv("SENTRA_GATEWAY_ADMIN_TOKEN", "").strip()
     config = GatewayConfig(upstream=args.upstream, port=args.port, state_root=state_root,
                            admin_token=admin_token,
                            upstream_control_token=os.getenv("SENTRA_WEB_CONTROL_TOKEN", ""),

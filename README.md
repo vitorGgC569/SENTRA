@@ -1,5 +1,22 @@
 # SENTRA
 
+> **Estado em 09/10/2026 — checkpoint de desenvolvimento, não release estável.**
+> O Canvas React Flow/Radix/Lucide/xterm está incorporado ao aplicativo Windows;
+> o SENTRA CLI dispõe de `/model` com menu numerado e `/effort` para Codex.
+> O caminho do Setup/Quick Start inclui Canvas, CLI, MCP, Secure Tunnel,
+> Web Models e orientação para conectar o app/plugin SENTRA ao ChatGPT.
+> **O app MCP não pode ser instalado/autorizado automaticamente dentro da conta
+> ChatGPT do usuário**: essa aprovação é uma etapa explícita no ChatGPT.
+> A suíte Python unitária completa **passou novamente na rodada de 09/10/2026**
+> (1.991 passed, 37 skipped, 0 failed, 0 errors, 14 subtests passed);
+> falhas/integração 183 passed, 10 skipped; colaboração Node 54/54. A instalação limpa/Setup/MSI/Authenticode e 37 projetos externos
+> ainda exigem aceite por requisito.
+> [Guia de primeira instalação e checklist real](docs/SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md) ·
+> [Checkpoint e pendências](docs/SENTRA_CHECKPOINT_IMPLEMENTACAO_E_PENDENCIAS_2026-10-09.md) ·
+> [Matriz de incorporação do Chat On Steroids](docs/SENTRA_ANALISE_INCORPORACAO_CHAT_ON_STEROIDS_2026-10-09.md) ·
+> [Implementação, testes e lacunas restantes](docs/SENTRA_COS_INCORPORACAO_EXECUCAO_2026-10-09.md).
+
+
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)
 ![Edge MV3](https://img.shields.io/badge/edge-MV3-orange)

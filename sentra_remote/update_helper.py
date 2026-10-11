@@ -56,11 +56,37 @@ def _validate_install_dir(path: Path, *, require_marker: bool = False) -> Path:
     return root
 
 
-def _state_file() -> Path:
-    override = os.environ.get("SENTRA_STATE_DIR", "").strip()
-    state_root = Path(override).expanduser().resolve() if override else (Path.home() / ".sentra").resolve()
-    state_root.mkdir(parents=True, exist_ok=True)
+def _state_file(install_dir: Path | None = None, state_dir: Path | None = None) -> Path:
+    from .product import ProductPaths
+    if state_dir is not None:
+        state_root = Path(state_dir).expanduser().resolve()
+    elif install_dir is not None:
+        state_root = ProductPaths.default(install_dir).state_dir
+    else:
+        override = os.environ.get("SENTRA_STATE_DIR", "").strip()
+        state_root = Path(override).expanduser().resolve() if override else (Path.home() / ".sentra").resolve()
+    # Reading metadata must not create an unknown state directory.
     return state_root / "update-state.json"
+
+
+def _require_offline_migration_contract(state_dir: Path | None, install_dir: Path) -> None:
+    """Deny physical version switches that might reinterpret unversioned DBs.
+
+    This helper is intentionally NOT a second grant authority. The future
+    central owner-auth orchestration must stage/verify schema migrations and
+    provide an explicit controlled handoff before this path is enabled.
+    """
+    from .product import ProductPaths
+    selected = Path(state_dir or ProductPaths.default(install_dir).state_dir).expanduser().resolve()
+    if not selected.exists():
+        return
+    # No DB contents are read. Never follow symbolic directory links.
+    if selected.is_symlink():
+        raise PermissionError("unsafe migration state directory")
+    for current, dirs, files in os.walk(selected, followlinks=False):
+        dirs[:] = [name for name in dirs if not (Path(current) / name).is_symlink()]
+        if any(name.lower().endswith((".db", ".sqlite", ".sqlite3")) for name in files):
+            raise PermissionError("SQLite migration requires durable owner-auth and an offline staged snapshot")
 
 
 def _copy_tree(source: Path, destination: Path) -> None:
@@ -72,9 +98,10 @@ def _copy_tree(source: Path, destination: Path) -> None:
 
 
 def _start_desktop(install_dir: Path) -> None:
-    human = install_dir / "sentra-human.exe"
+    canvas = install_dir / "sentra-canvas.exe"
     control = install_dir / "sentra-desktop.exe"
-    target = human if human.is_file() else control
+    human = install_dir / "sentra-human.exe"
+    target = canvas if canvas.is_file() else (control if control.is_file() else human)
     if target.is_file():
         subprocess.Popen(
             [str(target)],
@@ -84,10 +111,15 @@ def _start_desktop(install_dir: Path) -> None:
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
 
-def _write_state(payload: dict[str, Any]) -> None:
-    path = _state_file()
+def _write_state(payload: dict[str, Any], *, install_dir: Path | None = None,
+                 state_dir: Path | None = None) -> None:
+    path = _state_file(install_dir, state_dir)
+    path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    with temp.open("w", encoding="utf-8") as out:
+        json.dump(payload, out, indent=2)
+        out.flush()
+        os.fsync(out.fileno())
     temp.replace(path)
 
 
@@ -117,16 +149,21 @@ def apply_update(
     identity = str(marker.get("installation_id") or "")
     if not identity:
         raise ValueError("repair installation identity with Setup before updating")
+    # Fail before stopping any process or copying a binary when durable
+    # migration of the real SQLite state has not been coordinated by the host.
+    _require_offline_migration_contract(state_dir, install_dir)
+    namespace = hashlib.sha256(identity.encode()).hexdigest()
+    rollback_root = install_dir.parent / "Rollback" / namespace
+    from .program_stage import (require_no_interrupted_stage, stage_program_backup,
+                                mark_program_stage)
+    # Check for an earlier crash BEFORE any process is touched.
+    require_no_interrupted_stage(rollback_root)
     _wait_pid(parent_pid)
     from .installer import _stop_installed_processes
     _stop_installed_processes(install_dir)
-    namespace = hashlib.sha256((identity or str(install_dir)).encode()).hexdigest()
-    rollback_root = install_dir.parent / "Rollback" / namespace
-    backup = rollback_root / "previous"
-    rollback_root.mkdir(parents=True, exist_ok=True)
-    if install_dir.is_dir():
-        _copy_tree(install_dir, backup)
+    backup, stage_journal = stage_program_backup(install_dir, rollback_root, identity)
     try:
+        mark_program_stage(stage_journal, "APPLYING", identity)
         # Setup merges owned files; unrelated files remain in the destination.
         # Keep installation identity across update, while retaining state outside
         # the replaceable program tree (credentials and protected conversations).
@@ -166,15 +203,20 @@ def apply_update(
             "install_dir": str(install_dir),
             "manifest_url": manifest_url,
             "updated_at": time.time(),
-        })
+        }, install_dir=install_dir, state_dir=state_dir)
+        mark_program_stage(stage_journal, "COMMITTED", identity)
         if restart_desktop and not stop_after_doctor:
             _start_desktop(install_dir)
         return 0
     except Exception:
-        if install_dir.exists():
-            shutil.rmtree(filesystem_path(install_dir))
+        # Crash recovery is an explicit owner action; never auto-run Setup again.
+        mark_program_stage(stage_journal, "RECOVERY_REQUIRED", identity)
+        from .program_stage import restore_failed_program_tree
         if backup.is_dir():
-            shutil.copytree(filesystem_path(backup), filesystem_path(install_dir))
+            # Preserve a quarantined copy of the interrupted installer tree;
+            # never erase unknown user files or silently retry Setup.
+            restore_failed_program_tree(install_dir, backup, identity)
+            mark_program_stage(stage_journal, "RESTORED", identity)
             if restart_desktop:
                 _start_desktop(install_dir)
         raise
@@ -188,7 +230,7 @@ def rollback_update(
     restart_desktop: bool = True,
 ) -> int:
     install_dir = _validate_install_dir(install_dir, require_marker=True)
-    state_path = _state_file()
+    state_path = _state_file(install_dir)
     if not state_path.is_file():
         raise FileNotFoundError("no update rollback metadata is available")
     state = json.loads(state_path.read_text(encoding="utf-8-sig"))
@@ -236,7 +278,7 @@ def rollback_update(
             "rolled_back_at": time.time(),
             "previous_backup": str(replaced),
             "install_dir": str(install_dir),
-        })
+        }, install_dir=install_dir)
         if restart_desktop:
             _start_desktop(install_dir)
         return 0

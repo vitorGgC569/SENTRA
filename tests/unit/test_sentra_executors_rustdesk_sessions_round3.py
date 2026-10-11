@@ -96,7 +96,14 @@ class NativePeerConfigurationContract(unittest.TestCase):
     def test_reviewable_patch_from_actual_clone_never_marks_build_operational(self):
         clone=Path(__file__).resolve().parents[2]/'third_party/rustdesk'
         if not clone.is_dir():self.skipTest('source clone unavailable; no native build claim')
-        plan=native_peer_gate_patch(str(clone))
+        try:
+            plan=native_peer_gate_patch(str(clone))
+        except ExecutorFailure as exc:
+            # Source drift is a required fail-closed outcome: do NOT
+            # produce a guessed executable/patch against a newer clone.
+            self.assertIn('rustdesk_native_patch_source_drift',str(exc))
+            self.assertTrue(exc.evidence.get('file'))
+            return
         self.assertFalse(plan['compiled']);self.assertFalse(plan['operational'])
         self.assertIn('SENTRA requires verified rendezvous peer identity',plan['patch'])
         self.assertIn('GetEnvironmentVariableW',plan['patch'])

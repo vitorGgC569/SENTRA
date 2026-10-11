@@ -8,6 +8,7 @@ import pytest
 
 from sentra_model_gateway.turn_authority import TurnAuthority
 from sentra_mcp.services.context import ContextBusService
+from sentra_mcp.services.control_plane import ControlPlaneService
 from sentra_mcp.services.durable import DurableStateConflict, StaleFenceError
 
 
@@ -19,6 +20,56 @@ def descriptor(path, trace="trace123", tab="tab-one", conversation="conversation
                        "traceId": trace, "conversationKey": conversation, "status": status,
                        "lastHeartbeatAt": time.time() * 1000}],
     }), encoding="utf-8")
+
+
+def test_bound_turn_reuses_run_recovers_current_phase_and_cannot_revive_retired_token(tmp_path):
+    path = tmp_path / "browser.json"
+    state = tmp_path / "state"
+    first = TurnAuthority(state, path)
+    context = ContextBusService(state)
+    control = ControlPlaneService(first.durable, context)
+    owner = "canvas:bound-test"
+    run = first.durable.create_run(owner, workspace=str(tmp_path))["run_id"]
+    first.durable.transition_run(run, owner, "RUNNING")
+    control.ensure_agent(run, owner, agent_id="bound-agent", role="builder")
+    work = control.create_work_item(run, owner, objective="Bound Web", assignee_agent_id="bound-agent")
+    grant = control.authorization.grant(owner, principal_type="agent", principal_id="bound-agent",
+        capability="web:send", scope_type="work_item", scope_id=work["work_item_id"])
+    args = dict(control=control, owner=owner, run_id=run, work_item_id=work["work_item_id"],
+        principal_id="bound-agent", grant_id=grant["grant_id"], request_identity='{"thread_id":"bound","turn_id":"one"}',
+        conversation_uri="conversation://bound")
+    try:
+        token = first.issue_bound(**args)
+        with pytest.raises(DurableStateConflict):
+            first.issue_bound(**args)
+        descriptor(path, trace="phase-one")
+        first.authorize("browser-start", {"capability": token, "traceId": "phase-one"})
+        first.authorize("browser-complete", {"capability": token, "traceId": "phase-one"})
+        descriptor(path, trace="phase-two", tab="tab-two")
+        phase = first.authorize("browser-start", {"capability": token, "traceId": "phase-two"})
+        assert len(first.durable.list_runs(owner)["items"]) == 1
+    finally:
+        context.close()
+        first.durable.close()
+    recovered = TurnAuthority(state, path)
+    try:
+        cap = recovered._capability(token)
+        assert cap.shared_run and cap.operation_id == phase["operation_id"]
+        assert cap.work_item_id == work["work_item_id"] and cap.agent_id == "bound-agent"
+        recovered.authorize("browser-complete", {"capability": token, "traceId": "phase-two"})
+        recovered.retire(token)
+        assert recovered.durable.run_status(run, owner)["state"] == "RUNNING"
+        with pytest.raises(PermissionError):
+            recovered._capability(token)
+        # Persisted revocation also applies to a new process.
+        restarted = TurnAuthority(state, path)
+        try:
+            with pytest.raises(PermissionError):
+                restarted._capability(token)
+        finally:
+            restarted.durable.close()
+    finally:
+        recovered.durable.close()
 
 
 def test_tool_and_completion_are_fenced_by_the_same_physical_tab(tmp_path):

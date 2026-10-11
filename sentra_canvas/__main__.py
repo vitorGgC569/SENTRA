@@ -120,11 +120,13 @@ class CanvasHandler(BaseHTTPRequestHandler):
         if path.path.startswith("/desktop-assets/"):
             assets=(STATIC/"desktop-assets").resolve()
             file=(assets/path.path.removeprefix("/desktop-assets/")).resolve()
-            if not file.is_relative_to(assets) or not file.is_file() or file.suffix.lower() not in {".js",".css",".svg",".png",".woff2"}:
+            if (not file.is_relative_to(assets) or not file.is_file() or
+                    (file.suffix.lower() not in {".js",".css",".svg",".png",".woff2"}
+                     and file.name != "manifest.json")):
                 self._send(404,{"error":"desktop asset unavailable"});return
             self._send(200,file.read_bytes(),mimetypes.guess_type(file.name)[0] or "application/octet-stream");return
         if path.path in ("/","/index.html","/app.js","/app.css",
-                          "/desktop.html","/native.html","/canvas","/native.js","/native.css","/rope-physics.js","/fractal-grid.js","/machine-panel.js",
+                          "/desktop.html","/native.html","/canvas","/native.js","/native.css","/sentra-logo.png","/rope-physics.js","/fractal-grid.js","/machine-panel.js",
                           "/sentra-collab.js","/collaboration-panel.js","/graph-view.js","/workflow-panel.js","/center-panel.js","/remote-panel.js","/vendor/sentra-collab-runtime.js",
                          "/vendor/xterm.js","/vendor/addon-fit.js","/vendor/xterm.css"):
             file=STATIC/("index.html" if path.path in ("/","/index.html")
@@ -132,7 +134,9 @@ class CanvasHandler(BaseHTTPRequestHandler):
                          else path.path.lstrip("/"))
             content_type=("text/html; charset=utf-8" if file.suffix==".html"
                           else "text/javascript; charset=utf-8" if file.suffix==".js"
-                          else "text/css; charset=utf-8")
+                          else "text/css; charset=utf-8" if file.suffix==".css"
+                          else "image/png" if file.suffix==".png"
+                          else "application/octet-stream")
             self._send(200,file.read_bytes(),content_type)
             return
         if not self._auth():
@@ -140,6 +144,9 @@ class CanvasHandler(BaseHTTPRequestHandler):
         qs=parse_qs(path.query)
         ws=(qs.get("ws") or [""])[0]
         a=self.server.canvas
+        if path.path=="/api/desktop/surfaces":
+            from .electron_host import electron_status
+            self._send(200,{"electron":electron_status(),"terminal":{"available":True,"authority":"Canvas/ConPTY"}});return
         if path.path=="/api/health":
             self._send(200,{"ok":True,"provider_ready":"unverified",
                            "terminal_backend":"Windows ConPTY",
@@ -156,9 +163,49 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.center_machines(ws));return
         if path.path=="/api/center/network":
             self._send(200,a.center_network(ws));return
+        if path.path=="/api/center/browser-evidence":
+            self._send(200,a.center_browser_evidence(ws));return
+        if path.path=="/api/center/skill-library":
+            self._send(200,a.center_skill_library(ws));return
+        if path.path=="/api/center/chat-access":
+            self._send(200,a.center_chat_access(ws,(qs.get("conversation_id") or [""])[0]));return
+        if path.path=="/api/center/project-review":
+            action=(qs.get("action") or ["list"])[0]
+            if action not in {"list","preview","diff","pdf_text","pdf_visual"}:
+                raise Denied("project mutations require the approved POST editor")
+            try:
+                view=a.center_project_review(ws,
+                    path=(qs.get("path") or [""])[0],action=action,
+                    page=int((qs.get("page") or ["1"])[0]),
+                    dpi=int((qs.get("dpi") or ["72"])[0]))
+            except (TimeoutError, RuntimeError) as exc:
+                # Only an unavailable/timed-out native PDF renderer is a
+                # retryable read-only projection. Other runtime failures
+                # remain 500 and must not silently trigger UI fallback.
+                unavailable=(action=="pdf_visual" and
+                    (isinstance(exc,TimeoutError) or
+                     str(exc)=="PDFium is not installed; visual PDF preview disabled"))
+                if not unavailable:
+                    raise
+                self._send(503,{"error":"visual PDF preview unavailable"});return
+            self._send(200,view);return
+        if path.path=="/api/center/conversation-search":
+            self._send(200,a.center_conversation_search(ws,(qs.get("q") or [""])[0]));return
+        if path.path=="/api/center/mcp-account":
+            self._send(200,a.center_mcp_account(ws));return
+        if path.path=="/api/center/plugin-proof":
+            self._send(200,a.center_plugin_proof(ws));return
+        if path.path=="/api/center/mcp-http":
+            self._send(200,a.center_mcp_http(ws));return
+        if path.path=="/api/center/plugin-bundles":
+            self._send(200,a.center_plugin_bundles(ws));return
         if path.path=="/api/center/overview":
             self._send(200,a.center_overview(ws,operation_offset=int((qs.get("operation_offset") or ["0"])[0]),
                 work_item_offset=int((qs.get("work_item_offset") or ["0"])[0])));return
+        if path.path=="/api/center/goal-loop":
+            self._send(200,a.center_goal_loop(ws));return
+        if path.path=="/api/center/web-delivery":
+            self._send(200,a.center_web_delivery(ws));return
         if path.path=="/api/center/telemetry":
             self._send(200,a.center_telemetry(ws));return
         if path.path=="/api/center/operation":
@@ -201,6 +248,7 @@ class CanvasHandler(BaseHTTPRequestHandler):
         length=int(self.headers.get("Content-Length","0"))
         body_limit = (1500000 if route == "/api/collab/host" else
                       2_010_000 if route=="/api/center/machine/configure" else
+                      160000 if route=="/api/center/project-review" else
                       131072 if route in {"/api/center/execute","/api/agent/control"} else 16384)
         if not 0<length<=body_limit:
             raise ValueError("invalid request size")
@@ -228,6 +276,17 @@ class CanvasHandler(BaseHTTPRequestHandler):
         if route=="/api/collab/disable":
             self._send(200,a.collab_disable(ws,p["work_item_id"],p["principal_id"]))
             return
+        if route=="/api/center/goal-loop":
+            if set(p) - {"ws","action","objective","goal_id","loop_id","max_steps","max_cost_usd","deadline_seconds"}:
+                raise ValueError("unexpected Goal/Loop field")
+            self._send(200,a.center_goal_loop(ws,action=p.get("action","status"),
+                objective=p.get("objective",""),goal_id=p.get("goal_id"),loop_id=p.get("loop_id"),
+                max_steps=p.get("max_steps",2),max_cost_usd=p.get("max_cost_usd",0.0),
+                deadline_seconds=p.get("deadline_seconds",120)));return
+        if route=="/api/center/compact-resume":
+            if set(p) != {"ws", "action", "arguments"}:
+                raise ValueError("invalid Compact&Resume fields")
+            self._send(200,a.center_compact_resume(ws,action=p["action"],arguments=p["arguments"]));return
         if route=="/api/center/machine/configure":
             self._send(200,a.center_configure_machine(ws,p["agent_id"],p["kind"],
                 profiles=p.get("profiles"),headless=p.get("headless",True),
@@ -236,6 +295,68 @@ class CanvasHandler(BaseHTTPRequestHandler):
             return
         if route=="/api/center/network":
             self._send(200,a.center_network(ws,p["configuration"]));return
+        if route=="/api/center/browser-evidence":
+            if p.get("approve") is not True:raise Denied("explicit browser collector consent required")
+            self._send(200,a.center_browser_evidence(ws,configuration=p["configuration"]));return
+        if route=="/api/center/skill-library":
+            if p.get("action")!="disclose" and p.get("approve") is not True:
+                raise Denied("explicit skill import, activation or revocation consent required")
+            self._send(200,a.center_skill_library(ws,action=p["action"],parameters=p.get("parameters")));return
+        if route=="/api/center/chat-access":
+            self._send(200,a.center_chat_access(ws,change=p["change"]));return
+        if route=="/api/center/conversation-export":
+            self._send(200,a.center_conversation_export(ws,p["conversation_id"]));return
+        if route=="/api/desktop/electron":
+            if p.get("confirm") is not True:
+                raise Denied("explicit consent to open Electron display required")
+            from .electron_host import launch_electron
+            self._send(200,{"launched":True,"pid":launch_electron(self.server,wait=False),
+                            "authority":"existing_canvas_broker"});return
+        if route=="/api/center/project-review":
+            action=p.get("action")
+            if action not in {"preview_edit","save"}:
+                raise ValueError("unsupported editor mutation")
+            if action=="save":
+                if p.get("approve") is not True:
+                    raise Denied("file save requires explicit review and owner confirmation")
+                self._send(200,a.center_project_save_reviewed(ws,p["path"],p["content"],
+                    p["expected_sha256"],p.get("review_token")));return
+            self._send(200,a.center_project_review(ws,path=p["path"],action=action,
+                content=p["content"],expected_sha256=p["expected_sha256"]));return
+        if route=="/api/center/mcp-http":
+            # Operator-only catalog admission, NOT a tool call. The endpoint
+            # accepts no bearer token, arbitrary args, host effect or grant.
+            action=p.get("action")
+            required=({"ws","action","server_id","endpoint","approve"}
+                      if action=="register" else
+                      {"ws","action","server_id","approve"}
+                      if action=="disable" else set())
+            if not required or set(p)!=required:
+                raise ValueError("exact MCP HTTP catalog request schema required")
+            if p.get("approve") is not True:
+                raise Denied("explicit MCP HTTP catalog consent required")
+            self._send(200,a.center_mcp_http(ws,action=action,
+                server_id=p["server_id"],endpoint=p.get("endpoint")));return
+        if route=="/api/center/mcp-account":
+            action=p.get("action")
+            required=({"ws","action","approve"} if action=="begin" else
+                      {"ws","action","approve","attempt_id"}
+                      if action in {"mark_steps","cancel"} else set())
+            if not required or set(p)!=required:
+                raise ValueError("exact MCP account switch request schema required")
+            if p.get("approve") is not True:
+                raise Denied("explicit owner approval required")
+            self._send(200,a.center_mcp_account(ws,action=action,
+                attempt_id=p.get("attempt_id"),approved=True));return
+        if route=="/api/center/plugin-bundles":
+            if p.get("approve") is not True:
+                raise Denied("explicit MCPB registration or catalog change approval required")
+            action=p.get("action","stage")
+            if action not in {"stage","inspect","register","disable"}:
+                raise ValueError("unsupported MCPB catalog action")
+            self._send(200,a.center_plugin_bundles(ws,action=action,
+                source=p.get("source"),package_sha256=p.get("package_sha256"),
+                expected_sha256=p.get("expected_sha256")));return
         if route=="/api/center/network/pairing":
             self._send(200,a.center_network_pairing(ws));return
         if route=="/api/center/task/prepare":
@@ -341,12 +462,20 @@ def main(argv=None):
     p.add_argument("--state-dir",type=Path,help="persisted Canvas state directory")
     p.add_argument("--port",type=int,default=0,help="local port; 0 chooses free port")
     p.add_argument("--no-open",action="store_true",help="do not open UI")
+    p.add_argument("--ui",choices=("native","electron","terminal"),default="native",
+                   help="desktop UI host, Electron view or SENTRA CLI terminal")
     p.add_argument("--broker",action="store_true",help="run persistent local Canvas owner")
     args=p.parse_args(argv)
     from .broker import connect_or_start,publish_endpoint,remove_endpoint
     if not args.no_open and not args.broker:
-        from .native_app import launch_native
+        if args.ui == "terminal":
+            from sentra_cli.__main__ import main as cli_main
+            return cli_main(["--workspace",str(args.root.resolve())])
         endpoint=connect_or_start(args.root,args.state_dir,port=args.port)
+        if args.ui == "electron":
+            from .electron_host import launch_electron
+            return launch_electron(endpoint,wait=True)
+        from .native_app import launch_native
         launch_native(endpoint,serve=False)
         return 0
     app=Canvas(args.root,state_dir=args.state_dir)

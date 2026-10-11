@@ -1,5 +1,16 @@
 # SENTRA Desktop release process
 
+> **Gate operacional de 09/10/2026:** a suíte Python unitária integral
+> foi corrigida e passou com **1.962 aprovados, 37 ignorados e zero falhas/erros**;
+> a colaboração Node passou 54/54. A reconstrução completa de payload/Setup
+> está em QA e a release estável ainda exige primeira instalação limpa,
+> WebView2 nativo, verificação de app MCP pelo usuário, MSI e assinatura Authenticode.
+> O gate `git show HEAD --check` do checkpoint histórico `e4b3968`
+> falha por whitespace que exige um novo commit validado.
+> Consulte [primeira instalação](SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md)
+> e [checkpoint QA](SENTRA_COLABORACAO_RECONCILIACAO_QA_2026-10-09.md).
+
+
 A política atual de CI/CD, gates Windows/Canvas/Web Models, permissões mínimas,
 validação actionlint e separação entre build e publicação está em
 [CI_CD.md](CI_CD.md). A release estável só é publicada após a validação do job

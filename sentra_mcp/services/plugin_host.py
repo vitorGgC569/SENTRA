@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from .control_store import ControlPlaneStore, SQLiteControlPlaneStore
+from .tool_exposure import ToolExposureRegistry
 
 
 PLUGIN_PROTOCOL_VERSION = 1
@@ -54,6 +55,7 @@ class PluginWorkerHost:
         self.governance = governance
         self.authorization = authorization
         self.clock = clock
+        self.exposure = ToolExposureRegistry(self.store)
         with self._connect() as db:
             db.executescript(
                 """
@@ -102,9 +104,13 @@ class PluginWorkerHost:
 
     @staticmethod
     def _method_descriptors(value: Any) -> tuple[list[str], dict[str, str]]:
-        if not isinstance(value, list) or len(value) > 1000:
-            raise PluginProtocolError("plugin handshake methods must be a bounded list")
+        # Plugin tool exposure shares the model's single namespace. The host
+        # must reject same-name/case-alias collisions and excessive discovery
+        # surfaces before a worker can be marked VERIFIED.
+        if not isinstance(value, list) or len(value) > 256:
+            raise PluginProtocolError("plugin handshake exceeds 256 methods")
         names: list[str] = []
+        normalized: set[str] = set()
         caps: dict[str, str] = {}
         for raw in value:
             if isinstance(raw, str):
@@ -117,8 +123,10 @@ class PluginWorkerHost:
                 raise PluginProtocolError("plugin method descriptor is invalid")
             if not name or len(name) > 256:
                 raise PluginProtocolError("plugin method name is invalid")
-            if name in names:
-                raise PluginProtocolError("plugin handshake contains duplicate methods")
+            key=name.casefold()
+            if key in normalized:
+                raise PluginProtocolError("plugin handshake contains ambiguous tool names")
+            normalized.add(key)
             names.append(name)
             if capability:
                 caps[name] = capability
@@ -220,6 +228,7 @@ class PluginWorkerHost:
         run_id: str | None = None,
         timeout_s: float = 5.0,
         narrowed_capabilities: list[str] | None = None,
+        process_idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         plugin = self.governance.plugin_info(plugin_id, owner)
         manifest = dict(plugin.get("manifest") or {})
@@ -241,7 +250,7 @@ class PluginWorkerHost:
             workspace=workspace,
             mode=mode,
             run_id=run_id,
-            idempotency_key=f"plugin-worker:{plugin_id}",
+            idempotency_key=process_idempotency_key or f"plugin-worker:{plugin_id}",
             cleanup_policy="terminate_on_run_end",
         )
         session_id = str(process.get("session_id") or "")
@@ -293,6 +302,7 @@ class PluginWorkerHost:
             if result.get("version") and str(result["version"]) != plugin["version"]:
                 raise PluginProtocolError("plugin handshake version mismatch")
             methods, method_caps = self._method_descriptors(result.get("methods") or [])
+            self.exposure.reserve(plugin_id,result.get("methods") or [],enabled=False)
             live_caps = [
                 str(item).strip()
                 for item in (result.get("capabilities") or [])
@@ -324,12 +334,14 @@ class PluginWorkerHost:
                         owner,
                     ),
                 )
+            self.exposure.reserve(plugin_id,result.get("methods") or [],enabled=True)
             return {
                 "worker": self.info(worker_id, owner),
                 "plugin": verified,
                 "process": process,
             }
         except Exception:
+            self.exposure.disable(plugin_id)
             with self._connect() as db:
                 db.execute(
                     "UPDATE plugin_workers SET state='FAILED',updated_at=? "
@@ -406,6 +418,7 @@ class PluginWorkerHost:
 
     def stop(self, plugin_worker_id: str, owner: str) -> dict[str, Any]:
         worker = self.info(plugin_worker_id, owner)
+        self.exposure.disable(worker["plugin_id"])
         try:
             self.processes.terminate_session(worker["session_id"], owner)
         finally:
@@ -416,3 +429,128 @@ class PluginWorkerHost:
                     (self.clock(), plugin_worker_id, owner),
                 )
         return self.info(plugin_worker_id, owner)
+
+    def health(self, plugin_worker_id: str, owner: str) -> dict[str, Any]:
+        """Owner-scoped liveness from managed ProcessService session identity.
+
+        A PID match is insufficient: session ID, owner, run/operation IDs
+        must still match. A missing old process is never silently respawned.
+        """
+        worker = self.info(plugin_worker_id, owner)
+        sessions = self.processes.list_sessions(owner)
+        matches = [item for item in sessions
+                   if item.get("session_id") == worker["session_id"]]
+        if len(matches) != 1:
+            return {"worker_id": plugin_worker_id, "status": "UNAVAILABLE",
+                    "session_proven": False, "can_auto_restart": False}
+        process = matches[0]
+        proven = (process.get("owner") == owner
+                  and process.get("run_id") == worker.get("run_id")
+                  and process.get("operation_id") == worker.get("operation_id")
+                  and process.get("running") is True
+                  and worker["state"] == "READY")
+        return {"worker_id": plugin_worker_id,
+                "status": "HEALTHY" if proven else "UNAVAILABLE",
+                "session_proven": proven, "can_auto_restart": False}
+
+    def reconcile_worker(self, plugin_worker_id: str, owner: str) -> dict[str, Any]:
+        """Fail-closed recovery on crashed, disappeared or displaced workers."""
+        worker = self.info(plugin_worker_id, owner)
+        live = self.health(plugin_worker_id, owner)
+        if live["session_proven"]:
+            return {**live, "changed": False}
+        if worker["state"] in {"READY", "HANDSHAKING"}:
+            with self._connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("UPDATE plugin_workers SET state='FAILED',updated_at=? "
+                           "WHERE owner=? AND plugin_worker_id=? AND state IN ('READY','HANDSHAKING')",
+                           (self.clock(), owner, plugin_worker_id))
+            self.exposure.disable(worker["plugin_id"])
+            self.governance.update_plugin_verification(
+                worker["plugin_id"], owner, state="DISABLED",
+                verified_methods=[], live_capabilities=[])
+        return {"worker_id": plugin_worker_id, "status": "FAILED_CLOSED",
+                "can_auto_restart": False, "changed": True,
+                "operator_must_reauthorize": True}
+
+
+    async def restart_authorized(
+        self, control, *, owner, workspace, run_id, work_item_id, agent_id,
+        failed_worker_id, operation_id, idempotency_key, approval_ref,
+        verify_host_consent,
+    ):
+        """Physically restart a FAILED worker only under new durable Operation.
+
+        Old managed session must be absent/stopped; use a new process start
+        idempotency key and sandbox mode, never PID-based process reuse.
+        """
+        from pathlib import Path
+        from sentra_interop.central import CentralInteropAdapter
+        from sentra_runtime.contracts import Capability, Machine, OperationRequest
+        from .process import ProcessService
+
+        if (not isinstance(self.processes, ProcessService) or
+                not callable(verify_host_consent) or
+                not isinstance(approval_ref, str) or not approval_ref):
+            raise PermissionError("trusted physical managed ProcessService/consent required")
+        row = self.info(failed_worker_id, owner)
+        run = control.durable.run_status(run_id, owner)
+        work = control.work_item_info(work_item_id, owner)
+        if (row["state"] != "FAILED" or row["run_id"] != run_id
+                or Path(run["workspace"]).resolve() != Path(workspace).resolve()
+                or work["run_id"] != run_id
+                or work["assignee_agent_id"] != agent_id):
+            raise PermissionError("failed worker must belong to assigned central Run")
+        control._agent_from_run(run, agent_id)
+        if self.governance.plugin_info(row["plugin_id"], owner)["state"] != "DISABLED":
+            raise PermissionError("old worker plugin must be disabled")
+        machine = Machine("plugin-worker-" + row["plugin_id"], "plugin", owner, (
+            Capability("plugin:restart", "Owner-approved fenced sandbox worker restart"),))
+        gate = CentralInteropAdapter(control=control, run_id=run_id,
+                                     owner=owner, machine=machine).protocol_gate()
+        intent = OperationRequest(operation_id, agent_id, machine.machine_id,
+                                  "plugin:restart", work_item_id, idempotency_key,
+                                  {"plugin_id": row["plugin_id"],
+                                   "failed_worker_id": failed_worker_id,
+                                   "approval_ref": approval_ref})
+        if not (await gate.decision(intent)).allowed:
+            raise PermissionError("plugin worker restart WorkItem grant denied")
+
+        def host_check():
+            try:
+                return verify_host_consent(owner, workspace, run_id, work_item_id,
+                                           agent_id, failed_worker_id,
+                                           approval_ref) is True
+            except Exception:
+                return False
+
+        def old_session_stopped():
+            found = [item for item in self.processes.list_sessions(owner)
+                     if item.get("session_id") == row["session_id"]]
+            return len(found) == 0 or (
+                len(found) == 1 and found[0].get("running") is False)
+
+        if not host_check() or not old_session_stopped():
+            raise PermissionError("human approval absent or previous worker still running")
+
+        async def effect():
+            gate.physical_context(intent).checkpoint()
+            if (not host_check() or not old_session_stopped()
+                    or self.info(failed_worker_id, owner)["state"] != "FAILED"
+                    or not (await gate.decision(intent)).allowed):
+                raise PermissionError("plugin worker restart consent/lease changed")
+            started = self.start(
+                owner, plugin_id=row["plugin_id"], workspace=workspace,
+                run_id=run_id, mode="sandbox", timeout_s=12,
+                process_idempotency_key="plugin-restart:" + operation_id,
+                narrowed_capabilities=self.governance.plugin_info(
+                    row["plugin_id"], owner).get("narrowed_capabilities") or [],
+            )
+            gate.physical_context(intent).checkpoint()
+            return {"worker_id": started["worker"]["plugin_worker_id"],
+                    "session_id": started["worker"]["session_id"],
+                    "old_worker_id": failed_worker_id,
+                    "state": started["worker"]["state"],
+                    "grants_created": False, "sandbox_mode": "sandbox"}
+
+        return await gate.execute(intent, effect, timeout=30)

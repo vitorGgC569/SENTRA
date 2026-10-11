@@ -43,6 +43,7 @@ def chatgpt_plugin_install_plan(
     """
     mcp = _dict(status.get("mcp"))
     tunnel = _dict(status.get("tunnel"))
+    plugin_proof = _dict(status.get("plugin_proof"))
     configured = bool(tunnel.get("configured") or tunnel_id)
     online = bool(mcp.get("ok")) and bool(tunnel.get("ok"))
     if not configured:
@@ -57,6 +58,12 @@ def chatgpt_plugin_install_plan(
     return {
         "ready_to_install": configured and online,
         "requires_account_authorization": True,
+        "plugin_evidence": {
+            "mcp_tool_observed": plugin_proof.get("mcp_tool_observed") is True,
+            "authenticated_tool_observed": plugin_proof.get("authenticated_tool_observed") is True,
+            "plugin_installed_in_chatgpt": "unverified",
+            "schema_current_in_chatgpt": "unverified",
+        },
         "tunnel_id": tunnel_id if tunnel_id.startswith("tunnel_") else "",
         "chatgpt_url": CHATGPT_PLUGINS_HOME_URL,
         "reason": reason,

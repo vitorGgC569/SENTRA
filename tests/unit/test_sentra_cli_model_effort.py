@@ -59,8 +59,14 @@ def test_effort_changes_only_when_valid(tmp_path):
     assert repl.config.reasoning_effort=="low"
     web=make_repl(tmp_path,model="sentra/chatgpt-web/high")
     web.handle_slash_command("/effort high")
-    assert "Codex turns only" in web.console.export_text()
-    assert "does not use" in web._effort_label()
+    assert "capabilities unavailable" in web.console.export_text()
+    assert web.config.web_reasoning_effort is None
+    web.agent.client.supported_efforts = lambda model: ["medium", "high"]
+    web.handle_slash_command("/effort high")
+    assert web.config.web_reasoning_effort == "high"
+    assert "physical confirmation" in web._effort_label()
+    web.handle_slash_command("/effort xhigh")
+    assert web.config.web_reasoning_effort == "high"
 
 
 def test_effort_cli_argument_and_bad_config(tmp_path):
@@ -107,3 +113,63 @@ def test_native_codex_command_uses_selected_effort_and_model(tmp_path,monkeypatc
     config.reasoning_effort="invalid"
     with pytest.raises(NativeModelError,match="unsupported"):
         generate(config,[],config.model,lambda *x:None)
+
+
+
+def test_model_command_opens_numbered_interactive_selector_and_switches_web(tmp_path, monkeypatch):
+    repl = make_repl(tmp_path, models=[
+        "sentra/codex/current", "sentra/chatgpt-web/high", "sentra/chatgpt-web/high"
+    ])
+    monkeypatch.setattr("sentra_cli.codex_native.authenticated", lambda: True)
+    monkeypatch.setattr(repl.console, "input", lambda prompt: "2")
+    assert repl.handle_slash_command("/model")
+    assert repl.config.model == "sentra/chatgpt-web/high"
+    assert repl.agent.client.active_model == repl.config.model
+    display = repl.console.export_text()
+    assert "Selecionar modelo" in display
+    assert "1" in display and "2" in display
+    assert "Model selected" in display
+    assert display.count("sentra/chatgpt-web/high") >= 1
+
+
+@pytest.mark.parametrize("selection", ("", "0", "q", "99", "-1", "abc", "1;bad"))
+def test_model_selector_cancel_or_bad_choice_never_mutates(tmp_path, monkeypatch, selection):
+    repl = make_repl(tmp_path, model="sentra/codex/current")
+    monkeypatch.setattr("sentra_cli.codex_native.authenticated", lambda: True)
+    monkeypatch.setattr(repl.console, "input", lambda prompt: selection)
+    assert repl.handle_slash_command("/model")
+    assert repl.config.model == "sentra/codex/current"
+    assert repl.agent.client.active_model == "sentra/codex/current"
+
+
+def test_model_selector_does_not_select_unauthenticated_native_model(tmp_path, monkeypatch):
+    repl = make_repl(tmp_path, model="sentra/chatgpt-web/high",
+                     models=["sentra/codex/current", "sentra/chatgpt-web/high"])
+    monkeypatch.setattr("sentra_cli.codex_native.authenticated", lambda: False)
+    monkeypatch.setattr(repl.console, "input", lambda prompt: "1")
+    repl.handle_slash_command("/model")
+    assert repl.config.model == "sentra/chatgpt-web/high"
+    assert "not authenticated" in repl.console.export_text()
+
+
+def test_model_selector_missing_catalog_is_noninteractive_and_preserves_state(tmp_path, monkeypatch):
+    repl = make_repl(tmp_path, model="sentra/chatgpt-web/high")
+    def offline():
+        raise OSError("gateway unreachable")
+    repl.agent.client.list_models = offline
+    monkeypatch.setattr(repl.console, "input", lambda prompt: (_ for _ in ()).throw(
+        AssertionError("must not prompt when no models available")))
+    repl.handle_slash_command("/model")
+    assert repl.config.model == "sentra/chatgpt-web/high"
+    assert "catálogo" not in repl.console.export_text().lower() or "disponível" in repl.console.export_text().lower()
+
+
+def test_direct_model_switch_and_catalog_listing_still_work(tmp_path, monkeypatch):
+    repl = make_repl(tmp_path, model="sentra/chatgpt-web/high")
+    monkeypatch.setattr("sentra_cli.codex_native.authenticated", lambda: True)
+    monkeypatch.setattr(repl.console, "input", lambda prompt: (_ for _ in ()).throw(
+        AssertionError("list and explicit ID must never request another input")))
+    repl.handle_slash_command("/model list")
+    repl.handle_slash_command("/models")
+    repl.handle_slash_command("/model sentra/codex/current")
+    assert repl.config.model == "sentra/codex/current"

@@ -79,7 +79,7 @@ class GraphStore:
         self.db.execute("PRAGMA synchronous=FULL")
         with self._lock, self.db:
             if self.db.execute("PRAGMA user_version").fetchone()[0] < 5:
-                self.db.execute("CREATE TABLE collaboration_projection("
+                self.db.execute("CREATE TABLE IF NOT EXISTS collaboration_projection("
                                 "workspace TEXT PRIMARY KEY, revision INTEGER NOT NULL)")
                 self.db.execute("PRAGMA user_version=5")
 

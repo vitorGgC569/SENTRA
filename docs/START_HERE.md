@@ -1,5 +1,14 @@
 # SENTRA — Start Here
 
+> **Atualizado em 09/10/2026:** o **Canvas WebView2 com React Flow**
+> é a interface principal. O atalho `SENTRA` no Windows abre o Canvas;
+> `SENTRA Desktop` permanece como painel de Quick Start, conexões e Doctor.
+> O CLI usa `/model` para abrir o seletor numerado de modelos. Consulte o
+> [guia de primeira instalação e plugin](SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md).
+> O instalador descrito aqui ainda precisa superar a suíte Python integral,
+> o smoke WebView2, a assinatura e o aceite MSI antes de ser distribuído como estável.
+
+
 Este é o caminho mais curto para instalar, conectar e entender **onde o SENTRA aparece**.
 
 A regra principal é simples:

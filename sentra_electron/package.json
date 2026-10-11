@@ -1,0 +1,15 @@
+{
+  "name": "sentra-electron-surface",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Restricted Electron display for the authoritative SENTRA Canvas",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check main.cjs",
+    "test": "node --test test/*.test.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.0.0"
+  }
+}
