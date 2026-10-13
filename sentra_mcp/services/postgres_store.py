@@ -1,0 +1,701 @@
+"""Optional native PostgreSQL authority for the same SENTRA domain services.
+
+Tenant schemas, owner RLS, namespace advisory transaction locks and native
+migrations replace SQLite file locks. The small SQL dialect compiler covers the
+statements used by Control Plane services; unknown SQLite features fail closed.
+There is no SQLite fallback, remote executor, or second Run/Grant authority.
+"""
+from __future__ import annotations
+
+from collections.abc import Mapping
+from contextlib import contextmanager
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import threading
+import time
+import uuid
+
+from .control_store import CONTROL_PLANE_NAMESPACES
+
+
+class PostgresUnavailable(RuntimeError):
+    pass
+
+
+class PostgresSQLUnsupported(ValueError):
+    pass
+
+
+def _identifier(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[a-z_][a-z0-9_]{0,62}", value):
+        raise ValueError("unsafe PostgreSQL identifier")
+    return '"' + value + '"'
+
+
+def _scope(value, field):
+    if not isinstance(value, str) or not 1 <= len(value) <= 256 or "\x00" in value:
+        raise ValueError("explicit " + field + " required")
+    return value
+
+
+class ControlRow(dict):
+    """Named and positional row access retained for existing domain services."""
+    def __getitem__(self, key):
+        return tuple(self.values())[key] if isinstance(key, int) else super().__getitem__(key)
+
+
+class Rows:
+    def __init__(self, rows=(), rowcount=-1):
+        self.rows, self.position, self.rowcount = list(rows), 0, rowcount
+        self.lastrowid = None
+    def fetchone(self):
+        if self.position >= len(self.rows):
+            return None
+        result = self.rows[self.position]
+        self.position += 1
+        return result
+    def fetchall(self):
+        result = self.rows[self.position:]
+        self.position = len(self.rows)
+        return result
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class NamespaceLock:
+    def __init__(self, connection):
+        self.connection = connection
+        self.local = threading.local()
+    def __enter__(self):
+        manager = self.connection._scope_lock()
+        stack = getattr(self.local, "stack", [])
+        result = manager.__enter__()
+        stack.append(manager)
+        self.local.stack = stack
+        return result
+    def __exit__(self, typ, value, traceback):
+        return self.local.stack.pop().__exit__(typ, value, traceback)
+
+
+def _tokens(source):
+    """Separate SQL strings/quoted identifiers so values are never rewritten."""
+    return re.findall(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|--[^\n]*|/\*[\s\S]*?\*/|[^'\"/\-]+|[/\-]", source)
+
+
+def _statements(source):
+    current = []
+    for token in _tokens(source):
+        if token.startswith(("'", '"', "--", "/*")):
+            current.append(token)
+        else:
+            parts = token.split(";")
+            for index, part in enumerate(parts):
+                current.append(part)
+                if index < len(parts) - 1:
+                    statement = "".join(current).strip()
+                    if statement:
+                        yield statement
+                    current = []
+    statement = "".join(current).strip()
+    if statement:
+        yield statement
+
+
+def native_sql(source):
+    """Explicit compatible SQL forms, emitted as native PostgreSQL statements."""
+    if not isinstance(source, str) or "\x00" in source:
+        raise PostgresSQLUnsupported("invalid SQL")
+    result = source.strip().rstrip(";")
+    # Only this single-level JSON extraction is used by the authority services.
+    def json_field(match):
+        column, field = match.groups()
+        if field in {"reasoning_in_output", "effect_started"}:
+            return "CASE WHEN (" + column + "::jsonb ->> '" + field + "')='true' THEN 1 WHEN (" + column + "::jsonb ->> '" + field + "')='false' THEN 0 ELSE NULL END"
+        return "(" + column + "::jsonb ->> '" + field + "')"
+    result = re.sub(r"json_extract\(\s*([A-Za-z_][A-Za-z0-9_.]*)\s*,\s*'\$\.([A-Za-z_][A-Za-z0-9_]*)'\s*\)", json_field, result, flags=re.I)
+    if re.search(r"\bjson_extract\s*\(", result, re.I):
+        raise PostgresSQLUnsupported("unsupported JSON path")
+    ignore = bool(re.match(r"INSERT\s+OR\s+IGNORE\s+INTO\b", result, re.I))
+    if ignore:
+        result = re.sub(r"INSERT\s+OR\s+IGNORE\s+INTO", "INSERT INTO", result, count=1, flags=re.I) + " ON CONFLICT DO NOTHING"
+    parts = []
+    for token in _tokens(result):
+        if token.startswith(("'", '"', "--", "/*")):
+            parts.append(token.replace("%", "%%"))
+            continue
+        if re.search(r"\b(REPLACE|AUTOINCREMENT|ATTACH|DETACH|PRAGMA|COLLATE|GLOB|WITHOUT\s+ROWID)\b", token, re.I) and not re.search(r"AUTOINCREMENT", token, re.I):
+            raise PostgresSQLUnsupported("SQL form has no admitted PostgreSQL equivalent")
+        token = re.sub(r"INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT", "BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY", token, flags=re.I)
+        if re.search(r"AUTOINCREMENT", token, re.I):
+            raise PostgresSQLUnsupported("unsupported identity declaration")
+        if result.upper().startswith(("CREATE TABLE", "ALTER TABLE")):
+            token = re.sub(r"\bREAL\b", "DOUBLE PRECISION", token, flags=re.I)
+            token = re.sub(r"\bBLOB\b", "BYTEA", token, flags=re.I)
+            token = re.sub(r"\bINTEGER\b", "BIGINT", token, flags=re.I)
+        token = token.replace("%", "%%").replace("?", "%s")
+        parts.append(token)
+    result = "".join(parts)
+    if result.upper().startswith("CREATE TABLE"):
+        result = re.sub(r"REFERENCES\s+([a-z_][a-z0-9_]*)\s*\(([^)]+)\)((?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:NO ACTION|SET NULL|SET DEFAULT|CASCADE|RESTRICT))*)(?!\s+DEFERRABLE)",
+                        r"REFERENCES \1(\2)\3 DEFERRABLE INITIALLY IMMEDIATE", result, flags=re.I)
+    if not re.match(r"(?:SELECT|INSERT|UPDATE|DELETE|CREATE\s+(?:TABLE|INDEX|UNIQUE\s+INDEX)|ALTER\s+TABLE)\b", result, re.I):
+        raise PostgresSQLUnsupported("statement is outside the Control Plane SQL dialect")
+    return result
+
+
+class PostgresConnection:
+    def __init__(self, store, namespace):
+        self.store, self.namespace = store, namespace
+        self.schema = store.schema(namespace)
+        self.raw = store._connect_raw()
+        self.raw.execute("SELECT set_config('search_path', %s, false)", (self.schema + ",pg_catalog",))
+        self.raw.execute("SELECT set_config('sentra.principal_id', %s, false)", (store.principal_id,))
+        self.raw.execute("SELECT set_config('sentra.tenant_id', %s, false)", (store.tenant_id,))
+        self.row_factory = ControlRow
+        self._transaction = False
+        self._locked = False
+        self._mutex = threading.RLock()
+        self._scope_depth = 0
+        self._closed = False
+
+    @property
+    def in_transaction(self):
+        return self._transaction
+
+    def _begin(self, locked=False):
+        self.store.assert_available()
+        if not self._transaction:
+            self.raw.execute("BEGIN")
+            self._transaction = True
+            member = self.raw.execute("SELECT role FROM sentra_admin.memberships WHERE tenant_id=%s AND principal_id=%s AND revoked=false FOR SHARE",
+                                      (self.store.tenant_id, self.store.principal_id)).fetchone()
+            if member is None:
+                self.rollback()
+                raise PermissionError("tenant membership revoked")
+        if locked and not self._locked:
+            self.raw.execute("SELECT pg_advisory_xact_lock(%s)", (self.store.lock_key(self.namespace),))
+            self._locked = True
+
+    def scope_lock(self):
+        return NamespaceLock(self)
+
+    @contextmanager
+    def _scope_lock(self):
+        """Cross-process equivalent of the persistent services' SQLite RLock."""
+        with self._mutex:
+            outer = self._scope_depth == 0
+            if outer:
+                try:
+                    self._begin(locked=True)
+                except BaseException:
+                    self.rollback()
+                    raise
+            self._scope_depth += 1
+            try:
+                yield self
+            except BaseException:
+                if outer:
+                    self.rollback()
+                raise
+            else:
+                if outer:
+                    self.commit()
+            finally:
+                self._scope_depth -= 1
+
+    def _fetch(self, cursor):
+        rows = cursor.fetchall() if cursor.description else []
+        return Rows([ControlRow(row) for row in rows], cursor.rowcount)
+
+    def execute(self, source, parameters=()):
+        with self._mutex:
+            if self._closed:
+                raise RuntimeError("PostgreSQL connection is closed")
+            normalized = source.strip().rstrip(";")
+            upper = normalized.upper()
+            if upper in {"BEGIN", "BEGIN IMMEDIATE", "BEGIN EXCLUSIVE"}:
+                self._begin(locked=upper != "BEGIN")
+                return Rows()
+            if upper == "COMMIT":
+                self.commit()
+                return Rows()
+            if upper == "ROLLBACK":
+                self.rollback()
+                return Rows()
+            if upper.startswith("PRAGMA "):
+                return self._pragma(normalized)
+            if upper == "VACUUM":
+                if self._transaction:
+                    raise PostgresSQLUnsupported("VACUUM requires a committed PostgreSQL transaction")
+                self.raw.execute("VACUUM")
+                return Rows()
+            sql = native_sql(normalized)
+            sql_words = " ".join(token for token in _tokens(normalized) if not token.startswith(("'",'"',"--","/*"))).upper()
+            read_cte = upper.startswith("WITH ") and not re.search(r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|ALTER|DROP)\b",sql_words)
+            writes = not (upper.startswith("SELECT") or read_cte)
+            if writes and self.store.member_role == "reader":
+                # Existing static schema initialization is a read in a read-only session.
+                existing = re.match(r"CREATE (?:UNIQUE )?(TABLE|INDEX) IF NOT EXISTS\s+([a-z_][a-z0-9_]*)", normalized, re.I)
+                if existing:
+                    kind,name = existing.groups()
+                    catalog = "tables" if kind.upper() == "TABLE" else "pg_indexes"
+                    if catalog == "tables":
+                        found = self.raw.execute("SELECT 1 FROM information_schema.tables WHERE table_schema=%s AND table_name=%s", (self.schema,name)).fetchone()
+                    else:
+                        found = self.raw.execute("SELECT 1 FROM pg_indexes WHERE schemaname=%s AND indexname=%s", (self.schema,name)).fetchone()
+                    if found:
+                        self.store.require_membership()
+                        return Rows()
+            self.store.require_membership(write=writes)
+            if self._scope_depth:
+                self._begin(locked=True)
+            if writes:
+                self._begin(locked=True)
+            # Savepoints preserve the caught-integrity-error behavior of SQLite
+            # without leaving the PostgreSQL transaction aborted.
+            savepoint = self._transaction and writes
+            if savepoint:
+                self.raw.execute("SAVEPOINT sentra_statement")
+            try:
+                cursor = self.raw.execute(sql, parameters)
+                result = self._fetch(cursor)
+                if savepoint:
+                    self.raw.execute("RELEASE SAVEPOINT sentra_statement")
+                if upper.startswith(("CREATE TABLE", "ALTER TABLE")):
+                    table = re.search(r"(?:CREATE TABLE(?: IF NOT EXISTS)?|ALTER TABLE)\s+([a-z_][a-z0-9_]*)", normalized, re.I)
+                    if table:
+                        self._policy(table.group(1))
+                return result
+            except self.store.psycopg.IntegrityError as exc:
+                if savepoint:
+                    self.raw.execute("ROLLBACK TO SAVEPOINT sentra_statement")
+                    self.raw.execute("RELEASE SAVEPOINT sentra_statement")
+                raise sqlite3.IntegrityError("PostgreSQL constraint rejected Control Plane mutation") from exc
+
+    def _policy(self, table):
+        columns = self.raw.execute("SELECT column_name FROM information_schema.columns WHERE table_schema=%s AND table_name=%s", (self.schema, table)).fetchall()
+        names = {row["column_name"] for row in columns}
+        if "owner" not in names:
+            return
+        qualified = _identifier(self.schema) + "." + _identifier(table)
+        self.raw.execute("ALTER TABLE " + qualified + " ENABLE ROW LEVEL SECURITY")
+        self.raw.execute("ALTER TABLE " + qualified + " FORCE ROW LEVEL SECURITY")
+        exists = self.raw.execute("SELECT 1 FROM pg_policies WHERE schemaname=%s AND tablename=%s AND policyname='sentra_owner'", (self.schema, table)).fetchone()
+        if exists is None:
+            self.raw.execute("CREATE POLICY sentra_owner ON " + qualified + " USING (owner=current_setting('sentra.principal_id',true)) WITH CHECK (owner=current_setting('sentra.principal_id',true))")
+
+    def _pragma(self, source):
+        name = source[7:].strip()
+        table = re.fullmatch(r"table_info\(([a-z_][a-z0-9_]*)\)", name, re.I)
+        if table:
+            rows = self.raw.execute("SELECT ordinal_position-1 AS cid,column_name AS name,data_type AS type, "
+                "CASE WHEN is_nullable='NO' THEN 1 ELSE 0 END AS \"notnull\",column_default AS dflt_value,0 AS pk "
+                "FROM information_schema.columns WHERE table_schema=%s AND table_name=%s ORDER BY ordinal_position", (self.schema, table[1])).fetchall()
+            return Rows([ControlRow(row) for row in rows])
+        version = re.fullmatch(r"user_version(?:\s*=\s*(\d+))?", name, re.I)
+        if version:
+            if version[1] is not None:
+                if self.store.member_role == "reader":
+                    current = self.raw.execute("SELECT application_version FROM _sentra_namespace WHERE singleton=1").fetchone()
+                    if current["application_version"] == int(version[1]):
+                        self.store.require_membership()
+                        return Rows()
+                    raise PermissionError("read-only namespace migration denied")
+                self._begin(locked=True)
+                self.raw.execute("UPDATE _sentra_namespace SET application_version=%s WHERE singleton=1", (int(version[1]),))
+                return Rows()
+            return self._fetch(self.raw.execute("SELECT application_version AS user_version FROM _sentra_namespace WHERE singleton=1"))
+        if re.fullmatch(r"(?:journal_mode=WAL|synchronous=FULL|foreign_keys=ON|busy_timeout=\d+)", name, re.I):
+            return Rows([ControlRow(backend="postgres", synchronous_commit="on")])
+        if name.upper() == "SECURE_DELETE=ON":
+            # Encryption before first persistence remains mandatory. PostgreSQL
+            # MVCC/backups are deliberately not advertised as forensic erasure.
+            self.store.retention_limitations.add("MVCC and backups require encrypted-at-first-write data and operator retention")
+            return Rows([ControlRow(secure_delete=0)])
+        if re.fullmatch(r"wal_checkpoint\(TRUNCATE\)", name, re.I):
+            raise PostgresSQLUnsupported("PostgreSQL WAL retention is administered by PostgreSQL, not a SQLite checkpoint")
+        raise PostgresSQLUnsupported("unknown SQLite pragma in PostgreSQL authority")
+
+    def executescript(self, source):
+        with self._mutex:
+            fingerprint = hashlib.sha256(source.encode()).hexdigest()
+            if self.store.member_role == "reader":
+                exists = self.raw.execute("SELECT 1 FROM _sentra_migrations WHERE digest=%s AND compiler_version=1", (fingerprint,)).fetchone()
+                if exists:
+                    return
+                raise PermissionError("tenant schema migration requires an operator")
+            self._begin(locked=True)
+            for statement in _statements(source):
+                self.execute(statement)
+            self.raw.execute("INSERT INTO _sentra_migrations(digest,applied_at,compiler_version) VALUES(%s,%s,1) ON CONFLICT(digest) DO NOTHING", (fingerprint, time.time()))
+
+    def executemany(self, source, parameters):
+        count = 0
+        for row in parameters:
+            count += max(0, self.execute(source, row).rowcount)
+        return Rows(rowcount=count)
+
+    def commit(self):
+        if self._transaction:
+            self.raw.execute("COMMIT")
+            self._transaction = self._locked = False
+
+    def rollback(self):
+        if self._transaction:
+            self.raw.execute("ROLLBACK")
+            self._transaction = self._locked = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, typ, value, traceback):
+        self.rollback() if typ else self.commit()
+        # Match existing services that use a new connection per with statement.
+        if self.namespace not in {"durable", "context"}:
+            self.close()
+
+    def close(self):
+        if not self._closed:
+            self.rollback()
+            self.raw.close()
+            self._closed = True
+
+
+class PostgresControlPlaneStore:
+    backend = "postgres"
+    def __init__(self, state_root, *, dsn, tenant_id, principal_id, timeout_seconds=30):
+        if not isinstance(dsn, str) or not dsn.strip():
+            raise PostgresUnavailable("PostgreSQL authority is unavailable: DSN is not configured")
+        self.tenant_id = _scope(tenant_id, "tenant_id")
+        self.principal_id = _scope(principal_id, "authenticated principal_id")
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise PostgresUnavailable("PostgreSQL authority requires optional psycopg version 3") from exc
+        self.psycopg, self.dict_row = psycopg, dict_row
+        self._dsn = dsn
+        self.timeout_seconds = float(timeout_seconds)
+        if not 1 <= self.timeout_seconds <= 300:
+            raise ValueError("bounded PostgreSQL timeout required")
+        self.configured_root = Path(state_root).resolve()
+        self.tenant_root = self.configured_root / "tenants" / hashlib.sha256(tenant_id.encode()).hexdigest()[:32]
+        self.recovery_gate = self.tenant_root / "authority-recovery.json"
+        self.root = self.tenant_root / hashlib.sha256(principal_id.encode()).hexdigest()[:32] / "durable"
+        self.state_root = self.root.parent
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.retention_limitations = set()
+        self._ready = set()
+        self._selection_revision = None
+        self._mutex = threading.RLock()
+        try:
+            with self._connect_raw() as db:
+                role = db.execute("SELECT rolsuper,rolbypassrls FROM pg_roles WHERE rolname=current_user").fetchone()
+                if role["rolsuper"] or role["rolbypassrls"]:
+                    raise PermissionError("PostgreSQL runtime role must not bypass tenant RLS")
+                member = db.execute("SELECT role FROM sentra_admin.memberships WHERE tenant_id=%s AND principal_id=%s AND revoked=false", (tenant_id, principal_id)).fetchone()
+                if member is None:
+                    raise PermissionError("principal is not an enrolled tenant member")
+                self.member_role = member["role"]
+        except PermissionError:
+            raise
+        except Exception as exc:
+            raise PostgresUnavailable("PostgreSQL authority is unavailable or not provisioned") from exc
+
+    def _connect_raw(self):
+        db = self.psycopg.connect(self._dsn, autocommit=True, row_factory=self.dict_row, connect_timeout=int(self.timeout_seconds))
+        db.execute("SELECT set_config('statement_timeout',%s,false)", (str(int(self.timeout_seconds * 1000)),))
+        db.execute("SELECT set_config('lock_timeout',%s,false)", (str(int(self.timeout_seconds * 1000)),))
+        db.execute("SET synchronous_commit=on")
+        return db
+
+    def assert_principal(self, owner):
+        self.assert_available()
+        if owner != self.principal_id:
+            raise PermissionError("authenticated PostgreSQL principal mismatch")
+
+    def assert_available(self):
+        if self.recovery_gate.exists():
+            raise RuntimeError("native authority recovery is incomplete; quiesced administrator restore required")
+        from .authority_migration import read_selection
+        choice = read_selection(self.configured_root)
+        matches = (choice.get("backend") == "postgres" and choice.get("tenant_id") == self.tenant_id
+                   and choice.get("principal_id") == self.principal_id)
+        if matches and self._selection_revision is None:
+            self._selection_revision = choice["revision"]
+        elif self._selection_revision is not None and (not matches or choice["revision"] != self._selection_revision):
+            raise RuntimeError("native authority selection changed; reopen the configured Control Plane")
+
+    def schema(self, namespace):
+        if namespace not in CONTROL_PLANE_NAMESPACES:
+            raise ValueError("unknown Control Plane namespace")
+        digest = hashlib.sha256(self.tenant_id.encode()).hexdigest()[:24]
+        return "sentra_" + digest + "_" + namespace
+
+    def lock_key(self, namespace):
+        digest = hashlib.sha256((self.tenant_id + "\x00" + namespace).encode()).digest()[:8]
+        return int.from_bytes(digest, "big", signed=True)
+
+    def path_for(self, namespace):
+        self.schema(namespace)
+        return None
+
+    def connect(self, namespace):
+        self.assert_available()
+        schema = self.schema(namespace)
+        with self._mutex:
+            if namespace not in self._ready:
+                self.require_membership()
+                with self._connect_raw() as db:
+                    with db.transaction():
+                        db.execute("SELECT pg_advisory_xact_lock(%s)", (self.lock_key(namespace),))
+                        if self.member_role == "reader":
+                            state = db.execute("SELECT schema_version,tenant_id FROM " + _identifier(schema) + "._sentra_namespace WHERE singleton=1").fetchone()
+                            if state is None or state["schema_version"] != 1 or state["tenant_id"] != self.tenant_id:
+                                raise PermissionError("read-only tenant namespace is not initialized")
+                            self._ready.add(namespace)
+                            return PostgresConnection(self, namespace)
+                        self.require_membership(write=True)
+                        db.execute("CREATE SCHEMA IF NOT EXISTS " + _identifier(schema))
+                        db.execute("REVOKE ALL ON SCHEMA " + _identifier(schema) + " FROM PUBLIC")
+                        db.execute("CREATE TABLE IF NOT EXISTS " + _identifier(schema) + "._sentra_namespace(singleton BIGINT PRIMARY KEY CHECK(singleton=1),schema_version BIGINT NOT NULL,application_version BIGINT NOT NULL,tenant_id TEXT NOT NULL)")
+                        db.execute("INSERT INTO " + _identifier(schema) + "._sentra_namespace VALUES(1,1,0,%s) ON CONFLICT(singleton) DO NOTHING", (self.tenant_id,))
+                        state = db.execute("SELECT schema_version,tenant_id FROM " + _identifier(schema) + "._sentra_namespace WHERE singleton=1").fetchone()
+                        if state["schema_version"] > 1 or state["tenant_id"] != self.tenant_id:
+                            raise RuntimeError("PostgreSQL namespace version or tenant mismatch")
+                        db.execute("CREATE TABLE IF NOT EXISTS " + _identifier(schema) + "._sentra_migrations(digest TEXT PRIMARY KEY,applied_at DOUBLE PRECISION NOT NULL,compiler_version BIGINT NOT NULL)")
+                self._ready.add(namespace)
+        return PostgresConnection(self, namespace)
+
+    def describe(self):
+        return {"backend": "postgres", "configured": True, "tenant_id": self.tenant_id, "principal_id": self.principal_id,
+                "namespaces": sorted(CONTROL_PLANE_NAMESPACES), "schema_version": 1, "native_transactions": True,
+                "fencing": "namespace-advisory-lock+monotonic-lease-fences", "owner_rls": True,
+                "synchronous_commit": "on", "retention_limitations": sorted(self.retention_limitations)}
+
+    @staticmethod
+    def provision(dsn, *, tenant_id, principal_id, role="operator", runtime_role=None):
+        """Administrator-only enrollment, never reachable from shell/browser data."""
+        _scope(tenant_id, "tenant_id"); _scope(principal_id, "principal_id")
+        if role not in {"operator", "administrator", "reader"}:
+            raise ValueError("invalid tenant member role")
+        try:
+            import psycopg
+        except ImportError as exc:
+            raise PostgresUnavailable("PostgreSQL provisioning requires psycopg 3") from exc
+        with psycopg.connect(dsn) as db:
+            db.execute("CREATE SCHEMA IF NOT EXISTS sentra_admin")
+            db.execute("REVOKE ALL ON SCHEMA sentra_admin FROM PUBLIC")
+            db.execute("CREATE TABLE IF NOT EXISTS sentra_admin.memberships(tenant_id TEXT NOT NULL,principal_id TEXT NOT NULL,role TEXT NOT NULL,revoked BOOLEAN NOT NULL DEFAULT false,created_at DOUBLE PRECISION NOT NULL,PRIMARY KEY(tenant_id,principal_id))")
+            db.execute("CREATE TABLE IF NOT EXISTS sentra_admin.migrations(migration_id TEXT PRIMARY KEY,tenant_id TEXT NOT NULL,principal_id TEXT NOT NULL,state TEXT NOT NULL,source_digest TEXT NOT NULL,backup_path TEXT NOT NULL,created_at DOUBLE PRECISION NOT NULL)")
+            db.execute("INSERT INTO sentra_admin.memberships VALUES(%s,%s,%s,false,%s) ON CONFLICT(tenant_id,principal_id) DO UPDATE SET role=excluded.role,revoked=false", (tenant_id, principal_id, role, time.time()))
+            if runtime_role:
+                quoted = _identifier(runtime_role)
+                db.execute("GRANT USAGE ON SCHEMA sentra_admin TO " + quoted)
+                db.execute("GRANT SELECT ON sentra_admin.memberships TO " + quoted)
+                db.execute("GRANT UPDATE(revoked) ON sentra_admin.memberships TO " + quoted)
+                db.execute("GRANT SELECT,INSERT,UPDATE ON sentra_admin.migrations TO " + quoted)
+                database = db.execute("SELECT current_database()").fetchone()[0]
+                db.execute("GRANT CREATE ON DATABASE " + _identifier(database) + " TO " + quoted)
+        return {"tenant_id": tenant_id, "principal_id": principal_id, "role": role, "enrolled": True, "grant_created": False}
+
+    def revoke_member(self, principal_id):
+        if self.member_role != "administrator":
+            raise PermissionError("tenant administrator required")
+        self.require_membership(write=True,administrator=True)
+        with self._connect_raw() as db:
+            with db.transaction():
+                self.lock_administrator(db)
+                db.execute("UPDATE sentra_admin.memberships SET revoked=true WHERE tenant_id=%s AND principal_id=%s", (self.tenant_id, principal_id))
+        return {"principal_id": principal_id, "revoked": True}
+
+    def lock_administrator(self, db):
+        member = db.execute("SELECT role FROM sentra_admin.memberships WHERE tenant_id=%s AND principal_id=%s AND revoked=false FOR SHARE",
+                            (self.tenant_id,self.principal_id)).fetchone()
+        if member is None or member["role"] != "administrator":
+            raise PermissionError("current tenant administrator required")
+
+    def require_membership(self, *, write=False, maintenance=False, administrator=False):
+        if not maintenance:
+            self.assert_available()
+        with self._connect_raw() as db:
+            member = db.execute("SELECT role FROM sentra_admin.memberships WHERE tenant_id=%s AND principal_id=%s AND revoked=false", (self.tenant_id, self.principal_id)).fetchone()
+        if member is None or write and member["role"] == "reader" or administrator and member["role"] != "administrator":
+            raise PermissionError("tenant membership revoked or read-only")
+        return member["role"]
+
+    def backup(self, directory, *, quiesced=False, file_roots=None, recovery_key=None):
+        """Consistent encrypted native snapshot; no pg_dump shell/DSN exposure."""
+        from .authority_snapshot import SnapshotCodec, capture_files, collect_keys
+        if self.member_role != "administrator" or quiesced is not True:
+            raise PermissionError("quiesced tenant administrator backup required")
+        self.require_membership(administrator=True)
+        target = Path(directory).resolve()
+        target.mkdir(parents=True, exist_ok=False)
+        codec = SnapshotCodec(target, recovery_key=recovery_key, create=True)
+        keys = {}
+        expected_artifacts = {}
+        roots = {"tenant": self.tenant_root} if file_roots is None else file_roots
+        manifest = {"version": 2, "backend": "postgres", "tenant_id": self.tenant_id, "principal_id": self.principal_id, "created_at": time.time(), "tables": []}
+        try:
+            with self._connect_raw() as db:
+                with db.transaction():
+                    db.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                    members = db.execute("SELECT principal_id,role,revoked FROM sentra_admin.memberships WHERE tenant_id=%s ORDER BY principal_id FOR SHARE", (self.tenant_id,)).fetchall()
+                    if not any(m["principal_id"] == self.principal_id and m["role"] == "administrator" and not m["revoked"] for m in members):
+                        raise PermissionError("tenant administrator was revoked before backup")
+                    manifest["memberships"] = members
+                    db.execute("SELECT set_config('sentra.principal_id',%s,true)", (self.principal_id,))
+                    for namespace in sorted(CONTROL_PLANE_NAMESPACES):
+                        db.execute("SELECT pg_advisory_xact_lock(%s)", (self.lock_key(namespace),))
+                    for namespace in sorted(CONTROL_PLANE_NAMESPACES):
+                        schema = self.schema(namespace)
+                        tables = db.execute("SELECT table_name FROM information_schema.tables WHERE table_schema=%s AND table_type='BASE TABLE' ORDER BY table_name", (schema,)).fetchall()
+                        for table in tables:
+                            name = table["table_name"]
+                            columns = db.execute("SELECT column_name,data_type,is_nullable,column_default,is_identity FROM information_schema.columns WHERE table_schema=%s AND table_name=%s ORDER BY ordinal_position", (schema, name)).fetchall()
+                            principals = [m["principal_id"] for m in members] if any(c["column_name"] == "owner" for c in columns) else [self.principal_id]
+                            chunks = []
+                            index = 0
+                            for principal in principals:
+                                db.execute("SELECT set_config('sentra.principal_id',%s,true)", (principal,))
+                                cursor = db.execute("SELECT * FROM " + _identifier(schema) + "." + _identifier(name))
+                                while True:
+                                    rows = cursor.fetchmany(100)
+                                    if not rows:
+                                        break
+                                    data = [{k: ({"__sentra_bytea__": bytes(v).hex()} if isinstance(v, (bytes, memoryview)) else v) for k, v in row.items()} for row in rows]
+                                    filename = namespace + "-" + name + "-" + str(index) + ".protected"
+                                    collect_keys(rows, keys)
+                                    if namespace == "durable" and name == "artifacts":
+                                        for row in rows:
+                                            artifact = Path(row["path"]).resolve(strict=True)
+                                            if not any(artifact.is_relative_to(Path(p).resolve()) for p in roots.values()):
+                                                raise PermissionError("artifact outside archive roots; supply its explicit trusted root")
+                                            expected_artifacts[str(artifact)] = (row["sha256"],row["size_bytes"])
+                                    encoded = codec.encode(data, filename)
+                                    (target / filename).write_bytes(encoded)
+                                    chunks.append({"file": filename, "sha256": hashlib.sha256(encoded).hexdigest(), "rows": len(rows), "principal_id": principal})
+                                    index += 1
+                            manifest["tables"].append({"namespace": namespace, "table": name, "columns": columns, "chunks": chunks})
+                    manifest["files"] = capture_files(codec, roots, keys)
+                    captured = {str(Path(manifest["files"]["roots"][item["root"]]) / item["path"]):(item["sha256"],item["bytes"])
+                                for item in manifest["files"]["files"]}
+                    if any(captured.get(path) != identity for path,identity in expected_artifacts.items()):
+                        raise ValueError("registered artifact bytes do not match native authority snapshot")
+                    key_bytes = codec.encode(keys, "os-key-references")
+                    (target / "os-key-references.sealed").write_bytes(key_bytes)
+                    manifest["key_references_sha256"] = hashlib.sha256(key_bytes).hexdigest()
+            encoded = codec.encode(manifest, "manifest")
+            (target / "manifest.protected").write_bytes(encoded)
+            return {"directory": str(target), "manifest_sha256": hashlib.sha256(encoded).hexdigest(), "tables": len(manifest["tables"]), "encrypted": True,
+                    "artifact_files_included": True, "file_count": len(manifest["files"]["files"]),
+                    "recovery_key_wrapped": recovery_key is not None,
+                    "dpapi_original_profile_required": manifest["files"]["dpapi_original_profile_required"]}
+        except BaseException:
+            # Keep partial protected output for diagnosis; never advertise it as backup.
+            raise
+
+    def restore(self, directory, *, manifest_sha256, quiesced=False, file_roots=None, recovery_key=None):
+        """Restore rows atomically into already initialized compatible schemas.
+
+        Backups retain native columns/constraints in the active schema. A restore
+        invalidates leases and quarantines operations whose effects were in flight.
+        Files and key references are restored under a persistent recovery gate.
+        Existing DPAPI bytes require their original profile to preserve hashes.
+        """
+        from sentra_core.conversations import _decode
+        from .authority_snapshot import SnapshotCodec, stage_files, publish_files, restore_keys
+        if quiesced is not True or self.member_role != "administrator":
+            raise PermissionError("quiesced tenant administrator restore required")
+        self.require_membership(write=True, maintenance=True, administrator=True)
+        root = Path(directory).resolve(strict=True)
+        encoded = (root / "manifest.protected").read_bytes()
+        if hashlib.sha256(encoded).hexdigest() != manifest_sha256:
+            raise ValueError("backup manifest digest mismatch")
+        codec = SnapshotCodec(root, recovery_key=recovery_key) if (root / "archive-key.json").exists() else None
+        manifest = codec.decode(encoded, "manifest") if codec else _decode(encoded.decode())
+        if manifest.get("version") not in {1,2} or (manifest.get("tenant_id"), manifest.get("principal_id")) != (self.tenant_id, self.principal_id):
+            raise PermissionError("backup belongs to another tenant/principal")
+        staged = []
+        if manifest["version"] == 2:
+            # Require original paths: authoritative artifact references retain hashes/paths.
+            roots = {"tenant": self.tenant_root} if file_roots is None else file_roots
+            if {k:str(Path(p).resolve()) for k,p in roots.items()} != manifest["files"]["roots"]:
+                raise PermissionError("file relocation requires an explicit artifact-reference migration")
+            key_bytes = (root / "os-key-references.sealed").read_bytes()
+            if hashlib.sha256(key_bytes).hexdigest() != manifest["key_references_sha256"]:
+                raise ValueError("OS key-reference archive digest mismatch")
+            keys = codec.decode(key_bytes, "os-key-references")
+            staged = stage_files(codec, manifest["files"], roots)
+        with self._connect_raw() as db:
+            with db.transaction():
+                self.lock_administrator(db)
+                db.execute("SELECT set_config('sentra.principal_id',%s,true)", (self.principal_id,))
+                for namespace in sorted(CONTROL_PLANE_NAMESPACES):
+                    db.execute("SELECT pg_advisory_xact_lock(%s)", (self.lock_key(namespace),))
+                tables = []
+                for item in manifest["tables"]:
+                    schema, table = self.schema(item["namespace"]), item["table"]
+                    _identifier(table)
+                    current = db.execute("SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=%s AND table_name=%s ORDER BY ordinal_position", (schema, table)).fetchall()
+                    if [(c["column_name"], c["data_type"]) for c in current] != [(c["column_name"], c["data_type"]) for c in item["columns"]]:
+                        raise ValueError("backup schema requires its compatible application version")
+                    tables.append(_identifier(schema) + "." + _identifier(table))
+                members = db.execute("SELECT principal_id,role,revoked FROM sentra_admin.memberships WHERE tenant_id=%s ORDER BY principal_id FOR SHARE", (self.tenant_id,)).fetchall()
+                if members != manifest.get("memberships"):
+                    raise PermissionError("tenant membership changed; restore to a separate recovery tenant")
+                if manifest["version"] == 2:
+                    self.tenant_root.mkdir(parents=True, exist_ok=True)
+                    if self.recovery_gate.exists():
+                        gate = json.loads(self.recovery_gate.read_text(encoding="utf-8"))
+                        if gate.get("manifest_sha256") != manifest_sha256:
+                            raise PermissionError("another authority recovery is already incomplete")
+                    else:
+                        fd = os.open(self.recovery_gate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                        with os.fdopen(fd,"w",encoding="utf-8") as stream:
+                            json.dump({"manifest_sha256": manifest_sha256,"state":"RECOVERING"},stream)
+                            stream.flush(); os.fsync(stream.fileno())
+                    restore_keys(keys)
+                if tables:
+                    db.execute("TRUNCATE " + ",".join(tables) + " RESTART IDENTITY CASCADE")
+                db.execute("SET CONSTRAINTS ALL DEFERRED")
+                # Schema foreign keys are recreated DEFERRABLE by the compiler.
+                for item in manifest["tables"]:
+                    names = [c["column_name"] for c in item["columns"]]
+                    target = _identifier(self.schema(item["namespace"])) + "." + _identifier(item["table"])
+                    sql = "INSERT INTO " + target + "(" + ",".join(_identifier(n) for n in names) + ") VALUES(" + ",".join("%s" for _ in names) + ")"
+                    for chunk in item["chunks"]:
+                        if chunk["principal_id"] not in {member["principal_id"] for member in members}:
+                            raise PermissionError("backup chunk principal outside tenant")
+                        db.execute("SELECT set_config('sentra.principal_id',%s,true)", (chunk["principal_id"],))
+                        filename = chunk["file"]
+                        if Path(filename).name != filename:
+                            raise ValueError("invalid backup chunk path")
+                        raw = (root / filename).read_bytes()
+                        if hashlib.sha256(raw).hexdigest() != chunk["sha256"]:
+                            raise ValueError("backup chunk digest mismatch")
+                        rows = codec.decode(raw, filename) if codec else _decode(raw.decode())
+                        for row in rows:
+                            values = [bytes.fromhex(v["__sentra_bytea__"]) if isinstance(v, dict) and set(v) == {"__sentra_bytea__"} else v for v in (row[n] for n in names)]
+                            db.execute(sql, values)
+                    for column in item["columns"]:
+                        if column["is_identity"] == "YES":
+                            sequence = db.execute("SELECT pg_get_serial_sequence(%s,%s) AS seq", (self.schema(item["namespace"]) + "." + item["table"], column["column_name"])).fetchone()["seq"]
+                            db.execute("SELECT setval(%s::regclass,COALESCE((SELECT MAX(" + _identifier(column["column_name"]) + ") FROM " + target + "),1),EXISTS(SELECT 1 FROM " + target + "))", (sequence,))
+                durable = _identifier(self.schema("durable"))
+                for member in members:
+                    db.execute("SELECT set_config('sentra.principal_id',%s,true)", (member["principal_id"],))
+                    db.execute("UPDATE " + durable + ".operations SET state='UNCERTAIN' WHERE state IN ('STARTING','RUNNING','WAITING_EXTERNAL','CANCEL_REQUESTED')")
+                    db.execute("UPDATE " + durable + ".leases SET lease_until=0")
+                    db.execute("UPDATE " + durable + ".runs SET state='RECOVERING' WHERE state IN ('RUNNING','PAUSED')")
+                db.execute("UPDATE " + durable + ".lease_fences SET fencing_token=fencing_token+1")
+        if manifest["version"] == 2:
+            publish_files(staged)
+            self.recovery_gate.unlink()
+        return {"restored": True, "effects_replayed": False, "state": "RECOVERING", "artifact_files_restored": manifest["version"] == 2,
+                "artifacts_require_separate_restore": manifest["version"] == 1}

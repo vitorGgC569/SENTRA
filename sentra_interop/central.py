@@ -23,6 +23,20 @@ from .central_gate import DurableInteropGate, PinnedCentralPolicy
 BLOCKED_CODE = "MISSING_ATOMIC_INTENT_RESERVATION_AND_EFFECT_FENCE"
 
 
+def is_interop_observation(request, kind):
+    """Host-reviewed protocol reads, never peer annotations or renderer flags."""
+    reads={"openhands":{"openhands:health"},"acp":{"acp:events","acp:state","acp:list"},
+           "a2a":{"a2a:discover","a2a:get","a2a:events","a2a:artifact","a2a:extended_card"},
+           "mcp":{"mcp:list","mcp:resources_list","mcp:templates_list","mcp:resource_read",
+                  "mcp:prompts_list","mcp:prompt_read","mcp:notifications"},
+           "channels":{"channel:receipt","channel:inbox"},
+           "acp_registry":{"acp:catalog","acp:plan","acp:installed"},
+           "terminal":{"terminal:read"},
+           "workflow-provider":{"workflow:observe","workflow:output","workflow:advance","workflow:resume","activepieces:observe","activepieces:artifact","activepieces:catalog","activepieces:trigger_reconcile"}}
+    from sentra_runtime.observations import is_observation
+    return request.capability_id in reads.get(kind,set()) or is_observation(request,kind)
+
+
 class CentralInteropBlocked(PermissionError):
     """No external execution is allowed without the SENTRA durable authority."""
 
@@ -75,7 +89,7 @@ class CentralInteropAdapter:
                           tuple(c for c in self.machine.capabilities if c.capability_id in selected))
         from sentra_runtime.observations import is_observation
         authority = CentralDurableIntentAuthority(self.control.durable, release_on_terminal=True,budgets=self.control.budgets,
-            observation_predicate=lambda request:is_observation(request,self.machine.kind))
+            observation_predicate=lambda request:is_interop_observation(request,self.machine.kind))
         policy = PinnedCentralPolicy(self.decision, constraints)
         return DurableInteropGate(machine, policy, authority=authority,
                                   run_id=self.run_id, owner=self.owner,
@@ -92,7 +106,7 @@ class CentralInteropAdapter:
         if not isinstance(self.policy,BudgetedMachinePolicy):
             from sentra_runtime.observations import is_observation
             self.policy=BudgetedMachinePolicy(self.policy,control=self.control,owner=self.owner,
-                observation_predicate=lambda request:is_observation(request,self.machine.kind))
+                observation_predicate=lambda request:is_interop_observation(request,self.machine.kind))
         if constraints:
             self._provider_constraints[capability_id] = dict(constraints)
         self._transport_gate = self.protocol_gate(constraints=self._provider_constraints)

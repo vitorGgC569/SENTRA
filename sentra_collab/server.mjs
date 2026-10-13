@@ -9,6 +9,7 @@ import { PrecommitGate, snapshotOf } from "./precommit.mjs";
 import * as Y from "yjs";
 import {applyAwarenessUpdate} from "y-protocols/awareness";
 import {readAwarenessFrame} from "./awareness_guard.mjs";
+import {documentScope,initializeDocument,sanitizeDocumentAwareness} from './document_policy.mjs';
 import { AccessGate, workspaceFromDocument,
   sanitizeAwareness, MAX_SNAPSHOT_BYTES, DOC_PREFIX } from "./policy.mjs";
 const deny = () => { throw Error("collaboration-denied"); };
@@ -27,6 +28,8 @@ export function createCollabServer({
   const awarenessOwners = new Map();
   const check = async (context, documentName, action = "read") => {
     if (!context || context.workspaceId !== workspaceFromDocument(documentName)) deny();
+    const scope=documentScope(documentName);
+    if(scope&&scope.documentId!==context.documentId)deny();
     return gate.authorize(context,action);
   };
   const precommit=new PrecommitGate({authorize:check,commitSnapshot});
@@ -52,6 +55,16 @@ export function createCollabServer({
       let authenticated=false;
       try {
         const context = await gate.authenticate({token,documentName});
+        const scope=documentScope(documentName);
+        if(scope){
+          const stored=await loadSnapshot({...scope,context});
+          const recovery=precommit.recoveryState(documentName);
+          if(server.hocuspocus.documents.has(documentName) &&
+             (recovery.quarantined || (recovery.revision!==null&&recovery.revision!==stored?.revision))){
+            server.hocuspocus.closeConnections(documentName);
+            deny(); // reconnect loads a fresh document after old peers unload
+          }
+        }
         authenticated=true;
         admission.admit(socketId+":"+documentName,context,performance.now()-started);
         connectionConfig.readOnly = context.permission !== "write";
@@ -74,18 +87,23 @@ export function createCollabServer({
     async onLoadDocument({documentName,context}) {
       await check(context,documentName,"read");
       const workspaceId = workspaceFromDocument(documentName);
-      const stored = await loadSnapshot({workspaceId});
+      const stored = await loadSnapshot({workspaceId,context,...(documentScope(documentName)||{})});
       if (!stored || !Number.isSafeInteger(stored.revision) || stored.revision < 0 ||
           (stored.snapshot !== null && !(stored.snapshot instanceof Uint8Array))) deny();
       if (stored.snapshot?.byteLength > MAX_SNAPSHOT_BYTES) deny();
       const doc=new Y.Doc();
-      for (const name of ["layout","nodes","notes"]) doc.getMap(name);
+      initializeDocument(doc,Y,documentName);
       if (stored.snapshot) Y.applyUpdate(doc,stored.snapshot);
+      else if(documentScope(documentName)){
+        if(!stored.document)deny();
+        doc.getText('content').insert(0,stored.document.content);
+        for(const key of ['title','format','language'])doc.getMap('metadata').set(key,stored.document[key]);
+      }
       documentSnapshot(doc);
       let revision=stored.revision;
       // Production enables an explicit compatible migration of legacy strings.
       // Commit under the authenticated writer before publishing the new structs.
-      if(migrateNotes&&context.permission==='write'){
+      if(!documentScope(documentName)&&migrateNotes&&context.permission==='write'){
         let changed=false;const notes=doc.getMap('notes');
         doc.transact(()=>{
           for(const [id,value] of notes.entries())if(typeof value==='string'){
@@ -99,13 +117,13 @@ export function createCollabServer({
           if(ack?.revision!==revision+1)deny();revision=ack.revision;
         }
       }
-      precommit.setRevision(documentName,revision);
+      precommit.setRevision(documentName,revision,{recovered:true});
       return doc;
     },
     async afterLoadDocument({document,documentName,context}) {
       await check(context,documentName,"read");
       // Hocuspocus owns a separate Y.Doc; materialize root maps on that Doc.
-      for (const name of ["layout", "nodes", "notes"]) document.getMap(name);
+      initializeDocument(document,Y,documentName);
       documentSnapshot(document);
     },
     async beforeHandleMessage({context,documentName,update,socketId,connection,document}) {
@@ -141,7 +159,8 @@ export function createCollabServer({
       await check(context,documentName);
       const session = sessions.get(socketId + ":" + documentName);
       if (!session || !connection) deny();
-      sanitizeAwareness(states,context,session.claim);
+      if(documentScope(documentName))sanitizeDocumentAwareness(states,context,session.claim);
+      else sanitizeAwareness(states,context,session.claim);
       for (const [clientId] of states) {
         const key = documentName + ":" + clientId;
         if (awarenessOwners.has(key) && awarenessOwners.get(key) !== socketId) deny();
@@ -191,6 +210,20 @@ export function createCollabServer({
     },
     revokeWorkspace(workspaceId) {
       server.hocuspocus.closeConnections(DOC_PREFIX + workspaceId);
+    },
+    revokeDocument(workspaceId,documentId) {
+      const name='sentra-document:v1:'+workspaceId+':'+documentId;
+      documentScope(name);server.hocuspocus.closeConnections(name);
+    },
+    async inspectDocumentRecovery(context) {
+      const name='sentra-document:v1:'+context?.workspaceId+':'+context?.documentId;
+      const scope=documentScope(name);
+      await check(context,name,'read');
+      const status=precommit.recoveryState(name);
+      const stored=await loadSnapshot({...scope,context});
+      return Object.freeze({quarantined:status.quarantined,revision:status.revision,
+        persistedRevision:stored.revision,restartRequired:status.quarantined||
+          (status.revision!==null&&status.revision!==stored.revision)});
     },
     async destroy() {
       clearInterval(heartbeat);

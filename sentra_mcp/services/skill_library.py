@@ -79,6 +79,7 @@ class SkillLibrary:
     def __init__(self, control):
         self.control = control
         self.store = control.store
+        self._learning_sources = {}
         with self._db() as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS skill_packages(
@@ -91,6 +92,11 @@ class SkillLibrary:
                     owner TEXT NOT NULL, work_item_id TEXT NOT NULL, agent_id TEXT NOT NULL,
                     workspace TEXT NOT NULL, package_id TEXT NOT NULL, created REAL NOT NULL,
                     PRIMARY KEY(owner,work_item_id,agent_id,package_id));
+                CREATE TABLE IF NOT EXISTS skill_learning_bindings(
+                    owner TEXT NOT NULL,workspace TEXT NOT NULL,package_id TEXT NOT NULL,
+                    suggestion_id TEXT NOT NULL,review_revision INTEGER NOT NULL,
+                    protected_manifest TEXT NOT NULL,
+                    PRIMARY KEY(owner,workspace,package_id));
             """)
 
     @contextmanager
@@ -285,6 +291,153 @@ class SkillLibrary:
                 raise ValueError("skill package revision changed or already revoked")
         return self.info(owner, workspace, package_id)
 
+    def versions(self, owner, workspace, name):
+        """All immutable revisions of one skill name, newest first.
+
+        Read-only version chain for the A21 update flow. Provenance
+        (source/git SHA) is reported, never executed or trusted.
+        """
+        if not _NAME.fullmatch(name or ""):
+            raise ValueError("skill name required for version history")
+        root = str(Path(workspace).resolve(strict=True))
+        with self._db() as db:
+            rows = db.execute("SELECT package_id,name,description,source,git_sha,revoked,revision,created "
+                              "FROM skill_packages WHERE owner=? AND workspace=? AND name=? "
+                              "ORDER BY created DESC LIMIT 64", (owner, root, name)).fetchall()
+        return {"name": name, "items": [dict(r) for r in rows], "creates_grants": False}
+
+    def latest(self, owner, workspace, name):
+        """Newest non-revoked revision of one skill name, if any."""
+        history = self.versions(owner, workspace, name)
+        for item in history["items"]:
+            if not item["revoked"]:
+                return {**item, "creates_grants": False}
+        raise FileNotFoundError("no active skill revision for this name")
+
+    def upgrade_activation(self, owner, workspace, name, new_package_id,
+                           work_item_id, agent_id):
+        return self._change_activation(owner, workspace, name, new_package_id,
+                                       work_item_id, agent_id, direction="upgrade")
+
+    def _change_activation(self, owner, workspace, name, new_package_id,
+                           work_item_id, agent_id, *, direction):
+        """Operator-reviewed upgrade of a WorkItem activation to a newer SHA.
+
+        Both revisions must share name, description scope and provenance
+        origin kind; the old activation is removed only after the new
+        revision is proven active and non-revoked. Never creates a grant.
+        """
+        self._work(owner, workspace, work_item_id, agent_id)
+        self._learning_guard(owner, workspace, new_package_id, work_item_id, agent_id)
+        if not _NAME.fullmatch(name or ""):
+            raise ValueError("skill name required for upgrade")
+        root = str(Path(workspace).resolve(strict=True))
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute(
+                "SELECT p.package_id,p.name,p.source,p.created FROM skill_package_activations a "
+                "JOIN skill_packages p ON a.owner=p.owner AND a.workspace=p.workspace "
+                "AND a.package_id=p.package_id "
+                "WHERE a.owner=? AND a.workspace=? AND a.work_item_id=? AND a.agent_id=? "
+                "AND p.name=? AND p.revoked=0",
+                (owner, root, work_item_id, agent_id, name)).fetchall()
+            if not current:
+                raise PermissionError("no active skill activation of this name for this WorkItem")
+            target = db.execute(
+                "SELECT package_id,name,source,revoked,created FROM skill_packages "
+                "WHERE owner=? AND workspace=? AND package_id=?",
+                (owner, root, new_package_id)).fetchone()
+            if not target or target["revoked"] or target["name"] != name:
+                raise PermissionError("target skill revision unavailable or name mismatch")
+            if any(row["package_id"] == new_package_id for row in current):
+                raise ValueError("WorkItem already activated on this skill revision")
+            if any(row["source"] != target["source"] for row in current):
+                raise PermissionError("skill upgrade provenance origin changed")
+            if direction == "upgrade" and any(target["created"] <= row["created"] for row in current):
+                raise PermissionError("upgrade requires a newer imported revision from the same origin")
+            if direction == "rollback" and any(target["created"] >= row["created"] for row in current):
+                raise PermissionError("rollback requires a prior imported revision from the same origin")
+            old_ids = sorted(row["package_id"] for row in current)
+            for old_id in old_ids:
+                db.execute("DELETE FROM skill_package_activations WHERE owner=? AND workspace=? "
+                           "AND work_item_id=? AND agent_id=? AND package_id=?",
+                           (owner, root, work_item_id, agent_id, old_id))
+            db.execute("INSERT INTO skill_package_activations VALUES(?,?,?,?,?,?)",
+                       (owner, work_item_id, agent_id, root, new_package_id, time.time()))
+        return {"name": name, "previous_sha256": old_ids, "package_id": new_package_id,
+                "work_item_id": work_item_id, "activated": True, "grants_created": False}
+
+    def review(self, owner, workspace, package_id):
+        """Operator review bundle: metadata + file inventory, no execution.
+
+        Returns the file list with per-file SHA256 and the SKILL.md
+        frontmatter so a host reviewer can approve an update/revoke/rollback
+        without disclosing content to a WorkItem. Never creates a grant.
+        """
+        with self._db() as db:
+            row = db.execute("SELECT package_id,name,description,source,git_sha,"
+                             "revoked,revision,created,protected_files FROM skill_packages "
+                             "WHERE owner=? AND workspace=? AND package_id=?",
+                             (owner, str(Path(workspace).resolve()), package_id)).fetchone()
+        if not row:
+            raise FileNotFoundError("skill package not owned by this workspace")
+        values = _decode(row["protected_files"])
+        if _digest(values) != package_id:
+            raise ValueError("skill snapshot integrity failed")
+        inventory = [{"path": path,
+                      "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                      "bytes": len(text.encode("utf-8"))}
+                     for path, text in sorted(values.items())]
+        return {"package_id": row["package_id"], "name": row["name"],
+                "description": row["description"], "source": row["source"],
+                "git_sha": row["git_sha"], "revoked": bool(row["revoked"]),
+                "revision": row["revision"], "created": row["created"],
+                "frontmatter": _metadata(values["SKILL.md"]),
+                "files": inventory, "executable": False,
+                "grants_created": False}
+
+    def rollback_activation(self, owner, workspace, name, previous_package_id,
+                            work_item_id, agent_id, *, approved=False):
+        """Operator-approved rollback of a WorkItem activation to a prior SHA.
+
+        The currently activated revision(s) of ``name`` are removed only after
+        the previous revision is proven present, non-revoked and same-origin.
+        REMOVED-equivalent state (revoked package) can never be resurrected:
+        a revoked previous revision refuses the rollback. Never creates a grant.
+        """
+        if approved is not True:
+            raise PermissionError("explicit operator approval required for skill rollback")
+        return self._change_activation(owner, workspace, name, previous_package_id,
+                                       work_item_id, agent_id, direction="rollback")
+
+    def _learning_guard(self, owner, workspace, package_id, work_item_id, agent_id):
+        """Revalidate learning review/expiry/provenance and existing Grants.
+
+        Host composition attaches the protected Selo source. Missing source
+        after restart is unavailable, never a bypass to ordinary activation.
+        """
+        root = str(Path(workspace).resolve(strict=True))
+        with self._db() as db:
+            row = db.execute("SELECT * FROM skill_learning_bindings WHERE owner=? AND workspace=? AND package_id=?",
+                             (owner, root, package_id)).fetchone()
+            package = db.execute("SELECT source FROM skill_packages WHERE owner=? AND workspace=? AND package_id=?",
+                                 (owner, root, package_id)).fetchone()
+        if row is None:
+            if package and package["source"].startswith("selo-learning:"):
+                raise PermissionError("learning provenance binding unavailable")
+            return
+        source = self._learning_sources.get((owner, root))
+        if source is None:
+            raise PermissionError("protected learning source not composed; activation/disclosure unavailable")
+        candidate = source.to_skill_files(owner, row["suggestion_id"])
+        manifest = _decode(row["protected_manifest"])
+        if (candidate["package_sha256"] != package_id or candidate.get("review_revision") != row["review_revision"]
+                or candidate["capability_manifest"] != manifest):
+            raise PermissionError("learning review/manifest changed; review again before activation")
+        for capability in manifest.get("capabilities", []):
+            self.control.authorization.require(owner, principal_type="agent", principal_id=agent_id,
+                capability=capability, scope_type="work_item", scope_id=work_item_id)
+
     def _work(self, owner, workspace, work_item_id, agent_id):
         work = self.control.governance.work_item_info(work_item_id, owner)
         run = self.control.durable.run_status(work["run_id"], owner)
@@ -297,6 +450,7 @@ class SkillLibrary:
 
     def activate(self, owner, workspace, package_id, work_item_id, agent_id):
         self._work(owner, workspace, work_item_id, agent_id)
+        self._learning_guard(owner, workspace, package_id, work_item_id, agent_id)
         root = str(Path(workspace).resolve())
         with self._db() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -326,6 +480,7 @@ class SkillLibrary:
                            work_item_id, agent_id):
         """Atomically switch a WorkItem to a different immutable Skill SHA."""
         self._work(owner, workspace, work_item_id, agent_id)
+        self._learning_guard(owner, workspace, new_package_id, work_item_id, agent_id)
         if old_package_id == new_package_id:
             raise ValueError("skill update requires a different immutable SHA")
         root = str(Path(workspace).resolve(strict=True))
@@ -369,6 +524,7 @@ class SkillLibrary:
         selected = next((r for r in rows if r["package_id"] == package_id), None)
         if not selected:
             raise PermissionError("skill revision not activated for this WorkItem")
+        self._learning_guard(owner, workspace, package_id, work_item_id, agent_id)
         values = _decode(selected["protected_files"])
         if _digest(values) != package_id:
             raise ValueError("skill snapshot integrity failed")

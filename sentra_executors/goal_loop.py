@@ -4,12 +4,14 @@ A loop step creates one durable WorkItem and NOTHING executes it automatically.
 External effects remain exclusively inside SENTRA's existing executor gate.
 """
 from __future__ import annotations
+from sentra_interop.workflow_storage import projection_db
 
 import hashlib
 import json
 import math
 import time
 from typing import Any
+from sentra_core.conversations import _encode
 
 from sentra_mcp.services.control_store import SQLiteControlPlaneStore
 
@@ -26,11 +28,11 @@ class ConversationGoalLoop:
     the existing central Goal carries only a digest label.
     """
 
-    def __init__(self, control: Any, conversations=None, *, clock=time.time):
+    def __init__(self, control: Any, conversations=None, *, clock=time.time, price_quote=None):
         self.control, self.conversations, self.clock = control, conversations, clock
         self.store = control.store
-        self.loop = BoundedGoalLoop(control, clock=clock)
-        with self.store.connect("execution_workspace") as db:
+        self.loop = HostPricedGoalLoop(control,price_quote=price_quote,clock=clock) if price_quote is not None else BoundedGoalLoop(control, clock=clock)
+        with projection_db(None,store=self.store) as db:
             db.execute("""CREATE TABLE IF NOT EXISTS conversation_goal_bindings(
                 owner TEXT NOT NULL, conversation_id TEXT NOT NULL,
                 run_id TEXT NOT NULL, goal_id TEXT NOT NULL,
@@ -53,7 +55,7 @@ class ConversationGoalLoop:
 
     def _binding(self, owner, conversation_id):
         self._conversation(owner, conversation_id)
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             row = db.execute("SELECT * FROM conversation_goal_bindings WHERE owner=? AND conversation_id=?",
                              (owner, conversation_id)).fetchone()
         if row:
@@ -72,7 +74,7 @@ class ConversationGoalLoop:
         run = self.control.durable.run_status(run_id, owner, include_details=False)
         if run.get("terminal"):
             raise GoalLoopConflict("goal Run is terminal")
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT * FROM conversation_goal_bindings WHERE owner=? AND conversation_id=?",
                              (owner, conversation_id)).fetchone()
@@ -160,7 +162,7 @@ class ConversationGoalLoop:
         except PermissionError as exc:
             return {**self.status(owner, conversation_id), "state": "BLOCKED", "blocked": True,
                     "reason": str(exc), "required_capability": "goal:iterate"}
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             db.execute("UPDATE conversation_goal_bindings SET loop_id=?,updated=? WHERE owner=? AND conversation_id=? AND goal_id=?",
                        (opened["loop_id"], self.clock(), owner, conversation_id, row["goal_id"]))
         return self.loop_status(owner, conversation_id)
@@ -191,9 +193,8 @@ class BoundedGoalLoop:
     def __init__(self, control: Any, *, clock=time.time):
         self.control = control
         self.clock = clock
-        self.store = getattr(control, "store", None) or SQLiteControlPlaneStore(
-            control.durable.state_root)
-        with self.store.connect("execution_workspace") as db:
+        self.store = control.store
+        with projection_db(None,store=self.store) as db:
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS goal_loop_pacing(
                     loop_id TEXT PRIMARY KEY,
@@ -215,9 +216,8 @@ class BoundedGoalLoop:
                     micro_usd INTEGER NOT NULL CHECK(micro_usd >= 0),
                     PRIMARY KEY(loop_id,step));
             """)
-            columns = {row["name"] for row in db.execute("PRAGMA table_info(goal_loop_pacing)")}
-            if "grant_id" not in columns:
-                db.execute("ALTER TABLE goal_loop_pacing ADD COLUMN grant_id TEXT")
+            from sentra_interop.workflow_storage import ensure_column
+            ensure_column(db,"goal_loop_pacing","grant_id","TEXT")
 
     def _check_grant(self, row: dict[str, Any]) -> dict[str, Any]:
         grant = self.control.authorization.require(
@@ -231,7 +231,7 @@ class BoundedGoalLoop:
         return grant
 
     def _scope(self, owner: str, loop_id: str) -> dict[str, Any]:
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             row = db.execute("SELECT * FROM goal_loop_pacing "
                              "WHERE owner=? AND loop_id=?",
                              (owner,loop_id)).fetchone()
@@ -264,7 +264,7 @@ class BoundedGoalLoop:
         candidate = dict(zip(("loop_id","owner","run_id","goal_id","principal_id",
                               "max_steps","max_cost_usd","deadline_at"),values))
         grant = self._check_grant(candidate)
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             db.execute("BEGIN IMMEDIATE")
             old = db.execute("SELECT * FROM goal_loop_pacing "
                              "WHERE loop_id=?", (ident,)).fetchone()
@@ -286,13 +286,20 @@ class BoundedGoalLoop:
 
     def status(self, owner: str, loop_id: str) -> dict[str, Any]:
         row = self._scope(owner,loop_id)
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             steps = [dict(r) for r in db.execute(
                 "SELECT * FROM goal_loop_steps WHERE loop_id=? ORDER BY step",
                 (loop_id,)).fetchall()]
             reserved = db.execute("SELECT COALESCE(SUM(micro_usd),0) FROM "
                                   "goal_loop_cost_reservations WHERE loop_id=?",
                                   (loop_id,)).fetchone()[0]
+        from sentra_core.conversations import _decode
+        for step in steps:
+            try:
+                step["objective"]=_decode(step["objective"])["objective"]
+            except Exception:
+                step["objective"]=None
+                step["legacy_objective_requires_protected_migration"]=True
         return {**row, "steps": steps, "reserved_cost_usd":reserved / 1_000_000, "automatic_execution": False,
                 "expired": self.clock() >= row["deadline_at"],
                 "remaining_steps": row["max_steps"]-len(steps)}
@@ -327,7 +334,7 @@ class BoundedGoalLoop:
         if goal["run_id"] != row["run_id"] or goal["state"] != "ACTIVE":
             raise GoalLoopConflict("goal is not active on this Run")
         digest = hashlib.sha256(objective.encode()).hexdigest()
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             db.execute("BEGIN IMMEDIATE")
             live=db.execute("SELECT state,deadline_at,max_cost_usd FROM goal_loop_pacing "
                             "WHERE owner=? AND loop_id=?",(owner,loop_id)).fetchone()
@@ -365,7 +372,7 @@ class BoundedGoalLoop:
                     raise GoalLoopConflict("goal loop cumulative cost cap reached")
                 key = f"goal-loop:{loop_id}:{step}"
                 db.execute("INSERT INTO goal_loop_steps VALUES(?,?,?,?,?,NULL)",
-                           (loop_id,step,key,digest,objective))
+                           (loop_id,step,key,digest,_encode({"objective":objective})))
                 db.execute("INSERT INTO goal_loop_cost_reservations VALUES(?,?,?)",
                            (loop_id,step,micro))
         # Cross-database crash gap is closed by GovernanceService.external_key
@@ -379,7 +386,7 @@ class BoundedGoalLoop:
         if (item["run_id"],item["goal_id"],item["objective"]) != (
                 row["run_id"],row["goal_id"],objective):
             raise GoalLoopConflict("Governance external key is bound to a different intent")
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("UPDATE goal_loop_steps SET work_item_id=? "
                        "WHERE loop_id=? AND step=? AND objective_digest=? "
@@ -392,7 +399,7 @@ class BoundedGoalLoop:
         if operator_approved is not True:
             raise PermissionError("human approval required")
         self._scope(owner,loop_id)
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             db.execute("UPDATE goal_loop_pacing SET state='STOPPED' "
                        "WHERE owner=? AND loop_id=?", (owner,loop_id))
         return self.status(owner,loop_id)
@@ -411,7 +418,7 @@ class HostPricedGoalLoop(BoundedGoalLoop):
             raise TypeError("trusted host pricing callback required")
         super().__init__(control, clock=clock)
         self.price_quote=price_quote
-        with self.store.connect("execution_workspace") as db:
+        with projection_db(None,store=self.store) as db:
             db.execute("""CREATE TABLE IF NOT EXISTS goal_loop_host_quotes(
                 loop_id TEXT NOT NULL, step INTEGER NOT NULL,
                 quote_id TEXT NOT NULL, price_revision TEXT NOT NULL,
@@ -439,33 +446,23 @@ class HostPricedGoalLoop(BoundedGoalLoop):
                 type(quote_id) is not str or not 8<=len(quote_id)<=128 or
                 type(revision) is not str or not 1<=len(revision)<=64):
             raise ValueError("invalid bounded host price quote")
-        # Reject a changed persisted quote BEFORE reconciling any WorkItem.
-        # Otherwise a failed quote comparison could bind the pending step.
-        with self.store.connect("execution_workspace") as db:
-            previous=db.execute(
-                "SELECT s.step,s.work_item_id,q.quote_id,q.price_revision,q.micro_usd "
-                "FROM goal_loop_steps s LEFT JOIN goal_loop_host_quotes q "
-                "ON s.loop_id=q.loop_id AND s.step=q.step "
-                "WHERE s.loop_id=? ORDER BY s.step DESC LIMIT 1",(loop_id,)).fetchone()
-            if previous and not previous["work_item_id"] and previous["quote_id"] is not None:
-                if (previous["quote_id"],previous["price_revision"],previous["micro_usd"]
-                        )!=(quote_id,revision,micro):
-                    raise GoalLoopConflict("durable host price quote changed")
-        # Identical replays require the same exact price; a new catalog
-        # revision cannot silently reprice a reserved pending step.
-        result=super().advance(owner,loop_id,objective=objective,
-            operator_approved=True,estimated_cost_usd=micro / 1_000_000)
-        with self.store.connect("execution_workspace") as db:
+        # Pin the host quote before the WorkItem admission crash gap.
+        objective_sha=hashlib.sha256(objective.encode()).hexdigest()
+        with projection_db(None,store=self.store) as db:
             db.execute("BEGIN IMMEDIATE")
-            existing=db.execute(
-                "SELECT quote_id,price_revision,micro_usd FROM goal_loop_host_quotes "
-                "WHERE loop_id=? AND step=?", (loop_id,result["step"])).fetchone()
-            if existing is not None and (
-                    existing["quote_id"],existing["price_revision"],existing["micro_usd"]
-                    )!=(quote_id,revision,micro):
-                raise GoalLoopConflict("durable host price quote changed")
+            previous=db.execute("SELECT step,work_item_id FROM goal_loop_steps WHERE loop_id=? ORDER BY step DESC LIMIT 1",(loop_id,)).fetchone()
+            step=previous["step"] if previous and not previous["work_item_id"] else previous["step"]+1 if previous else 1
+            from sentra_interop.workflow_storage import ensure_column
+            ensure_column(db,"goal_loop_host_quotes","objective_sha256","TEXT")
+            existing=db.execute("SELECT * FROM goal_loop_host_quotes WHERE loop_id=? AND step=?",(loop_id,step)).fetchone()
+            if existing and (existing["quote_id"],existing["price_revision"],existing["micro_usd"],existing["objective_sha256"])!=(quote_id,revision,micro,objective_sha):
+                raise GoalLoopConflict("durable host quote/objective changed")
             if existing is None:
-                db.execute("INSERT INTO goal_loop_host_quotes VALUES(?,?,?,?,?)",
-                           (loop_id,result["step"],quote_id,revision,micro))
+                db.execute("INSERT INTO goal_loop_host_quotes(loop_id,step,quote_id,price_revision,micro_usd,objective_sha256) VALUES(?,?,?,?,?,?)",
+                    (loop_id,step,quote_id,revision,micro,objective_sha))
+        result=super().advance(owner,loop_id,objective=objective,
+            operator_approved=True,estimated_cost_usd=micro/1_000_000)
+        if result["step"]!=step:
+            raise GoalLoopConflict("goal step changed concurrently; reconcile existing WorkItem")
         return {**result,"host_priced":True,"quote_id":quote_id,
                 "price_revision":revision,"reserved_cost_usd":micro/1_000_000}

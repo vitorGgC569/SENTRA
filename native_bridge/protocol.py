@@ -30,7 +30,7 @@ OPS_TO_EXTENSION = {"CREATE_CHAT", "SEND_MESSAGE", "WAIT_RESPONSE", "READ_RESPON
 # mensagem, nunca consome quota. É a forma segura de vigiar rate-limit.
 # DELETE_CHAT instrui a exclusão remota de conversas para manter a conta limpa.
 JOB_TYPES = {"CHAT_TASK", "CHAT_START", "CHAT_SEND", "CHAT_COLLECT", "CHAT_PEEK", "STATUS_PROBE", "DELETE_CHAT", "BROWSER_ACTION"}
-BROWSER_ACTIONS = {"navigate", "extract", "click", "type", "screenshot", "close"}
+BROWSER_ACTIONS = {"navigate", "extract", "click", "type", "screenshot", "close", "approval_status", "stream_snapshot", "attach_info", "model_catalog"}
 CHAT_PROVIDERS = {"chatgpt", "gemini"}
 GEMINI_MODELS = {"flash-lite", "flash", "pro"}
 
@@ -86,6 +86,7 @@ class ChatJob:
     created_at: float = field(default_factory=time.time)
     kind: str = "CHAT_TASK"
     images: List[str] = field(default_factory=list)
+    attachments: List[Dict[str, Any]] = field(default_factory=list)
     target_worker: str = ""
     browser_action: str = ""
     browser_args: Dict[str, Any] = field(default_factory=dict)
@@ -102,6 +103,21 @@ class ChatJob:
     requested_effort: Optional[str] = None
 
     def validate(self) -> None:
+        if not isinstance(self.attachments, list) or len(self.attachments) > 4:
+            raise ValueError("binary attachment set must hold 0..4 refs")
+        if self.attachments and (self.provider != "chatgpt" or self.dispatch_mode != "relay" or self.images):
+            raise ValueError("binary attachments require the real ChatGPT relay composer; no mixed/implicit external transport")
+        for ref in self.attachments:
+            if (not isinstance(ref, dict) or set(ref) != {"asset_id", "name", "mime", "bytes", "sha256"}
+                    or not re.fullmatch(r"web-asset-[0-9a-f]{32}", str(ref.get("asset_id", "")))
+                    or not re.fullmatch(r"sentra-[0-9a-f]{32}\.(png|jpg|pdf|txt)", str(ref.get("name", "")))
+                    or ref["mime"] not in {"image/png", "image/jpeg", "application/pdf", "text/plain"}
+                    or type(ref["bytes"]) is not int or not 1 <= ref["bytes"] <= (
+                        8 * 1024 * 1024 if ref["mime"].startswith("image/") else 20 * 1024 * 1024)
+                    or not re.fullmatch(r"[a-f0-9]{64}", str(ref.get("sha256", "")))):
+                raise ValueError("invalid scoped binary attachment descriptor")
+        if len({ref["asset_id"] for ref in self.attachments}) != len(self.attachments):
+            raise ValueError("duplicate attachment set member")
         if self.dispatch_mode not in {"relay", "external"}:
             raise ValueError("dispatch_mode must be relay or external")
         for name in ("requested_model", "requested_effort"):

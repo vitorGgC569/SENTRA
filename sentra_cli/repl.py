@@ -8,6 +8,8 @@ import sys
 from typing import Any
 
 from rich.console import Console
+from rich.align import Align
+from rich.markup import escape
 from rich.panel import Panel
 from rich.table import Table
 
@@ -46,44 +48,26 @@ class SentraREPL:
         return f"[dim]{effort} (Codex only; Web model does not use this setting)[/dim]"
 
     def print_banner(self) -> None:
-        health = self.agent.client.probe_health()
-        if self.agent.canvas.is_available:
-            maestri_status="[bold green]Native session[/bold green] · directed connections"
-        elif self.config.is_in_maestri:
-            terminal = (self.config.maestri_terminal_id or "")[:8]
-            maestri_status = (
-                f"[bold green]Connected[/bold green] terminal={terminal}"
-            )
-        else:
-            maestri_status = "[dim]Standalone[/dim]"
+        """Compact OpenCode-inspired landing screen; /status retains diagnostics."""
+        self.console.print()
+        self.console.print(Align.center("[bold bright_white]S E N T R A[/bold bright_white]"))
+        self.console.print(Align.center("[dim]Seu ambiente de execução e colaboração[/dim]"))
+        self.console.print()
+        # Provider readiness stays discoverable from /status and /doctor,
+        # without crowding the interactive composer with a diagnostics table.
 
-        table = Table(show_header=False, box=None, padding=(0, 1))
-        table.add_row("[bold cyan]Workspace:[/bold cyan]", str(self.config.workspace))
-        table.add_row("[bold cyan]Model:[/bold cyan]", self.config.model)
-        table.add_row("[bold cyan]Reasoning:[/bold cyan]", self._effort_label())
-        table.add_row("[bold cyan]Conversation:[/bold cyan]", self.agent.session_id)
-        if self.config.model.startswith("sentra/codex/"):
-            from .codex_native import authenticated
-            table.add_row("[bold cyan]Codex:[/bold cyan]",
-                          "[green]Authenticated[/green]" if authenticated()
-                          else "[red]Sign-in required[/red]")
-            table.add_row("[bold cyan]Web Gateway:[/bold cyan]", "[dim]Optional for Codex[/dim]")
-        else:
-            table.add_row("[bold cyan]SENTRA Gateway:[/bold cyan]",
-                          self._gateway_label(health))
-        table.add_row(
-            "[bold cyan]SENTRA Canvas:[/bold cyan]" if self.agent.canvas.is_available else "[bold cyan]Maestri:[/bold cyan]",
-            maestri_status,
-        )
-
-        self.console.print(
-            Panel(
-                table,
-                title="[bold yellow]SENTRA CLI v1.1[/bold yellow]",
-                subtitle="Type a request or /help",
-                border_style="cyan",
-            )
-        )
+    def _print_composer(self) -> None:
+        model = str(self.config.model or "nenhum modelo selecionado")
+        provider = ("Codex" if model.startswith("sentra/codex/") else
+                    "ChatGPT Web" if model.startswith("sentra/chatgpt-web/") else
+                    "SENTRA Gateway")
+        effort = (self.config.web_reasoning_effort or "padrão") if provider == "ChatGPT Web" else self.config.reasoning_effort
+        safe_model = escape(model)
+        self.console.print()
+        self.console.print("[bold bright_blue]▏[/bold bright_blue] [dim]Pergunte qualquer coisa...[/dim]")
+        self.console.print("[bold bright_blue]▏[/bold bright_blue] [bright_blue]Build[/bright_blue]  ·  "
+                           + safe_model + "  ·  " + provider + "  ·  [yellow]" + str(effort) + "[/yellow]")
+        self.console.print("[dim]~[/dim]  [dim]/model[/dim] modelos   [dim]/help[/dim] comandos")
 
     def _print_gateway_status(self) -> None:
         status = self.agent.client.gateway_status()
@@ -156,6 +140,16 @@ class SentraREPL:
             self.console.print("[dim]Codex validates this explicit model on the next turn.[/dim]")
         self.console.print(f"Reasoning: {self._effort_label()}")
 
+    def _select_model_number(self, text: str, catalog: list[str]) -> bool:
+        """Never submit a numbered choice to the provider as prose."""
+        if not text.isascii() or not text.isdecimal() or len(text) > 4:
+            return False
+        index = int(text)
+        if not 1 <= index <= len(catalog):
+            return False
+        self._select_model(catalog[index - 1], catalog=catalog)
+        return True
+
     def _choose_model(self) -> None:
         models = self._print_models()
         if not models:
@@ -174,7 +168,7 @@ class SentraREPL:
                 or not 1 <= int(answer) <= len(models)):
             self.console.print("[yellow]Escolha inválida; modelo mantido.[/yellow]")
             return
-        self._select_model(models[int(answer) - 1], catalog=models)
+        self._select_model_number(answer, models)
 
     def _maestri_command(self, arg: str) -> None:
         if not self.agent.maestri.is_available:
@@ -325,6 +319,7 @@ class SentraREPL:
             rows = [
                 ("/status", "Gateway, providers, Maestri and Git status"),
                 ("/doctor", "Detailed Gateway and Maestri diagnostics"),
+                ("/doctor codex", "Codex CLI read-only version, login and uncertain-session status"),
                 ("/gateway start|status|stop", "Manage Web Model runtime"),
                 ("/models", "List models advertised by SENTRA Gateway"),
                 ("/model", "Abrir menu numerado para escolher um modelo disponível"),
@@ -353,6 +348,14 @@ class SentraREPL:
                 ("/resume <id>", "Open saved context without submitting a model request"),
                 ("/continue", "Continue the unfinished turn from its durable journal"),
                 ("/resolve <call> <done|not-run> <evidence>", "Record a verified decision for an uncertain call"),
+                ("/shell <action> [project]", "Shell bridge: home/space/dot/conversation via the authoritative route"),
+                ("/space list|get|create", "Spaces sharing the same agents and state (via shell bridge)"),
+                ("/dot list|create|update", "Dots via admission flow; prose is never a command"),
+                ("/conversation list|create|send", "Conversations dispatched to a Dot with receipts"),
+                ("/backup status [stage]", "Coordinated backup status (SQLite/Postgres/config/artifacts/keys)"),
+                ("/update status [stage]", "Staged product update status (apply on exit, ConPTY-safe)"),
+                ("/provider list", "Optional provider pins/SBOM/NOTICE inventory (read-only)"),
+                ("/doctor-export <text>", "Redacted diagnostics export preview (IP/URL/path/email/title/project)"),
                 ("/exit", "Close CLI"),
             ]
             for row in rows:
@@ -390,6 +393,29 @@ class SentraREPL:
                 git_status(self.config.workspace),
                 markup=False,
             )
+            return True
+
+        if cmd == "/doctor" and arg.lower() == "codex":
+            from .codex_native import find_cli, authenticated
+            import subprocess
+            executable = find_cli()
+            if executable is None:
+                self.console.print("[yellow]Codex CLI: não encontrado.[/yellow]")
+            else:
+                try:
+                    result = subprocess.run([str(executable), "--version"], capture_output=True,
+                                            timeout=5, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+                    version = (result.stdout.decode("utf-8", errors="replace").strip()
+                               if result.returncode == 0 else "versão indisponível")
+                except (OSError, subprocess.TimeoutExpired):
+                    version = "versão indisponível"
+                self.console.print("Codex CLI: " + escape(version[:90]))
+                self.console.print("Autenticação: " + ("disponível" if authenticated() else "não confirmada"))
+            pending = [call for call in self.agent.store.status(self.agent.session_id)["uncertain_calls"]
+                       if call.get("kind") == "provider"]
+            self.console.print("Chamadas de provedor incertas: " + str(len(pending)))
+            if pending:
+                self.console.print("[yellow]Não repetir essas chamadas; use /session para conferir o recibo.[/yellow]")
             return True
 
         if cmd == "/doctor":
@@ -453,6 +479,10 @@ class SentraREPL:
                 self._choose_model()
             elif arg.lower() == "list":
                 self._print_models()
+            elif arg.isascii() and arg.isdecimal():
+                catalog = list(dict.fromkeys(self.agent.client.list_models()))
+                if not self._select_model_number(arg, catalog):
+                    self.console.print("[yellow]Número de modelo fora do catálogo.[/yellow]")
             else:
                 self._select_model(arg)
             return True
@@ -551,7 +581,7 @@ class SentraREPL:
 
         if cmd == "/clear":
             self.agent.reset()
-            self.console.print("[green]Conversation context cleared.[/green]")
+            self.console.print("[green]Nova sessão aberta. A sessão anterior e seus recibos foram preservados.[/green]")
             return True
 
         if cmd in {"/goal", "/loop"}:
@@ -595,7 +625,110 @@ class SentraREPL:
             self._maestri_command(arg)
             return True
 
+        if cmd in {"/shell", "/space", "/dot", "/conversation", "/coordinate"}:
+            self._shell_command(cmd, arg)
+            return True
+
+        if cmd in {"/backup", "/restore", "/update", "/provider", "/doctor-export"}:
+            self._maintenance_command(cmd, arg)
+            return True
+
         return False
+
+    def _shell_command(self, cmd: str, arg: str) -> None:
+        """Shell bridge via the principal-composed route. No second authority."""
+        from .shell_bridge import ShellBridge
+        bridge = ShellBridge(self.config)
+        if not bridge.is_available:
+            self.console.print(
+                "[yellow]Shell bridge unavailable: start the local SENTRA Canvas "
+                "broker (SENTRA_CANVAS_PORT/SENTRA_CANVAS_BEARER) so CLI, chat, "
+                "Canvas and Desktop share the same state.[/yellow]"
+            )
+            return
+        parts = arg.strip().split(None, 1)
+        sub = (parts[0].lower() if parts else "")
+        rest = (parts[1] if len(parts) > 1 else "")
+        mapping = {
+            ("/shell", ""): "home",
+            ("/shell", "home"): "home",
+            ("/space", ""): "space_list",
+            ("/space", "list"): "space_list",
+            ("/space", "get"): "space_get",
+            ("/space", "create"): "space_create",
+            ("/dot", "list"): "dot_list",
+            ("/dot", "create"): "dot_create",
+            ("/dot", "update"): "dot_update",
+            ("/conversation", "list"): "conversation_list",
+            ("/conversation", "create"): "conversation_create",
+            ("/conversation", "send"): "message_send",
+            ("/coordinate", ""): "coordinate",
+        }
+        action = mapping.get((cmd, sub))
+        if cmd == '/coordinate':
+            action, rest = 'coordinate', arg.strip()
+        if action is None and cmd == "/shell" and sub:
+            action = sub if sub in {
+                "home", "space_list", "space_get", "dot_list",
+                "conversation_list", "message_list", "events",
+                "space_create", "dot_create", "dot_update",
+                "conversation_create", "message_send", "coordinate",
+                "turn_permission_list", "turn_permission_grant", "turn_permission_revoke",
+            } else None
+        if action is None:
+            self.console.print(
+                "[yellow]Usage: /shell home | /space list|get|create | "
+                "/dot list|create|update | /conversation list|create|send[/yellow]"
+            )
+            return
+        try:
+            if action == 'coordinate' and not rest.strip().startswith('{'):
+                raise ValueError('coordinate requires a structured JSON intent; prose does not authorize actions')
+            payload = json.loads(rest) if rest.strip().startswith('{') else {"project_id": rest.strip() or bridge.project_id}
+            if not isinstance(payload, dict): raise ValueError("shell command requires a JSON object")
+            project = payload.pop("project_id", bridge.project_id)
+            space = payload.pop("space_id", "")
+            conversation = payload.pop("conversation_id", "")
+            key = payload.pop("request_key", "")
+            if action in {'turn_permission_grant', 'turn_permission_revoke'} and not key:
+                raise ValueError('turn permission mutation requires a stable request_key')
+            if action == "message_send":
+                if not key: raise ValueError("message_send requires a stable request_key; uncertain sends are never repeated")
+                content, attachments = payload.pop("content", ""), payload.pop("attachments", [])
+                if payload: raise ValueError("unknown message_send fields")
+                result = bridge.send_turn(content, project_id=project, space_id=space,
+                    conversation_id=conversation, request_key=key, attachments=attachments)
+            else:
+                result = bridge.dispatch(action, project_id=project, space_id=space,
+                    conversation_id=conversation, request_key=key, extra=payload)
+        except (ValueError, PermissionError, RuntimeError) as exc:
+            self.console.print(f"[red]Shell bridge: {exc}[/red]")
+            return
+        self.console.print(json.dumps(result, ensure_ascii=False, indent=2), markup=False)
+
+    def _maintenance_command(self, cmd: str, arg: str) -> None:
+        """Vitra maintenance projections: read-only, fail-closed, no authority."""
+        from .maintenance import backup_status, doctor_preview, provider_inventory, update_status
+        if cmd == "/backup":
+            self.console.print(json.dumps(backup_status(arg.strip()), ensure_ascii=False, indent=2), markup=False)
+            return
+        if cmd == "/restore":
+            self.console.print(
+                "[yellow]Restore is an explicit owner-authorized offline operation; "
+                "this CLI only reports backup status. Use /backup status [stage].[/yellow]"
+            )
+            return
+        if cmd == "/update":
+            self.console.print(json.dumps(update_status(arg.strip()), ensure_ascii=False, indent=2), markup=False)
+            return
+        if cmd == "/provider":
+            self.console.print(json.dumps(provider_inventory(), ensure_ascii=False, indent=2), markup=False)
+            return
+        if cmd == "/doctor-export":
+            self.console.print(
+                json.dumps(doctor_preview({"note": arg}), ensure_ascii=False, indent=2), markup=False
+            )
+            return
 
     def on_tool_call(self, op: str, args_preview: str) -> None:
         preview = args_preview.replace("\n", " ")
@@ -622,6 +755,8 @@ class SentraREPL:
             )
 
     def run_one_shot(self, prompt: str) -> None:
+        from .shell_live_preview import LivePreviewWriter
+        preview = LivePreviewWriter()
         prompt_clean = prompt.strip()
         if prompt_clean.startswith("/"):
             if self.handle_slash_command(prompt_clean):
@@ -649,81 +784,174 @@ class SentraREPL:
                 )
                 return
 
+        def live_tool_call(operation, arguments_preview):
+            preview.activity("tool_call", operation)
+            self.on_tool_call(operation, arguments_preview)
+
+        def live_tool_result(result_preview):
+            preview.activity("tool_result")
+            self.on_tool_result(result_preview)
+
         for chunk in self.agent.step_stream(
             prompt,
-            on_tool_call=self.on_tool_call,
-            on_tool_result=self.on_tool_result,
+            on_tool_call=live_tool_call,
+            on_tool_result=live_tool_result,
         ):
+            preview.send(chunk)
             sys.stdout.write(chunk)
             sys.stdout.flush()
         sys.stdout.write("\n")
         sys.stdout.flush()
 
     def run_interactive(self) -> None:
-        self.print_banner()
+        from .terminal_ui import CenteredTerminalUI, geometry
+        import time
+        ui = CenteredTerminalUI()
+        turns: list[tuple[str, str]] = []
+        choosing: list[str] | None = None
+        if ui.enabled:
+            self.console.record = True
+        else:
+            self.print_banner()
+
+        def remember(role: str, content: str) -> None:
+            if not ui.enabled or not content.strip():
+                return
+            normalized = content.replace("\r", "").strip()
+            if role == "system":
+                # A table/JSON dump is for terminal scrollback, not the mini feed.
+                lines = [line.strip() for line in normalized.splitlines()
+                         if line.strip() and not line.strip().startswith(("┏", "┡", "└", "│", "┃"))]
+                normalized = (lines[0] if lines else "Comando concluído")
+                if len(lines) > 1:
+                    normalized += "  ·  saída detalhada acima"
+            turns.append((role, normalized[:420] if role == "system" else normalized[-2200:]))
+            del turns[:-12]
+
+        def flush_console() -> str:
+            if ui.enabled:
+                return self.console.export_text(clear=True)
+            return ""
+
+        def catalog() -> list[str]:
+            try:
+                return list(dict.fromkeys(self.agent.client.list_models()))
+            except (OSError, ValueError, RuntimeError, AttributeError) as exc:
+                remember("system", "Catálogo indisponível: " + type(exc).__name__)
+                return []
+
         while True:
             try:
                 self._print_job_notifications()
-                self.console.print(
-                    "\n[bold cyan]sentra>[/bold cyan] ",
-                    end="",
-                )
-                line = input()
+                remember("system", flush_console())
+                if ui.enabled:
+                    effort = ((self.config.web_reasoning_effort or "padrão")
+                              if self.config.model.startswith("sentra/chatgpt-web/")
+                              else self.config.reasoning_effort)
+                    line = ui.read(model=self.config.model, effort=effort, turns=turns,
+                                   choices=choosing)
+                else:
+                    self._print_composer()
+                    line = self.console.input("[bold bright_blue]▏[/bold bright_blue] ")
                 if not line.strip():
                     continue
-                line_clean = line.strip()
-
-                if line_clean.startswith("/"):
-                    if self.handle_slash_command(line_clean):
+                clean = line.strip()
+                if choosing is not None:
+                    if clean in {"0", "cancel", "q", "Q", "/cancel"}:
+                        choosing = None
+                        remember("system", "Seleção cancelada; modelo mantido.")
                         continue
-
-                if (
-                    self.agent.maestri.is_available
-                    and self.agent.wants_maestri_orchestration(line_clean)
-                ):
-                    self.console.print(
-                        self.agent.execute_directive("MAESTRI", "orchestrate|" + line_clean),
-                        markup=False,
-                    )
+                    if self._select_model_number(clean, choosing):
+                        choosing = None
+                        remember("system", flush_console() or "Modelo selecionado: " + self.config.model)
+                        continue
+                    if clean.startswith("/"):
+                        choosing = None  # An explicit command exits the picker.
+                    else:
+                        remember("system", "Digite o número do modelo ou 0 para cancelar.")
+                        continue
+                if ui.enabled and clean in {"/models", "/model", "/model list"}:
+                    choosing = catalog()
+                    if not choosing:
+                        choosing = None
+                        remember("system", "Nenhum modelo anunciado. Use /gateway status.")
+                    continue
+                if clean.startswith("/") and self.handle_slash_command(clean):
+                    remember("user", clean)
+                    remember("system", flush_console())
                     continue
 
-                if (
-                    line_clean.startswith("[[")
-                    and line_clean.endswith("]]")
-                ):
-                    match = DIRECTIVE_RE.fullmatch(line_clean)
+                if (self.agent.maestri.is_available
+                        and self.agent.wants_maestri_orchestration(clean)):
+                    self.console.print(self.agent.execute_directive("MAESTRI", "orchestrate|" + clean),
+                                       markup=False)
+                    remember("user", clean)
+                    remember("system", flush_console())
+                    continue
+
+                if clean.startswith("[[") and clean.endswith("]]"):
+                    match = DIRECTIVE_RE.fullmatch(clean)
                     if match:
-                        op = match.group(1)
-                        raw_args = match.group(2) or ""
-                        self.on_tool_call(op, raw_args[:120])
-                        self.console.print(
-                            self.agent.execute_directive(op, raw_args),
-                            markup=False,
-                        )
+                        op, args = match.group(1), match.group(2) or ""
+                        self.on_tool_call(op, args[:120])
+                        self.console.print(self.agent.execute_directive(op, args), markup=False)
+                        remember("user", clean)
+                        remember("system", flush_console())
                         continue
 
-                self.console.print()
-                for chunk in self.agent.step_stream(
-                    line,
-                    on_tool_call=self.on_tool_call,
-                    on_tool_result=self.on_tool_result,
-                ):
-                    sys.stdout.write(chunk)
-                    sys.stdout.flush()
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                reply: list[str] = []
+                last_draw = 0.0
+                try:
+                    if not ui.enabled:
+                        self.console.print()
+                    for chunk in self.agent.step_stream(line, on_tool_call=self.on_tool_call,
+                                                        on_tool_result=self.on_tool_result):
+                        reply.append(chunk)
+                        if ui.enabled:
+                            now = time.monotonic()
+                            if now - last_draw >= .07:
+                                view = turns + [("user", line), ("assistant", "".join(reply))]
+                                layout = geometry(*ui._limits(), has_history=True)
+                                ui._draw(layout, model=self.config.model, effort=effort,
+                                         turns=view, value="", cursor=0)
+                                last_draw = now
+                        else:
+                            sys.stdout.write(chunk)
+                            sys.stdout.flush()
+                    if not ui.enabled:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                    flush_console()
+                    remember("user", line)
+                    if self.agent.client.last_error:
+                        error = str(self.agent.client.last_error)[:130]
+                        remember("system", "Provedor falhou: " + error +
+                                 ". Verifique /doctor codex e /session; nenhuma chamada foi repetida.")
+                    else:
+                        remember("assistant", "".join(reply))
+                except Exception:
+                    # Preserve the user's draft and terminal state; the outer
+                    # handler prints a bounded error without a new provider call.
+                    flush_console()
+                    raise
             except KeyboardInterrupt:
-                self.console.print(
-                    "\n[yellow]Interrupted. Use /exit to close.[/yellow]"
-                )
+                self.console.print("\n[yellow]Interrompido. Use /exit para sair.[/yellow]")
+                remember("system", flush_console() or "Interrompido.")
             except EOFError:
-                self.console.print("\n[dim]Session closed.[/dim]")
+                self.console.print("\n[dim]Sessão encerrada.[/dim]")
                 break
             except Exception as exc:
-                self.console.print(
-                    f"\n[bold red]Unexpected error:[/] "
-                    f"{type(exc).__name__}: {exc}"
-                )
+                name = type(exc).__name__
+                if name == "UncertainCall":
+                    message = ("Sessão com chamada pendente de reconciliação. "
+                               "Use /session e /resolve somente com evidência. /clear abre uma sessão nova, preservando a anterior.")
+                else:
+                    message = f"Erro na sessão: {name}: {str(exc)[:220]}"
+                if ui.enabled:
+                    remember("system", message)
+                    flush_console()
+                else:
+                    self.console.print("[red]" + escape(message) + "[/red]")
 
     def continue_previous(self):
         for chunk in self.agent.step_stream("", on_tool_call=self.on_tool_call,

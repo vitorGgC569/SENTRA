@@ -59,6 +59,10 @@ export function ChatAccessDialog({ ws, agents, close }) {
           onClick={() => setChat(false, false)}>Limpar política</button>
       </div>}
       <small>{policy ? (policy.blocked ? 'Bloqueio configurado' : policy.trusted ? 'Confiável (ainda requer grants)' : 'Sem confiança explícita') : 'Aguardando…'}</small>
+      {policy && typeof policy.pending_approval_count === 'number' && policy.pending_approval_count > 0 &&
+        <small role="status" style={{ color: '#d7ac85' }}>
+          {policy.pending_approval_count} aprovação(ões) de ação aguardando segundo consentimento neste chat. Nenhum efeito executa sem os dois consentimentos do operador.
+        </small>}
       {policy && !policy.verified_origin_available && <small role="status" style={{ color: '#d7ac85' }}>
         Identidade MCP→chat ainda sem prova. Este bloqueio só atinge requisições cuja origem for comprovada; o modo estrito nega chamadas não atribuídas.
       </small>}

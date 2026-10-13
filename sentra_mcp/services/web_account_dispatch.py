@@ -188,3 +188,38 @@ def guard_from_durable_web_receipts(*, control,
         browser_evidence=control.browser_evidence,
         authenticated_link=resolve,
         verified_account=verified_account)
+
+
+def verified_account_from_catalog(control, *, provider: str = "chatgpt",
+                                  max_age_s: float = 600.0):
+    """Build the host `verified_account` callback from Brisa's catalog.
+
+    Returns True only when `BrowserEvidenceService.account_catalog_status`
+    reports a fresh verified catalog for the same principal/provider AND
+    the dispatched conversation matches the attested binding. Anything
+    else (missing/stale/unverified catalog, import failure) denies: with
+    no independent account attestor the guard remains DENY-ALL, which is
+    the correct closed state, not a capacity.
+    """
+    if provider not in {"chatgpt", "gemini"}:
+        raise ValueError("catalog provider must be chatgpt or gemini")
+
+    def check(context, link, conversation_id: str) -> bool:
+        try:
+            status = control.browser_evidence.account_catalog_status(
+                link.principal, provider, max_age_s=max_age_s)
+        except (AttributeError, ValueError, OSError):
+            return False
+        if not isinstance(status, dict) or status.get("verified") is not True:
+            return False
+        try:
+            with control.session_checkpoints.store.connect("chat_access") as db:
+                row = db.execute(
+                    "SELECT conversation_id FROM browser_request_messages "
+                    "WHERE principal=? AND request_id=?",
+                    (link.principal, link.request_id)).fetchone()
+        except (OSError, ValueError):
+            return False
+        return row is not None and row["conversation_id"] == conversation_id
+
+    return check

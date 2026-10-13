@@ -66,9 +66,9 @@ class SentraMCPServer:
         self.audit = AuditLogger(self.config.audit_log)
         self.workspaces = WorkspaceRegistry(self.config, self.audit)
         self.filesystem = FilesystemService(self.config, self.audit, self.workspaces)
-        self.durable = DurableRunService(self.config.resolved_state_root)
-        self.context = ContextBusService(self.config.resolved_state_root)
-        self.control_plane = ControlPlaneService(self.durable, self.context)
+        self.control_plane = ControlPlaneService.from_store(self.config.resolved_state_root)
+        self.durable = self.control_plane.durable
+        self.context = self.control_plane.context
         from .services.web_account_dispatch import guard_from_durable_web_receipts
         self._web_receipt_ref = web_receipt_ref or (lambda _ctx: None)
         self._web_dispatch_guard = guard_from_durable_web_receipts(

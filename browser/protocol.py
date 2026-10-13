@@ -17,6 +17,18 @@ TAB_OPS = frozenset({
     "GET_CONVERSATION_URL",
     "STOP_GENERATION",
     "GET_STATUS",
+    # Read-only/primitive ops implemented by content-script.js but previously
+    # missing from the Python contract (Brisa 1.7.0: exact parity, no drift).
+    "BROWSER_EXTRACT",
+    "BROWSER_CLICK",
+    "BROWSER_TYPE",
+    # Brisa 1.7.0 read-only observers: streaming snapshot, approval detail,
+    # attachment inventory and attested account catalog. None of them sends,
+    # clicks approval UI or creates capability grants.
+    "STREAM_SNAPSHOT",
+    "APPROVAL_STATUS",
+    "ATTACH_INFO",
+    "MODEL_CATALOG_OBSERVE",
 })
 
 WORKER_STATES = frozenset({"IDLE", "BUSY", "WAITING_RESPONSE"})

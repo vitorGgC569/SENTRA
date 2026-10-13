@@ -4,10 +4,31 @@
  *      DELETE_CONVERSATION. */
 "use strict";
 
-const OMA_CS_VERSION = "1.6.52";
+const OMA_CS_VERSION = "1.7.0";
 const OMA_BUILD_ID = chrome.runtime.getManifest().sentra_build_id || "missing-build-id";
 const OMA_SOURCE_HASH = chrome.runtime.getManifest().sentra_source_hash || "missing-source-hash";
 let omaPendingResponseBaseline = null;
+let omaCentralBoundJob = null;
+
+function omaBindObservationOnly(jobId) {
+  if (!/^websend_[a-f0-9]{64}$/.test(jobId || '')) throw Error('CENTRAL_TURN_ID_REQUIRED');
+  const guard = globalThis.__SENTRA_RECOVERY_GUARD__;
+  if (guard?.busy && !guard.central_bound_job_id) throw Error('RECOVERY_GUARD_NOT_QUIESCED');
+  if (guard) {
+    guard.cleanup?.();
+    // The existing guard's scan checks busy before any Stop/Continue. Keep
+    // already queued scans fenced without editing another owner's guard.
+    guard.central_bound_job_id = jobId;
+    guard.busy = true;
+  }
+  if (omaAdditionalChecksRecoveryPromise) throw Error('RECOVERY_NOT_QUIESCED');
+  omaCentralBoundJob = jobId;
+  return {observation_only:true,job_id:jobId,effect_performed:false};
+}
+// Brisa 1.7.0: message-ID-keyed stream revision counter. Each assistant turn
+// observed after a send gets a new revision; viewers reconcile by revision.
+let omaStreamRevision = 0;
+let omaStreamMessageKey = "";
 
 function omaProvider() {
   return window.location.hostname === "gemini.google.com" ? "gemini" : "chatgpt";
@@ -244,6 +265,7 @@ async function omaWaitAdditionalChecksCleared(
 }
 
 async function omaRecoverAdditionalChecks() {
+  if (omaCentralBoundJob) throw Error('CENTRAL_TURN_AWAITS_OPERATOR: additional checks require an explicit new intent');
   // WAIT_RESPONSE and the global UI watcher can observe the same banner on the
   // same mutation. Collapse both into one stop -> Continue transaction.
   if (omaAdditionalChecksRecoveryPromise) return omaAdditionalChecksRecoveryPromise;
@@ -487,18 +509,62 @@ async function omaPasteImages(box, dataUrls) {
 }
 
 const omaMessageDeliveryAttempts = new Map();
-function omaSendMessage(text, images, deliveryId = '') {
+async function omaAttachBinarySet(box, refs) {
+  if (!refs?.length) return [];
+  if (!Array.isArray(refs) || refs.length > 4 || omaProvider() !== 'chatgpt') throw Error('BINARY_COMPOSER_UNAVAILABLE');
+  const scope = box.closest('form') || box.parentElement;
+  const chipSelector = '[data-testid*="attachment"],[data-testid*="file-chip"],[data-testid*="upload-preview"]';
+  if (scope?.querySelector(chipSelector)) throw Error('BINARY_COMPOSER_HAS_UNOWNED_ATTACHMENTS');
+  const files = [];
+  for (const ref of refs) {
+    if (!/^sentra-[a-f0-9]{32}\.(png|jpg|pdf|txt)$/.test(ref.name || '') ||
+        !['image/png','image/jpeg','application/pdf','text/plain'].includes(ref.mime) ||
+        !Number.isSafeInteger(ref.bytes) || ref.bytes < 1 || ref.bytes > 20 * 1024 * 1024 ||
+        !String(ref.data_url || '').startsWith('data:' + ref.mime + ';base64,')) throw Error('BINARY_DESCRIPTOR_INVALID');
+    const blob = await (await fetch(ref.data_url)).blob();
+    const bytes = await blob.arrayBuffer();
+    const sha = [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(x => x.toString(16).padStart(2,'0')).join('');
+    if (blob.size !== ref.bytes || sha !== ref.sha256) throw Error('BINARY_CONTENT_CHANGED');
+    files.push(new File([bytes], ref.name, { type: ref.mime }));
+  }
+  const input = omaFindFileInputs(box).find(node => (node.multiple || files.length === 1) &&
+    (!node.accept || files.every(file => node.accept.split(',').some(type =>
+      type.trim() === file.type || type.trim() === '.' + file.name.split('.').pop() ||
+      type.trim() === '*/*' || (type.trim() === 'image/*' && file.type.startsWith('image/'))))));
+  const transfer = new DataTransfer(); files.forEach(file => transfer.items.add(file));
+  // Exactly one upload gesture. A lost acknowledgment never selects another
+  // input/drop route and cannot duplicate a partially uploaded provider file.
+  if (input) {
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+  } else {
+    const drop = new DragEvent('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, 'dataTransfer', { value: transfer });
+    (box.parentElement || box).dispatchEvent(drop);
+  }
+  const deadline = Date.now() + 25000;
+  while (Date.now() < deadline) {
+    const chips = [...(scope?.querySelectorAll(chipSelector) || [])];
+    const text = chips.map(node => [node.textContent, node.getAttribute('title'), node.getAttribute('aria-label')].filter(Boolean).join(' ')).join('\n');
+    const uploading = scope?.querySelector('[role="progressbar"],[data-testid*="uploading"],[aria-busy="true"]');
+    if (!uploading && refs.every(ref => text.includes(ref.name))) return refs.map(({data_url, ...ref}) => ref);
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  throw Error('BINARY_UPLOAD_UNCONFIRMED: reconcile composer; do not resend');
+}
+
+function omaSendMessage(text, images, deliveryId = '', attachments = []) {
   if (deliveryId && omaMessageDeliveryAttempts.has(deliveryId)) {
     return omaMessageDeliveryAttempts.get(deliveryId);
   }
   if (omaMessageDeliveryAttempts.size >= 1000) {
     throw new Error('DELIVERY_LIMIT: reload only after all deliveries are reconciled');
   }
-  const pending = omaPrepareAndSendMessage(text, images);
+  const pending = omaPrepareAndSendMessage(text, images, attachments);
   if (deliveryId) omaMessageDeliveryAttempts.set(deliveryId, pending);
   return pending;
 }
-async function omaPrepareAndSendMessage(text, images) {
+async function omaPrepareAndSendMessage(text, images, attachments = []) {
   const box = await omaWaitForComposer();
   // Composer virtualizado fora da viewport pode n├úo montar a toolbar de envio:
   // traz para a vista + foca + acomoda antes de preencher/enviar.
@@ -517,7 +583,9 @@ async function omaPrepareAndSendMessage(text, images) {
   }
   // Evid├¬ncia visual: anexa ANTES do texto (o clear acima destruiria anexos).
   // Falha aqui = job FAILED honesto, nada enviado.
-  const imagesAttached = await omaPasteImages(box, images);
+  if (attachments.length && images.length) throw Error('MIXED_BINARY_LEGACY_SET_REFUSED');
+  const attachedFiles = await omaAttachBinarySet(box, attachments);
+  const imagesAttached = attachments.length ? 0 : await omaPasteImages(box, images);
   // contenteditable ou textarea: preenche de forma compat├¡vel com o React.
   const fillOnce = (via) => {
     if (box.isContentEditable) {
@@ -562,7 +630,7 @@ async function omaPrepareAndSendMessage(text, images) {
   // Hidrata├º├úo: em tab rec├®m-criada o composer existe antes do app React.
   // Se nada de envio existir, espera a hidrata├º├úo e tenta a 2┬¬ rodada.
   for (let round = 0; round < 2; round++) {
-    const r = await omaSubmitAttempt(box, text);
+    const r = await omaSubmitAttempt(box, text, attachedFiles);
     if (r.accepted) return Object.assign({}, r, { images_attached: imagesAttached });
     if (r.hint === "no-send-affordance" && round === 0) {
       await new Promise((res) => setTimeout(res, 8000));
@@ -611,7 +679,7 @@ async function omaWaitSendAffordance(timeoutMs) {
   return false; // chamador decide: tenta mesmo assim e falha com diagn├│stico
 }
 
-async function omaSubmitAttempt(box, text) {
+async function omaSubmitAttempt(box, text, attachments = []) {
   // Nunca envie prompt parcial/contaminado: confere o texto INTEIRO aqui,
   // n├úo s├│ o head. Fill truncado (ex. 1016 chars de 3.5KB) aborta alto.
   if (!omaTextsMatch(omaComposerText(box), text)) {
@@ -647,7 +715,14 @@ async function omaSubmitAttempt(box, text) {
     while (Date.now() < deadline) {
       const candidates = ids().filter(item => item.id && !baseline.has(item.id));
       for (const candidate of candidates) {
+        const container = candidate.node.closest('[data-testid^="conversation-turn-"]') || candidate.node;
+        const observedNames = attachments.map(ref => ref.name).filter(name => {
+          const elements = [...container.querySelectorAll('[title],[aria-label],[data-testid*="attachment"],[data-testid*="file-chip"]')];
+          return elements.some(node => [node.getAttribute('title'),node.getAttribute('aria-label'),node.textContent].some(value => String(value || '').includes(name)));
+        });
+        if (observedNames.length !== attachments.length) continue;
         const clone = candidate.node.cloneNode(true);
+        for (const chip of clone.querySelectorAll('[data-testid*="attachment"],[data-testid*="file-chip"]')) chip.remove();
         for (const chip of clone.querySelectorAll('[data-prompt-link-href^="app://"],[app-mention-path]')) chip.remove();
         const actual = String(clone.innerText || clone.textContent || '').trim();
         if (actual !== text.trim()) continue;
@@ -656,7 +731,8 @@ async function omaSubmitAttempt(box, text) {
         const digest = [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)))]
           .map(value => value.toString(16).padStart(2, '0')).join('');
         return { accepted: true, method: button ? 'button' : 'form', delivery_receipt: {
-          conversation_id: conversation, message_id: candidate.id, prompt_sha256: digest } };
+          conversation_id: conversation, message_id: candidate.id, prompt_sha256: digest,
+          ...(attachments.length ? { attachments, attachment_names: observedNames } : {}) } };
       }
       await new Promise(resolve => setTimeout(resolve, 250));
     }
@@ -1159,6 +1235,105 @@ function omaBrowserSetValue(node, text, clear) {
   node.dispatchEvent(new Event("change", { bubbles: true }));
 }
 
+/* Brisa 1.7.0 — observed-only browser evidence (deny-only, never acts).
+ * Approval cards are reported, never clicked. Attachments are inventoried,
+ * never exfiltrated. Stream snapshots carry bounded prefixes keyed by the
+ * DOM message id with a local revision counter. Model labels are observed
+ * text, never account attestation. */
+function omaApprovalDetail() {
+  try {
+    const cards = [];
+    for (const sel of (OMA_SELECTORS.approvalCard || [])) {
+      for (const node of document.querySelectorAll(sel)) {
+        if (!omaIsVisible(node)) continue;
+        const text = String(node.innerText || node.textContent || "").trim().slice(0, 200);
+        if (text) cards.push(text);
+      }
+    }
+    if (!cards.length) return { state: "idle", tool_name: null };
+    const first = cards[0];
+    const toolMatch = first.match(/(?:tool|connector|plugin|skill)\s*[:\-]?\s*([A-Za-z0-9_.:@/-]{1,80})/i);
+    return { state: "pending", tool_name: toolMatch ? toolMatch[1] : null, cards: cards.length };
+  } catch (_) {
+    return { state: "unknown", tool_name: null };
+  }
+}
+
+function omaAttachInventory() {
+  try {
+    const chips = [];
+    for (const sel of (OMA_SELECTORS.attachmentChip || [])) {
+      for (const node of document.querySelectorAll(sel)) {
+        if (!omaIsVisible(node)) continue;
+        chips.push(String(node.innerText || node.getAttribute("aria-label") || "attachment").trim().slice(0, 120));
+      }
+    }
+    const box = omaQueryFirst(OMA_SELECTORS.composer);
+    let composerImages = 0;
+    try {
+      const scope = (box && (box.closest("form") || box.parentElement)) || document;
+      composerImages = scope.querySelectorAll("img").length;
+    } catch (_) {}
+    return { chips: chips.slice(0, 8), chip_count: chips.length, composer_images: composerImages };
+  } catch (_) {
+    return { chips: [], chip_count: 0, composer_images: 0 };
+  }
+}
+
+function omaStreamSnapshot() {
+  try {
+    const nodes = document.querySelectorAll(OMA_SELECTORS.assistantMessages.join(","));
+    const count = nodes.length;
+    const text = count ? omaNodeReadableText(nodes[count - 1]) : "";
+    const key = omaConversationId() + ":" + count;
+    if (key !== omaStreamMessageKey) {
+      omaStreamMessageKey = key;
+      omaStreamRevision = 0;
+    } else {
+      omaStreamRevision++;
+    }
+    const truncated = text.length > 32000;
+    return { message_index: count, revision: omaStreamRevision,
+             prefix_chars: Math.min(text.length, 32000),
+             prefix_sha256: "", truncated,
+             finished: omaGenerationFinished(),
+             conversation_id: omaConversationId() };
+  } catch (_) {
+    return { message_index: 0, revision: omaStreamRevision, prefix_chars: 0,
+             prefix_sha256: "", truncated: false, finished: false, conversation_id: null };
+  }
+}
+
+function omaObservedModelCatalog() {
+  // Observed composer-adjacent labels only. The relay/host must attest the
+  // account before any consumer treats this as an authenticated catalog.
+  try {
+    const labels = new Set();
+    for (const node of document.querySelectorAll("button,[role='button'],[aria-label]")) {
+      if (!omaIsVisible(node)) continue;
+      const text = String(node.innerText || node.getAttribute("aria-label") || "")
+        .replace(/\s+/g, " ").trim().slice(0, 60);
+      if (!text || text.length > 60) continue;
+      if (/^(gpt-|o[0-9]|flash|pro|chatgpt|gemini)/i.test(text)) labels.add(text);
+      if (labels.size >= 16) break;
+    }
+    return { provider: omaProvider(), observed_labels: [...labels].slice(0, 16),
+             verified: false };
+  } catch (_) {
+    return { provider: omaProvider(), observed_labels: [], verified: false };
+  }
+}
+
+function omaRefusesApprovalTarget(node) {
+  try {
+    if (node.closest("[data-testid='connector-approval'],[data-testid='tool-approval'],"
+        + "[data-testid='approval-card'],[data-testid='confirmation-card'],[role='alertdialog']")) {
+      return true;
+    }
+  } catch (_) {}
+  return false;
+}
+
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   // NEW_CHAT navega a p├ígina: responde de forma s├¡ncrona ANTES de navegar,
   // sen├úo o canal morre com o contexto JS (message channel closed).
@@ -1182,6 +1357,11 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       case "BROWSER_CLICK": {
         const node = omaBrowserNode(request.selector);
         if (!omaIsVisible(node)) throw new Error("browser target is not visible");
+        // Deny-only approval contract: SENTRA never clicks approval UI.
+        // The operator acts in the page; the extension only observes.
+        if (omaRefusesApprovalTarget(node)) {
+          throw new Error("APPROVAL_CLICK_REFUSED: approval UI is observe-only; the human acts in the page");
+        }
         node.click();
         return { clicked: true, url: window.location.href };
       }
@@ -1198,15 +1378,18 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           count: omaAssistantMessageCount(),
           text: omaLastAssistantText(),
         };
-        return await omaSendMessage(request.text || "", request.images || [], request.delivery_id || '');
+        return await omaSendMessage(request.text || "", request.images || [], request.delivery_id || '', request.attachments || []);
       }
+      case "SENTRA_BOUND_OBSERVATION":
+        return omaBindObservationOnly(request.job_id);
       case "WAIT_RESPONSE": {
         // Fatia do SW (< 30s, ver service-worker.js): cada chamada relata os
         // pings enviados na fatia (hb_cs = prova de vida da tab). No TIMEOUT
         // o contador vai na mensagem (csping=N) para o SW acumular.
         omaStableWaitPings = 0;
         try {
-          const text = await omaWaitForStableResponse(request.timeout_ms || 120000, 3, omaPendingResponseBaseline);
+          const text = await omaWaitForStableResponse(request.timeout_ms || 120000, 3, omaPendingResponseBaseline,
+                                                      request.read_only === true || !!omaCentralBoundJob);
           return { text, hb_cs: omaStableWaitPings };
         } catch (e) {
           try { e.message = `${(e && e.message) || e} csping=${omaStableWaitPings}`; } catch (_) {}
@@ -1215,6 +1398,15 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
       }
       case "READ_RESPONSE":
         return { text: omaLastAssistantText() };
+      case "STREAM_SNAPSHOT":
+        return omaStreamSnapshot();
+      case "APPROVAL_STATUS":
+        return { ...omaApprovalDetail(), effect_performed: false,
+                 conversation_id: omaConversationId(), url: window.location.href };
+      case "ATTACH_INFO":
+        return { ...omaAttachInventory(), conversation_id: omaConversationId() };
+      case "MODEL_CATALOG_OBSERVE":
+        return omaObservedModelCatalog();
       case "GET_CONVERSATION_ID":
         return { conversation_id: omaConversationId() };
       case "GET_CONVERSATION_URL":
@@ -1250,6 +1442,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           draftEmpty = !box || !omaComposerText(box).trim();
         } catch (_) { draftEmpty = false; }
         const additionalChecks = omaFindAdditionalChecksBannerText();
+        const approvalDetail = omaApprovalDetail();
+        const attachInventory = omaAttachInventory();
         return { finished: omaGenerationFinished(), url: window.location.href,
                  provider: omaProvider(), model: omaGeminiCurrentModel(),
                  cs_version: OMA_CS_VERSION, cs_build_id: OMA_BUILD_ID,
@@ -1265,6 +1459,8 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
                  additional_checks: additionalChecks,
                  additional_checks_recovery_attempts: omaAdditionalChecksRecoveryAttempts,
                  additional_checks_recovery_active: !!omaAdditionalChecksRecoveryPromise,
+                 approval_detail: approvalDetail,
+                 attachments_observed: attachInventory,
                  composer_found: composerFound, buttons_sample: buttonsSample,
                  diagnostics: omaComposerDiagnostics() };
       }
@@ -1356,6 +1552,7 @@ let omaGlobalChecksLastSignature = "";
 let omaGlobalChecksLastAt = 0;
 
 async function omaMaybeRecoverGlobalAdditionalChecks() {
+  if (omaCentralBoundJob) return;
   if (omaProvider() !== "chatgpt") return;
   // 1.6.50+: the autonomous guard owns global recovery so an already-open tab
   // can be repaired after extension reload without duplicating Stop/Continue.

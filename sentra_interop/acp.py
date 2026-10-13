@@ -6,7 +6,9 @@ configured and admitted by SENTRA PolicyDecision beforehand.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
+import hashlib
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Protocol
 
@@ -82,7 +84,10 @@ class ACPStdioTransport:
         self._updates: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue(maxsize=128)
         self._dead: BaseException | None = None
         self._closed = False
-        self._read_task = asyncio.create_task(self._read_loop())
+        self.request_handler = None
+        self._contexts = {}
+        self._server_tasks = set()
+        self._read_task = asyncio.create_task(self._read_loop(), context=contextvars.Context())
 
     @classmethod
     async def launch(
@@ -108,14 +113,25 @@ class ACPStdioTransport:
             not isinstance(arg, str) or "\0" in arg for arg in args
         ):
             raise ACPLaunchError("INVALID_CONFIG", "FAILED")
-        if request.arguments != {"executable": executable, "args": list(args), "cwd": cwd}:
+        launch_arguments={"executable": executable, "args": list(args), "cwd": cwd}
+        if (any(request.arguments.get(key)!=value for key,value in launch_arguments.items())
+                or set(request.arguments)-set(launch_arguments)-{"local_id","executable_sha256","argument_file_pins","environment_sha256"}):
             raise ACPLaunchError("INVALID_REQUEST", "FAILED")
         target = Path(executable)
         directory = Path(cwd)
         if not target.is_absolute() or not target.is_file() or not directory.is_dir():
             raise ACPLaunchError("INVALID_CONFIG", "FAILED")
+        environment={}
         if env:
-            raise ACPLaunchError("ENV_DENIED", "FAILED")
+            from .registry_install import validate_agent_env
+            from sentra_runtime.provider_content import text_digest
+            try:environment=dict(validate_agent_env(env))
+            except ValueError:raise ACPLaunchError("ENV_DENIED","FAILED") from None
+            if request.arguments.get("environment_sha256")!=text_digest(environment):
+                raise ACPLaunchError("ENV_DENIED","FAILED")
+        elif request.arguments.get("environment_sha256"):
+            from sentra_runtime.provider_content import text_digest
+            if request.arguments["environment_sha256"]!=text_digest({}):raise ACPLaunchError("ENV_DENIED","FAILED")
         if launch_hook is not None and not callable(launch_hook):
             raise ACPLaunchError("INVALID_CONFIG", "FAILED")
 
@@ -144,9 +160,18 @@ class ACPStdioTransport:
                 nonlocal spawned_owner
                 if context is not None:
                     context.checkpoint()
+                if request.arguments.get("executable_sha256"):
+                    with target.open("rb") as source:
+                        actual=hashlib.file_digest(source,"sha256").hexdigest()
+                    if actual!=request.arguments["executable_sha256"]:
+                        raise ACPLaunchError("EXECUTABLE_PIN_CHANGED","FAILED")
+                for pinned_path,pinned_sha in request.arguments.get("argument_file_pins",{}).items():
+                    with Path(pinned_path).open("rb") as source:
+                        if hashlib.file_digest(source,"sha256").hexdigest()!=pinned_sha:
+                            raise ACPLaunchError("ARGUMENT_FILE_PIN_CHANGED","FAILED")
                 process, owner = await spawn_owned(
                     str(target), tuple(args), cwd=str(directory.resolve()),
-                    env={}, stdin=asyncio.subprocess.PIPE,
+                    env=environment, stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                     limit=MAX_LINE + 1,
                     checkpoint=context.checkpoint if context is not None else None,
@@ -217,6 +242,8 @@ class ACPStdioTransport:
         request_id = self._sequence
         future: asyncio.Future[Mapping[str, Any]] = loop.create_future()
         self._pending[request_id] = future
+        from sentra_runtime.effect_boundary import current_effect_context
+        self._contexts[request_id] = current_effect_context.get()
         try:
             await self._write({"jsonrpc": "2.0", "id": request_id, "method": method, "params": dict(params)})
             return await asyncio.wait_for(future, timeout)
@@ -228,6 +255,7 @@ class ACPStdioTransport:
                 if future.cancelled():
                     self._expired_ids.add(request_id)
                 self._pending.pop(request_id, None)
+                self._contexts.pop(request_id,None)
 
     async def notify(self, method: str, params: Mapping[str, Any]) -> None:
         if method not in ALLOWED_NOTIFY_METHODS or not isinstance(params, Mapping):
@@ -265,8 +293,10 @@ class ACPStdioTransport:
                         raise ACPProtocolError("invalid agent request method")
                     if type(msg["id"]) not in (str, int) or len(str(msg["id"])) > 128:
                         raise ACPProtocolError("invalid agent request id")
-                    await self._write({"jsonrpc": "2.0", "id": msg["id"],
-                                       "error": {"code": -32601, "message": "not supported"}})
+                    if len(self._server_tasks)>=32:raise ACPProtocolError("ACP reverse request limit exceeded")
+                    task=asyncio.create_task(self._answer_server(msg))
+                    self._server_tasks.add(task)
+                    task.add_done_callback(self._server_tasks.discard)
                 elif "method" in msg:
                     if msg["method"] != "session/update" or not isinstance(msg.get("params"), dict):
                         raise ACPProtocolError("unknown ACP notification")
@@ -312,8 +342,33 @@ class ACPStdioTransport:
                 except ProcessLookupError:
                     pass
 
+    async def _answer_server(self,msg):
+        from sentra_runtime.effect_boundary import current_effect_context
+        contexts=[c for key,c in self._contexts.items() if c is not None and key in self._pending]
+        context=contexts[0] if len(contexts)==1 else None
+        token=current_effect_context.set(context)
+        try:
+            if (context is None or not callable(self.request_handler)
+                    or msg["method"] not in {"session/request_permission","elicitation/create"}):
+                response={"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32601,"message":"not supported"}}
+            else:
+                context.checkpoint()
+                value=await self.request_handler(msg,context.request)
+                context.checkpoint()
+                response={"jsonrpc":"2.0","id":msg["id"],"result":value}
+            await self._write(response)
+        except Exception:
+            try:
+                self.process.stdin.write(_frame({"jsonrpc":"2.0","id":msg["id"],
+                    "error":{"code":-32000,"message":"interaction unavailable"}}))
+                await self.process.stdin.drain()
+            except Exception:pass
+        finally:current_effect_context.reset(token)
+
     async def close(self) -> None:
         self._closed = True
+        for task in self._server_tasks:task.cancel()
+        await asyncio.gather(*self._server_tasks,return_exceptions=True)
         if self.process.stdin is not None:
             self.process.stdin.close()
         if self._owner is not None:
@@ -364,6 +419,7 @@ class ACPSessionAdapter:
         self._scope: tuple[str, str, str] | None = None
         self._negotiation_attempted = False
         self._initialization_lock = asyncio.Lock()
+        self.client_capabilities = {}
         self.session_id: str | None = None
         self._cancel_requested = False
         self._session_lock = asyncio.Lock()
@@ -417,10 +473,10 @@ class ACPSessionAdapter:
             self._negotiation_attempted = True
             version = max(self.supported_versions)
             info = {"name": "sentra", "version": "1.0.0"}
-            params = ({"protocolVersion": version, "info": info, "capabilities": {}}
+            params = ({"protocolVersion": version, "info": info, "capabilities": dict(self.client_capabilities)}
                       if version == 2 else {"protocolVersion": 1, "clientInfo": info,
                           "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False},
-                                                 "terminal": False}})
+                                                 "terminal": False,**self.client_capabilities}})
             response = await self.transport.request("initialize", params, timeout)
             chosen = response.get("protocolVersion")
             if type(chosen) is not int or chosen not in self.supported_versions:

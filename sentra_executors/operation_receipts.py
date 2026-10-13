@@ -90,3 +90,65 @@ class OperationReceiptViews:
                 "candidates":candidates,"destructive_actions_executed":0,
                 "gc_supported_for_unknown_pid":False,
                 "next_offset":page["page"]["next_offset"]}
+
+
+class HumanReceiptViews(OperationReceiptViews):
+    """Human-readable receipts with lineage for shell/approval surfaces.
+
+    Extends the sanitized :class:`OperationReceiptViews` projection with the
+    durable lineage a human supervisor needs: which routine occurrence, goal
+    loop step, workflow activity or terminal write produced the operation,
+    whether an approval is still pending, and what to do next. Still
+    read-only and still field-projected: no stdout, prompts, credentials,
+    command strings or file paths are ever included.
+    """
+
+    _NEXT = {
+        "SUCCEEDED": "This operation succeeded. Provider start/signal/ACK receipts require separate completion or recipient observation.",
+        "FAILED": "Review the evidence. Retry needs a confirmed NOT_STARTED, retryable outcome and a separately admitted operation.",
+        "CANCELLED": "Cancellation does not prove rollback. Observe started effects before any new request.",
+        "UNCERTAIN": "Outcome uncertain: reconcile before any retry. Query this "
+                     "same operation_id again; do not submit a duplicate effect.",
+        "RUNNING": "Operation in progress. Wait for its receipt instead of "
+                   "submitting the same effect again.",
+        "QUEUED": "Operation queued behind central admission. Wait for its receipt.",
+        "WAITING_EXTERNAL": "Waiting for an external result (provider, human "
+                            "approval or signal). No duplicate submission.",
+    }
+
+    def human_receipt(self, owner: str, operation_id: str, *,
+                      work_item_id: str | None = None) -> dict[str, Any]:
+        """Full human receipt: sanitized state, lineage, approval, next step."""
+        base = self.receipt(owner, operation_id, work_item_id=work_item_id)
+        row = self.control.durable.operation_status(operation_id, owner)
+        progress = row.get("progress") if isinstance(row.get("progress"), dict) else {}
+        lineage: dict[str, Any] = {}
+        for key in ("routine_id", "routine_source", "routine_occurrence_key",
+                    "goal_loop_id", "goal_loop_step", "workflow_id",
+                    "workflow_namespace", "workflow_step_id", "terminal_id"):
+            value = progress.get(key)
+            if isinstance(value, (str, int)) and value != "":
+                lineage[key] = value
+        work_id = base.get("work_item_id")
+        approval: dict[str, Any] = {"required": False}
+        if isinstance(work_id, str) and work_id:
+            try:
+                work = self.control.work_item_info(work_id, owner)
+                grants = work.get("grants") or work.get("approvals") or []
+                pending = [grant for grant in (grants if isinstance(grants, list) else [])
+                           if isinstance(grant, dict) and grant.get("state") in {
+                               "PENDING", "WAITING_APPROVAL"}]
+                if pending:
+                    approval = {"required": True, "state": "waiting_approval",
+                                "pending_count": len(pending)}
+                elif work.get("state") in {"WAITING_APPROVAL", "BLOCKED"}:
+                    approval = {"required": True, "state": work["state"],
+                                "pending_count": 1}
+            except (FileNotFoundError, PermissionError, KeyError):
+                approval = {"required": False, "state": "unknown"}
+        state = base["state"]
+        return {**base, "lineage": lineage, "approval": approval,
+                "human_summary": base["summary"],
+                "next_step": self._NEXT.get(
+                    state, "Query this operation_id again for its current state."),
+                "reconcile_before_retry": state == "UNCERTAIN"}

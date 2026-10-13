@@ -7,6 +7,7 @@ It complements SENTRA admission, rather than granting authority of its own.
 from __future__ import annotations
 
 import copy
+import base64
 import json
 import math
 import sqlite3
@@ -172,6 +173,9 @@ class ACPSessionState:
     usage: dict[str, Any] | None = None
     info: dict[str, Any] = field(default_factory=dict)
     foreground: dict[str, Any] | None = None
+    terminals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    plan: dict[str, Any] | None = None
+    messages: list[dict[str, Any]] = field(default_factory=list)
     max_tools: int = 4096
     max_projection_bytes: int = 2 * 1024 * 1024
 
@@ -276,6 +280,41 @@ class ACPSessionState:
             if not isinstance(event.get("state"), str) or not event["state"]:
                 raise ValueError("invalid ACP foreground state")
             self.foreground = copy.deepcopy(dict(event))
+        elif kind in {"terminal_update","terminal_output_chunk"}:
+            key=identity(event.get("terminalId"))
+            if key not in self.terminals and len(self.terminals)>=128:raise ValueError("ACP terminal count exceeded")
+            terminal=copy.deepcopy(self.terminals.get(key,{"terminalId":key,"display_only":True}))
+            if kind=="terminal_update":
+                for name in ("command","cwd","output","exitStatus","_meta"):
+                    if name not in event:continue
+                    value=event[name]
+                    if name in {"command","cwd"} and value is not None and not isinstance(value,str):raise ValueError("invalid ACP terminal metadata")
+                    if name in {"output","exitStatus"} and value is not None and not isinstance(value,Mapping):raise ValueError("invalid ACP terminal state")
+                    if name=="output" and value is not None:
+                        try:base64.b64decode(value.get("data",""),validate=True)
+                        except (ValueError,TypeError) as exc:raise ValueError("invalid ACP terminal output") from exc
+                    terminal[name]=copy.deepcopy(value)  # v2 absent skips, null clears.
+            else:
+                value=event.get("data")
+                try:
+                    chunk=base64.b64decode(value,validate=True)
+                    before=base64.b64decode((terminal.get("output") or {}).get("data",""),validate=True)
+                except (ValueError,TypeError) as exc:raise ValueError("invalid ACP terminal chunk") from exc
+                if len(before)+len(chunk)>1024*1024:raise ValueError("ACP terminal projection exceeds bound; use persisted event pages")
+                terminal["output"]={"data":base64.b64encode(before+chunk).decode("ascii")}
+            projected={**self.terminals,key:terminal};self._bounded(projected);self.terminals=projected
+        elif kind in {"plan","plan_update"}:
+            plan=copy.deepcopy(self.plan or {})
+            if "entries" in event:
+                if event["entries"] is not None and not isinstance(event["entries"],list):raise ValueError("invalid ACP plan entries")
+                plan["entries"]=copy.deepcopy(event["entries"])
+            if "_meta" in event:plan["_meta"]=copy.deepcopy(event["_meta"])
+            self._bounded(plan);self.plan=plan
+        elif kind in {"user_message_chunk","agent_message_chunk","agent_thought_chunk","user_message","agent_message","agent_thought"}:
+            value=copy.deepcopy(dict(event))
+            # Full transcripts remain in the protected provider event store;
+            # this bounded projection serves only the current attachment.
+            messages=[*self.messages[-255:],value];self._bounded(messages);self.messages=messages
         elif kind == "session_info_update":
             self.info.update(copy.deepcopy({k: v for k, v in event.items() if k != "sessionUpdate"}))
             self._bounded(self.info)

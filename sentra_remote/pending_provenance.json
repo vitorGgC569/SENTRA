@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "state": "final_materialization_required",
+  "validated": false,
+  "components": {
+    "quickjs": {
+      "source_pipeline": "sentra_code_mode/guest/build.sh",
+      "source_provenance": "sentra_code_mode/guest/PROVENANCE.md",
+      "upstream_release": "2026-06-04",
+      "upstream_sha256": "b376e839b322978313d929fd20663b11ba58b75df5a46c126dd19ea2fa70ad2a",
+      "artifact_sha256": null,
+      "required_outputs": ["sentra_quickjs_guest.wasm", "sbom.cdx.json", "provenance.json", "LICENSE-QuickJS"]
+    },
+    "hcs": {
+      "source_provenance": "sentra_executors/INTEGRAL_PROVENANCE.json",
+      "hcsshim_revision": "ab8249e8a1110ff5f052d3710fe57f29c45503d3",
+      "artifact_sha256": null,
+      "required_outputs": ["manifest.json", "compiled native files", "licenses/notices"]
+    },
+    "rustdesk": {
+      "source_pipeline": "sentra_executors/remote_rustdesk_build.py",
+      "upstream_revision": "1d4abd0258bb6678cdd5e2abe3a2af59fd3d7dbe",
+      "control_extension": "sentra-desktop-control-v1",
+      "artifact_sha256": null,
+      "required_outputs": ["manifest.json", "compiled native files", "AGPL source/license/notices"]
+    }
+  }
+}

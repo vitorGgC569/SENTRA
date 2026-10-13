@@ -1,0 +1,47 @@
+name: Vitra release preparation (read-only)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "sentra_remote/coordinated_backup.py"
+      - "sentra_remote/coordinated_upgrade.py"
+      - "sentra_remote/optional_providers.py"
+      - "sentra_remote/setup_states.py"
+      - "sentra_remote/sidecar_manifests.py"
+      - "sentra_remote/diagnostics.py"
+      - "sentra_remote/install_doctor.py"
+      - "sentra_remote/onboarding.py"
+      - "sentra_remote/setup_assistant.py"
+      - "sentra_cli/maintenance.py"
+      - "sentra_electron/staged_update.cjs"
+      - "scripts/commander/clean_install_plan.py"
+      - "scripts/commander/release_signing.py"
+      - "scripts/commander/provider_pins.py"
+
+permissions:
+  contents: read
+
+jobs:
+  vitra-prep:
+    name: Vitra release preparation (no QA execution)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Setup Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Read-only provider inventory
+        shell: pwsh
+        run: python -B scripts/commander/provider_pins.py
+      - name: Read-only clean-install plan
+        shell: pwsh
+        run: python -B scripts/commander/clean_install_plan.py --release release
+      - name: Read-only shell packaging probe
+        shell: pwsh
+        run: python -B scripts/commander/shell_release_probe.py --static sentra_canvas/static

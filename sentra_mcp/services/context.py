@@ -59,7 +59,12 @@ class ContextBusService:
         *,
         clock=time.time,
         transport: ContextTransport | None = None,
+        store=None,
     ) -> None:
+        from .control_store import create_control_plane_store
+        self.store = store or create_control_plane_store(state_root)
+        if getattr(self.store, "backend", "sqlite") == "postgres":
+            state_root = self.store.state_root
         self.state_root = Path(state_root).resolve()
         self.root = self.state_root / "context"
         self.root.mkdir(parents=True, exist_ok=True)
@@ -67,12 +72,13 @@ class ContextBusService:
         self.transport: ContextTransport = transport or NullContextTransport()
         self.last_transport_error: str | None = None
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(
-            str(self.root / "context.sqlite3"),
-            check_same_thread=False,
-            timeout=10,
-        )
-        self.db.row_factory = sqlite3.Row
+        if getattr(self.store, "backend", "sqlite") == "postgres":
+            self.db = self.store.connect("context")
+            self.lock = self.db.scope_lock()
+        else:
+            self.store.assert_active()
+            self.db = self.store.connect("context",shared=True)
+            self.db.row_factory = sqlite3.Row
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -198,6 +204,10 @@ class ContextBusService:
             self.db.commit()
 
     def close(self) -> None:
+        if self.store.backend == "postgres":
+            with self.db._mutex:
+                self.db.close()
+            return
         with self.lock:
             self.db.close()
         try:

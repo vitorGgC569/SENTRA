@@ -13,12 +13,19 @@ import time
 from typing import Any
 
 from sentra_remote.secrets import protect_secret, unprotect_secret
-from .control_store import ControlPlaneStore, SQLiteControlPlaneStore
+from .control_store import ControlPlaneStore, create_control_plane_store
 
 
 _IDENT = re.compile(r"^[A-Za-z0-9_-]{8,160}$")
 _TOKENS = re.compile(r"[^\W_]{2,40}", re.UNICODE)
-_MAX_MESSAGE = 131072
+_SECRET_LIKE = re.compile(
+    r"(?:[A-Za-z0-9_-]*[0-9][A-Za-z0-9_-]*){8,}|sk-[A-Za-z0-9]+|"
+    r"dpapi:[A-Za-z0-9]+|keyring:[A-Za-z0-9]+|bearer[A-Za-z0-9]+|"
+    r"xox[bap]-[A-Za-z0-9-]+|gh[pous]_[A-Za-z0-9]+")
+_SECRET_WORDS = frozenset({
+    "password", "passwd", "secret", "token", "api-key", "apikey",
+    "cookie", "session-token", "authorization", "private-key", "privatekey"})
+_MAX_MESSAGE = 800000  # full 200000-character ChatResult even at 4-byte UTF-8
 _MAX_WORKSPACE = 8 * 1024 * 1024
 
 
@@ -46,7 +53,12 @@ def _plain(cipher: str) -> str:
 
 
 def _terms(text: str) -> set[str]:
-    return set(token.casefold() for token in _TOKENS.findall(text)[:1024]) if text else set()
+    found = set(token.casefold() for token in _TOKENS.findall(text or "")[:1024])
+    # Never index secret-looking material by default (A11): tokens with a
+    # high digit/symbol ratio or known secret prefixes stay searchable only
+    # via exact message reads, never via the Geraldton index.
+    return {token for token in found
+            if not _SECRET_LIKE.fullmatch(token) and token not in _SECRET_WORDS}
 
 
 def _hashed(key: bytes, terms: set[str]) -> set[str]:
@@ -59,7 +71,7 @@ class WebHistoryStore:
 
     def __init__(self, state_root: str, *, store: ControlPlaneStore | None = None,
                  clock=time.time):
-        self.store = store or SQLiteControlPlaneStore(state_root)
+        self.store = store or create_control_plane_store(state_root)
         self.clock = clock
         with self.store.connect("provider_content") as db:
             db.executescript("""
@@ -257,6 +269,23 @@ class WebHistoryStore:
                    (*scope, host["revision"], host["body_sha256"], host["state"], host["collector_id"],
                     host["source_sha256"], host["document_id"], host["identity_epoch"]))
 
+    def list_observed_conversations(self, owner: str, workspace: str, *,
+                                    limit: int = 50) -> list[dict[str, Any]]:
+        """Read-only Home/recents projection over observed Web messages (no authority)."""
+        owner, workspace = self._scope(owner, workspace)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("limit must be 1..200")
+        with self.store.connect("provider_content") as db:
+            rows = db.execute(
+                "SELECT conversation_id,COUNT(*) AS messages,"
+                "MAX(observed_at) AS last_observed FROM web_history_messages "
+                "WHERE owner=? AND workspace=? GROUP BY conversation_id "
+                "ORDER BY last_observed DESC LIMIT ?",
+                (owner, workspace, limit)).fetchall()
+        return [{"conversation_id": row["conversation_id"],
+                 "messages": int(row["messages"]),
+                 "last_observed": row["last_observed"]} for row in rows]
+
     def messages(self, owner: str, workspace: str, conversation_id: str,
                  *, limit: int = 100) -> list[dict[str, Any]]:
         owner, workspace = self._scope(owner, workspace)
@@ -319,6 +348,59 @@ class WebHistoryStore:
         if len(result.encode("utf-8")) > 2_000_000:
             raise ValueError("Web Markdown export exceeds 2 MB")
         return result
+
+    def export_message(self, owner: str, workspace: str, conversation_id: str,
+                       message_id: str, *, redact_body: bool = False) -> str:
+        """Export a single response/message with provenance (OD-CF06/A20)."""
+        if type(redact_body) is not bool:
+            raise ValueError("redact_body must be a boolean")
+        owner, workspace = self._scope(owner, workspace)
+        conversation_id = _bounded("conversation_id", conversation_id)
+        message_id = _bounded("message_id", message_id)
+        with self.store.connect("provider_content") as db:
+            row = db.execute(
+                "SELECT * FROM web_history_messages WHERE owner=? AND workspace=? "
+                "AND conversation_id=? AND message_id=?",
+                (owner, workspace, conversation_id, message_id)).fetchone()
+        if row is None:
+            raise FileNotFoundError("Web message not found for owner/workspace")
+        body = "[CONTENT REDACTED]" if redact_body else _plain(row["protected_body"])
+        output = ["# ChatGPT Web response", "",
+                  f"Conversation: `{conversation_id}`", f"Message: `{message_id}`",
+                  f"Role: {row['role']}, revision {row['revision']}, {row['state']}", "",
+                  "Source: host-side Web observations, not proof of account ownership.", ""]
+        output.extend("> " + line for line in body.splitlines() or [""])
+        output.append("")
+        result = "\n".join(output)
+        if len(result.encode("utf-8")) > 2_000_000:
+            raise ValueError("Web Markdown export exceeds 2 MB")
+        return result
+
+    def delete_workspace(self, owner: str, workspace: str, *,
+                         operator_approved: bool = False) -> dict[str, int]:
+        """Erase a whole workspace history WITH its search index (A11).
+
+        Disabling the index (`set_index(enabled=False)`) erases terms but
+        keeps messages; deleting the session erases messages, host
+        observations AND terms together.
+        """
+        if operator_approved is not True:
+            raise PermissionError("explicit workspace erase approval required")
+        owner, workspace = self._scope(owner, workspace)
+        with self.store.connect("provider_content") as db:
+            db.execute("BEGIN IMMEDIATE")
+            hosts = db.execute("DELETE FROM web_history_host_observations "
+                               "WHERE owner=? AND workspace=?",
+                               (owner, workspace)).rowcount
+            terms = db.execute("DELETE FROM web_history_terms "
+                               "WHERE owner=? AND workspace=?",
+                               (owner, workspace)).rowcount
+            messages = db.execute("DELETE FROM web_history_messages "
+                                  "WHERE owner=? AND workspace=?",
+                                  (owner, workspace)).rowcount
+            db.execute("DELETE FROM web_history_prefs WHERE owner=? AND workspace=?",
+                       (owner, workspace))
+        return {"messages": messages, "terms": terms, "host_observations": hosts}
 
     def purge(self, owner: str, workspace: str, conversation_id: str, *,
               operator_approved: bool = False) -> int:

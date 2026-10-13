@@ -32,7 +32,36 @@ def electron_binary() -> Path | None:
 def electron_status() -> dict[str, object]:
     return {"available": electron_binary() is not None,
             "renderer": "sentra_canvas", "authority": "existing_canvas_broker",
+            "shell_home": "desktop.html (shell-first; Canvas as internal view)",
+            "bridge": "POST /api/shell/bridge (principal-composed)",
             "install_hint": "npm install --prefix sentra_electron"}
+
+
+def describe_shell_surface() -> dict[str, object]:
+    """Vitra-owned display contract for the shell-first Electron surface."""
+    return {
+        "schema": 1,
+        "home": "Spaces, Dots, recent conversations and project/activity state",
+        "canvas": "internal orchestration view, same agents and authoritative state",
+        "navigation": "shell persists Space/project selection; all ops via shellBridge",
+        "authority": "existing_canvas_broker",
+    }
+
+
+def describe_staged_update_surface() -> dict[str, object]:
+    """Display-side staged-update contract: apply on exit, never kill ConPTY.
+
+    The display never applies updates itself; it only reports the staged
+    plan sealed by coordinated_upgrade and defers while ConPTY sessions are
+    alive (Pulso-owned handles remain authoritative).
+    """
+    return {
+        "schema": 1,
+        "apply_on": "app_exit",
+        "conpty_policy": "never_interrupt_live_sessions",
+        "failure_policy": "remain_on_functional_version_and_allow_rollback",
+        "authority": "existing_canvas_broker",
+    }
 
 
 def launch_electron(endpoint, *, wait: bool = False) -> int:

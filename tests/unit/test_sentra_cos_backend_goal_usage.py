@@ -159,7 +159,9 @@ def test_real_cli_goal_budget_blocks_second_provider_submission(tmp_path, monkey
                                  limits={"input_tokens": 10})
         submissions = []
 
-        def native(config, messages, model, delivery, *, usage_callback=None):
+        def native(config, messages, model, delivery, *, usage_callback=None, checkpoint=None):
+            if checkpoint is not None:
+                checkpoint()
             assert any("PRIVATE_CLI_GOAL_USAGE" in message["content"] for message in messages)
             ident = "cli-goal-reported-" + str(len(submissions))
             delivery("codex-cli", ident, "submitted")
@@ -328,16 +330,12 @@ def test_real_cli_delivery_and_usage_keep_same_approved_goal_during_change(tmp_p
         run = durable.create_run(owner, workspace=str(tmp_path))["run_id"]
         goal = ConversationGoalLoop(control, agent.store).set(owner, agent.session_id, run_id=run,
             objective="keep approved accounting scope", operator_approved=True)
-        before = agent.client.on_before_provider
-        def pause_after_admission(provider):
-            before(provider)
-            control.update_goal(goal["goal_id"], owner, state="PAUSED", reason="owner paused after provider admission")
-        agent.client.on_before_provider = pause_after_admission
-
-        def native(config, messages, model, delivery, *, usage_callback=None):
-            # This owner change happens after approval, before the submitted
-            # callback. Already approved consumption keeps its original scope.
+        def native(config, messages, model, delivery, *, usage_callback=None, checkpoint=None):
+            if checkpoint is not None:
+                checkpoint()
+            # Consumption already submitted keeps its original accounting scope.
             delivery("codex-cli", "scope-race-one", "submitted")
+            control.update_goal(goal["goal_id"], owner, state="PAUSED", reason="owner paused after physical submission")
             usage_callback("codex-cli", "scope-race-one", model, {"input_tokens": 10, "output_tokens": 2})
             delivery("codex-cli", "scope-race-one", "completed")
             return "observed fixture answer"

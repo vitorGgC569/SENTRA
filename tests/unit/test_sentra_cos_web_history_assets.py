@@ -78,7 +78,9 @@ def test_attachment_rejects_oversized_and_identity_mismatch(tmp_path):
                  principal_id=p["principal_id"],capability="web:attach",
                  scope_type="work_item",scope_id=p["work_item_id"])
         with pytest.raises(ValueError):
-            asset.begin(**{**p,"expected_bytes":4*1024*1024+1})
+            asset.begin(**{**p,"expected_bytes":20*1024*1024+1})
+        with pytest.raises(ValueError):
+            asset.begin(**{**p,"content_type":"image/png","expected_bytes":8*1024*1024+1})
         with pytest.raises(ValueError):
             asset.begin(**{**p,"message_id":"?"})
         with pytest.raises(ValueError):

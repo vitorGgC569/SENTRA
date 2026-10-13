@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import closing
 from sentra_mcp.errors import sanitize_error
 from pathlib import Path
 
@@ -66,13 +67,15 @@ class Session:
 
 class Canvas:
     def __init__(self,root,db_path=None,principal=None,max_terminals=12,*,state_dir=None,
-                 max_task_workers=4,max_pending_tasks=128):
+                 max_task_workers=4,max_pending_tasks=128,shell_configuration=None):
         if type(max_task_workers) is not int or not 1<=max_task_workers<=16:
             raise ValueError("task worker limit must be 1-16")
         if type(max_pending_tasks) is not int or not max_task_workers<=max_pending_tasks<=1024:
             raise ValueError("pending task limit must cover workers and be <=1024")
         root=Path(root).resolve()
         self.project_dir=root
+        from .shell_optional import load_shell_configuration
+        shell_configuration=load_shell_configuration(shell_configuration, root=root)
         self.state_dir=Path(state_dir).resolve() if state_dir is not None else root/".sentra"/"canvas"
         self.state_dir.mkdir(parents=True,exist_ok=True)
         self.instance_lock=InstanceLock(self.state_dir/"owner.lock")
@@ -101,9 +104,20 @@ class Canvas:
         self.max_task_workers=max_task_workers
         self.max_pending_tasks=max_pending_tasks
         self._task_runtime=None
+        self._control=None
         self._machine_host=None
         self._collab_authority=None
         self._collab_process=None
+        self._shell_runtime=None
+        self._project_documents=None
+        self._project_file_service=None
+        self._channels=None
+        self._protocol_interactions=None
+        self._shell_machines=None
+        self._shell_turn_permissions=None
+        self._shell_product_requests=None
+        # Host configuration is injected at startup, never selected by renderer.
+        self._shell_configuration=shell_configuration
         self._plan_history=None
         self._network_settings=None
         self._task_runtime_error=None
@@ -111,23 +125,362 @@ class Canvas:
         self._dispatch_wake=threading.Event()
         self._dispatch_thread=threading.Thread(target=self._dispatch_loop,daemon=True,name="sentra-canvas-queue")
         self._dispatch_thread.start()
+        self._compose_web_relay_startup()
+
+    def _compose_web_relay_startup(self):
+        config = self._shell_configuration.get("web_relay")
+        if not isinstance(config, dict) or config.get("enabled") is not True:
+            return
+        from native_bridge.host_attestors import create_host_attestors
+        control = self._shell_service()
+        account_attestor, assistant_observer = create_host_attestors(control, owner="canvas:" + self.store.principal)
+        if not callable(account_attestor) or not callable(assistant_observer):
+            raise RuntimeError("fail-closed: host attestors cannot be constructed")
+        self.attach_shell_relay_observers(account_attestor=account_attestor,
+                                          assistant_observer=assistant_observer)
 
     def _runtime(self):
-        if self._task_runtime is None:
-            from .task_runtime import TaskRuntime
-            self._task_runtime=TaskRuntime(self.state_dir.parent,self.store)
-        return self._task_runtime
+        with self._lock:
+            if self._task_runtime is None:
+                from sentra_runtime.canvas_authority import CanvasAuthorityRuntime
+                self._task_runtime=CanvasAuthorityRuntime(self.state_dir.parent,self.store,
+                    control=self._control_service(),owner="canvas:"+self.store.principal)
+            return self._task_runtime
+
+    def _control_service(self):
+        """Choose the configured authority once; hosted failures never fall back locally."""
+        with self._lock:
+            if self._control is None:
+                from sentra_mcp.services.control_plane import ControlPlaneService
+                config=self._shell_configuration.get("control_plane",{})
+                if not isinstance(config,dict) or set(config)-{"backend","dsn","tenant_id","principal_id"}:
+                    raise ValueError("invalid host Control Plane configuration")
+                control=ControlPlaneService.from_store(self.state_dir.parent,**config)
+                try:
+                    if hasattr(control.store,"assert_principal"):
+                        control.store.assert_principal("canvas:"+self.store.principal)
+                except BaseException:
+                    control.context.close()
+                    control.durable.close()
+                    raise
+                self._control=control
+            return self._control
+
+    def _shell_service(self):
+        """Compose the conversation surface with the existing runtime authority."""
+        with self._lock:
+            host = self._machine_service()
+            if self._shell_runtime is None:
+                from .shell_runtime import CanvasShellRuntime
+                self._shell_runtime = CanvasShellRuntime(self, host.control, owner=host.owner)
+                host.control.attach_shell_runtime(self._shell_runtime)
+                self._shell_runtime.recover_completed()
+            return host.control
+
+    def _document_service(self):
+        with self._lock:
+            control = self._shell_service()
+            if self._project_documents is None:
+                from .project_documents import ProjectDocuments
+                owner = self._runtime().owner
+                self._project_documents = ProjectDocuments(control, owner=owner,
+                    resolve_space=lambda sid, pid: control.shell.get_space(sid, owner, project_id=pid),
+                    resolve_run=lambda pid: control.shell.resolve_run(pid, owner))
+            return self._project_documents
+
+    def attach_shell_relay_observers(self, *, account_attestor, assistant_observer):
+        """Trusted host composition only; callback authority never comes from HTTP."""
+        with self._lock:
+            self._shell_service()
+            self._shell_runtime.web.attach_observers(account_attestor=account_attestor,
+                assistant_observer=assistant_observer)
+            self._shell_runtime.recover_completed()
+
+    def _channel_service(self):
+        with self._lock:
+            if self._channels is None:
+                from sentra_interop.channels import ChannelService
+                host = self._machine_service()
+                self._channels = ChannelService(host.control, owner=host.owner)
+            return self._channels
+
+    def channel_receive(self, connector_id, raw_body, headers):
+        """Authenticated provider ingress records an inbox; it cannot dispatch work."""
+        from sentra_interop.provider_store import identifier
+        identifier(connector_id)
+        if not isinstance(raw_body, bytes) or len(raw_body) > 1048576:
+            raise ValueError("channel webhook body exceeds limit")
+        return self._channel_service().receive(connector_id=connector_id,
+            raw_body=raw_body, headers=dict(headers))
+
+    def channel_challenge(self, connector_id, query):
+        from sentra_interop.provider_store import identifier
+        identifier(connector_id)
+        return self._channel_service().challenge(connector_id, query)
+
+    def interop_receive(self, machine_id, raw_body, headers):
+        """Pinned A2A ingress persists evidence; execution remains an admitted operation."""
+        from sentra_interop.provider_store import identifier
+        identifier(machine_id)
+        if not isinstance(raw_body, bytes) or len(raw_body) > 1048576:
+            raise ValueError("interop webhook body exceeds limit")
+        host = self._machine_service()
+        entry = next((e for e in host.configurations.entries() if e["machine_id"] == machine_id), None)
+        if entry is None or entry["configuration"].get("kind") != "a2a":
+            raise Denied("configured A2A callback machine required")
+        project_id = entry["configuration"]["workspace_id"]
+        self.store.workspace(project_id)
+        # MachineHost resolves only restored/configured factories and the provider
+        # validates callback secret, peer/task/context and replay binding.
+        value = host.receive_interop_callback(machine_id, raw_body, dict(headers))
+        if (value.get("project_id") or value.get("workspace_id")) != project_id:
+            raise Denied("callback project differs from its configured machine")
+        return value
+
+    def _channel_configure(self, project_id, payload):
+        control = self._shell_service()
+        owner = self._runtime().owner
+        configuration = payload.get("configuration")
+        if not isinstance(configuration, dict) or configuration.get("project_id") != project_id:
+            raise Denied("channel configuration belongs to another project")
+        agent_id = configuration.get("agent_id")
+        self.store.resource("agents", agent_id, project_id)
+        run = control.durable.run_status(self._runtime().run(project_id)["run_id"], owner)
+        if not any(a["agent_id"] == agent_id for a in run.get("agents", [])):
+            raise Denied("channel agent is outside the project Run")
+        routes = configuration.get("routes")
+        if not isinstance(routes, list) or not 1 <= len(routes) <= 100:
+            raise ValueError("bounded channel routes required")
+        # The configured routes must reference persisted conversations and Spaces.
+        from contextlib import closing
+        for item in routes:
+            if not isinstance(item, dict):
+                raise ValueError("channel route must be an object")
+            with closing(control.store.connect("shell")) as db:
+                conversation = control.shell._entity(db, owner, project_id, "conversation",
+                    item.get("conversation_id"), space_id=item.get("space_id"))
+            control.shell.get_space(conversation["space_id"], owner, project_id=project_id)
+        return self._channel_service().configure(connector_id=payload.get("connector_id"),
+            configuration=configuration, expected_revision=payload.get("expected_revision", 0))
+
+    def shell_delivery_inspect(self, project_id, space_id, conversation_id, operation_id):
+        """Read-only inspection of a known, conversation-bound provider operation.
+
+        Does not admit, call, retry, reconcile or mark an operation successful.
+        """
+        from contextlib import closing
+        from sentra_core.conversations import _decode
+        self.store.workspace(project_id)
+        control = self._shell_service()
+        owner = self._runtime().owner
+        with closing(control.store.connect("shell")) as db:
+            control.shell._entity(db, owner, project_id, "conversation",
+                                  conversation_id, space_id=space_id)
+            row = db.execute(
+                "SELECT protected_input,receipt_id,state FROM canvas_shell_queue "
+                "WHERE owner=? AND operation_id=?",
+                (owner, operation_id)).fetchone()
+        if row is None:
+            raise Denied("delivery record not found in this conversation")
+        original = _decode(row["protected_input"])["message"]
+        if (original.get("project_id") != project_id or
+                original.get("space_id") != space_id or
+                original.get("conversation_id") != conversation_id or
+                original.get("operation_id") != operation_id):
+            raise Denied("delivery record belongs to another conversation")
+        operation = control.durable.operation_status(operation_id, owner)
+        if operation.get("run_id") != original.get("run_id"):
+            raise Denied("delivery and operation run differ")
+        raw_error = operation.get("error") or {}
+        error_code = raw_error.get("code", "") if isinstance(raw_error, dict) else ""
+        # Only display known diagnostic codes. Raw provider errors can contain
+        # credentials, prompts or private machine identifiers.
+        allowed_codes = {"shell_provider_unconfirmed", "shell_model_interrupted",
+                         "shell_relay_unconfirmed", "shell_worker_failed"}
+        reason_code = error_code if error_code in allowed_codes else (
+            "not_yet_attested" if operation["state"] == "UNCERTAIN" else "")
+        receipt = (operation.get("result") or {}).get("receipt_id") or row["receipt_id"]
+        problem = None
+        if operation["state"] == "UNCERTAIN":
+            try:
+                problem = self._shell_runtime._delivery_problem(original)
+            except (OSError, RuntimeError, ValueError, LookupError):
+                problem = None  # Failure to inspect the journal never retries the provider.
+        return {"status": operation["state"], "operation_id": operation_id,
+                "receipt_confirmed": operation["state"] == "SUCCEEDED" and bool(receipt),
+                "reason_code": reason_code, "automatic_retry": False,
+                "receipt_id": receipt if operation["state"] == "SUCCEEDED" else None,
+                "message": ("Resultado definitivo verificado no registro do SENTRA."
+                            if operation["state"] == "SUCCEEDED" and receipt else
+                            (problem or "Ainda não existe resposta definitiva verificada.") +
+                            " A operação não foi reenviada."
+                            if operation["state"] == "UNCERTAIN" else
+                            "A operação ainda está em " + str(operation["state"]) + ".")}
+
+    def shell_live_preview(self, project_id, space_id, conversation_id):
+        """Authenticated, conversation-scoped, nonauthoritative model projection."""
+        from contextlib import closing
+        self.store.workspace(project_id)
+        control = self._shell_service()
+        try:
+            with closing(control.store.connect("shell")) as db:
+                control.shell._entity(db, self._runtime().owner, project_id, "conversation",
+                                      conversation_id, space_id=space_id)
+        except FileNotFoundError as exc:
+            raise Denied("conversation outside the authorized project") from exc
+        from .shell_web_preview import web_preview
+        observed = web_preview(self._shell_runtime, project_id, conversation_id)
+        native = self._shell_runtime.live.view(project_id, conversation_id)
+        return observed if observed.get('content') or (native['status'] == 'idle' and observed['status'] != 'idle') else native
+
+    def shell_bridge(self, payload):
+        """Authenticated owner entry point; renderer inputs never select authority."""
+        if not isinstance(payload, dict):
+            raise ValueError("shell envelope must be an object")
+        action = payload.get("action")
+        project_id = payload.get("project_id", payload.get("ws"))
+        if not isinstance(action, str) or not isinstance(project_id, str):
+            raise ValueError("shell action and project_id required")
+        if payload.get("ws") is not None and payload["ws"] != project_id:
+            raise ValueError("conflicting project identifiers")
+        forbidden = {"owner", "principal", "principal_id", "principal_type", "grant",
+            "grant_id", "permissions", "permission", "workspace_root", "root", "run_id", "operation_id"}
+        if forbidden.intersection(payload):
+            raise Denied("shell authority is derived from the authenticated server")
+        self.store.workspace(project_id)
+        control = self._shell_service()
+        request_key = payload.get("request_key")
+        params = {k: v for k, v in payload.items() if k not in {"action", "project_id", "ws", "request_key"}}
+        if action == "attachment_upload_status" and request_key is not None:
+            # This read uses the original mutation key as a reconciliation selector.
+            params["request_key"] = request_key
+        if action == "channel_configure":
+            value = self._channel_configure(project_id, params)
+            return {"ok": True, "value": value, "request_key": request_key}
+        if action in {'coordinator_approval_list', 'coordinator_approval_reply'}:
+            from .shell_approval_inbox import dispatch_coordinator_approval
+            value = dispatch_coordinator_approval(self, project_id, action, params, request_key)
+            return {'ok': True, 'value': value, 'request_key': request_key}
+        if action in {"interaction_list", "interaction_reply"}:
+            with self._lock:
+                if self._protocol_interactions is None:
+                    from sentra_interop.interactions import ProtocolInteractionService
+                    self._protocol_interactions = ProtocolInteractionService(control, owner=self._runtime().owner)
+            if action == "interaction_list":
+                value = self._protocol_interactions.pending(workspace_id=project_id, limit=params.get("limit", 100))
+            else:
+                value = self._protocol_interactions.reply(workspace_id=project_id,
+                    interaction_id=params["interaction_id"], answer=params["answer"], request_key=request_key)
+            return {"ok": True, "value": value, "request_key": request_key}
+        from .project_review import PROJECT_REVIEW_ACTIONS, ProjectReviewService
+        if action in PROJECT_REVIEW_ACTIONS:
+            if payload.get("space_id"):
+                control.shell.get_space(payload["space_id"], self._runtime().owner, project_id=project_id)
+            with self._lock:
+                if self._project_file_service is None:
+                    self._project_file_service = ProjectReviewService(lambda pid: self.store.workspace(pid)["path"])
+            value = self._project_file_service.dispatch(action, params, project_id=project_id)
+            return {"ok": True, "value": value, "request_key": request_key}
+        if "path" in payload:
+            raise Denied("filesystem paths are allowed only by scoped project preview actions")
+        from sentra_mcp.services.pacto_product import PACTO_ACTIONS, PACTO_READS, dispatch_pacto_product
+        if action in PACTO_ACTIONS:
+            if action in PACTO_READS:
+                value = dispatch_pacto_product(self, project_id, action, params)
+            else:
+                with self._lock:
+                    if self._shell_product_requests is None:
+                        from .shell_requests import ShellHostRequests
+                        self._shell_product_requests = ShellHostRequests(control, self._runtime().owner)
+                value = self._shell_product_requests.invoke(project_id, action, params, request_key,
+                    lambda: dispatch_pacto_product(self, project_id, action, params))
+            return {"ok": True, "value": value, "request_key": request_key}
+        from .shell_permissions import TURN_PERMISSION_ACTIONS, ShellTurnPermissions
+        from .shell_goals import GOAL_ACTIONS, dispatch_goal
+        if action in GOAL_ACTIONS:
+            value = dispatch_goal(self, project_id, action, params, request_key)
+            return {"ok": True, "value": value, "request_key": request_key}
+        from .shell_dot_canvas import DOT_CANVAS_ACTIONS, dispatch_dot_canvas
+        from .shell_dot_vm import DOT_VM_ACTIONS, DotVmServices
+        from .shell_dot_lifecycle import DOT_LIFECYCLE_ACTIONS, DotLifecycleServices
+        if action in DOT_VM_ACTIONS:
+            with self._lock:
+                if getattr(self, '_shell_dot_vm', None) is None:
+                    self._shell_dot_vm = DotVmServices(self)
+            value = self._shell_dot_vm.dispatch(project_id, action, params, request_key)
+            return {'ok': True, 'value': value, 'request_key': request_key}
+        if action in DOT_LIFECYCLE_ACTIONS:
+            with self._lock:
+                if getattr(self, '_shell_dot_lifecycle', None) is None:
+                    self._shell_dot_lifecycle = DotLifecycleServices(self)
+            value = self._shell_dot_lifecycle.dispatch(project_id, action, params, request_key)
+            return {'ok': True, 'value': value, 'request_key': request_key}
+        from .shell_dot_computer import DOT_COMPUTER_ACTIONS, DotComputerServices
+        if action in DOT_COMPUTER_ACTIONS:
+            with self._lock:
+                if getattr(self, '_shell_dot_computer', None) is None:
+                    self._shell_dot_computer = DotComputerServices(self)
+            value = self._shell_dot_computer.dispatch(project_id, action, params, request_key)
+            return {'ok': True, 'value': value, 'request_key': request_key}
+        from .shell_access import ACCESS_ACTIONS, dispatch_access
+        if action in ACCESS_ACTIONS:
+            return {"ok": True, "value": dispatch_access(self, project_id, action, params, request_key)}
+        if action in DOT_CANVAS_ACTIONS:
+            value = dispatch_dot_canvas(self, project_id, action, params, request_key)
+            return {"ok": True, "value": value, "request_key": request_key}
+        if action in TURN_PERMISSION_ACTIONS:
+            with self._lock:
+                if self._shell_turn_permissions is None:
+                    self._shell_turn_permissions = ShellTurnPermissions(self)
+            return {"ok": True, "value": self._shell_turn_permissions.dispatch(project_id, action, params, request_key),
+                "request_key": request_key}
+        from .code_machine import CODE_ACTIONS
+        if action in CODE_ACTIONS:
+            from .shell_code import dispatch_code
+            return {"ok": True, "value": dispatch_code(self,project_id,action,params,request_key),
+                "request_key":request_key}
+        from .shell_machines import MACHINE_ACTIONS, ShellMachineServices
+        if action in MACHINE_ACTIONS:
+            with self._lock:
+                if self._shell_machines is None:
+                    self._shell_machines = ShellMachineServices(self)
+            value = self._shell_machines.dispatch(project_id, action, params, request_key)
+            return {"ok": True, "value": value, "request_key": request_key}
+        from .project_documents import DOCUMENT_ACTIONS
+        if action in DOCUMENT_ACTIONS:
+            params["request_key"] = request_key
+            value = self._document_service().dispatch(action, params, project_id=project_id,
+                principal_id=self.store.principal, principal_type="user")
+            return {"ok": True, "value": value, "request_key": request_key}
+        result = control.shell_dispatch(self._runtime().owner, project_id=project_id,
+            action=action, payload=params, request_key=request_key)
+        if action == 'message_list' and result.get('ok') is True:
+            from .shell_generated_media import ShellGeneratedMedia
+            result['value']['items'] = ShellGeneratedMedia(self._shell_runtime).messages(project_id,
+                params['conversation_id'], result['value']['items'])
+        if action == 'conversation_create':
+            # An owner-created conversation starts with the visible default:
+            # project reads, with approval required before edits or commands.
+            # Agent-created child conversations do not enter this owner route.
+            from .shell_access import AccessStore, dispatch_access
+            conversation = result['value']
+            if conversation.get('conversation_id') and not AccessStore(control, self._runtime().owner).profile(conversation['conversation_id']).get('work_item_id'):
+                dispatch_access(self, project_id, 'access_set', {'space_id': conversation['space_id'],
+                    'conversation_id': conversation['conversation_id'], 'mode': 'ask'},
+                    'default-access-' + hashlib.sha256(request_key.encode()).hexdigest())
+        return result
 
     def _machine_service(self):
         """Share the existing durable state; the host owns only dispatch machinery."""
         with self._lock:
             if self._machine_host is None:
-                from sentra_mcp.services.context import ContextBusService
-                from sentra_mcp.services.control_plane import ControlPlaneService
                 from sentra_runtime.machine_host import MachineHost
                 runtime = self._runtime()
-                control = ControlPlaneService(runtime.durable, ContextBusService(self.state_dir.parent))
-                self._machine_host = MachineHost(control, owner=runtime.owner)
+                self._machine_host = MachineHost(runtime.control, owner=runtime.owner)
+                from .code_machine import configure_code_machine
+                self._machine_host.attach_runtime_adapters(canvas=self)
+                self._machine_host.attach_configuration_handler("code-mode",
+                    lambda host, **kwargs: configure_code_machine(host, canvas=self, **kwargs))
                 def validate_scope(config):
                     workspace = self.store.workspace(config["workspace_id"])
                     self.store.resource("agents",config["agent_id"],config["workspace_id"])
@@ -187,7 +540,14 @@ class Canvas:
             if source is not None:
                 action="stage"  # Existing Canvas client request compatibility.
             else:
-                return control.bundle_list(owner,root)
+                from sentra_mcp.services.mcpb_supervision import MCPBSupervisionService
+                return {**control.bundle_list(owner,root),
+                    "supervision":MCPBSupervisionService(control).status(owner,root)}
+        if action in {"supervision","supervision_sweep"}:
+            from sentra_mcp.services.mcpb_supervision import MCPBSupervisionService
+            supervision=MCPBSupervisionService(control)
+            return supervision.status(owner,root) if action=="supervision" else supervision.sweep(owner,root,
+                approved_by_host=lambda: self.store.workspace(ws)["owner"]==self.store.principal)
         if action=="inspect":
             return control.bundle_inspect(owner,root,package_sha256)
         if action=="register":
@@ -217,12 +577,17 @@ class Canvas:
         if action=="git":return library.import_git(owner,root,**p)
         if action=="github":return library.import_github(owner,root,**p)
         if action=="revoke":return library.revoke(owner,root,**p)
-        if action in {"activate","disclose"}:
+        if action=="versions":return library.versions(owner,root,**p)
+        if action=="latest":return library.latest(owner,root,**p)
+        if action=="review":return library.review(owner,root,**p)
+        if action in {"activate","disclose","upgrade","rollback"}:
             work=control.governance.work_item_info(p["work_item_id"],owner)
             if work.get("metadata",{}).get("workspace_id")!=ws:
                 raise Denied("skill WorkItem belongs to another Canvas workspace")
             self.store.resource("agents",p["agent_id"],ws)
             if action=="activate":return library.activate(owner,root,**p)
+            if action=="upgrade":return library.upgrade_activation(owner,root,**p)
+            if action=="rollback":return library.rollback_activation(owner,root,approved=True,**p)
             return library.disclose(owner,root,**p)
         raise ValueError("unsupported skill library action")
 
@@ -371,7 +736,8 @@ class Canvas:
             raise ValueError("unsupported chat access policy change")
         result={"strict_policy":registry.strict_status(principal)}
         if conversation_id:
-            result["chat"]=registry.chat_status(principal,conversation_id)
+            result["chat"]={**registry.chat_status(principal,conversation_id),
+                **registry.conversation_consent_summary(principal,conversation_id)}
         return result
 
     def center_network(self,ws,configuration=None,*,agent=False):
@@ -543,6 +909,13 @@ class Canvas:
         workspace = self.store.workspace(ws)
         self.store.resource("agents", agent_id, ws)
         host = self._machine_service()
+        if kind == "workspace-files":
+            return host.configure_workspace_files(workspace_id=ws,
+                workspace_root=workspace["path"], agent_id=agent_id)
+        if kind == "terminal":
+            # Existing fenced ConPTY terminal machine; not a general host shell.
+            return host.configure_terminal(workspace_id=ws,
+                workspace_root=workspace["path"], agent_id=agent_id, canvas=self)
         if kind == "documents":
             return host.configure_documents(workspace_id=ws, workspace_root=workspace["path"],
                                             agent_id=agent_id,recalculation_backends=recalculation_backends,
@@ -556,12 +929,79 @@ class Canvas:
         if kind == "workflow":
             return host.configure_workflow(workspace_id=ws,workspace_root=workspace["path"],
                 agent_id=agent_id,definitions=definitions)
+        if kind == "code-mode":
+            return host.configure_code(workspace_id=ws,workspace_root=workspace["path"],
+                agent_id=agent_id,provider_config=provider_config)
         if kind in {"daytona","guacamole","rustdesk"}:
             return host.configure_session(workspace_id=ws,workspace_root=workspace["path"],
                 agent_id=agent_id,kind=kind,provider_config=provider_config)
+        if kind in {"acp","a2a","mcp","channels","acp_registry"}:
+            return host.configure_interop(workspace_id=ws,workspace_root=workspace["path"],
+                agent_id=agent_id,kind=kind,provider_config=provider_config)
+        if kind in {"windows_uia_semantic","windows_guest_uia","windows_guest_lifecycle",
+                    "windows_guest_artifact","windows_hcs_native","gvisor_workload"}:
+            return host.configure_executor(workspace_id=ws,workspace_root=workspace["path"],
+                agent_id=agent_id,kind=kind,provider_config=provider_config)
         raise ValueError("unsupported machine kind")
 
-    def center_prepare_task(self, ws, machine_id, capabilities, objective):
+    def center_file_work_items(self, ws, conversation_id):
+        """Read-only owner-scoped file WorkItems for one conversation.
+
+        A configured machine does not imply a Grant. Expose allowed
+        capabilities only after the same authoritative policy that the machine
+        executor checks. No task/grant is created during this read.
+        """
+        self.store.workspace(ws)
+        host = self._machine_service()
+        owner = self._runtime().owner
+        control = host.control
+        try:
+            with closing(control.store.connect("shell")) as db:
+                conversation = control.shell._entity(db, owner, ws, "conversation", conversation_id)
+                dot = control.shell._entity(db, owner, ws, "dot", conversation["dot_id"],
+                                            space_id=conversation["space_id"])
+        except FileNotFoundError as exc:
+            raise Denied("file WorkItems outside the authorized conversation") from exc
+        agent_id = dot["agent_id"]
+        machines = [machine for machine in host.inventory(ws)
+                    if machine["kind"] in {"workspace-files", "terminal"} and
+                       machine["agent_id"] == agent_id]
+        machine_ids = {machine["machine_id"] for machine in machines}
+        machine_kinds = {machine["machine_id"]: machine["kind"] for machine in machines}
+        if not machines:
+            return {"items": [], "machine_configured": False, "dot": dot.get("name", "Dot")}
+        eligible = {item["work_item_id"]: item for item in
+                    host.task_catalog(workspace_id=ws, agent_ids={agent_id})}
+        run = self._runtime().run(ws)
+        records = control.list_work_items(owner, run_id=run["run_id"],
+                                          limit=1000)["items"]
+        items = []
+        for item in records:
+            meta = item.get("metadata", {})
+            if (meta.get("machine_id") not in machine_ids or
+                    meta.get("workspace_id") != ws or
+                    meta.get("conversation_id") != conversation_id or
+                    meta.get("file_access_owner_approved" if
+                             machine_kinds.get(meta.get("machine_id")) == "workspace-files"
+                             else "terminal_access_owner_approved") is not True or
+                    item.get("assignee_agent_id") != agent_id):
+                continue
+            allowed = (eligible[item["work_item_id"]]["capabilities"]
+                       if item["work_item_id"] in eligible else [])
+            items.append({"work_item_id": item["work_item_id"],
+                          "machine_id": meta["machine_id"],
+                          "kind": machine_kinds.get(meta["machine_id"]),
+                          "state": item["state"],
+                          "objective": item.get("objective", ""),
+                          "requested_capabilities": item.get("required_capabilities", []),
+                          "granted_capabilities": allowed,
+                          "authorized": bool(allowed) and item["state"] == "RUNNING",
+                          "created_at": item.get("created_at")})
+        items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return {"items": items, "machine_configured": True,
+                "dot": dot.get("name", "Dot")}
+
+    def center_prepare_task(self, ws, machine_id, capabilities, objective, *, conversation_id=None, approve=False):
         """Owner explicitly creates a scoped task/grant for a configured machine."""
         self.store.workspace(ws)
         host = self._machine_service()
@@ -574,6 +1014,44 @@ class Canvas:
         runtime = self._runtime()
         run = runtime.run(ws)
         control = host.control
+        file_scope = {}
+        if selected["kind"] in {"workspace-files", "terminal"}:
+            if approve is not True:
+                raise Denied("explicit owner approval required for scoped machine grants")
+            if not isinstance(conversation_id, str) or not conversation_id:
+                raise Denied("file access must be explicitly scoped to a shell conversation")
+            with closing(control.store.connect("shell")) as db:
+                conversation = control.shell._entity(db, runtime.owner, ws, "conversation", conversation_id)
+                dot = control.shell._entity(db, runtime.owner, ws, "dot", conversation["dot_id"],
+                                            space_id=conversation["space_id"])
+            if dot["agent_id"] != selected["agent_id"]:
+                raise Denied("file access conversation belongs to another Dot")
+            permission_flag = ("file_access_owner_approved" if selected["kind"] == "workspace-files"
+                               else "terminal_access_owner_approved")
+            file_scope = {"conversation_id": conversation_id, permission_flag: True}
+            # A lost HTTP acknowledgement must not create a second set of Grants.
+            for existing in control.list_work_items(host.owner, limit=1000)["items"]:
+                if existing.get("state") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                    continue
+                meta = existing.get("metadata", {})
+                if (existing["run_id"] != run["run_id"] or
+                        existing.get("assignee_agent_id") != selected["agent_id"] or
+                        meta.get("workspace_id") != ws or meta.get("machine_id") != machine_id or
+                        meta.get("conversation_id") != conversation_id or
+                        meta.get(permission_flag) is not True or
+                        not set(capabilities) <= set(existing.get("required_capabilities", []))):
+                    continue
+                active = [grant for grant in control.authorization.list_grants(host.owner,
+                    principal_type="agent", principal_id=selected["agent_id"])["items"]
+                    if grant["scope_type"] == "work_item" and
+                    grant["scope_id"] == existing["work_item_id"] and
+                    grant["capability"] in set(capabilities)]
+                if (existing["state"] == "RUNNING" and
+                        {grant["capability"] for grant in active} == set(capabilities)):
+                    return {"work_item": existing, "machine_id": machine_id,
+                            "grant_ids": [grant["grant_id"] for grant in active],
+                            "existing_authorization": True}
+                raise Denied("existing incomplete file WorkItem must be reviewed or revoked before a new authorization")
         if run["state"] == "CREATED":
             runtime.durable.transition_run(run["run_id"], runtime.owner, "RUNNING",
                                            reason="owner prepared a machine task")
@@ -585,7 +1063,8 @@ class Canvas:
             work_item_id="WI-machine-" + secrets.token_hex(12), objective=objective.strip(),
             assignee_agent_id=selected["agent_id"], required_capabilities=sorted(set(capabilities)),
             metadata={"workspace_id": ws, "machine_id": machine_id,
-                      "canvas_agent_id": selected["agent_id"], "owner_configured": True})
+                      "canvas_agent_id": selected["agent_id"], "owner_configured": True,
+                      **file_scope})
         grants = [control.authorization_grant(runtime.owner, principal_type="agent",
                     principal_id=selected["agent_id"], capability=cap,
                     scope_type="work_item", scope_id=item["work_item_id"])
@@ -593,6 +1072,36 @@ class Canvas:
         control.transition_work_item(item["work_item_id"], runtime.owner, "RUNNING")
         return {"work_item": control.work_item_info(item["work_item_id"], runtime.owner),
                 "machine_id": machine_id, "grant_ids": [g["grant_id"] for g in grants]}
+
+    def center_revoke_files(self, ws, work_item_id, conversation_id, *, approve=False):
+        """Owner revokes only this conversation's existing workspace-files Grants."""
+        if approve is not True:
+            raise Denied("explicit owner approval required for file access revocation")
+        self.store.workspace(ws)
+        host = self._machine_service()
+        item = host.control.work_item_info(work_item_id, host.owner)
+        meta = item.get("metadata", {})
+        if (meta.get("workspace_id") != ws or
+                meta.get("conversation_id") != conversation_id):
+            raise Denied("WorkItem does not belong to this conversation")
+        machine = next((m for m in host.inventory(ws) if m["machine_id"] == meta.get("machine_id")), None)
+        if (machine is None or machine["kind"] not in {"workspace-files", "terminal"} or
+                machine["agent_id"] != item["assignee_agent_id"] or
+                meta.get("file_access_owner_approved" if machine["kind"] == "workspace-files"
+                         else "terminal_access_owner_approved") is not True):
+            raise Denied("invalid scoped machine ownership")
+        grants = host.control.authorization.list_grants(host.owner, principal_type="agent",
+            principal_id=item["assignee_agent_id"])["items"]
+        revoked = []
+        for grant in grants:
+            if grant["scope_type"] == "work_item" and grant["scope_id"] == work_item_id and (
+                    grant["capability"] in set(machine["capabilities"])):
+                if not grant.get("revoked"):
+                    host.control.authorization_revoke(grant["grant_id"], host.owner)
+                    revoked.append(grant["grant_id"])
+        if item["state"] in {"RUNNING", "QUEUED", "PENDING"}:
+            host.control.transition_work_item(work_item_id, host.owner, "CANCELLED")
+        return {"revoked_grants": len(revoked), "work_item_id": work_item_id, "access": "revoked"}
 
     def center_execute(self, ws, work_item_id, machine_id, capability_id, operation_id,
                        arguments, request_key):
@@ -638,7 +1147,13 @@ class Canvas:
             workspace = self.store.workspace(ws)
             if payload.get("workspace") != workspace["path"]:
                 raise Denied("Canvas capability belongs to another workspace")
-            if terminal.startswith("task:"):
+            if terminal.startswith("shell:"):
+                if self._shell_runtime is None:
+                    raise Denied("shell runtime capability is no longer available")
+                subject = self._shell_runtime.actors.subject(token, payload)
+                agents = {subject["dot"]["agent_id"]}
+                shell_conversation_id = subject["message"]["conversation_id"]
+            elif terminal.startswith("task:"):
                 task = self.store.resource("tasks", terminal[5:], ws)
                 process = self._task_processes.get(task["id"])
                 if process is None or process.poll() is not None:
@@ -653,9 +1168,17 @@ class Canvas:
                 agents = {a["id"] for a in self.store.list_resources("agents", ws)
                           if a.get("terminal_id") == terminal}
         action = payload["action"]
+        if not terminal.startswith("shell:"):
+            shell_conversation_id = None
         if action == "machine_list":
             host=self._machine_service()
-            tasks=host.task_catalog(workspace_id=ws,agent_ids=agents)
+            tasks=host.task_catalog(workspace_id=ws,agent_ids=agents,conversation_id=shell_conversation_id)
+            if shell_conversation_id:
+                file_ids = {m["machine_id"] for m in host.inventory(ws)
+                            if m["kind"] in {"workspace-files", "terminal", "computer-local", "virtualbox_vm"}}
+                tasks = [item for item in tasks if item["machine_id"] not in file_ids
+                         or host.control.work_item_info(item["work_item_id"], host.owner)
+                         .get("metadata", {}).get("conversation_id") == shell_conversation_id]
             scopes={}
             for item in tasks:scopes.setdefault(item["machine_id"],set()).update(item["capabilities"])
             return {"machines":[{**m,"capabilities":sorted(scopes[m["machine_id"]]),
@@ -671,6 +1194,9 @@ class Canvas:
         if (item.get("assignee_agent_id") not in agents
                 or item.get("metadata", {}).get("workspace_id") != ws):
             raise Denied("machine task belongs to another Canvas agent")
+        if (shell_conversation_id and payload.get("capability_id", "").startswith(("workspace:file.", "computer:", "terminal:", "vm:"))
+                and item.get("metadata", {}).get("conversation_id") != shell_conversation_id):
+            raise Denied("file task belongs to another conversation")
         if action == "machine_experiences":
             return self.center_experiences(ws,payload["work_item_id"],payload["machine_id"],
                 payload["query"],payload.get("limit",5))
@@ -739,6 +1265,9 @@ class Canvas:
         """Private bearer-authenticated callbacks for the owned Node sidecar."""
         if not isinstance(params, dict):
             raise ValueError("collaboration callback parameters required")
+        from .project_documents import DOCUMENT_HOST_METHODS
+        if method in DOCUMENT_HOST_METHODS:
+            return self._document_service().host_call(method, params)
         authority = self._collaboration_service()
         if method == "resolveGrant":
             self.store.workspace(params["workspaceId"])
@@ -1286,6 +1815,11 @@ class Canvas:
 
     def agent_control(self,token,payload):
         """A CLI sees only its own directed graph, not the UI bearer authority."""
+        with self._lock:
+            binding = self._agent_tokens.get(token)
+            is_shell = binding is not None and binding[1].startswith("shell:")
+        if is_shell and payload.get("action") not in {"machine_list", "machine_execute", "machine_observe", "machine_experiences"}:
+            return self._shell_runtime.actors.dispatch(token, payload)
         if payload.get("action") in {"machine_list", "machine_execute", "machine_observe", "machine_experiences"}:
             return self._agent_machine_control(token, payload)
         with self._lock:
@@ -1463,7 +1997,7 @@ class Canvas:
             "canvas-center-" + ws, "canvas-read-only",
             runtime.owner, (Capability(cap_id, "Read local Canvas workspace summary"),),
         )
-        authorization = AuthorizationService(self.state_dir.parent)
+        authorization = self._machine_service().control.authorization
         policy = BoundWorkItemPolicy(
             owner=runtime.owner, principal_type="agent",
             authorization=authorization, governance=runtime.governance,
@@ -1621,7 +2155,15 @@ class Canvas:
         source_root=Path(__file__).resolve().parents[1]
         launch=("import sys;sys.path.insert(0,"+repr(str(source_root))+
                 ");from sentra_cli.__main__ import main;sys.exit(main())")
-        return [sys.executable,"-c",launch,*arguments]
+        # The desktop broker may run under pythonw. Its children need the
+        # console interpreter so ConPTY and prompt-stdin have real stdio.
+        interpreter = Path(sys.executable)
+        if os.name == 'nt' and interpreter.name.lower().startswith('pythonw'):
+            console = interpreter.with_name(interpreter.name.replace('pythonw', 'python'))
+            if not console.is_file():
+                raise FileNotFoundError('Python console interpreter required for SENTRA CLI')
+            interpreter = console
+        return [str(interpreter),"-u","-c",launch,*arguments]
 
     def create_agent(self,ws,name,model,role="worker",start=False,*,goal=None):
         validated_name(name)
@@ -1707,8 +2249,17 @@ class Canvas:
                 if self._closing or cancel.is_set():
                     self.store.task_state(ws,ident,"cancelled");return
                 environment=os.environ.copy()
+                from sentra_runtime.provider_authority import ENVIRONMENT_KEY, prepare_provider_binding
                 for key in list(environment):
-                    if key.startswith(("MAESTRI_","SENTRA_CANVAS_AGENT_")):environment.pop(key)
+                    if key.startswith(("MAESTRI_","SENTRA_CANVAS_AGENT_")) or key in {
+                            ENVIRONMENT_KEY,"SENTRA_CANVAS_TOKEN","SENTRA_CANVAS_PORT"}:environment.pop(key)
+                runtime=self._runtime()
+                runtime.project(self.store.resource("tasks",ident,ws))
+                binding=prepare_provider_binding(runtime.control,state_root=self.state_dir.parent,
+                    owner=runtime.owner,principal=self.store.principal,conversation_id="task_"+ident,
+                    project_id=ws,run_id=task["run_id"],work_item_id=task["work_item_id"],
+                    operation_id=task["operation_id"])
+                environment.update(binding["environment"])
                 if self._agent_port is not None:
                     token=secrets.token_urlsafe(36)
                     self._agent_tokens[token]=(ws,"task:"+ident)
@@ -1812,6 +2363,10 @@ class Canvas:
             for event in self._jobs.values():event.set()
             threads=list(self._task_threads.values())
         self._dispatch_thread.join(timeout=5)
+        if self._shell_runtime is not None:
+            self._shell_runtime.close()
+        if self._shell_machines is not None:
+            self._shell_machines.close()
         if self._collab_process is not None:
             self._collab_process.close()
         if self._network_settings is not None:
@@ -1839,6 +2394,9 @@ class Canvas:
                     try:self._task_runtime.project(task)
                     except Exception as exc:self._task_runtime_error=type(exc).__name__
             finally:self._task_runtime.close()
+        if self._control is not None:
+            self._control.context.close()
+            self._control.durable.close()
         self.graph.close()
         self.store.close()
         self.instance_lock.close()

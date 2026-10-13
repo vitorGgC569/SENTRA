@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Sequence
 
-from .control_store import ControlPlaneStore, SQLiteControlPlaneStore
+from .control_store import ControlPlaneStore, create_control_plane_store
 from .tool_exposure import ToolExposureRegistry
 
 
@@ -49,7 +49,7 @@ class PluginWorkerHost:
         store: ControlPlaneStore | None = None,
         clock=time.time,
     ) -> None:
-        self.store = store or SQLiteControlPlaneStore(state_root)
+        self.store = store if store is not None else create_control_plane_store(state_root)
         self.path = self.store.path_for("plugin_worker")
         self.processes = processes
         self.governance = governance

@@ -572,7 +572,7 @@ class SentraDesktop:
                                            state_root=self.paths.state_dir,
                                            admin_token=admin_token,
                                            upstream_control_token=os.environ.get("SENTRA_WEB_CONTROL_TOKEN", ""),
-                                           connector_name=os.environ.get("SENTRA_CONNECTOR_NAME", "SENTRA tunnel"))
+                                           connector_name=os.environ.get("SENTRA_CONNECTOR_NAME", "SENTRA"))
                     gateway = GatewayServer(config)
                     self.web_gateway = gateway
                     self.web_gateway_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
@@ -1659,7 +1659,7 @@ class SentraDesktop:
             self.runtime_key_var.set("")
             messagebox.showinfo("SENTRA", "Tunnel credential stored with Windows DPAPI.")
         except Exception as exc:
-            messagebox.showerror("SENTRA tunnel", str(exc))
+            messagebox.showerror("SENTRA", str(exc))
 
     def open_edge_extensions(self) -> None:
         try:

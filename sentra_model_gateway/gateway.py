@@ -385,7 +385,7 @@ class GatewayConfig:
     port: int = 17842
     admin_token: str = ""
     upstream_control_token: str = ""
-    connector_name: str = "SENTRA tunnel"
+    connector_name: str = "SENTRA"
     checkout: Path = Path(__file__).resolve().parent.parent / "third_party" / "codex-chatgpt-web"
     launcher_executable: Path | None = None
     state_root: Path | None = None
@@ -824,6 +824,8 @@ class GatewayServer(ThreadingHTTPServer):
         self.launcher.authority_port = self.server_port
         self.model_catalog_cache_path = state_root / "web-models" / "model-catalog.json"
         self._model_catalog_lock = threading.RLock()
+        from .account_models import AccountModelCatalog
+        self.account_catalog = AccountModelCatalog(state_root)
         self._upstream_watchdog_stop = threading.Event()
         self._upstream_watchdog_thread: threading.Thread | None = None
         self._upstream_failure_since: float | None = None
@@ -841,6 +843,14 @@ class GatewayServer(ThreadingHTTPServer):
                 row = db.execute("SELECT mode FROM gateway_web_transport_mode WHERE singleton=1").fetchone()
             except sqlite3.OperationalError as exc:
                 if "no such table" not in str(exc):
+                    raise
+                return "legacy"
+            except Exception as exc:
+                # PostgreSQL backend: missing relation (undefined table) also
+                # means uninitialized routing -> legacy. Anything else raises.
+                message = str(exc)
+                if ("does not exist" not in message
+                        and "undefined" not in message.lower()):
                     raise
                 return "legacy"
         if row is None or row[0] not in {"legacy", "candidate_v2", "durable_v2"}:
@@ -1110,6 +1120,28 @@ class GatewayServer(ThreadingHTTPServer):
                 "models": [],
             }
         return payload
+
+    def observe_account_models(self, account_fingerprint: str, models: list[dict[str, Any]], *,
+                               collector_ref: str, nonce: str,
+                               picker_available: bool = True) -> dict[str, Any]:
+        """Host-only account observation; Codex/CLI/Canvas consume cached_view/select."""
+        return self.account_catalog.observe(
+            account_fingerprint, models, collector_ref=collector_ref,
+            nonce=nonce, picker_available=picker_available)
+
+    def account_model_view(self, account_fingerprint: str | None = None) -> dict[str, Any]:
+        """Safe account/model/effort projection for Canvas and CLI (no auth material)."""
+        return self.account_catalog.cached_view(account_fingerprint)
+
+    def select_account_model(self, account_fingerprint: str, requested_model: str | None,
+                             requested_effort: str | None = None, *,
+                             expected_generation: int | None = None,
+                             active_generation: int | None = None) -> dict[str, Any]:
+        """Resolve the effective model/effort strictly from observed account entries."""
+        return self.account_catalog.select(
+            account_fingerprint, requested_model, requested_effort,
+            expected_generation=expected_generation,
+            active_generation=active_generation)
 
     def sentra_doctor(self, *, verify_connector: bool = False) -> dict[str, Any]:
         checks: list[dict[str, Any]] = []
@@ -1721,6 +1753,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
             self._json(200, self.server.cached_model_catalog())
             return
+        if path == "/sentra/account-models":
+            if not (self._authorized_admin() or self._authorized_internal()):
+                self._json(401, {"error": "unauthorized"})
+                return
+            query = parse_qs(parsed_request.query).get("account_fingerprint", [])
+            fingerprint = query[0] if query else None
+            try:
+                self._json(200, self.server.account_model_view(fingerprint))
+            except (ValueError, RuntimeError) as exc:
+                self._json(400, {"error": str(exc)})
+            return
         if path == "/sentra/codex/status":
             if not self._authorized_admin():
                 self._json(401, {"error": "unauthorized"})
@@ -1766,7 +1809,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
             except (OSError, ValueError, KeyError, http.client.HTTPException):
                 pass
 
-            # Upstream unavailable or returned error: fallback to cached catalog or defaults
+            # Upstream unavailable or returned error: serve only observed entries.
+            # Never invent model rights from names; an empty observation means
+            # "unavailable", and Automatic is resolved by AccountModelCatalog.
             cached = self.server.cached_model_catalog()
             cached_models = cached.get("models") if isinstance(cached, dict) else []
             if cached_models:
@@ -1775,16 +1820,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     for m in cached_models if isinstance(m, dict) and (m.get("id") or m.get("slug"))
                 ]
             else:
-                data = [
-                    {"id": "sentra/chatgpt-web/high", "object": "model", "owned_by": "sentra"},
-                    {"id": "sentra/chatgpt-web/medium", "object": "model", "owned_by": "sentra"},
-                    {"id": "sentra/chatgpt-web/low", "object": "model", "owned_by": "sentra"},
-                    {"id": "sentra/chatgpt-web/mini", "object": "model", "owned_by": "sentra"},
-                    {"id": "gpt-6.1-sol", "object": "model", "owned_by": "system"},
-                    {"id": "gpt-4o", "object": "model", "owned_by": "system"},
-                    {"id": "o3-mini", "object": "model", "owned_by": "system"},
-                ]
-            self._json(200, {"object": "list", "data": data, "models": data})
+                data = []
+            self._json(200, {"object": "list", "data": data, "models": data,
+                             "status": "ready" if data else "unavailable",
+                             "automatic_resend": False})
             return
         if path == "/v1/responses":
             self._proxy("GET", self.path)
@@ -2068,7 +2107,7 @@ def main() -> None:
     config = GatewayConfig(upstream=args.upstream, port=args.port, state_root=state_root,
                            admin_token=admin_token,
                            upstream_control_token=os.getenv("SENTRA_WEB_CONTROL_TOKEN", ""),
-                           connector_name=os.getenv("SENTRA_CONNECTOR_NAME", "SENTRA tunnel"))
+                           connector_name=os.getenv("SENTRA_CONNECTOR_NAME", "SENTRA"))
     server = GatewayServer(config)
     try:
         if args.launch_upstream:

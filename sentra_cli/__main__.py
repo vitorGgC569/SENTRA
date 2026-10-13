@@ -84,6 +84,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     sessions.add_argument("--session-id", help="Create or reopen a named persistent conversation")
     sessions.add_argument("--resume", help="Resume an existing conversation without automatically submitting a prompt")
     parser.add_argument("--state-dir", type=Path, help="Shared SENTRA runtime state directory")
+    parser.add_argument("--shell-turn", action="store_true", help="Send one authoritative shell turn, including scoped attachment refs")
+    parser.add_argument("--project-id", default="")
+    parser.add_argument("--space-id", default="")
+    parser.add_argument("--conversation-id", default="")
+    parser.add_argument("--request-key", default="")
+    parser.add_argument("--attachment-ref", action="append", default=[], help="Brisa att-* reference (repeat up to four times)")
+    parser.add_argument("--shell-request-status", help="Read local acknowledgement/uncertainty without sending the turn again")
     parser.add_argument("--continue", dest="continue_previous", action="store_true",
                         help="Explicitly continue the unfinished turn in --resume, using its durable journal")
     parser.add_argument(
@@ -156,7 +163,7 @@ def _run_frozen_gateway_service(argv: list[str]) -> int:
             "SENTRA_WEB_CONTROL_TOKEN", ""
         ),
         connector_name=os.environ.get(
-            "SENTRA_CONNECTOR_NAME", "SENTRA tunnel"
+            "SENTRA_CONNECTOR_NAME", "SENTRA"
         ),
     )
     server = GatewayServer(config)
@@ -273,6 +280,7 @@ def main(argv: list[str] | None = None) -> int:
         workspace=workspace,
         model=args.model,
         reasoning_effort=args.effort,
+        web_reasoning_effort=args.effort if str(args.model).startswith('sentra/chatgpt-web/') else None,
         fallback_model=args.fallback_model,
         gateway_url=args.gateway_url,
         timeout_s=args.timeout,
@@ -283,6 +291,22 @@ def main(argv: list[str] | None = None) -> int:
         state_root=args.state_dir,
     )
     try:
+        if args.shell_turn or args.shell_request_status:
+            import json
+            from .shell_bridge import ShellBridge
+            bridge = ShellBridge(config)
+            if args.shell_request_status:
+                print(json.dumps(bridge.request_status(args.shell_request_status), ensure_ascii=False))
+                return 0
+            if not args.prompt or not args.space_id or not args.conversation_id or not args.request_key:
+                raise ValueError("--shell-turn requires prompt, Space/conversation IDs and one stable request-key")
+            result = bridge.send_turn(args.prompt, project_id=args.project_id,
+                space_id=args.space_id, conversation_id=args.conversation_id,
+                request_key=args.request_key, attachments=args.attachment_ref)
+            print(json.dumps(result, ensure_ascii=False))
+            return 3 if (result.get("value") or {}).get("status") == "uncertain" else 0
+        if args.attachment_ref:
+            raise ValueError("attachment refs require --shell-turn; attachments never silently fall back to text")
         repl = SentraREPL(config)
         if args.continue_previous:
             repl.continue_previous()

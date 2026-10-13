@@ -1,0 +1,17 @@
+SENTRA Desktop — Third-party notice: OpenAI tunnel client
+=========================================================
+
+Component: tunnel-client (optional provider "tunnel-client")
+Pinned version: 0.0.14
+Pinned SHA-256: 784ab8da7b5a88f0109f1fd8aaf0a1c86067430b896dddf307ef7e3cc49fa1a5
+Source: https://github.com/openai/tunnel-client/releases/download/v0.0.14/tunnel-client-v0.0.14-windows-amd64.zip
+License: MIT (see licenses/tunnel-client/ copied from the verified archive at install time)
+Upstream: https://github.com/openai/tunnel-client
+
+Notes for SENTRA distribution:
+- The archive digest is verified BEFORE extraction on every install and
+  every release staging (sentra_remote/installer.py,
+  scripts/commander/release_assets.py). A mismatch refuses the install.
+- License files travel inside the upstream archive and are copied to
+  licenses/tunnel-client/ during installation.
+- SBOM entry: pkg:generic/tunnel-client@0.0.14 (see release SBOM).

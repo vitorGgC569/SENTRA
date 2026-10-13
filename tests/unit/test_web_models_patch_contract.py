@@ -48,7 +48,7 @@ def test_electron_doctor_is_sentra_managed() -> None:
     patch_text = (ROOT / "integrations" / "codex_chatgpt_web" / "sentra-upstream.patch").read_text(encoding="utf-8")
     assert "sentraDoctor" in patch_text
     assert "/sentra/doctor" in patch_text
-    assert 'process.env.SENTRA_CONNECTOR_NAME || "SENTRA tunnel"' in patch_text
+    assert 'process.env.SENTRA_CONNECTOR_NAME || "SENTRA"' in patch_text
     assert 'handle("launcher:doctor", () => sentraDoctor(runtimeHost, { verifyConnector: true }))' in patch_text
     assert '/sentra/doctor?verify_connector=1' in patch_text
     assert '"verify-connector"' in patch_text
@@ -59,8 +59,8 @@ def test_electron_doctor_is_sentra_managed() -> None:
 def test_sentra_managed_web_models_have_one_mcp_owner() -> None:
     patch_text = (ROOT / "integrations" / "codex_chatgpt_web" / "sentra-upstream.patch").read_text(encoding="utf-8")
 
-    assert 'const CURRENT_CONNECTOR_NAME = "SENTRA tunnel";' in patch_text
-    assert 'export const CHATGPT_CONNECTOR_NAME = "SENTRA tunnel";' in patch_text
+    assert 'const CURRENT_CONNECTOR_NAME = "SENTRA";' in patch_text
+    assert 'export const CHATGPT_CONNECTOR_NAME = "SENTRA";' in patch_text
     assert '"Codex Native2", "Codex Native2 DEV", "Codex Native"' in patch_text
     assert "function sentraManagedHarness()" in patch_text
     assert 'if (config.mode !== "full" || sentraManagedHarness()) return;' in patch_text

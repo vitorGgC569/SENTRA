@@ -63,6 +63,11 @@ class DurableWebTransport:
                     document_id TEXT NOT NULL, identity_epoch TEXT NOT NULL,
                     prompt_sha256 TEXT NOT NULL,
                     PRIMARY KEY(token_hash,operation_id,submission_index));
+                CREATE TABLE IF NOT EXISTS gateway_web_attachment_links(
+                    token_hash TEXT NOT NULL, operation_id TEXT NOT NULL,
+                    submission_index INTEGER NOT NULL,
+                    asset_id TEXT NOT NULL, sha256 TEXT NOT NULL,
+                    PRIMARY KEY(token_hash,operation_id,submission_index,asset_id));
             """)
             columns = {row[1] for row in db.execute("PRAGMA table_info(gateway_web_submissions)")}
             if "operation_id" not in columns:
@@ -201,6 +206,72 @@ class DurableWebTransport:
             raise PermissionError("browser surface differs from authenticated descriptor")
         return proof
 
+    def _staged_images(self, binding, refs) -> tuple[list, list[tuple[str, str]]]:
+        """Resolve gateway preflight attachment refs to outbox images.
+
+        `refs` (from the browser-event payload, host-authenticated) is a list
+        of {asset_id, sha256} pointing at READY_LOCAL staged bytes in
+        `WebAssetDrafts`. Each ref must belong to the SAME bound WorkItem
+        with a live `web:attach` grant and an exact digest; bytes are
+        materialized host-side within the relay image caps. Returns
+        (data-URLs, [(asset_id, sha256)]). Empty refs admit a text-only turn
+        exactly as before. Anything else fails closed: the browser never
+        supplies bytes and a replay with different attachments is rejected
+        by `_attachment_links`, never substituted.
+        """
+        import re as _re
+        if refs is None:
+            refs = []
+        if not isinstance(refs, list) or len(refs) > 2:
+            raise ValueError("preflight attachments hold at most 2 staged refs "
+                             "per send (composer quota until the Brisa composer "
+                             "path expands); larger sets are refused, never split")
+        if not refs:
+            return [], []
+        from sentra_mcp.services.web_history_assets import WebAssetDrafts
+        from native_bridge.attachment_upload import AttachmentUploads
+        drafts = WebAssetDrafts(self.control)
+        uploads = AttachmentUploads(self.control, self.jobs, drafts)
+        images: list = []
+        links: list[tuple[str, str]] = []
+        for ref in refs:
+            if not isinstance(ref, dict):
+                raise ValueError("staged attachment ref must be an object")
+            asset_id = ref.get("asset_id")
+            sha256 = ref.get("sha256")
+            if (not isinstance(asset_id, str)
+                    or not _re.fullmatch(r"[A-Za-z0-9_-]{8,160}", asset_id)
+                    or not isinstance(sha256, str)
+                    or not _re.fullmatch(r"[0-9a-f]{64}", sha256)):
+                raise ValueError("staged attachment ref requires asset_id and sha256")
+            status = None
+            try:
+                status = drafts.status(binding["owner"], asset_id)
+            except FileNotFoundError:
+                raise PermissionError("staged attachment unknown for owner")
+            if status["state"] != "READY_LOCAL":
+                raise PermissionError("staged attachment is not finalized")
+            if status["work_item_id"] != binding["work_item_id"] or status["sha256"] != sha256:
+                raise PermissionError("staged attachment binding changed")
+            images.append(uploads.bound_image(binding["owner"], asset_id))
+            links.append((asset_id, sha256))
+        return images, sorted(links)
+
+    def _attachment_links(self, cap, index: int) -> list[tuple[str, str]]:
+        with self.control.store.connect("session_checkpoint") as db:
+            try:
+                rows = db.execute(
+                    "SELECT asset_id,sha256 FROM gateway_web_attachment_links "
+                    "WHERE token_hash=? AND operation_id=? AND submission_index=?",
+                    (cap.token_hash, cap.operation_id, index)).fetchall()
+            except Exception as exc:
+                message = str(exc)
+                if ("does not exist" in message or "undefined" in message.lower()
+                        or "no such table" in message):
+                    return []
+                raise
+        return sorted((row["asset_id"], row["sha256"]) for row in rows)
+
     def _host_observation(self, **expected):
         from .browser_host_identity import read_host_message
         with self.control.store.connect("session_checkpoint") as db:
@@ -270,17 +341,21 @@ class DurableWebTransport:
             prompt = payload.get("prompt")
             if not isinstance(prompt, str) or hashlib.sha256(prompt.encode()).hexdigest() != payload.get("prompt_sha256"):
                 raise ValueError("physical prompt fingerprint mismatch")
+            images, links = self._staged_images(binding, payload.get("attachments"))
             if row is not None:
                 if row["worker"] != proof["worker"] or any(row[field] != payload.get(field)
                     for field in ("document_id", "identity_epoch", "prompt_sha256")):
                     raise PermissionError("Web preflight replay changed its physical identity")
+                if links != self._attachment_links(cap, index):
+                    raise PermissionError("Web preflight replay changed its attachments")
                 self.web._authority(self.web._row(cap.owner, row["job_id"]))
                 previous = self.web.status(cap.owner, row["job_id"])
                 if previous["state"] != "READY" or previous["send_fence"]:
                     raise PermissionError("Web intent already advanced; reconcile instead of resending")
                 return {"ok": True, "state": "READY", "request_id": row["job_id"], "account_verified": True,
                     "document_id": row["document_id"], "identity_epoch": row["identity_epoch"],
-                    "prompt_sha256": row["prompt_sha256"], "submission_index": index, "idempotent_replay": True}
+                    "prompt_sha256": row["prompt_sha256"], "submission_index": index, "idempotent_replay": True,
+                    "attachments": len(links)}
             admitted = self.web.admit(cap.owner,
                 request_identity=request_identity, submission_index=index, run_id=cap.run_id,
                 operation_id=cap.operation_id, work_item_id=cap.work_item_id,
@@ -288,17 +363,21 @@ class DurableWebTransport:
                 workspace=self.control._run(cap.run_id, cap.owner)["workspace"],
                 conversation_key=cap.conversation_uri, prompt=prompt,
                 conversation_url=proof.get("conversation_url"), requested_model=payload.get("model"),
-                requested_effort=payload.get("effort"), target_worker=proof["worker"], dispatch_mode="external")
+                requested_effort=payload.get("effort"), target_worker=proof["worker"], dispatch_mode="external",
+                images=images)
             claimed = self.web.claim(cap.owner, admitted["job_id"], worker=proof["worker"])
             self.jobs.progress(admitted["job_id"], proof["worker"], claimed["lease_token"], "ready")
             with self.control.store.connect("session_checkpoint") as db:
                 db.execute("INSERT OR IGNORE INTO gateway_web_submissions VALUES(?,?,?,?,?,?,?,?)",
                     (cap.token_hash, cap.operation_id, index, admitted["job_id"], proof["worker"],
                      payload["document_id"], payload["identity_epoch"], payload["prompt_sha256"]))
+                for asset_id, sha256 in links:
+                    db.execute("INSERT OR IGNORE INTO gateway_web_attachment_links VALUES(?,?,?,?,?)",
+                        (cap.token_hash, cap.operation_id, index, asset_id, sha256))
             return {"ok": True, "state": "READY", "request_id": admitted["job_id"],
                     "account_verified": True, "document_id": payload["document_id"],
                     "identity_epoch": payload["identity_epoch"], "prompt_sha256": payload["prompt_sha256"],
-                    "submission_index": index}
+                    "submission_index": index, "attachments": len(links)}
         if row is None or payload.get("request_id") != row["job_id"]:
             raise PermissionError("Web submission has no matching durable preflight")
         for field in ("document_id", "identity_epoch", "prompt_sha256"):
@@ -362,6 +441,15 @@ class DurableWebTransport:
                 conversation_id=payload["conversation_id"], message_id=payload["message_id"],
                 revision=payload["revision"], body=payload["body"], complete=payload.get("complete") is True,
                 parent_user_message_id=payload.get("parent_user_message_id"))
+            from browser.streaming import StreamingLedger
+            # The proven observation feeds the same snapshot ledger as the
+            # binary relay. It remains presentation data, never a final receipt.
+            try:
+                StreamingLedger(self.control.store).record_frame(
+                    principal=proof['browser_principal'], conversation_id=payload['conversation_id'],
+                    message_id=payload['message_id'], revision=payload['revision'], text=payload['body'])
+            except ValueError:
+                pass  # Preview quota must not invalidate an already proved answer.
             return {**result, "ok": True}
         raise ValueError("unsupported Web browser event")
 

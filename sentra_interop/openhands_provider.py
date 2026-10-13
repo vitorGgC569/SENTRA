@@ -13,6 +13,7 @@ import inspect
 import json
 import sqlite3
 import uuid
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -151,6 +152,13 @@ class OpenHandsIdentityStore:
             db.execute("""CREATE TABLE IF NOT EXISTS oh_tools(
                 local_id TEXT NOT NULL,tool_call_id TEXT NOT NULL,event_id TEXT NOT NULL,
                 status TEXT,PRIMARY KEY(local_id,tool_call_id))""")
+            db.execute("""CREATE TABLE IF NOT EXISTS oh_health(
+                provider TEXT PRIMARY KEY,failures INTEGER NOT NULL,last_failure REAL,
+                last_success REAL,probe_disabled INTEGER NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS oh_tool_operations(
+                local_id TEXT NOT NULL,tool_call_id TEXT NOT NULL,operation_id TEXT NOT NULL,
+                work_item_id TEXT NOT NULL,intent_sha256 TEXT NOT NULL,
+                PRIMARY KEY(local_id,tool_call_id))""")
 
     @contextmanager
     def _db(self):
@@ -217,8 +225,36 @@ class OpenHandsIdentityStore:
 
     def tools(self, local_id):
         with self._db() as db:
-            return [dict(row) for row in db.execute("SELECT tool_call_id,event_id,status FROM oh_tools WHERE local_id=?",
+            return [dict(row) for row in db.execute("SELECT t.tool_call_id,t.event_id,t.status,o.operation_id,o.work_item_id "
+                                                   "FROM oh_tools t LEFT JOIN oh_tool_operations o ON "
+                                                   "t.local_id=o.local_id AND t.tool_call_id=o.tool_call_id WHERE t.local_id=?",
                                                    (local_id,))]
+
+    def health(self,provider):
+        with self._db() as db:
+            row=db.execute("SELECT * FROM oh_health WHERE provider=?",(provider,)).fetchone()
+        return dict(row) if row else {"provider":provider,"failures":0,"last_failure":None,
+                                      "last_success":None,"probe_disabled":False,"observed":False}
+
+    def record_health(self,provider,success):
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            old=db.execute("SELECT * FROM oh_health WHERE provider=?",(provider,)).fetchone()
+            failures=0 if success else min(100,(old["failures"] if old else 0)+1)
+            db.execute("INSERT INTO oh_health VALUES(?,?,?,?,?) ON CONFLICT(provider) DO UPDATE SET "
+                "failures=excluded.failures,last_failure=excluded.last_failure,last_success=excluded.last_success,"
+                "probe_disabled=excluded.probe_disabled",(provider,failures,time.time() if not success else old["last_failure"] if old else None,
+                time.time() if success else old["last_success"] if old else None,int(failures>=3)))
+
+    def link_tool_operation(self,local_id,tool_call_id,operation):
+        with self._db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM oh_tools WHERE local_id=? AND tool_call_id=?",(local_id,tool_call_id)).fetchone():
+                raise EffectRejected("OpenHands tool event has not been recovered")
+            old=db.execute("SELECT * FROM oh_tool_operations WHERE local_id=? AND tool_call_id=?",(local_id,tool_call_id)).fetchone()
+            if old and old["operation_id"]!=operation["operation_id"]:raise EffectRejected("OpenHands tool link immutable")
+            db.execute("INSERT OR IGNORE INTO oh_tool_operations VALUES(?,?,?,?,?)",(local_id,tool_call_id,
+                operation["operation_id"],operation["work_item_id"],operation["intent_sha256"]))
 
     def evidence(self, local_id, event_id):
         with self._db() as db:
@@ -233,13 +269,14 @@ class OpenHandsIdentityStore:
 class OpenHandsAgentServerProvider:
     def __init__(self, gate: InteropGate, *, config: OpenHandsServerConfig,
                  identity_store: OpenHandsIdentityStore, transport: OpenHandsHTTPTransport,
-                 authorize_parent=None, message_resolver=None):
+                 authorize_parent=None, message_resolver=None,operation_resolver=None):
         if not config.enabled or transport.config != config: raise ValueError("explicit matching OpenHands configuration required")
         if not callable(getattr(gate,"physical_context",None)):
             raise ValueError("OpenHands real provider requires host-injected durable physical gate")
         self.gate,self.config,self.store,self.transport=gate,config,identity_store,transport
         self.authorize_parent=authorize_parent
         self.message_resolver=message_resolver
+        self.operation_resolver=operation_resolver
 
     async def host_handler(self,request):
         """Register directly with host.bind_provider; content stays host-resolved.
@@ -266,6 +303,11 @@ class OpenHandsAgentServerProvider:
         elif cap=="openhands:evidence": outcome=await self.evidence(request,local_id=local,event_id=args.get("event_id"))
         elif cap=="openhands:run": outcome=await self.run(request,local_id=local)
         elif cap=="openhands:cancel": outcome=await self.cancel(request,local_id=local,immediate=args.get("immediate",True))
+        elif cap=="openhands:condense": outcome=await self.condense(request,local_id=local)
+        elif cap=="openhands:health": outcome=await self.provider_health(request)
+        elif cap=="openhands:tool_link": outcome=await self.link_tool(request,local_id=local,
+            tool_call_id=args.get("tool_call_id"),operation_id=args.get("operation_id"))
+        elif cap=="openhands:delete": outcome=await self.delete(request,local_id=local)
         else: raise EffectRejected("unknown OpenHands host capability")
         return self.host_result(outcome)
 
@@ -283,7 +325,16 @@ class OpenHandsAgentServerProvider:
         # Host bind_provider already reserved and fenced this exact intent.
         # Do not reserve it a second time or acquire the same physical lock.
         context.checkpoint()
-        payload=await effect()
+        try:
+            payload=await effect()
+            if request.capability_id not in {"openhands:health","openhands:evidence","openhands:tool_link"}:
+                self.store.record_health(self.config.provider_id,True)
+        except EffectRejected:
+            raise
+        except BaseException:
+            if request.capability_id not in {"openhands:health","openhands:evidence","openhands:tool_link"}:
+                self.store.record_health(self.config.provider_id,False)
+            raise
         if isinstance(payload,OperationResult):
             return DispatchOutcome(payload,dict(payload.evidence))
         return DispatchOutcome(OperationResult(request.operation_id,"SUCCEEDED"),payload)
@@ -299,7 +350,7 @@ class OpenHandsAgentServerProvider:
 
     def _binding(self, local_id, request):
         binding=self.store.get(local_id,self.config,request)
-        if binding is None: raise EffectRejected("OpenHands binding missing; explicit create required")
+        if binding is None or binding["state"]=="DELETED": raise EffectRejected("OpenHands binding missing/deleted")
         return binding
 
     async def _parent_binding(self,local_id,request):
@@ -375,6 +426,63 @@ class OpenHandsAgentServerProvider:
 
     async def reattach(self, request, *, local_id):
         return await self.read(request,local_id=local_id)  # GET only, never create/run/send.
+
+    async def provider_health(self,request):
+        async def effect():
+            self._check(request,"openhands:health",{})
+            return {**self.store.health(self.config.provider_id),"automatic_probe":False,"runtime_validation":"pending"}
+        return await self._admit(request,effect)
+
+    async def link_tool(self,request,*,local_id,tool_call_id,operation_id):
+        async def effect():
+            self._check(request,"openhands:tool_link",{"local_id":local_id,"tool_call_id":tool_call_id,"operation_id":operation_id})
+            binding=self._binding(local_id,request)
+            if not callable(self.operation_resolver):raise EffectRejected("authoritative OpenHands tool operation resolver not configured")
+            operation=self.operation_resolver(request,operation_id)
+            if inspect.isawaitable(operation):operation=await operation
+            if (not isinstance(operation,Mapping) or operation.get("operation_id")!=operation_id
+                    or operation.get("work_item_id")!=binding["work_item"] or not operation.get("intent_sha256")):
+                raise EffectRejected("OpenHands tool operation not in same central WorkItem")
+            self.store.link_tool_operation(local_id,_id(tool_call_id),operation)
+            return {"tool_call_id":tool_call_id,"operation_id":operation_id,"verified_sentra_effect":False,
+                    "link_type":"central_operation_reference"}
+        return await self._admit(request,effect)
+
+    async def condense(self,request,*,local_id):
+        async def effect():
+            self._check(request,"openhands:condense",{"local_id":local_id})
+            binding=self._binding(local_id,request);cursor=None;seen=set();saved=0
+            # Archive the source before asking the server condenser to act.
+            # No second model is called and no transcript is overwritten.
+            for _ in range(100):
+                params={"sort_order":"TIMESTAMP","limit":100}
+                if cursor is not None:params["page_id"]=cursor
+                page=await self.transport.request("GET","/conversations/"+binding["remote_id"]+"/events/search",params=params)
+                items=page.get("items") if isinstance(page,Mapping) else None
+                if not isinstance(items,list) or len(items)>100:raise ValueError("invalid condensation source page")
+                typed=[OpenHandsSDKEvent.from_mapping(row) for row in items]
+                next_cursor=page.get("next_page_id")
+                saved+=len(self.store.ingest_page(local_id,typed,next_cursor))
+                if next_cursor is None:break
+                if not isinstance(next_cursor,str) or next_cursor in seen:raise ValueError("condensation source pagination cycle")
+                seen.add(next_cursor);cursor=next_cursor
+            else:raise EffectRejected("condensation source exceeds archive page budget")
+            result=await self.transport.request("POST","/conversations/"+binding["remote_id"]+"/condense")
+            if not isinstance(result,Mapping) or result.get("success") is not True:raise ValueError("OpenHands condensation not acknowledged")
+            return {"conversation_id":binding["remote_id"],"condensation_requested":True,
+                    "original_events_archived":True,"new_source_events":saved,"effects_replayed":False,
+                    "summary_verified":False,"next_action":"recover condensation event with openhands:events"}
+        return await self._admit(request,effect,timeout=self.config.timeout*101)
+
+    async def delete(self,request,*,local_id):
+        async def effect():
+            self._check(request,"openhands:delete",{"local_id":local_id})
+            binding=self._binding(local_id,request)
+            result=await self.transport.request("DELETE","/conversations/"+binding["remote_id"])
+            if not isinstance(result,Mapping) or result.get("success") is not True:raise ValueError("OpenHands deletion not acknowledged")
+            self.store.update(local_id,state="DELETED")
+            return {"deleted":True,"conversation_id":binding["remote_id"],"mapping_tombstone_retained":True}
+        return await self._admit(request,effect,timeout=self.config.timeout+1)
 
     async def events(self, request, *, local_id, page_id=None, limit=100):
         async def effect():

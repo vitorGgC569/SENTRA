@@ -70,10 +70,19 @@ def _run(config, args, *, cwd, limit):
     for name,stream,bound in (("stdout",child.process.stdout,limit),("stderr",child.process.stderr,65536)):
         thread=threading.Thread(target=read,args=(name,stream,bound),daemon=True);thread.start();threads.append(thread)
     try:
-        code=child.process.wait(timeout=config.timeout_seconds)
+        deadline=time.monotonic()+config.timeout_seconds
+        while True:
+            if context is not None:context.checkpoint()
+            remaining=deadline-time.monotonic()
+            if remaining<=0:raise subprocess.TimeoutExpired(child.process.args,config.timeout_seconds)
+            try:
+                code=child.process.wait(timeout=min(0.25,remaining));break
+            except subprocess.TimeoutExpired:
+                continue
         for thread in threads:thread.join(timeout=2)
         if code!=0 or any(thread.is_alive() for thread in threads):
             raise VulnerabilityGateError("Grype process failed; database/tool provisioning may be required")
+        if context is not None:context.checkpoint()
         return code,results
     except subprocess.TimeoutExpired as exc:
         raise VulnerabilityGateError("Grype scan timed out") from exc

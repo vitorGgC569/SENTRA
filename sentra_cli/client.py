@@ -7,6 +7,7 @@ Web turn is sent, never after an uncertain Web delivery.
 from __future__ import annotations
 
 import json
+import base64
 import os
 import sqlite3
 import subprocess
@@ -41,6 +42,11 @@ class ProviderAdmissionError(RuntimeError):
     pass
 
 
+class _NoProviderRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, url):
+        return None
+
+
 class ModelClient:
     """SENTRA Responses client with fail-closed delivery semantics."""
 
@@ -53,6 +59,8 @@ class ModelClient:
         self.on_delivery = None
         self.on_usage = None
         self.on_before_provider = None
+        self.on_before_http = None
+        self._provider_admission_error = None
         self.on_web_delivery = None
         self.last_web_delivery = None
         # One logical Codex thread per CLI process. Every Responses request gets
@@ -77,7 +85,7 @@ class ModelClient:
         """Use current provider capabilities; never invent available efforts."""
         req = urllib.request.Request(self.config.gateway_url.rstrip("/") + "/models",
             headers={"Authorization": "Bearer " + self.config.gateway_api_key, "User-Agent": "sentra-cli"})
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with self._provider_http(req, timeout=5) as response:
             catalog = self._decode_json(response.read())
         for item in catalog.get("models", catalog.get("data", [])):
             if isinstance(item, dict) and (item.get("slug") or item.get("id")) == model:
@@ -97,6 +105,24 @@ class ModelClient:
     def _usage(self,provider,ident,model,usage):
         if self.on_usage is not None and usage:
             self.on_usage(provider,ident,model,usage)
+
+    def _provider_checkpoint(self, provider='gateway'):
+        if self._provider_admission_error is not None:
+            raise ProviderAdmissionError(self._provider_admission_error)
+        try:
+            if self.on_before_http is not None:
+                self.on_before_http(provider)
+            elif os.environ.get('SENTRA_CANVAS_AGENT_SCOPE') == 'shell' or os.environ.get('SENTRA_CONTROL_BINDING_FILE'):
+                raise PermissionError('hosted model transport requires its configured live admission checkpoint')
+        except Exception as exc:
+            self._provider_admission_error = sanitize_error(exc)
+            raise ProviderAdmissionError(self._provider_admission_error) from None
+
+    def _provider_http(self, request, *, timeout, provider='gateway'):
+        # No redirect/retry handler can perform a second uncheckpointed request.
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoProviderRedirect())
+        self._provider_checkpoint(provider)
+        return opener.open(request, timeout=timeout)
 
     @staticmethod
     def _decode_json(raw: bytes) -> dict[str, Any]:
@@ -133,7 +159,7 @@ class ModelClient:
                 url,
                 headers={"User-Agent": "sentra-cli"},
             )
-            with urllib.request.urlopen(req, timeout=2.5) as resp:
+            with self._provider_http(req, timeout=2.5) as resp:
                 status_code = int(resp.status)
                 payload = self._decode_json(resp.read())
         except urllib.error.HTTPError as exc:
@@ -187,7 +213,7 @@ class ModelClient:
                     "User-Agent": "sentra-cli",
                 },
             )
-            with urllib.request.urlopen(req, timeout=1.5) as resp:
+            with self._provider_http(req, timeout=1.5, provider='local') as resp:
                 return resp.status == 200
         except Exception:
             return False
@@ -216,7 +242,7 @@ class ModelClient:
         }
         try:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=5.0) as resp:
+            with self._provider_http(req, timeout=5.0) as resp:
                 payload = self._decode_json(resp.read())
         except urllib.error.HTTPError as exc:
             if native_models:return native_models
@@ -282,7 +308,7 @@ class ModelClient:
                 method="POST",
             )
             try:
-                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                with self._provider_http(req, timeout=timeout) as resp:
                     payload = self._decode_json(resp.read())
                     detail = str(
                         payload.get("source")
@@ -370,8 +396,7 @@ class ModelClient:
         home = Path(os.environ.get("USERPROFILE") or Path.home())
         return home / ".sentra" / "web-models" / "cli-headless-upstream.pid"
 
-    @staticmethod
-    def _upstream_ready() -> bool:
+    def _upstream_ready(self) -> bool:
         url = os.environ.get(
             "SENTRA_WEB_UPSTREAM",
             "http://127.0.0.1:17841",
@@ -381,7 +406,7 @@ class ModelClient:
                 url,
                 headers={"User-Agent": "sentra-cli"},
             )
-            with urllib.request.urlopen(request, timeout=2.0) as response:
+            with self._provider_http(request, timeout=2.0) as response:
                 payload = ModelClient._decode_json(response.read())
                 return bool(
                     response.status == 200
@@ -391,8 +416,7 @@ class ModelClient:
         except Exception:
             return False
 
-    @staticmethod
-    def _browser_relay_token_file() -> Path | None:
+    def _browser_relay_token_file(self) -> Path | None:
         """Find the token that authenticates against the relay actually on 8765."""
         raw_candidates = [
             os.environ.get("SENTRA_BROWSER_RELAY_TOKEN_FILE", "").strip(),
@@ -419,7 +443,7 @@ class ModelClient:
                         "User-Agent": "sentra-cli",
                     },
                 )
-                with urllib.request.urlopen(request, timeout=1.5) as response:
+                with self._provider_http(request, timeout=1.5) as response:
                     if response.status == 200:
                         return candidate
             except Exception:
@@ -542,7 +566,7 @@ class ModelClient:
                 endpoint.rstrip("/") + "/json/version",
                 headers={"User-Agent": "sentra-cli"},
             )
-            with urllib.request.urlopen(request, timeout=1.5) as response:
+            with self._provider_http(request, timeout=1.5) as response:
                 payload = self._decode_json(response.read())
                 websocket = str(payload.get("webSocketDebuggerUrl") or "")
                 return bool(
@@ -608,7 +632,7 @@ class ModelClient:
                 )
                 try:
                     remaining = max(0.1, deadline - time.monotonic())
-                    with urllib.request.urlopen(
+                    with self._provider_http(
                         request,
                         timeout=min(5.0, remaining),
                     ) as response:
@@ -671,7 +695,8 @@ class ModelClient:
         if not executable.is_file():
             return "browser-host error=packaged Electron launcher not found"
 
-        env = os.environ.copy()
+        from .authority_environment import provider_child_environment
+        env = provider_child_environment(self.config.state_root, os.environ)
         env["SENTRA_BROWSER_HOST_ONLY"] = "1"
         env["SENTRA_MANAGED_TUNNEL"] = "1"
         env["SENTRA_WEB_GATEWAY_URL"] = self.config.gateway_url
@@ -692,6 +717,7 @@ class ModelClient:
             pass
 
         try:
+            self._provider_checkpoint()
             process = subprocess.Popen(
                 [str(executable), "--hidden"],
                 cwd=str(executable.parent),
@@ -821,8 +847,7 @@ class ModelClient:
             pass
         return detail
 
-    @staticmethod
-    def _spawn_gateway() -> str:
+    def _spawn_gateway(self) -> str:
         try:
             if getattr(sys, "frozen", False):
                 command = [sys.executable, "--gateway-service"]
@@ -835,6 +860,7 @@ class ModelClient:
                     "sentra_model_gateway.gateway",
                 ]
                 cwd = str(SENTRA_ROOT)
+            self._provider_checkpoint()
             process = subprocess.Popen(
                 command,
                 cwd=cwd,
@@ -869,7 +895,8 @@ class ModelClient:
             cwd = cli.parent
             executable = cli
 
-        env = os.environ.copy()
+        from .authority_environment import provider_child_environment
+        env = provider_child_environment(self.config.state_root, os.environ)
         authority_origin = self._gateway_origin()
         env["SENTRA_WEB_GATEWAY_URL"] = authority_origin + "/v1"
         env["SENTRA_TURN_AUTHORITY_URL"] = authority_origin
@@ -1153,6 +1180,27 @@ class ModelClient:
                 ]
             else:
                 item_content = [{"type": "input_text", "text": content}]
+                images = message.get("images")
+                if images is not None:
+                    if not isinstance(images, list) or len(images) > 1:
+                        raise ValueError("only one validated VM frame can be attached per message")
+                    for image in images:
+                        if not isinstance(image, dict) or image.get("mime_type") != "image/png" \
+                                or not isinstance(image.get("data_base64"), str):
+                            raise ValueError("unsupported or malformed model image")
+                        encoded = image["data_base64"]
+                        try:
+                            decoded = base64.b64decode(encoded, validate=True)
+                        except (ValueError, TypeError) as exc:
+                            raise ValueError("malformed model image payload") from exc
+                        if len(decoded) > 1_048_576 or not decoded.startswith(b"\x89PNG\r\n\x1a\n") \
+                                or base64.b64encode(decoded).decode("ascii") != encoded:
+                            raise ValueError("model image failed PNG validation")
+                        item_content.append({
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{encoded}",
+                            "detail": "auto",
+                        })
 
             item: dict[str, Any] = {
                 "type": "message",
@@ -1188,12 +1236,13 @@ class ModelClient:
         # Only explicit browser preflight errors, known to occur before send,
         # can be reported as rejected rather than uncertain delivery.
         pre_submission_codes = {
+            "connector_not_found",
             "chatgpt_model_controls_unavailable",
             "chatgpt_effort_unavailable",
             "chatgpt_effort_locked",
             "model_version_unavailable",
         }
-        rejected = event.get("type") == "response.failed" and code in pre_submission_codes
+        rejected = event.get("type") in {"response.failed", "error"} and code in pre_submission_codes
         return detail[:900], rejected
 
     @staticmethod
@@ -1248,10 +1297,12 @@ class ModelClient:
 
         self._delivery("gateway", turn_id, "submitted")
         try:
-            response = urllib.request.urlopen(
+            response = self._provider_http(
                 req,
                 timeout=self.config.timeout_s,
             )
+        except ProviderAdmissionError:
+            raise
         except urllib.error.HTTPError as exc:
             self._delivery("gateway", turn_id, "rejected" if exc.code in {400,401,403,404,405,413,422,429} else "uncertain")
             raise ProviderHTTPError(
@@ -1277,6 +1328,7 @@ class ModelClient:
 
         current_event: str | None = None
         emitted = False
+        received_asset = False
         completed = False
         deadline = time.monotonic() + max(self.config.timeout_s, 0.1)
         try:
@@ -1324,7 +1376,13 @@ class ModelClient:
                     event_type = str(
                         data.get("type") or current_event or ""
                     )
-                    if event_type == "sentra.web_delivery":
+                    if event_type == 'sentra.generated_asset':
+                        callback = getattr(self, 'on_generated_asset', None)
+                        if data.get('request_id') != turn_id or not callable(callback):
+                            raise ProviderHTTPError('gateway', None, 'generated media has no matching local receiver')
+                        callback('gateway', turn_id, data)
+                        received_asset = True
+                    elif event_type == "sentra.web_delivery":
                         if data.get("transport") != "durable_v2" or not isinstance(data.get("messages"), list):
                             raise ProviderHTTPError("gateway", None, "invalid durable Web delivery projection")
                         self.last_web_delivery = data
@@ -1349,7 +1407,7 @@ class ModelClient:
                     elif event_type in {"response.failed", "error"}:
                         detail, rejected = self._stream_failure_detail(data)
                         raise ProviderHTTPError("gateway", 400 if rejected else None, detail)
-            if not emitted:
+            if not emitted and not received_asset:
                 raise ProviderHTTPError(
                     "gateway", None, "response completed without output text"
                 )
@@ -1360,7 +1418,7 @@ class ModelClient:
             self._delivery(
                 "gateway",
                 turn_id,
-                "rejected" if exc.status == 400 and not emitted else "uncertain",
+                "rejected" if exc.status == 400 and not emitted and not received_asset else "uncertain",
             )
             raise
         except Exception as exc:
@@ -1407,10 +1465,13 @@ class ModelClient:
         request_id = "sentra-cli-direct-" + uuid.uuid4().hex
         self._delivery(provider, request_id, "submitted")
         try:
-            response = urllib.request.urlopen(
+            response = self._provider_http(
                 req,
                 timeout=self.config.timeout_s,
+                provider=provider,
             )
+        except ProviderAdmissionError:
+            raise
         except urllib.error.HTTPError as exc:
             self._delivery(provider, request_id, "rejected" if exc.code in {400,401,403,404,405,413,422,429} else "uncertain")
             raise ProviderHTTPError(
@@ -1492,18 +1553,28 @@ class ModelClient:
         del tools
         self.last_delivery_state = "not_submitted"
         self.last_error = None
+        self._provider_admission_error = None
         model = model_override or self.config.model
         if model.startswith("sentra/codex/"):
+            if any(message.get("images") for message in messages if isinstance(message, dict)):
+                self.last_error = "Selected Codex CLI transport cannot receive the validated VM screenshot; choose a gateway Responses model."
+                self.last_delivery_state = "not_submitted"
+                yield "\n" + self.last_error + "\n"
+                return
             from .codex_native import generate,NativeModelError
             self.active_provider="codex-cli"
             self.active_model=model
             try:
-                yield generate(self.config,messages,model,self._delivery,usage_callback=self._usage)
+                self._provider_checkpoint('codex-cli')
+                yield generate(self.config,messages,model,self._delivery,usage_callback=self._usage,
+                    checkpoint=lambda:self._provider_checkpoint('codex-cli'))
             except (NativeModelError,OSError,ValueError) as exc:
                 self.last_error=sanitize_error(exc)
                 yield "\nNative Codex turn failed and was not replayed automatically: "+self.last_error+"\n"
             return
         health = self.probe_health()
+        if self._provider_admission_error is not None:
+            raise ProviderAdmissionError(self._provider_admission_error)
         pre_send_errors: list[str] = []
 
         is_chatgpt_web = (
@@ -1555,6 +1626,11 @@ class ModelClient:
                     f"automatically: {exc}\n"
                 )
                 return
+        if any(message.get("images") for message in messages if isinstance(message, dict)):
+            self.last_error = "Gateway Responses is not ready to receive the VM screenshot; no text-only fallback was submitted."
+            self.last_delivery_state = "not_submitted"
+            yield "\n" + self.last_error + "\n"
+            return
         if model.startswith(("sentra/chatgpt-web/", "chatgpt-web/", "sentra/gemini-web/", "gemini-web/")):
             self.active_provider = "gateway"
             self.active_model = model

@@ -36,7 +36,16 @@ class ControlPlaneService:
     def __init__(self, durable: DurableRunService, context: ContextBusService) -> None:
         self.durable = durable
         self.context = context
-        self.store = SQLiteControlPlaneStore(durable.state_root)
+        self.store = getattr(durable, "store", None) or SQLiteControlPlaneStore(durable.state_root)
+        if getattr(self.store, "backend", "sqlite") != getattr(getattr(context, "store", None), "backend", "sqlite"):
+            raise ValueError("durable and context must share the same storage authority")
+        context_store = getattr(context,"store",None)
+        if self.store.backend == "postgres":
+            if context_store is None or any(getattr(self.store,field) != getattr(context_store,field,None)
+                for field in ("tenant_id","principal_id","_dsn","configured_root")):
+                raise ValueError("durable and context native authority scope differs")
+        elif context_store is not None and self.store.root != context_store.root:
+            raise ValueError("durable and context local authority roots differ")
         self.tool_exposure = ToolExposureRegistry(self.store)
         self.task_ledger = DurableTaskLedger(durable.state_root, store=self.store)
         self.authorization = AuthorizationService(durable.state_root, store=self.store)
@@ -60,6 +69,25 @@ class ControlPlaneService:
         )
         self.skill_library = SkillLibrary(self)
         self.plugin_host: PluginWorkerHost | None = None
+        from .shell_coordinator import ShellCoordinatorService
+        self.shell = ShellCoordinatorService(self)
+
+    def attach_shell_runtime(self, runtime: Any) -> None:
+        self.shell.attach_runtime(runtime)
+
+    @classmethod
+    def from_store(cls, state_root, *, backend="configured", dsn=None, tenant_id=None, principal_id=None):
+        from .control_store import create_control_plane_store
+        store = create_control_plane_store(state_root, backend=backend, dsn=dsn,
+                                           tenant_id=tenant_id, principal_id=principal_id)
+        durable = DurableRunService(state_root, store=store)
+        context = ContextBusService(state_root, store=store)
+        return cls(durable, context)
+
+    def shell_dispatch(self, owner: str, *, project_id: str, action: str,
+                       payload: dict[str, Any], request_key: str | None = None) -> dict[str, Any]:
+        return self.shell.dispatch(owner, project_id=project_id, action=action,
+                                   payload=payload, request_key=request_key)
 
     def _run(self, run_id: str, owner: str) -> dict[str, Any]:
         return self.durable.run_status(run_id, owner)
@@ -190,6 +218,24 @@ class ControlPlaneService:
             desired_state="ACTIVE",
             metadata=metadata,
         )
+
+    def set_agent_paused(self, run_id: str, owner: str, *, agent_id: str, paused: bool) -> dict[str, Any]:
+        if type(paused) is not bool:
+            raise ValueError("explicit pause/resume required")
+        self._agent_from_run(self._run(run_id, owner), agent_id)
+        result = self.durable.update_agent(agent_id, owner, desired_state="WAITING" if paused else "ACTIVE",
+            metadata={"coordination_paused": paused}, event_type="AGENT_COORDINATION_PAUSED" if paused else "AGENT_COORDINATION_RESUMED")
+        cancelled = []
+        if paused:
+            with self.durable.lock:
+                operations = self.durable.db.execute("SELECT * FROM operations WHERE run_id=? AND owner=? AND state IN ('STARTING','RUNNING','WAITING_EXTERNAL')", (run_id, owner)).fetchall()
+            for operation in operations:
+                progress = __import__("json").loads(operation["progress_json"])
+                if progress.get("principal_id") == agent_id:
+                    self.durable.request_cancel(operation["operation_id"], owner, side_effect_may_have_started=True)
+                    cancelled.append(operation["operation_id"])
+        return {"agent_id": agent_id, "run_id": run_id, "paused": paused, "desired_state": result["desired_state"],
+                "cancel_requested_operation_ids": cancelled, "automatic_replay": False}
 
     @staticmethod
     def _chat_provider(provider: str | None, conversation_url: str | None) -> str:
@@ -611,6 +657,13 @@ class ControlPlaneService:
                 )
         return item
 
+    def reassign_work_item(self, work_item_id: str, owner: str, *, agent_id: str,
+                           expected_assignee_agent_id: str | None = None) -> dict[str, Any]:
+        item = self.work_item_info(work_item_id, owner)
+        self._agent_from_run(self._run(item["run_id"], owner), agent_id)
+        return self.governance.reassign_work_item(work_item_id, owner, agent_id=agent_id,
+            expected_assignee_agent_id=expected_assignee_agent_id)
+
     def work_item_info(self, work_item_id: str, owner: str) -> dict[str, Any]:
         item = self.governance.work_item_info(work_item_id, owner)
         self._run(str(item["run_id"]), owner)
@@ -649,6 +702,9 @@ class ControlPlaneService:
         run = self._run(run_id, owner)
         self._agent_from_run(run, agent_id)
         item = self.work_item_info(work_item_id, owner)
+        assignee = agent_id or item.get("assignee_agent_id")
+        if assignee and self.durable.agent_info(assignee, owner)["desired_state"] == "WAITING":
+            raise PermissionError("agent is paused by the coordinator")
         authority_run = self._run(str(item["run_id"]), owner)
         self.budgets.require(
             owner,
@@ -1689,6 +1745,20 @@ class ControlPlaneService:
         return {**item,"binding_matches_target":current==item["target_conversation_id"],
                 "requires_operator_reconciliation":item["state"]=="UNCERTAIN" or diverged,
                 "remote_target_attested":False}
+
+    def execute_coordinator_intent(self, owner, **kwargs):
+        intent = kwargs.get("intent") or {}
+        if isinstance(intent, dict) and intent.get("kind") in {"dot_tool_dispatch", "consolidate_tool_dispatches"}:
+            if intent.get("kind") == "consolidate_tool_dispatches":
+                from sentra_runtime.dot_tool_dispatch import consolidate_tool_dispatches
+                return consolidate_tool_dispatches(
+                    self, owner, kwargs.get("project_id"), kwargs.get("work_item_id"),
+                    intent.get("child_work_item_ids", [])
+                )
+            from sentra_runtime.dot_tool_dispatch import execute_dot_tool_dispatch
+            return execute_dot_tool_dispatch(self, owner, **kwargs)
+        from sentra_runtime.coordinator_admission import execute_coordinator_intent
+        return execute_coordinator_intent(self, owner, **kwargs)
 
     def cancel_chat_continuation(self, owner, continuation_id, *,
                                  operator_approved=False):

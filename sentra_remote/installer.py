@@ -235,7 +235,15 @@ def _copy_product_files(install_dir: Path) -> list[str]:
     if getattr(sys, "frozen", False):
         shutil.copy2(_filesystem_path(Path(sys.executable)), _filesystem_path(install_dir / "sentra-installer.exe"))
     owned = list(PRODUCTS)
-    folders = [(ext_source, "edge_extension"), (source / "web-models", "web-models"), (docs, "docs")]
+    runtime_source = source / 'runtime'
+    if runtime_source.is_dir():
+        shutil.copytree(_filesystem_path(runtime_source), _filesystem_path(install_dir / 'runtime'), dirs_exist_ok=True)
+    runtime_record = source / 'runtime-components.json'
+    if runtime_record.is_file():
+        shutil.copy2(_filesystem_path(runtime_record), _filesystem_path(install_dir / runtime_record.name))
+        owned.append(runtime_record.name)
+    folders = [(ext_source, "edge_extension"), (source / "web-models", "web-models"),
+               (runtime_source, "runtime"), (docs, "docs")]
     if electron_source.exists():
         folders.append((electron_source, "sentra-electron"))
     for folder, prefix in folders:
@@ -562,6 +570,7 @@ def install(
     relay_port: int | None = None,
     stop_after_doctor: bool = False,
     progress: ProgressCallback | None = None,
+    offline_handoff: Path | None = None,
 ) -> dict[str, Any]:
     install_dir = install_dir.expanduser().resolve()
     paths = (
@@ -587,7 +596,13 @@ def install(
     notify("Preparing installation", 5)
     if (install_dir / INSTALL_MARKER).is_file():
         _validate_sentra_install(install_dir)
-        _stop_installed_processes(install_dir)
+        if offline_handoff is not None:
+            from .app_exit_update import load_handoff
+            load_handoff(offline_handoff, install_dir)
+            if not offline_handoff.with_suffix('.claimed').is_file():
+                raise PermissionError('offline Setup requires the helper single-use claim')
+        else:
+            _stop_installed_processes(install_dir)
     elif install_dir.exists() and any(install_dir.iterdir()):
         raise ValueError("choose an empty install directory; destination contains files without SENTRA ownership")
     if install_git and not command_exists("git"):
@@ -662,9 +677,16 @@ def install(
         from .windows_integration import shortcuts
         result["shortcuts"]=shortcuts(install_dir)
 
-    notify("Connect & Verify", 88)
-    runtime = LocalRuntime(paths, settings)
-    verification = runtime.connect_and_verify(timeout_s=12.0)
+    notify("Connect & Verify" if offline_handoff is None else "Service verification deferred until restart", 88)
+    runtime = None
+    if offline_handoff is None:
+        runtime = LocalRuntime(paths, settings)
+        verification = runtime.connect_and_verify(timeout_s=12.0)
+    else:
+        # Coordinated apply keeps the installation quiesced. Starting services
+        # here would invalidate the helper's actual offline proof and rollback.
+        verification = {'started': {}, 'status': {}, 'next_url': None,
+                        'deferred': 'post_update_restart', 'external_completion_claimed': False}
     result["startup"] = verification["started"]
     result["connect_verify"] = verification
     result["doctor"] = verification["status"]
@@ -683,7 +705,7 @@ def install(
     ready = _installation_ready(verification, openai_required=bool(tunnel_id))
     notify("Ready" if ready else "Installed — local services need attention", 100 if ready else 90)
 
-    if stop_after_doctor:
+    if stop_after_doctor and runtime is not None:
         runtime.stop_all()
 
     human = install_dir / "sentra-human.exe"
@@ -1250,6 +1272,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--relay-port", type=int)
     parser.add_argument("--stop-after-doctor", action="store_true")
     parser.add_argument("--upgrade", action="store_true")
+    parser.add_argument("--offline-handoff", type=Path)
     args = parser.parse_args(argv)
     if args.uninstall:
         print(json.dumps(uninstall(
@@ -1278,6 +1301,7 @@ def main(argv: list[str] | None = None) -> int:
             mcp_port=args.mcp_port,
             relay_port=args.relay_port,
             stop_after_doctor=args.stop_after_doctor,
+            offline_handoff=args.offline_handoff,
         )
     except Exception as exc:
         from sentra_mcp.errors import sanitize_error

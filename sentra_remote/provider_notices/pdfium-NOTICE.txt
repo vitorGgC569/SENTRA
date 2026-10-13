@@ -1,0 +1,16 @@
+SENTRA Desktop — Third-party notice: PDFium (pypdfium2)
+========================================================
+
+Component: PDFium via pypdfium2 (optional provider "pdfium")
+Pinned version: 4.30.0
+Source: PyPI package pypdfium2==4.30.0
+License: BSD-3-Clause (PDFium) / Apache-2.0 (pypdfium2 bindings);
+  see scripts/commander/pdfium_pin.py for the enforced pin.
+Upstream: https://pdfium.googlesource.com/pdfium/; bindings:
+  https://github.com/bblanchon/pypdfium2 (verify at build time)
+
+Notes for SENTRA distribution:
+- The release SBOM MUST contain pypdfium2==4.30.0
+  (scripts/commander/release_assets.py enforces this; release_doctor
+  re-checks it). The release build refuses an unpinned PDFium.
+- SBOM entry: pkg:pypi/pypdfium2@4.30.0 (see release SBOM).

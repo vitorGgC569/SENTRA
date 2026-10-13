@@ -17,13 +17,21 @@ INSTALL_MARKER = ".sentra-install.json"
 TERMINAL = frozenset({"COMMITTED", "RESTORED"})
 
 
+def _checkpoint():
+    from sentra_runtime.effect_boundary import current_effect_context
+    context = current_effect_context.get()
+    if context is not None:
+        context.checkpoint()
+
+
 def _write(path: Path, data: dict) -> None:
     tmp = path.with_name(path.name + ".tmp")
+    _checkpoint()
     with Path(filesystem_path(tmp)).open("x", encoding="utf-8") as out:
         json.dump(data, out, sort_keys=True)
         out.flush()
         os.fsync(out.fileno())
-    os.replace(filesystem_path(tmp), filesystem_path(path))
+    _checkpoint(); os.replace(filesystem_path(tmp), filesystem_path(path))
 
 
 def _load(path: Path) -> dict:
@@ -62,18 +70,18 @@ def stage_program_backup(install: Path, namespace: Path, installation_id: str) -
         raise PermissionError("backup installation identity mismatch")
     if any(child.is_symlink() for child in install.rglob("*")):
         raise PermissionError("symlinks in installation cannot be backed up safely")
-    namespace.mkdir(parents=True, exist_ok=True)
+    _checkpoint(); namespace.mkdir(parents=True, exist_ok=True)
     transaction_id = uuid.uuid4().hex
     original_backup = namespace / "previous"
     backup = original_backup if not original_backup.exists() else namespace / ("previous-" + transaction_id)
     pending = namespace / (".staging-" + transaction_id)
     journal = namespace / ("txn-" + transaction_id + ".json")
     try:
-        shutil.copytree(filesystem_path(install), filesystem_path(pending))
+        _checkpoint(); shutil.copytree(filesystem_path(install), filesystem_path(pending))
         new_marker = json.loads(Path(filesystem_path(pending / INSTALL_MARKER)).read_text(encoding="utf-8"))
         if new_marker.get("installation_id") != installation_id:
             raise PermissionError("staged ownership changed")
-        os.replace(filesystem_path(pending), filesystem_path(backup))
+        _checkpoint(); os.replace(filesystem_path(pending), filesystem_path(backup))
         _write(journal, {
             "schema": 1, "phase": "PREPARED",
             "installation_binding": hashlib.sha256(installation_id.encode()).hexdigest(),
@@ -101,11 +109,12 @@ def mark_program_stage(journal: Path, phase: str, installation_id: str) -> None:
     record["phase"] = phase
     # Journal persistence cannot safely be rolled back to older transaction state.
     temp = journal.with_name(journal.name + ".phase.tmp")
+    _checkpoint()
     with Path(filesystem_path(temp)).open("x", encoding="utf-8") as out:
         json.dump(record, out, sort_keys=True)
         out.flush()
         os.fsync(out.fileno())
-    os.replace(filesystem_path(temp), filesystem_path(journal))
+    _checkpoint(); os.replace(filesystem_path(temp), filesystem_path(journal))
 
 
 def restore_failed_program_tree(install: Path, backup: Path, installation_id: str) -> Path:
@@ -126,7 +135,7 @@ def restore_failed_program_tree(install: Path, backup: Path, installation_id: st
     # New files might have been written by another actor after Setup started.
     # Never erase them: move the entire suspect tree into an owned quarantine.
     quarantine = backup.parent / ("failed-current-" + uuid.uuid4().hex)
-    os.replace(filesystem_path(install), filesystem_path(quarantine))
+    _checkpoint(); os.replace(filesystem_path(install), filesystem_path(quarantine))
     try:
         shutil.copytree(filesystem_path(backup), filesystem_path(install))
         # Retain only unknown new files, without overwriting restored media.

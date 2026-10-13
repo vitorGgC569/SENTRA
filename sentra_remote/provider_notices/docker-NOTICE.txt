@@ -1,0 +1,18 @@
+SENTRA Desktop — Third-party notice: Docker Desktop
+====================================================
+
+Component: Docker Desktop (optional provider "docker")
+Pinned version: 4.34.3
+Source: winget package Docker.DockerDesktop
+License: Docker Subscription Agreement (proprietary; free for personal/
+  small-business use per upstream terms — operator must accept upstream
+  terms at install time)
+Upstream: https://www.docker.com / https://docs.docker.com/desktop/
+
+Notes for SENTRA distribution:
+- Docker is OPTIONAL and used only as an isolated-task sandbox. SENTRA
+  never silently executes on the host; sandbox health is verified via
+  `docker info` before any isolated run.
+- Installed only with explicit user approval; Doctor reports installable
+  otherwise. Daemon readiness is NOT inferred from the binary alone.
+- SBOM entry: pkg:generic/docker@4.34.3 (see release SBOM).

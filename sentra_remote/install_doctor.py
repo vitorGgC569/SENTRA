@@ -26,6 +26,15 @@ REQUIRED = {
 }
 REQUIRED.update({f"component_{i}": name for i, name in enumerate(PRODUCTS)})
 
+# OpenDots shell surface: existing installs remain valid without it, but a
+# shell-first install must carry the shell bundle proof and the bridge
+# contract note. Checked separately so REQUIRED stays backward compatible.
+SHELL_COMPONENTS = {
+    "shell_bundle": "sentra_canvas/static/desktop-assets/manifest.json",
+    "shell_bridge_contract": "docs/SENTRA_SHELL_BRIDGE_INTEGRATION_2026-10-11.md",
+    "shell_migration_plan": "docs/SENTRA_IMPLEMENTACAO_INTEGRAL_2026-10-11.md",
+}
+
 
 @dataclass(frozen=True)
 class RepairPlan:
@@ -86,8 +95,9 @@ def inspect_installation(root: Path, *, deep: bool = False) -> RepairPlan:
     )
 
 
-def shareable_doctor(plan: RepairPlan) -> dict:
-    return {
+def shareable_doctor(plan: RepairPlan, *, shell: dict | None = None,
+                     providers: dict | None = None) -> dict:
+    public = {
         "schema": 1,
         "status": plan.status,
         "missing_components": list(plan.missing),
@@ -95,6 +105,45 @@ def shareable_doctor(plan: RepairPlan) -> dict:
         "execution": "none",
         "identity_disclosed": False,
         "credentials_inspected": False,
+        "shell_surface": "unchecked",
+    }
+    if isinstance(shell, dict):
+        status = shell.get("status")
+        if status in {"shell_ready", "shell_pending", "unowned"}:
+            public["shell_surface"] = status
+            missing = shell.get("missing")
+            if isinstance(missing, list):
+                public["shell_missing_count"] = min(len(missing), 64)
+    if isinstance(providers, dict):
+        states = providers.get("providers") if isinstance(providers.get("providers"), dict) else None
+        if isinstance(states, dict):
+            counts: dict[str, int] = {}
+            for entry in states.values():
+                state = entry.get("state") if isinstance(entry, dict) else None
+                if state in {"absent", "installable", "installing", "ready",
+                             "degraded", "unavailable", "removed"}:
+                    counts[state] = min(counts.get(state, 0) + 1, 64)
+            public["providers"] = {"states": counts, "total": min(len(states), 64)}
+    return public
+
+
+def inspect_shell_surface(root: Path) -> dict:
+    """Read-only shell linkage check. Never inspects credentials or tokens."""
+    base = Path(root).expanduser().absolute()
+    if base.is_symlink():
+        return {"schema": 1, "status": "unowned", "missing": ["root"]}
+    missing = []
+    for label, relative in SHELL_COMPONENTS.items():
+        target = base / relative
+        if not target.is_file() or target.is_symlink():
+            missing.append(label)
+    # The installed shell bundle manifest is optional until Prisma ships the
+    # shell; its absence is reported, never treated as a damaged install.
+    return {
+        "schema": 1,
+        "status": "shell_ready" if not missing else "shell_pending",
+        "missing": sorted(missing),
+        "repair_action": "none" if not missing else "install_shell_bundle_or_keep_canvas",
     }
 
 
@@ -130,3 +179,20 @@ def request_owner_repair(
         not marker.is_file() or hashlib.sha256(marker.read_bytes()).digest() != before):
         raise PermissionError("installation changed during repair admission")
     return dispatch(candidate.resolve(), operation_id)
+
+
+def inspect_provider_surface(probes: dict | None = None) -> dict:
+    """Read-only optional-provider projection for Doctor surfaces.
+
+    Never installs, repairs or removes anything. Each provider reports
+    ready/degraded/installable/unavailable from verified probes only.
+    """
+    from .optional_providers import PROVIDERS, describe_provider
+    probes = probes if isinstance(probes, dict) else {}
+    states = {}
+    for name in sorted(PROVIDERS):
+        probe = probes.get(name)
+        states[name] = describe_provider(
+            name, probe if isinstance(probe, dict) else None
+        ).to_dict()
+    return {"schema": 1, "providers": states}

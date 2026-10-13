@@ -36,3 +36,18 @@ export async function api(path, data, options = {}) {
 export function route(path, fields) {
   return path + '?' + new URLSearchParams(fields).toString();
 }
+
+export async function apiBinary(path, options = {}) {
+  if (!path.startsWith('/api/shell/generated-media?') || !bearer) throw new ApiError('Arquivo não autorizado.', 401);
+  const response = await fetch(path, { headers: { Authorization: 'Bearer ' + bearer },
+    cache: 'no-store', credentials: 'omit', redirect: 'error', signal: options.signal });
+  if (!response.ok) {
+    const value = await response.json().catch(() => ({}));
+    throw new ApiError(value.error || 'Arquivo ainda não confirmado.', response.status);
+  }
+  const maximum = options.maxBytes || 20 * 1024 * 1024;
+  if (Number(response.headers.get('Content-Length')) > maximum) throw new ApiError('Arquivo excede o limite de tamanho.');
+  const blob = await response.blob();
+  if (blob.size > maximum) throw new ApiError('Arquivo excede o limite de tamanho.');
+  return blob;
+}

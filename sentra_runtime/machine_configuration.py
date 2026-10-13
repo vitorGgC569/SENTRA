@@ -1,6 +1,7 @@
 """Persist explicit host configuration without grants or live session claims."""
 import hashlib
 import json
+from sentra_core.conversations import _encode, _decode
 
 
 class MachineConfigurationStore:
@@ -29,7 +30,7 @@ class MachineConfigurationStore:
             with db:
                 db.execute("INSERT INTO configured_machines VALUES(?,?,?,?) ON CONFLICT(owner,machine) "
                            "DO UPDATE SET config=excluded.config,sha256=excluded.sha256",
-                           (self.owner,machine_id,encoded,digest))
+                           (self.owner,machine_id,_encode(config),digest))
         finally:
             db.close()
 
@@ -41,9 +42,10 @@ class MachineConfigurationStore:
             db.close()
         values = []
         for row in rows:
-            if hashlib.sha256(row["config"].encode()).hexdigest() != row["sha256"]:
+            value = _decode(row["config"]) if row["config"].startswith(("dpapi:","keyring:")) else json.loads(row["config"])
+            canonical = json.dumps(value,sort_keys=True,ensure_ascii=False,allow_nan=False,separators=(",",":"))
+            if hashlib.sha256(canonical.encode()).hexdigest() != row["sha256"]:
                 raise RuntimeError("persisted machine configuration integrity failure")
-            value = json.loads(row["config"])
             if not isinstance(value, dict):
                 raise RuntimeError("invalid persisted machine configuration")
             values.append({"machine_id":row["machine"], "configuration":value})

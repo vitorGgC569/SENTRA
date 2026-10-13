@@ -42,6 +42,38 @@ def validate_desktop_bundle(ui: Path) -> dict:
     return manifest
 
 
+def validate_shell_bundle(ui: Path) -> dict:
+    """Optional shell-first bundle: Home/Dots/Spaces with Canvas as internal view.
+
+    Absence is reported (shell pending) and keeps the current desktop bundle
+    authoritative. When present, the shell bundle must carry its own hashed
+    manifest and the single shellBridge client; it never becomes a second
+    backend authority.
+    """
+    ui = Path(ui)
+    entry = ui / "shell-home.html"
+    manifest_file = ui / "shell-assets" / "manifest.json"
+    if not entry.is_file() or not manifest_file.is_file():
+        return {"schema": 1, "status": "shell_pending"}
+    try:
+        manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (ValueError, OSError) as exc:
+        raise ValueError("invalid SENTRA shell bundle manifest") from exc
+    if (not isinstance(manifest, dict) or manifest.get("entry") != "/shell-home.html"
+            or not isinstance(manifest.get("files"), dict)
+            or "shell.js" not in manifest["files"]):
+        raise ValueError("incomplete shell bundle contract")
+    for name, digest in manifest["files"].items():
+        if (not isinstance(name, str) or "/" in name or "\\" in name or name.startswith(".")
+                or not isinstance(digest, str) or len(digest) != 64
+                or any(c not in "0123456789abcdef" for c in digest)):
+            raise ValueError("invalid shell bundle file/hash")
+        asset = manifest_file.parent / name
+        if not asset.is_file() or hashlib.sha256(asset.read_bytes()).hexdigest() != digest:
+            raise ValueError("stale or tampered shell bundle: " + name)
+    return {"schema": 1, "status": "shell_ready", "files": len(manifest["files"])}
+
+
 def build_canvas(dist: Path, work: Path, spec: Path) -> None:
     from scripts.commander.build_windows import _build
     from scripts.commander.pdfium_pin import require_pdfium

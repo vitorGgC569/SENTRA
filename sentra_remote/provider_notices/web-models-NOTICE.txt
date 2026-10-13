@@ -1,0 +1,16 @@
+SENTRA Desktop — Third-party notice: Web Models (vendored)
+==========================================================
+
+Component: Web Models Electron payload (optional provider "web-models")
+Pinned version: tracked in web-models/integration-build.json at pack time
+Source: vendored payload built from integrations/codex_chatgpt_web/
+  (upstream ref + patch SHA-256 recorded in integration-build.json)
+License: upstream license + SENTRA patch; full text ships at
+  web-models/licenses/codex-chatgpt-web/LICENSE inside the payload.
+Upstream manifest: integrations/codex_chatgpt_web/upstream.json
+
+Notes for SENTRA distribution:
+- The release staging refuses a stale upstream patch
+  (scripts/commander/release_assets.py compares patch_sha256).
+- This NOTICE is the pin record; the authoritative license text travels
+  inside the versioned payload so each release carries its exact terms.

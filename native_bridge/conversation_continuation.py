@@ -3,8 +3,59 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 from .continuation_web import WebContinuation, WebContinuationConflict
+
+
+def _transcript_binding(*, transcript_sha256=None, transcript_message_ids=None,
+                        children_snapshot=None) -> dict:
+    """Pin the original transcription + worker children into the checkpoint.
+
+    OD-FF07 (transcript + outbox in one intent): the durable outbox binds
+    prompt_sha256 per delivery while the checkpoint pins transcript_sha256
+    plus the ordered message ids and the worker-children snapshot. Commit
+    compares both digests, so a successor can never resume a different
+    transcription and children never lose context silently. Crash/uncertain
+    never replays: mismatches fail closed to operator reconciliation.
+    """
+    binding: dict = {}
+    if transcript_sha256 is not None:
+        if (not isinstance(transcript_sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", transcript_sha256)):
+            raise ValueError("transcript_sha256 must be a SHA-256 hex digest")
+        binding["transcript_sha256"] = transcript_sha256
+    if transcript_message_ids is not None:
+        if (not isinstance(transcript_message_ids, list)
+                or not transcript_message_ids or len(transcript_message_ids) > 500
+                or any(not isinstance(item, str) or not 8 <= len(item) <= 160
+                       for item in transcript_message_ids)):
+            raise ValueError("transcript_message_ids must be 1..500 bounded ids")
+        binding["transcript_message_ids"] = list(transcript_message_ids)
+    if children_snapshot is not None:
+        if not isinstance(children_snapshot, dict) or len(json.dumps(
+                children_snapshot, separators=(",", ":")).encode("utf-8")) > 200000:
+            raise ValueError("children_snapshot must be an object within 200 KB")
+        binding["children_snapshot"] = children_snapshot
+    return binding
+
+
+def _pinned_transcript(service, owner, row, allocation_id, continuation_id) -> dict:
+    """Read the pinned transcription from the immutable checkpoint (no replay)."""
+    if allocation_id:
+        checkpoint_id = row["checkpoint_id"]
+    else:
+        checkpoint_id = service.control.session_checkpoints.continuation(
+            owner, continuation_id)["checkpoint_id"]
+    with service.web.store.connect("session_checkpoint") as db:
+        checkpoint = db.execute("SELECT * FROM session_checkpoints WHERE owner=? AND checkpoint_id=?",
+                                (owner, checkpoint_id)).fetchone()
+    if checkpoint is None:
+        return {}
+    pinned = service.control.session_checkpoints._row(checkpoint)["checkpoint"]
+    return {key: pinned[key] for key in (
+        "transcript_sha256", "transcript_message_ids", "children_snapshot")
+        if key in pinned}
 
 
 class ConversationWebContinuation:
@@ -43,13 +94,18 @@ class ConversationWebContinuation:
 
     def prepare(self, owner, conversation_id, *, run_id, chat_id, work_item_id,
                 principal_id, request_key, summary, cursor=None, target_url=None,
-                operator_approved=False):
+                operator_approved=False, transcript_sha256=None,
+                transcript_message_ids=None, children_snapshot=None):
         if operator_approved is not True:
             raise PermissionError("host owner approval required for Compact&Resume")
         if not isinstance(request_key, str) or not 1 <= len(request_key) <= 128:
             raise ValueError("bounded stable request_key required")
         if not isinstance(summary, str) or not 1 <= len(summary) <= 16000:
             raise ValueError("bounded reviewed summary required")
+        transcript = _transcript_binding(
+            transcript_sha256=transcript_sha256,
+            transcript_message_ids=transcript_message_ids,
+            children_snapshot=children_snapshot)
         self._conversation(owner, conversation_id, run_id)
         run = self.control._run(run_id, owner)
         self.control._agent_from_run(run, principal_id)
@@ -65,7 +121,8 @@ class ConversationWebContinuation:
         preferences = self.conversations.model_preferences(conversation_id) if self.conversations else None
         payload = {"summary": summary, "logical_conversation_id": conversation_id,
                    "work_item_id": work_item_id, "principal_id": principal_id,
-                   "target_url": target_url, "requested_preferences": preferences}
+                   "target_url": target_url, "requested_preferences": preferences,
+                   **transcript}
         checkpoint = self.control.write_session_checkpoint(
             owner, run_id=run_id, chat_id=chat_id, source_instance_id="conversation-compact-resume",
             source_epoch=epoch, source_seq=0, checkpoint=payload, cursor=cursor or {})
@@ -116,16 +173,26 @@ class ConversationWebContinuation:
         published = state.get("state", state.get("stage")) == "PUBLISHED"
         account = self._account_proven(owner, row) if published else False
         ready = published and state["collector_message_attested"] and account
-        uncertain = state.get("delivery_state") == "unconfirmed" or state.get("requires_operator_reconciliation", False)
+        uncertain = state.get("delivery_state") == "unconfirmed" or state.get(
+            "requires_operator_reconciliation", False)
+        pinned = _pinned_transcript(self, owner, row, allocation_id, continuation_id)
         return {**state, "conversation_id": conversation_id, "run_id": row["run_id"],
                 "state": "PUBLISHED" if published else "UNCONFIRMED" if uncertain else "WAITING_RECEIPT",
                 "account_identity_attested": account,
+                "transcript_sha256": pinned.get("transcript_sha256"),
+                "transcript_message_ids": pinned.get("transcript_message_ids"),
+                "children_snapshot": pinned.get("children_snapshot"),
                 "successor_ready": ready, "blocked": not ready, "automatic_retry": False}
 
-    def resume(self, owner, conversation_id, *, allocation_id=None, continuation_id=None, operator_approved=False):
+    def resume(self, owner, conversation_id, *, allocation_id=None, continuation_id=None,
+               operator_approved=False, transcript_sha256=None):
         if operator_approved is not True:
             raise PermissionError("host owner approval required to resume successor")
         row = self._binding(owner, conversation_id, allocation_id, continuation_id)
+        if transcript_sha256 is not None:
+            pinned = _pinned_transcript(self, owner, row, allocation_id, continuation_id)
+            if pinned.get("transcript_sha256") != transcript_sha256:
+                raise PermissionError("successor transcription changed; reconcile before commit")
         if not self._account_proven(owner, row):
             return self._blocked("authenticated Web account proof unavailable or mismatched",
                                  conversation_id=conversation_id, allocation_id=allocation_id,

@@ -82,6 +82,7 @@
       if (branchConversation !== routeId || (conversationId && conversationId !== branchConversation)) conflict = true;
       conversationId = branchConversation;
       for (const message of messages.slice(0, 600)) {
+        if (message?.author?.role !== 'user') continue;
         const request = message?.metadata?.request_id, id = message?.id;
         if (typeof request !== 'string' || typeof id !== 'string' || !ID.test(request) || !ID.test(id)) continue;
         // Two different committed messages for one MCP request are
@@ -106,10 +107,77 @@
     return { nonce, document_id: scanDocument, conversation_id: conversationId,
       route_conversation_id: routeId, state, requests: [...requests.values()] };
   }
+  function assistantFrame(expected) {
+    if (location.origin !== 'https://chatgpt.com' || !expected || !ID.test(expected.request_id || '') ||
+        !ID.test(expected.parent_user_message_id || '') || expected.document_id !== currentDocument()) return null;
+    const route = /^\/c\/([A-Za-z0-9_-]{8,160})(?:\/|$)/.exec(location.pathname)?.[1];
+    if (route !== expected.conversation_id) return null;
+    const own = (object, key) => {
+      const descriptor = object && typeof object === 'object' && Object.getOwnPropertyDescriptor(object, key);
+      return descriptor && Object.hasOwn(descriptor, 'value') ? descriptor.value : undefined;
+    };
+    const found = new Map(); let budget = 4096;
+    for (const element of [...document.querySelectorAll('[data-message-id],section[data-testid^="conversation-turn"]')].slice(-200)) {
+      let node = fiberFor(element), branch = null, messages = [];
+      for (let depth = 0; node && depth < 80; depth++, node = node.return) {
+        const props = node.memoizedProps;
+        for (const value of [own(props,'conversationId'),own(props,'clientThreadId'),own(own(props,'conversation'),'id')]) {
+          if (!ID.test(value || '')) continue;
+          if (branch && branch !== value) return null;
+          branch = value;
+        }
+        for (const list of [own(props,'messages'),own(props,'allMessages'),own(own(props,'turn'),'messages')]) {
+          if (Array.isArray(list)) { if (list.length > 600) return null; messages.push(...list); }
+        }
+        if (own(props,'message')) messages.push(own(props,'message'));
+      }
+      if (branch !== route) continue;
+      for (const message of messages) {
+        if (--budget < 0) return null;
+        const id = own(message,'id'), role = own(own(message,'author'),'role');
+        if (!ID.test(id || '') || !['user','assistant'].includes(role)) continue;
+        const parts = own(own(message,'content'),'parts');
+        // Native images must be committed assistant image_asset_pointer parts.
+        // Never mine image URLs from Markdown, code output, tool messages or DOM.
+        // An unsupported part means no assistant proof, not text-only success.
+        let body = null, assets = [];
+        if (role === 'assistant') {
+          if (!Array.isArray(parts) || parts.length > 64) continue;
+          const textParts = []; let unsupported = false;
+          for (const part of parts) {
+            if (typeof part === 'string') { textParts.push(part); continue; }
+            const pointer = own(part,'asset_pointer');
+            if (own(part,'content_type') === 'image_asset_pointer' &&
+                typeof pointer === 'string' && /^file-service:\/\/file-[A-Za-z0-9_-]{8,160}$/.test(pointer)) {
+              assets.push(pointer.slice('file-service://'.length));
+              continue;
+            }
+            unsupported = true; break;
+          }
+          if (unsupported || assets.length > 4 || new Set(assets).size !== assets.length) continue;
+          body = textParts.join('\n');
+        }
+        if (body !== null && body.length > 200000) return null;
+        const value = { message_id:id,role,body,assets,parent:own(message,'parent_id'),
+          request:own(own(message,'metadata'),'request_id'),status:own(message,'status') };
+        if (found.has(id) && JSON.stringify(found.get(id)) !== JSON.stringify(value)) return null;
+        found.set(id,value);
+      }
+    }
+    const parent = found.get(expected.parent_user_message_id);
+    if (!parent || parent.role !== 'user' || parent.request !== expected.request_id) return null;
+    const children = [...found.values()].filter(item => item.role === 'assistant' && item.parent === parent.message_id);
+    if (children.length !== 1 || currentDocument() !== expected.document_id) return null;
+    const child = children[0];
+    if (!['in_progress','finished_successfully'].includes(child.status)) return null;
+    return { message_id:child.message_id,parent_user_message_id:parent.message_id,body:child.body,
+      assets:child.assets,conversation_id:route,document_id:currentDocument(),complete:child.status === 'finished_successfully' };
+  }
+
   // A document keeps its identity across scans and service-worker restarts.
   if (!globalThis.__sentraConversationEvidence) {
     Object.defineProperty(globalThis, '__sentraConversationEvidence', {
-      value: { get documentId() { return currentDocument(); }, observe }, configurable: true,
+      value: { get documentId() { return currentDocument(); }, observe, assistantFrame }, configurable: true,
     });
   }
 })();

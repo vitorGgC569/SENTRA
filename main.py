@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib.util
+import hashlib
 import json
 import sys
 import uuid
@@ -151,15 +152,56 @@ async def doctor(config, workspace, *, worker=None, reviewer=None):
 
 
 async def serve_relay(config):
+    import urllib.request
     from urllib.parse import urlparse
     from native_bridge.relay import RelayServer
     from native_bridge.settings import relay_settings
-    base = config.get("browser",{}).get("relay_base","http://127.0.0.1:8765")
+    from native_bridge.host_attestors import create_host_attestors
+    from sentra_mcp.services.control_plane import ControlPlaneService
+
+    base = config.get("browser", {}).get("relay_base", "http://127.0.0.1:8765")
     address = urlparse(base)
     token, path, database = relay_settings(PROJECT_ROOT)
-    server = RelayServer(host=address.hostname or "127.0.0.1", port=address.port or 8765,
-                         token=token, db_path=database, extension_dir=PROJECT_ROOT/"edge_extension").start()
-    print(f"Relay: {base}\nToken para parear nas opções da extensão: {path}\nBanco: {database}\nCtrl+C encerra.", flush=True)
+    host = address.hostname or "127.0.0.1"
+    port = address.port or 8765
+
+    # Composição host-owned: ligar relay ao Control Plane com attestors reais
+    control = None
+    assistant_observer = None
+    account_attestor = None
+    try:
+        control = ControlPlaneService.from_store(PROJECT_ROOT / ".sentra")
+        account_attestor, assistant_observer = create_host_attestors(control, owner="canvas:local-operator")
+    except Exception as exc:
+        raise RuntimeError(f"fail-closed: cannot construct host attestors for relay: {exc}") from exc
+
+    if control is None or not callable(account_attestor) or not callable(assistant_observer):
+        raise RuntimeError("fail-closed: relay requires authenticated_control and real host attestors")
+
+    # Coexistência com o relay host na 8765 (um relay por porta; nada de dual-bind)
+    try:
+        server = RelayServer(host=host, port=port,
+                             token=token, db_path=database,
+                             extension_dir=PROJECT_ROOT / "edge_extension",
+                             authenticated_control=control,
+                             assistant_observer=assistant_observer).start()
+    except OSError as exc:
+        try:
+            with urllib.request.urlopen(f"http://{host}:{port}/health", timeout=2) as resp:
+                data = json.loads(resp.read().decode())
+                expected_outbox = hashlib.sha256(str(Path(database).resolve()).casefold().encode('utf-8')).hexdigest()
+                if data.get("ok") and data.get('outbox_identity') == expected_outbox:
+                    print(f"Relay already active on http://{host}:{port} (owned by host process).\n"
+                          f"Single-relay-per-port policy: existing relay retained without dual-bind.", flush=True)
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        return
+        except Exception:
+            pass
+        raise RuntimeError(f"Port {port} already occupied. Stop conflicting relay before starting standalone.") from exc
+
+    print(f"Relay (host-composed): {base}\nToken para parear nas opções da extensão: {path}\nBanco: {database}\nCtrl+C encerra.", flush=True)
     try:
         await asyncio.Event().wait()
     finally:

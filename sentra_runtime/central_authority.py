@@ -27,7 +27,8 @@ class CentralDurableIntentAuthority:
     """ControlPlane-owned adapter over DurableRunService's atomic reservation."""
 
     def __init__(self, durable: DurableRunService, *, ttl_s: float = 60.0,
-                 release_on_terminal: bool = False, budgets=None,observation_predicate=None):
+                 release_on_terminal: bool = False, budgets=None,observation_predicate=None, allow_cleanup=False,
+                 budget_provider="sentra-machines"):
         if not isinstance(durable, DurableRunService):
             raise TypeError("real SENTRA DurableRunService required")
         if type(ttl_s) not in (float, int) or not 1 <= ttl_s <= 3600:
@@ -37,9 +38,16 @@ class CentralDurableIntentAuthority:
         self.durable = durable
         self.ttl_s = ttl_s
         self.release_on_terminal = release_on_terminal
+        self.allow_cleanup = allow_cleanup is True
+        if budget_provider not in {"sentra-machines", "voice", "attachments"}:
+            raise ValueError("trusted machine budget provider required")
+        self.budget_provider = budget_provider
         if budgets is not None:
             from sentra_mcp.services.budget_policy import BudgetPolicyService
-            if not isinstance(budgets,BudgetPolicyService) or budgets.store.path_for("governance").parent!=durable.root:
+            same_store = budgets.store is durable.store if isinstance(budgets, BudgetPolicyService) else False
+            if isinstance(budgets, BudgetPolicyService) and getattr(budgets.store, "backend", "sqlite") == "sqlite":
+                same_store = budgets.store.path_for("governance").parent == durable.root
+            if not isinstance(budgets,BudgetPolicyService) or not same_store:
                 raise ValueError("machine budget must share this central authority")
         self.budgets=budgets
         if observation_predicate is not None and not callable(observation_predicate):raise ValueError("trusted observation classifier required")
@@ -64,7 +72,8 @@ class CentralDurableIntentAuthority:
                 idempotency_key=request.idempotency_key,
                 intent_sha256=fingerprint,
                 resource_key=self._resource(request),
-                kind="sentra.machine.observation" if self._observation(request) else "sentra.machine",
+                kind="sentra.machine.cleanup" if self.allow_cleanup else "sentra.machine.observation" if self._observation(request) else "sentra.machine",
+                allow_cleanup=self.allow_cleanup,
                 ttl_s=self.ttl_s,
                 operation_context={
                     "work_item_id": request.work_item_id,
@@ -90,7 +99,7 @@ class CentralDurableIntentAuthority:
             if (row["run_id"] != receipt.run_id
                     or row["intent_sha256"] != receipt.intent_sha256
                     or row["fencing_token"] != receipt.fencing_token
-                    or row["kind"] not in {"sentra.machine","sentra.machine.observation"}
+                    or row["kind"] not in {"sentra.machine","sentra.machine.observation","sentra.machine.cleanup"}
                     or not isinstance(row["resource_key"], str)):
                 raise StaleFenceError("stored intent, run or fence mismatch")
             return row
@@ -99,7 +108,7 @@ class CentralDurableIntentAuthority:
         """Host-scoped lookup; callers must authorize access before exposing it."""
         with self.durable.lock:
             row = self.durable._operation_row(operation_id, owner)
-            if (row["kind"] not in {"sentra.machine","sentra.machine.observation"} or not row["intent_sha256"]
+            if (row["kind"] not in {"sentra.machine","sentra.machine.observation","sentra.machine.cleanup"} or not row["intent_sha256"]
                     or type(row["fencing_token"]) is not int):
                 raise ValueError("operation has no central machine intent")
             return IntentReceipt(operation_id, row["intent_sha256"], row["run_id"],
@@ -119,7 +128,7 @@ class CentralDurableIntentAuthority:
                 if (lease is None or lease["operation_id"] != receipt.operation_id
                         or lease["owner"] != receipt.owner
                         or self.durable.run_status(receipt.run_id, receipt.owner,
-                                                   include_details=False)["state"] != "RUNNING"
+                                                   include_details=False)["state"] != "RUNNING" and current["kind"] != "sentra.machine.cleanup"
                         or current["state"] not in ("STARTING", "RUNNING")):
                     return False
                 if current["state"] == "STARTING":
@@ -148,7 +157,7 @@ class CentralDurableIntentAuthority:
 
     def begin_effect(self, receipt: IntentReceipt) -> None:
         row = self._binding(receipt)
-        if self.budgets is not None and row["kind"]!="sentra.machine.observation":
+        if self.budgets is not None and row["kind"] not in {"sentra.machine.observation", "sentra.machine.cleanup"}:
             from .machine_budget import quota_event_id
             from .executor import AuthorizationRequired
             progress=json.loads(row["progress_json"])
@@ -156,7 +165,7 @@ class CentralDurableIntentAuthority:
             run=self.durable.run_status(receipt.run_id,receipt.owner,include_details=False)
             result=self.budgets.reserve_quota(receipt.owner,event_id=quota_event_id(receipt.operation_id),
                 workspace=run.get("workspace"),goal_id=item.get("goal_id"),work_item_id=progress["work_item_id"],
-                run_id=receipt.run_id,operation_id=receipt.operation_id,agent_id=progress["principal_id"],provider="sentra-machines")
+                run_id=receipt.run_id,operation_id=receipt.operation_id,agent_id=progress["principal_id"],provider=self.budget_provider)
             if result.get("allowed") is not True:raise AuthorizationRequired("SENTRA machine budget exhausted")
         self.durable.begin_machine_effect(
             receipt.operation_id, receipt.owner, intent_sha256=receipt.intent_sha256,
@@ -178,31 +187,39 @@ class CentralDurableIntentAuthority:
                               allow_nan=False, separators=(",", ":")).encode("utf-8")
         if len(envelope) > 2_010_000:
             raise ValueError("result envelope exceeds bounded storage")
-        digest = hashlib.sha256(envelope).hexdigest()
+        content_digest = hashlib.sha256(envelope).hexdigest()
         identity = hashlib.sha256(json.dumps(
-            [receipt.owner, receipt.run_id, receipt.operation_id, digest],
+            [receipt.owner, receipt.run_id, receipt.operation_id, content_digest],
             separators=(",", ":")).encode()).hexdigest()
         directory = self.durable.artifact_root / "machine-evidence"
         directory.mkdir(parents=True, exist_ok=True)
-        target = directory / (identity + ".json")
+        target = directory / (identity + ".protected")
         if not target.exists():
+            from sentra_remote.secrets import protect_secret
+            stored_bytes = protect_secret(envelope.decode("utf-8")).encode("utf-8")
+            if not stored_bytes.startswith((b"dpapi:",b"keyring:")):
+                raise RuntimeError("machine evidence requires OS protected storage")
             temporary = directory / (identity + "." + uuid.uuid4().hex + ".tmp")
             try:
                 fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "wb") as stream:
-                    stream.write(envelope)
+                    stream.write(stored_bytes)
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, target)
             finally:
                 temporary.unlink(missing_ok=True)
-        elif hashlib.sha256(target.read_bytes()).hexdigest() != digest:
-            raise ValueError("result artifact content changed")
+        else:
+            from sentra_remote.secrets import unprotect_secret
+            stored_bytes = target.read_bytes()
+            if hashlib.sha256(unprotect_secret(stored_bytes.decode()).encode()).hexdigest() != content_digest:
+                raise ValueError("result artifact content changed")
+        digest = hashlib.sha256(stored_bytes).hexdigest()
         artifact = self.durable.register_artifact(
             receipt.run_id, receipt.owner, target,
-            operation_id=receipt.operation_id, mime_type="application/json",
+            operation_id=receipt.operation_id, mime_type="application/vnd.sentra.protected-result",
             artifact_id="effect-evidence-" + identity[:48], expected_sha256=digest,
-            metadata={"kind": "machine-result", "schema": 1,
+            metadata={"kind": "machine-result", "schema": 1, "os_protected": True,
                       "intent_sha256": receipt.intent_sha256},
         )
         return {"state": result.state, "evidence_sha256": evidence_digest,
@@ -226,7 +243,7 @@ class CentralDurableIntentAuthority:
                 or artifact["sha256"] != stored.get("evidence_artifact_sha256")
                 or artifact["metadata"].get("intent_sha256") != receipt.intent_sha256):
             raise ValueError("result artifact is not bound to the stored intent")
-        data = json.loads(self.durable.read_artifact(aid, max_bytes=2_010_000))
+        data = self._read_evidence(aid)
         evidence = data["evidence"]
         payload = json.dumps(evidence, sort_keys=True, allow_nan=False,
                              ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -236,6 +253,13 @@ class CentralDurableIntentAuthority:
                 or hashlib.sha256(payload).hexdigest() != stored.get("evidence_sha256")):
             raise ValueError("stored result receipt does not verify")
         return OperationResult(receipt.operation_id, row["state"], evidence, data.get("error"))
+
+    def _read_evidence(self, artifact_id):
+        raw = self.durable.read_artifact(artifact_id, max_bytes=4_030_000)
+        if raw.startswith((b"dpapi:",b"keyring:")):
+            from sentra_remote.secrets import unprotect_secret
+            raw = unprotect_secret(raw.decode())
+        return json.loads(raw)
 
     def record_late_return(self,receipt: IntentReceipt,*,value=None,error_type=None) -> None:
         """Keep worker-return evidence without promoting an uncertain operation.
@@ -274,13 +298,57 @@ class CentralDurableIntentAuthority:
                 or artifact["sha256"]!=progress.get("late_return_artifact_sha256")
                 or artifact["metadata"].get("intent_sha256")!=receipt.intent_sha256):
             raise ValueError("late return artifact scope mismatch")
-        envelope=json.loads(self.durable.read_artifact(artifact_id,max_bytes=2_010_000))
+        envelope=self._read_evidence(artifact_id)
         payload=json.dumps(envelope["evidence"],ensure_ascii=False,allow_nan=False,sort_keys=True,separators=(",",":")).encode()
         if (envelope.get("schema")!=1 or envelope.get("operation_id")!=receipt.operation_id
                 or envelope.get("intent_sha256")!=receipt.intent_sha256
                 or hashlib.sha256(payload).hexdigest()!=progress.get("late_return_evidence_sha256")):
             raise ValueError("late return evidence does not verify")
         return envelope["evidence"]
+
+    def record_metadata_transition(self, receipt: IntentReceipt, request: OperationRequest,
+                                   result: OperationResult) -> bool:
+        """ACK of an admitted self-stop, without reopening its effect policy.
+
+        Only pause/cancel of this Run or pause of this coordinator's own Dot.
+        Actual durable state and the original fence must still verify. Recording
+        this receipt grants no subsequent effect, cleanup action or child Grant.
+        """
+        try:
+            _,digest = _request_snapshot(request)
+            row = self._binding(receipt)
+            if (digest != receipt.intent_sha256 or request.operation_id != receipt.operation_id
+                    or result.operation_id != receipt.operation_id or result.state != "SUCCEEDED"):
+                return False
+            intent = request.arguments.get("intent",{})
+            kind = intent.get("kind")
+            cap = {"pause":"canvas.coordinator.pause","cancel":"canvas.coordinator.cancel",
+                   "pause_dot":"canvas.coordinator.pause_dot"}.get(kind)
+            progress = json.loads(row["progress_json"])
+            if (cap is None or request.capability_id != cap or progress.get("capability_id") != cap
+                    or progress.get("principal_id") != request.principal_id
+                    or progress.get("work_item_id") != request.work_item_id):
+                return False
+            if kind == "pause_dot":
+                if intent.get("agent_id") != request.principal_id:
+                    return False
+                actor = self.durable.agent_info(request.principal_id,receipt.owner)
+                if actor["run_id"] != receipt.run_id or actor["desired_state"] != "WAITING":
+                    return False
+                observed = {"agent_id":request.principal_id,"desired_state":"WAITING"}
+            else:
+                run = self.durable.run_status(receipt.run_id,receipt.owner,include_details=False)
+                target = "PAUSED" if kind == "pause" else "CANCELLED"
+                if run["state"] != target:
+                    return False
+                observed = {"run_id":receipt.run_id,"state":target}
+            acknowledgement = OperationResult(result.operation_id,"SUCCEEDED",{
+                **result.evidence,"terminal_metadata_transition_ack":True,
+                "metadata_transition_observed":observed,"subsequent_effects_denied":True,
+                "external_completion_claimed":False})
+            return self.record_result(receipt,acknowledgement)
+        except (StaleFenceError,DurableStateConflict,ValueError,FileNotFoundError,PermissionError):
+            return False
 
     def record_result(self, receipt: IntentReceipt, result: OperationResult) -> bool:
         if (not isinstance(result, OperationResult)

@@ -92,7 +92,13 @@ class ConversationStore:
         self.root = Path(state_root).resolve() / "conversations"
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "conversations.sqlite3"
-        self.principal = principal or getpass.getuser()
+        binding = None
+        if os.environ.get("SENTRA_CONTROL_BINDING_FILE"):
+            from sentra_runtime.provider_authority import load_provider_binding
+            binding = load_provider_binding(state_root)
+        if binding is not None and principal is not None and principal != binding["principal"]:
+            raise PermissionError("conversation principal differs from server CLI authority capsule")
+        self.principal = binding["principal"] if binding is not None else principal or getpass.getuser()
         self.telemetry = None
         self.telemetry_root = Path(state_root)
         self.telemetry_error = None
@@ -560,7 +566,7 @@ class ConversationStore:
     def fingerprint(operation, args):
         return hashlib.sha256((operation.upper() + "\0" + args).encode("utf-8")).hexdigest()
 
-    def start_tool(self, ident, turn, operation, args):
+    def start_tool(self, ident, turn, operation, args, *, observation_provider=None):
         if not isinstance(operation, str) or not re.fullmatch(r"[A-Za-z_]{1,64}", operation) or not isinstance(args, str):
             raise ValueError("invalid tool operation or arguments")
         operation = operation.upper()
@@ -570,6 +576,16 @@ class ConversationStore:
             current = db.execute("SELECT id FROM turns WHERE id=? AND conversation_id=? AND state='running'", (turn, ident)).fetchone()
             if current is None:
                 raise PermissionError("turn is not running")
+            if observation_provider is not None:
+                if (operation != 'CANVAS' or args != 'vm_frame'
+                        or not isinstance(observation_provider, tuple) or len(observation_provider) != 2
+                        or any(not isinstance(value, str) or not 1 <= len(value) <= 200 for value in observation_provider)):
+                    raise ValueError('fresh observations are allowed only for canonical VM frame reads')
+                provider = db.execute("SELECT id FROM calls WHERE conversation_id=? AND turn_id=? AND kind='provider' "
+                    "AND operation=? AND provider_id=? AND state='completed'", (ident, turn, *observation_provider)).fetchone()
+                if provider is None:
+                    raise PermissionError('fresh observation requires this completed provider round')
+                fingerprint = hashlib.sha256((fingerprint + '\0observation:' + provider['id']).encode()).hexdigest()
             previous = db.execute("SELECT * FROM calls WHERE turn_id=? AND kind='tool' AND fingerprint=?", (turn, fingerprint)).fetchone()
             if previous:
                 if previous["state"] == "completed":

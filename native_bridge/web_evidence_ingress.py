@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import time
 from typing import Any
 
 
@@ -49,8 +50,9 @@ class AuthenticatedWebReceiptBroker:
                        request_id, worker, evidence, extension_id=None,
                        document_id=None, identity_epoch=None):
         if (not isinstance(evidence, dict) or
-                set(evidence) != {"conversation_id","message_id","prompt_sha256",
-                                  "images_attached"}):
+                set(evidence) not in ({"conversation_id","message_id","prompt_sha256", "images_attached"},
+                                     {"conversation_id","message_id","prompt_sha256", "images_attached",
+                                      "attachments", "attachment_names"})):
             raise WebReceiptAttestationError("exact Web receipt fields required")
         return self.prove_message(owner=owner,run_id=run_id,
                                   browser_principal=browser_principal,
@@ -146,9 +148,10 @@ class AuthenticatedWebReceiptBroker:
                 INSERT INTO authenticated_web_receipts
                 (job_id,owner,run_id,workspace,browser_principal,request_id,worker,
                  conversation_id,message_id,receipt_sha256,attested_at,identity_epoch)
-                VALUES(?,?,?,?,?,?,?,?,?,?,strftime('%s','now'),?)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
             """,(job_id,owner,run_id,workspace,browser_principal,request_id,worker,
-                 evidence["conversation_id"],evidence["message_id"],digest,identity_epoch))
+                 evidence["conversation_id"],evidence["message_id"],digest,
+                 time.time(),identity_epoch))
         return {"job_id":job_id,"state":"attested",
                 "message_id":evidence["message_id"],"replayed":False}
 

@@ -14,7 +14,8 @@ BUILTIN = {
     "cmd": "Prompt de comando · CMD",
     "pwsh": "PowerShell 7",
 }
-AGENT_TOOLS = {"sentra-cli":"SENTRA CLI","codex":"OpenAI Codex CLI"}
+AGENT_TOOLS = {"sentra-cli":"SENTRA CLI","codex":"OpenAI Codex CLI",
+               "opencode":"OpenCode CLI"}
 
 def _which(name: str) -> Path | None:
     value=shutil.which(name)
@@ -45,6 +46,15 @@ def resolve(project_root: Path) -> dict:
         candidate=Path.home()/"AppData"/"Local"/"Programs"/"OpenAI"/"Codex"/"bin"/"codex.exe"
         if candidate.is_file():codex=candidate.resolve()
     if codex:commands["codex"]=[str(codex)]
+    # Resolve the official npm package's native binary instead of interpreting
+    # a shim and a user prompt as cmd.exe syntax.
+    opencode = _which("opencode.exe")
+    if not opencode and os.name == "nt":
+        candidate = Path(os.environ.get("APPDATA", "")) / "npm/node_modules/@opencode/cli/bin/opencode.exe"
+        if candidate.is_file():
+            opencode = candidate.resolve()
+    if opencode and opencode.suffix.lower() == ".exe":
+        commands["opencode"] = [str(opencode)]
     antigravity=(Path.home()/"AppData"/"Local"/"Programs"/"antigravity"/"Antigravity.exe")
     if not antigravity.is_file():
         antigravity=Path(os.environ.get("LOCALAPPDATA",""))/"Programs"/"antigravity"/"Antigravity.exe"
@@ -80,4 +90,13 @@ def cli_argv(root:Path, workspace:Path, shell:str)->list[str]:
     if shell=="codex":
         # Let Codex decide interactive model/auth; its own sandbox prompts apply.
         return [*command,"-C",str(workspace)]
+    if shell=="opencode":
+        model = "opencode/muse-spark-1.3-contributor-free#high"
+        if Path(command[0]).suffix.lower() == ".cmd":
+            cmd = found.get("cmd")
+            if not cmd:
+                raise ValueError("cmd.exe required to launch OpenCode npm shim")
+            # The path originates in shutil.which, never from a user payload.
+            return [*cmd, "/D", "/C", *command, "mini", "--standalone", "--model", model]
+        return [*command, "mini", "--standalone", "--model", model]
     raise ValueError("unsupported terminal adapter")

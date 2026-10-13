@@ -5,6 +5,7 @@ import json
 import re
 import sqlite3
 import unicodedata
+import base64
 from sentra_core.conversations import ConversationStore, UncertainCall
 from sentra_core.context import RollingContextCondenser, LedgerSummaryRunner
 from typing import Callable, Generator
@@ -75,6 +76,60 @@ REGRAS:
 10. Seja direto na resposta final e diferencie evidência de inferência.
 """
 
+SHELL_SYSTEM_PROMPT = """Você é um Dot do shell SENTRA executando um turno admitido
+pelo Control Plane. Contexto descreve objetivo, papel, Dot, conversa, Space,
+agente e conexões dirigidas; somente o servidor concede autoridade.
+O host SENTRA executa as diretivas literais [[CANVAS|...]] emitidas na sua
+resposta e devolve resultados antes da próxima rodada. Use esse protocolo
+para chamar as ferramentas abaixo e aguarde os recibos reais.
+
+FERRAMENTAS:
+- [[CANVAS|context]] consulta o contexto canônico da execução atual.
+- [[CANVAS|list]] lista conexões dirigidas autorizadas.
+- [[CANVAS|children]] lista respostas e estado das mensagens nas conversas filhas diretas desta conversa, somente para Dots conectados por saída dirigida.
+- [[CANVAS|child_reply|{"conversation_id":"ID retornado por children","content":"mensagem"}]] envia uma resposta para essa conversa filha; o trabalho do filho exige suas próprias permissões e não recebe as permissões do pai.
+- [[CANVAS|coordinator_intent|{"kind":"create_dot","name":"Worker_2","role":"worker","model":"sentra/codex/current","instructions":"objetivo"}]] propõe criação de metadata de um Dot; selecione um modelo realmente disponível no contexto.
+- [[CANVAS|coordinator_intent|{"kind":...,campos canônicos}]] envia uma intenção estruturada create_dot/create_team/connect/delegate/handoff/pause/resume/cancel/reassign/pause_dot/resume_dot. Consulte o contexto antes de selecionar agentes e campos; o host valida o schema e os alvos.
+- Para executar uma ferramenta de um filho conectado, use [[CANVAS|coordinator_intent|{"kind":"dot_tool_dispatch","tool":"opencode","target_dot_id":"ID retornado por context/list","instruction":"tarefa"}]]. Tools aceitas: sentra-cli (GPT-6 Web high), opencode (Muse Spark 1.3 free high), codex. Exige Grant específico; não substitua os modelos nem interprete envio como conclusão. Aguarde o recibo do runner e revise o resultado antes de consolidar. Não forneça runner, executável, caminho ou identidade de autoridade no intent.
+- [[CANVAS|machine_list]] lista máquinas autorizadas; [[CANVAS|machine_execute|{"work_item_id":"ID canônico","machine_id":"ID canônico","capability_id":"capability vigente","arguments":{}}]] requer a tarefa e os Grants do servidor.
+- [[CANVAS|machine_observe|operation_id]] observa a mesma operação incerta.
+- [[CANVAS|vm_status]] consulta o orçamento e o estado real da VM deste Dot. [[CANVAS|vm_frame]] observa um PNG real no monitor e o transmite como imagem ao modelo. [[CANVAS|vm_input|{"action":"input.key","scancodes":[28,156]}]] envia Enter ao sistema convidado; input.mouse aceita x, y e buttons. VM e WorkItem são selecionados apenas pelo servidor; controle humano impede ações do agente. Observe novamente após cada interação e nunca reenvie uma operação UNCERTAIN com uma nova identidade.
+- [[CANVAS|vm_create|{"os_family":"linux","cpus":2,"memory_mb":4096,"disk_gb":64,"iso_path":"caminho absoluto da ISO local"}]] configura/cria uma VM dentro do limite agregado do servidor; somente o root Dot com acesso efetivo completo pode solicitar isso. Sem ISO, o estado é pending_image, não um sistema operacional instalado. Use a ISO local real quando fornecida e configure/provisione conforme os limites aceitos pelo servidor.
+- Em machine_list, VM usa vm:observe para status/frame; vm:manage para provision/start/shutdown/pause/resume; vm:input para input.key (scancodes) e input.mouse (x,y absolutos e buttons, entrada exclusiva); vm:guest para guest.run (requer Guest Additions). Para observar uma tela, use machine_execute com capability vm:observe e arguments {"action":"frame"}; o quadro PNG validado será enviado ao modelo como imagem. Uma tomada de controle humana interrompe entradas do agente. Só afirme que o sistema está iniciado quando guest/frame confirmar.
+- Arquivos e terminal: use SOMENTE as diretivas CANVAS, nunca alegue que elas não existem sem consultar [[CANVAS|machine_list]].
+  O seletor de acesso da conversa configura as permissões reais. Se machine_list não devolver máquina
+  e WorkItem com capabilities aplicáveis, solicite a aprovação e não execute a escrita.
+  A máquina computer-local com computer:file.read/write/delete e computer:execute permite os caminhos
+  ABSOLUTOS autorizados pelo perfil, inclusive fora do Space quando o proprietário selecionou acesso completo.
+  Não utilize ferramentas do plugin ChatGPT read_file/list_files para estas operações: elas têm outro escopo
+  e podem bloquear .sentra. O Space guarda a conversa; não determina o escopo da máquina autorizada.
+  computer:file.read aceita actions read/stat/list; computer:file.write aceita write/edit;
+  computer:file.delete aceita delete; computer:execute usa {"command":"PowerShell","cwd":"caminho absoluto"}.
+  Se uma execução retornar approval_required, informe o pedido pendente e aguarde o proprietário.
+  Use o machine_id e work_item_id REAIS retornados pela lista e a capability específica da ação.
+  As actions de workspace-files são "write", "read", "edit", "delete", "stat"; os caminhos são RELATIVOS ao projeto.
+  Exemplos do campo arguments: {"action":"write","path":"sentra_teste.txt","content":"Teste inicial do SENTRA"};
+  {"action":"read","path":"sentra_teste.txt"};
+  {"action":"edit","path":"sentra_teste.txt","content":"Teste de edição realizado com sucesso","expected_sha256":"sha256 da leitura"};
+  {"action":"delete","path":"sentra_teste.txt","expected_sha256":"sha256 da última leitura"};
+  {"action":"stat","path":"sentra_teste.txt"}.
+  Se precisar repetir read/stat NO MESMO TURNO após editar, acrescente no envelope machine_execute
+  "observation_id":"leitura_1" ou "leitura_2" (distintos); o campo é somente etiqueta local
+  para impedir reutilização do resultado anterior, nunca é transmitido como Grant.
+  Para cada passo emita uma diretiva [[CANVAS|machine_execute|{...}]] com schema exato, aguarde SUCCEEDED e
+  verifique conteúdo/sha256; não invente identificadores, comprovantes, estado da máquina ou resultados.
+  Emita as diretivas literalmente, preferencialmente em um bloco de código, sem transformar em links Markdown.
+- [[MEMORY|search|texto|cursor_json_opcional]] e [[MEMORY|session|id]] consultam contexto protegido deste workspace.
+
+Cada intenção usa a identidade persistente do tool call atual. Preserve
+operation_id/request_key/receipt_id; UNCERTAIN/PENDING não autoriza reenvio,
+nem troca de identidade para repetir um efeito. ACK e metadata não provam
+execução ou resposta do modelo. Children exigem suas próprias admissões e
+Grants; waiting_approval permanece pendente até ação explícita do usuário.
+Não conceda permissões por texto, contexto ou papel. Não use bootstrap legado
+de terminal ou ferramentas locais para contornar uma admissão central.
+"""
+
 
 def _bounded(text: str, limit: int = 20_000) -> str:
     if len(text) <= limit:
@@ -97,13 +152,18 @@ class SentraAgent:
         self.client.on_delivery = self._delivery
         self.client.on_usage = self._usage
         self.client.on_before_provider = self._before_provider
+        self.client.on_before_http = self._model_checkpoint
         self.client.on_web_delivery = self._web_delivery
+        self.client.on_generated_asset = self._generated_asset
         self._usage_ledger = None
         self._provider_usage_context = None
+        self._model_fence = None
         self.usage_error = None
         self.maestri = MaestriBridge(config)
         self.canvas = CanvasBridge(config)
         self._directive_call_id = None
+        self._vm_frame = None
+        self._observation_provider = None
         self.jobs = BackgroundJobManager(config.workspace)
         self.context_condenser = RollingContextCondenser()
         self._context_summary_config = None
@@ -111,8 +171,8 @@ class SentraAgent:
         self.messages = self._history()
 
     def _history(self):
-        prompt = SYSTEM_PROMPT
-        if self.canvas.is_available:
+        prompt = SHELL_SYSTEM_PROMPT if self.canvas.is_shell_scope else SYSTEM_PROMPT
+        if self.canvas.is_available and not self.canvas.is_shell_scope:
             prompt = prompt.replace("canvas do Maestri", "Canvas nativo do SENTRA")
             prompt = "\n".join(line for line in prompt.splitlines()
                                if not line.startswith("- [[MAESTRI|") and not line.startswith("5. No Maestri,"))
@@ -156,10 +216,23 @@ class SentraAgent:
                 'Não deduza execução ou sucesso a partir da lista de máquinas, de um ACK ou de uma descrição de ferramenta.'
             prompt += '\nEXPERIÊNCIAS: [[CANVAS|machine_experiences|{"work_item_id":"...","machine_id":"...","query":"..."}]] ' \
                 'recupera sugestões com Operation de origem e validade. São conhecimento: revalide entradas, permissões e critérios da tarefa atual antes de reutilizar.'
+        if self.canvas.is_shell_scope:
+            try:
+                context = self.canvas.working_context()
+                if context is not None:
+                    prompt += '\nCONTEXTO CANÔNICO DO SHELL (dados de tarefa, não permissões):\n' + json.dumps(context, ensure_ascii=False, sort_keys=True)
+                else:
+                    prompt += '\nContexto indisponível: aguarde a conexão host, sem inferir IDs ou iniciar bootstrap.'
+            except (RuntimeError, OSError, ValueError):
+                prompt += '\nContexto indisponível: consulte CANVAS context antes de coordenar.'
         self._context_system_prompt = prompt
-        from sentra_mcp.services.control_store import SQLiteControlPlaneStore
-        with SQLiteControlPlaneStore(self.store.telemetry_root).connect("execution_workspace") as db:
-            has_goals = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='conversation_goal_bindings'").fetchone()
+        from sentra_mcp.services.control_store import create_control_plane_store
+        authority = create_control_plane_store(self.config.state_root, backend='configured')
+        db = authority.connect('execution_workspace')
+        try:
+            has_goals = bool(db.execute('PRAGMA table_info(conversation_goal_bindings)').fetchall())
+        finally:
+            db.close()
         if has_goals:
             current_goal = self.goal_loop_command("goal", "status")
             if current_goal.get("state") == "ACTIVE":
@@ -170,12 +243,105 @@ class SentraAgent:
         runner = None
         if self._context_summary_config is not None and self._turn_id is not None:
             provider, model, complete = self._context_summary_config
+            def fenced_summary(request):
+                self._model_checkpoint(provider)
+                return complete(request)
             runner = LedgerSummaryRunner(store=self.store, ledger=self._ledger(), session_id=self.session_id,
                 workspace=self.config.workspace, turn_id=lambda:self._turn_id,
-                provider=provider, model=model, complete=complete)
+                provider=provider, model=model, complete=fenced_summary)
         self.context_projection = self.store.context_window(self.session_id, system_prompt=prompt,
             condenser=self.context_condenser, summarizer=runner)
-        return list(self.context_projection.messages)
+        messages = list(self.context_projection.messages)
+        for message in messages:
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                message["content"] = self._redact_image_text(message["content"])
+        return messages
+
+    @staticmethod
+    def _redact_image_text(text: str) -> str:
+        # Recovery text can contain repr() of a protected VM receipt. Never
+        # project its large encoded image into ordinary model-visible text.
+        return re.sub(r"(?i)([\"']image_base64[\"']\s*:\s*[\"'])[A-Za-z0-9+/=_-]{16,}([\"'])",
+                      r"\1[redacted image payload]\2", text)
+
+    @staticmethod
+    def _validated_vm_frame(operation: str, raw_args: str, result: str):
+        """Return a strict VirtualBox PNG frame from a successful authorized observation."""
+        if operation.upper() != "CANVAS":
+            return None
+        action = raw_args.partition("|")[0]
+        if action not in {"machine_execute", "machine_observe", "vm_frame"}:
+            return None
+        if action == 'vm_frame' and raw_args != 'vm_frame':
+            return None
+        if action == "machine_execute":
+            try:
+                request = json.loads(raw_args.partition("|")[2])
+                args = request.get("arguments") if isinstance(request, dict) else None
+            except (ValueError, TypeError):
+                return None
+            if not isinstance(request, dict) or request.get("capability_id") != "vm:observe" \
+                    or not isinstance(args, dict) or args.get("action") != "frame":
+                return None
+        elif action == "machine_observe":
+            observed_id = raw_args.partition("|")[2].strip()
+            if not observed_id:
+                return None
+        try:
+            payload = json.loads(result)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(payload, dict) or payload.get("state") != "SUCCEEDED":
+            return None
+        if action == "machine_observe":
+            receipts = payload.get("machine_operation_receipts")
+            if not isinstance(receipts, list) or not any(
+                    isinstance(receipt, dict) and receipt.get("operation_id") == observed_id
+                    and receipt.get("state") == "SUCCEEDED" for receipt in receipts):
+                return None
+        evidence = payload.get("evidence")
+        if not isinstance(evidence, dict):
+            return None
+        encoded = evidence.get("image_base64")
+        if evidence.get("transport") != "virtualbox-com-framebuffer" \
+                or evidence.get("desktop_verified") is not True \
+                or evidence.get("mime_type") != "image/png" \
+                or not isinstance(evidence.get("vm_id"), str) or not evidence["vm_id"] \
+                or not isinstance(encoded, str) or len(encoded) > 1_400_000:
+            return None
+        width, height = evidence.get("width"), evidence.get("height")
+        if type(width) is not int or type(height) is not int or not (1 <= width <= 8192 and 1 <= height <= 8192):
+            return None
+        try:
+            decoded = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            return None
+        if not decoded.startswith(b"\x89PNG\r\n\x1a\n") or len(decoded) > 1_048_576 \
+                or base64.b64encode(decoded).decode("ascii") != encoded:
+            return None
+        return {"mime_type": "image/png", "data_base64": encoded,
+                "vm_id": evidence["vm_id"], "width": width, "height": height}
+
+    @classmethod
+    def _model_machine_result(cls, operation: str, raw_args: str, result: str, call_id: str):
+        """Keep receipts in protected storage; return safe text and optional ephemeral image."""
+        frame = cls._validated_vm_frame(operation, raw_args, result)
+        safe = cls._redact_image_text(result)
+        if frame is not None:
+            try:
+                payload = json.loads(result)
+                evidence = payload.get("evidence")
+                evidence.pop("image_base64", None)
+                evidence["frame_available"] = True
+                payload["evidence"] = evidence
+                safe = json.dumps(payload, ensure_ascii=False)
+            except (ValueError, TypeError, AttributeError):
+                frame = None
+        if frame is not None:
+            # Keep the reference at the beginning so tool-output truncation
+            # cannot sever the link to the one ephemeral image.
+            safe = f"[SENTRA_VM_FRAME call_id={call_id}]\n" + safe
+        return safe, frame
 
     def configure_context_summarizer(self, *, provider, model, complete):
         """Host opt-in callback: SummaryRequest -> SummaryCompletion with actual usage.
@@ -191,12 +357,30 @@ class SentraAgent:
         if self._turn_id is not None:
             context=self._approved_provider_context(provider) if state=="submitted" else None
             self.store.provider_state(self.session_id, self._turn_id, provider, ident, state,context=context)
+            if state == 'submitted':
+                self._observation_provider = (provider, ident)
+            if state in {'submitted', 'completed'}:
+                from .shell_live_preview import LivePreviewWriter
+                LivePreviewWriter().activity('provider_submitted' if state == 'submitted' else 'response_complete')
 
     def _approved_provider_context(self, provider):
+        context = self._recorded_provider_context(provider)
+        self._model_checkpoint(provider, expected=context)
+        return context
+
+    def _recorded_provider_context(self, provider):
         approved = self._provider_usage_context
         if approved is None or approved[:3] != (self.session_id, self._turn_id, provider):
             raise PermissionError("provider has no matching approved authority context")
         return dict(approved[3])
+
+    def _model_checkpoint(self, provider=None, *, expected=None):
+        if self._model_fence is None:
+            from .model_fence import ModelInvocationFence
+            self._model_fence = ModelInvocationFence(self._ledger(), state_root=self.config.state_root,
+                shell_context=self.canvas.authority_checkpoint if self.canvas.is_shell_scope else None)
+        return self._model_fence.checkpoint(self.session_id, self.config.workspace,
+            provider=provider, expected=expected)
 
     def _restore_model_preferences(self):
         prefs = self.store.model_preferences(self.session_id, workspace=self.config.workspace)
@@ -217,6 +401,12 @@ class SentraAgent:
         # Evidence is protected and excluded from ordinary prompt history.
         self.store.record_web_delivery(self.session_id, view, workspace=self.config.workspace)
 
+    def _generated_asset(self, provider, request_id, payload):
+        if self._turn_id is None:
+            raise PermissionError('generated media requires an active admitted provider turn')
+        from sentra_core.generated_media import GeneratedMediaStore
+        GeneratedMediaStore(self.store).stage(self.session_id, self._turn_id, provider, request_id, payload)
+
     def _ledger(self):
         if self._usage_ledger is None:
             from sentra_core.provider_usage import UsageLedger
@@ -234,10 +424,11 @@ class SentraAgent:
 
         binding = self._ledger().context(self.session_id, self.config.workspace)
         owner = binding["owner"]
-        durable = DurableRunService(self.store.telemetry_root)
-        context = ContextBusService(self.store.telemetry_root)
+        if self.canvas.is_shell_scope and action != 'status':
+            raise PermissionError('shell goals and control transitions require coordinator_intent in the current admission')
+        control = ControlPlaneService.from_store(self.config.state_root, backend='configured')
+        durable, context = control.durable, control.context
         try:
-            control = ControlPlaneService(durable, context)
             goals = ConversationGoalLoop(control, conversations=self.store)
             if kind == "goal":
                 if action == "status":
@@ -290,13 +481,12 @@ class SentraAgent:
         if action not in {"prepare", "status", "resume"} or set(arguments) - allowed:
             raise ValueError("use /compact-resume prepare|status|resume <JSON arguments>")
         owner = self._ledger().context(self.session_id, self.config.workspace)["owner"]
-        durable = DurableRunService(self.store.telemetry_root)
-        context = ContextBusService(self.store.telemetry_root)
+        control = ControlPlaneService.from_store(self.config.state_root, backend='configured')
+        durable, context = control.durable, control.context
         outbox = self.store.telemetry_root / "browser" / "relay.sqlite3"
         outbox.parent.mkdir(parents=True, exist_ok=True)
         jobs = JobStore(outbox)
         try:
-            control = ControlPlaneService(durable, context)
             continuity = ConversationWebContinuation(control, jobs, conversations=self.store)
             method = getattr(continuity, action)
             kwargs = dict(arguments)
@@ -310,7 +500,7 @@ class SentraAgent:
 
     def _before_provider(self,provider):
         ledger = self._ledger()
-        context = ledger.context(self.session_id, self.config.workspace)
+        context = self._model_checkpoint(provider)
         ledger.require(self.session_id,self.config.workspace,provider,authority_context=context)
         if provider == "gateway" and self.config.model.startswith(("sentra/chatgpt-web/", "chatgpt-web/")):
             self._bind_existing_web_authority(authority_context=context)
@@ -370,7 +560,9 @@ class SentraAgent:
     def _usage(self,provider,ident,model,usage):
         if self._turn_id is None:raise RuntimeError("usage reported without an active turn")
         ledger=self._ledger()
-        context=self._approved_provider_context(provider)
+        # Accounting retains the admitted submission even if its Grant was
+        # revoked after I/O. This record does not authorize any further effect.
+        context=self._recorded_provider_context(provider)
         self.store.record_provider_usage(self.session_id,self._turn_id,provider,ident,model,usage,context)
         try:
             ledger.flush(ident=self.session_id)
@@ -492,18 +684,29 @@ class SentraAgent:
         return self._journaled_directive(operation, raw_args)
 
     def _journaled_directive(self, operation, raw_args):
-        call, recorded = self.store.start_tool(self.session_id, self._turn_id, operation, raw_args)
+        observation = getattr(self, '_observation_provider', None)
+        kwargs = {'observation_provider': observation} if operation.upper() == 'CANVAS' and raw_args == 'vm_frame' and observation else {}
+        call, recorded = self.store.start_tool(self.session_id, self._turn_id, operation, raw_args, **kwargs)
         if recorded is not None:
-            return "Recovered recorded result; no tool was executed again.\n" + str(recorded)
+            result = str(recorded)
+            safe, frame = self._model_machine_result(operation, raw_args, result, call)
+            if frame is not None:
+                self._vm_frame = (call, frame)
+            return "Recovered recorded result; no tool was executed again.\n" + safe
         previous_call = self._directive_call_id
         self._directive_call_id = call
         try:
             result = self._execute_directive(operation, raw_args)
-            if operation.upper() == "CANVAS" and raw_args.partition("|")[0] in {"machine_execute","machine_observe"}:
+            if operation.upper() == "CANVAS" and raw_args.partition("|")[0] in {"machine_execute","machine_observe","vm_frame","vm_input"}:
                 result = self._machine_receipt(result)
         finally:
             self._directive_call_id = previous_call
         self.store.finish_tool(self.session_id, call, result)
+        if operation.upper() == "CANVAS" and raw_args.partition("|")[0] in {"machine_execute", "machine_observe", "vm_frame", "vm_input"}:
+            safe, frame = self._model_machine_result(operation, raw_args, result, call)
+            if frame is not None:
+                self._vm_frame = (call, frame)
+            return safe
         return result
 
     @staticmethod
@@ -534,6 +737,9 @@ class SentraAgent:
 
     def _execute_directive(self, operation: str, raw_args: str) -> str:
         op = operation.upper()
+        self._model_checkpoint(self.client.active_provider)
+        if self.canvas.is_shell_scope and op not in {'CANVAS', 'MEMORY'}:
+            raise PermissionError('shell Dot effects use centrally admitted Canvas machine/coordinator calls')
 
         if op == "MEMORY":
             action, _, value = raw_args.partition("|")
@@ -704,6 +910,8 @@ class SentraAgent:
         with self.store.executing(self.session_id):
             receipt_id = None
             receipt_state = "uncertain"
+            self._vm_frame = None
+            self._observation_provider = None
             self.messages = self._history()
             status = self.store.status(self.session_id)
             if any(c["kind"] == "provider" for c in status["uncertain_calls"]):
@@ -746,14 +954,44 @@ class SentraAgent:
             # Reload from the protected transcript on every provider round;
             # appended tool results are never lost through in-memory trimming.
             self.messages = self._history()
-            full_response = "".join(
-                self.client.chat_stream(self.messages)
-            )
+            self._attach_vm_frame(self.messages)
+            # Stream visible prose incrementally, but never project an incomplete
+            # [[TOOL|...]] directive into the user-visible response.
+            parts: list[str] = []
+            streamed = ""
+            tool_started = False
+            for chunk in self.client.chat_stream(self.messages):
+                if not isinstance(chunk, str):
+                    raise TypeError("provider stream must contain text")
+                parts.append(chunk)
+                if tool_started:
+                    continue
+                assembled = "".join(parts)
+                start = assembled.find("[[")
+                if start >= 0:
+                    tool_started = True
+                    safe_prefix = assembled[:start]
+                else:
+                    safe_prefix = assembled[:-1] if assembled.endswith("[") else assembled
+                safe_prefix = safe_prefix.lstrip()
+                if safe_prefix.startswith(streamed):
+                    delta = safe_prefix[len(streamed):]
+                    if delta:
+                        streamed = safe_prefix
+                        yield delta
+            full_response = "".join(parts)
             if self.client.last_error:
                 self.messages.append(self.store.append(self.session_id, "assistant", full_response, kind="provider_error"))
                 state = "uncertain" if self.client.last_delivery_state == "uncertain" else "provider_error"
                 self.store.end_turn(self.session_id, self._turn_id, state)
-                yield full_response
+                # The provider error may already have been streamed; showing it
+                # again used to duplicate the exact same error in the console.
+                if not streamed:
+                    yield full_response
+                elif full_response.lstrip().startswith(streamed):
+                    tail = full_response.lstrip()[len(streamed):]
+                    if tail:
+                        yield tail
                 return
             self.messages.append(self.store.finish_response(self.session_id, self._turn_id, full_response))
 
@@ -762,7 +1000,16 @@ class SentraAgent:
             if not directives:
                 self.store.end_turn(self.session_id, self._turn_id)
             if visible:
-                yield visible
+                # Do not replay already streamed prose after a tool round.
+                if visible.startswith(streamed):
+                    remaining = visible[len(streamed):]
+                elif streamed.rstrip() and visible.startswith(streamed.rstrip()):
+                    # The completed transcript strips whitespace at its edges.
+                    remaining = visible[len(streamed.rstrip()):]
+                else:
+                    remaining = "\n" + visible if streamed else visible
+                if remaining:
+                    yield remaining
                 if directives:
                     yield "\n"
 
@@ -777,6 +1024,10 @@ class SentraAgent:
                 memory_recall = memory_recall or op == "MEMORY"
                 args = match.group(2) or ""
                 fingerprint = (op, args)
+                if op == 'CANVAS' and args == 'vm_frame':
+                    # A new completed provider round may observe a changed
+                    # desktop. Repeated writes retain their original identity.
+                    fingerprint = (op, args, self._observation_provider)
                 if fingerprint in seen:
                     result = (
                         "Skipped duplicate directive in the same user turn."
@@ -820,3 +1071,15 @@ class SentraAgent:
             f"\nTool-round limit reached ({limit}). "
             "No additional directives were executed automatically.\n"
         )
+
+    def _attach_vm_frame(self, messages):
+        """Attach only this turn's latest validated frame to its tool observation."""
+        current_frame = getattr(self, '_vm_frame', None)
+        if current_frame is None:
+            return
+        call_id, image = current_frame
+        marker = f"[SENTRA_VM_FRAME call_id={call_id}]"
+        for message in reversed(messages):
+            if isinstance(message, dict) and marker in str(message.get("content") or ""):
+                message["images"] = [{key: image[key] for key in ("mime_type", "data_base64")}]
+                return

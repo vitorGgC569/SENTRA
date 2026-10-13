@@ -47,15 +47,16 @@ class TurnCapability:
 
 
 class TurnAuthority:
-    def __init__(self, state_root: Path, descriptor: Path, *, clock=time.time) -> None:
+    def __init__(self, state_root: Path, descriptor: Path, *, clock=time.time, control=None) -> None:
         self.state_root = Path(state_root).resolve()
-        self.durable = DurableRunService(self.state_root)
+        if control is not None and control.durable.state_root.resolve() != self.state_root:
+            raise ValueError("gateway must share the selected central state root")
+        self.durable = control.durable if control is not None else DurableRunService(self.state_root)
         self.descriptor = descriptor
         self.clock = clock
         self.lock = threading.RLock()
         self.capabilities: dict[str, TurnCapability] = {}
-        from sentra_mcp.services.control_store import SQLiteControlPlaneStore
-        self.store = SQLiteControlPlaneStore(self.state_root)
+        self.store = self.durable.store
         with self.store.connect("session_checkpoint") as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("""CREATE TABLE IF NOT EXISTS gateway_bound_web_turns(

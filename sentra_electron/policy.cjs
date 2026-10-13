@@ -5,14 +5,16 @@ function safeOrigin(value) {
     const u = new URL(value);
     return u.protocol === 'http:' && u.hostname === '127.0.0.1' &&
       /^\d+$/.test(u.port) && Number(u.port) >= 1 && Number(u.port) <= 65535 &&
-      !u.username && !u.password && !u.search && !u.hash && u.pathname === '/desktop.html';
+      !u.username && !u.password && !u.search && !u.hash &&
+      (u.pathname === '/desktop.html' || u.pathname === '/shell-home.html' || u.pathname === '/native.html');
   } catch { return false; }
 }
 function envelope(value) {
   if (!value || value.schema !== 1 || !Number.isInteger(value.port) ||
       value.port < 1 || value.port > 65535 || typeof value.secret !== 'string' ||
       !/^[A-Za-z0-9_-]{32,128}$/.test(value.secret)) throw Error('Invalid SENTRA display handoff');
-  return 'http://127.0.0.1:' + value.port + '/desktop.html#token=' + encodeURIComponent(value.secret);
+  const surface = (value.surface === 'shell-home' || value.surface === 'native') ? value.surface : 'desktop';
+  return 'http://127.0.0.1:' + value.port + '/' + surface + '.html#token=' + encodeURIComponent(value.secret);
 }
 function isAllowedResource(value, port) {
   try {

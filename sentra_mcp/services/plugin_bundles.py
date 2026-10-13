@@ -18,7 +18,8 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from .control_store import SQLiteControlPlaneStore
+from .control_store import create_control_plane_store
+from .pacto_authority import require_same_store
 
 
 MAX_BUNDLE_BYTES=128*1024*1024
@@ -49,9 +50,9 @@ def _safe(name):
 
 
 class MCPBBundleCatalog:
-    def __init__(self,state_root):
+    def __init__(self,state_root,*,store=None):
         self.state_root=Path(state_root).resolve()
-        self.store=SQLiteControlPlaneStore(self.state_root)
+        self.store=store if store is not None else create_control_plane_store(self.state_root)
         self.target=self.state_root/"plugin-bundles"
         self.target.mkdir(parents=True,exist_ok=True)
         db=self._connect()
@@ -606,8 +607,7 @@ class MCPBBundleCatalog:
         if approved is not True or not re.fullmatch(r"[a-f0-9]{64}", package_sha256 or ""):
             raise PermissionError("operator-approved MCPB SHA is required")
         root = str(Path(workspace).resolve(strict=True))
-        if control.store.path_for("plugin_bundle") != self.store.path_for("plugin_bundle"):
-            raise PermissionError("MCPB purge requires same central SQLite")
+        require_same_store(control.store, self.store)
         target = self.target / package_sha256
         archive = self.target / ".archives" / (package_sha256 + ".mcpb")
         if archive.is_symlink() or not archive.is_file() or _file_sha256(archive) != package_sha256:
@@ -727,9 +727,7 @@ class MCPBWorkItemLifecycle:
         """Construct real loopback receiver; host must call start/close."""
         from .mcpb_oauth_callback import OAuthLoopbackReceiver
         self._binding("mcp:oauth")
-        if (broker.vault.store.path_for("plugin_bundle") !=
-                self.control.store.path_for("plugin_bundle")):
-            raise PermissionError("OAuth vault must use same central SQLite")
+        require_same_store(self.control.store, broker.vault.store)
         if not callable(verify_host_consent):
             raise PermissionError("authenticated OAuth owner host callback required")
 
@@ -751,10 +749,9 @@ class MCPBWorkItemLifecycle:
             verify_host_consent=revalidate, exchange=exchange)
 
     def _http(self, registry):
-        if (registry.control is not self.control
-                or registry.store.path_for("plugin_bundle") !=
-                   self.control.store.path_for("plugin_bundle")):
+        if registry.control is not self.control:
             raise PermissionError("MCP HTTP registry must use same central authority")
+        require_same_store(self.control.store, registry.store)
         row = registry.get(self.owner, self.workspace, self.server_id)
         if not row["enabled"] or not row["streamable"]:
             raise PermissionError("MCP HTTP lifecycle provider not active")
@@ -764,8 +761,7 @@ class MCPBWorkItemLifecycle:
                              operation_id, idempotency_key):
         self._binding("mcp:" + name)
         self._http(registry)
-        if vault.store.path_for("plugin_bundle") != self.control.store.path_for("plugin_bundle"):
-            raise PermissionError("OAuth bearer source not central")
+        require_same_store(self.control.store, vault.store)
         # Host-only callable returns bearer to the transport, not the tool result.
         return await registry.execute(owner=self.owner, workspace=self.workspace,
             server_id=self.server_id, run_id=self.run_id,
@@ -780,8 +776,7 @@ class MCPBWorkItemLifecycle:
             raise ValueError("MCP session action requires events/delete")
         self._binding("mcp:events" if action == "events" else "mcp:session-delete")
         self._http(registry)
-        if vault.store.path_for("plugin_bundle") != self.control.store.path_for("plugin_bundle"):
-            raise PermissionError("MCP session OAuth vault not bound to central SQLite")
+        require_same_store(self.control.store, vault.store)
         return await registry.session_action(
             owner=self.owner, workspace=self.workspace, server_id=self.server_id,
             run_id=self.run_id, work_item_id=self.work_item_id, agent_id=self.agent_id,
@@ -841,10 +836,9 @@ class MCPBWorkItemLifecycle:
 
         capability = {"refresh": "mcp:oauth-refresh",
                       "revoke": "mcp:oauth-revoke"}.get(action)
-        if (not capability or
-                vault.store.path_for("plugin_bundle") !=
-                self.control.store.path_for("plugin_bundle")):
+        if not capability:
             raise PermissionError("MCPB OAuth requires central vault and known effect")
+        require_same_store(self.control.store, vault.store)
         transport = exchange if action == "refresh" else revoke
         if not callable(transport):
             raise PermissionError("trusted OAuth refresh or revoker required")
@@ -883,11 +877,10 @@ class MCPBWorkItemLifecycle:
         self._host_approval("uninstall" if uninstall else "disable",
                             approval_ref, verify_host_approval)
         _, registration = self._binding()
-        central_path = self.control.store.path_for("plugin_bundle")
-        if (registry.control is not self.control
-                or registry.store.path_for("plugin_bundle") != central_path
-                or vault.store.path_for("plugin_bundle") != central_path):
+        if registry.control is not self.control:
             raise PermissionError("MCPB retirement needs exactly the central authorities")
+        require_same_store(self.control.store, registry.store)
+        require_same_store(self.control.store, vault.store)
         # Fail closed: schema first, transport second, local bearer third.
         self.control.tool_exposure.disable(registration["plugin_id"])
         try:

@@ -18,7 +18,7 @@ from sentra_interop.central import CentralInteropAdapter
 from sentra_runtime.contracts import Capability, Machine, OperationRequest
 
 from .chat_access import ChatAccessService, _ID, _PRINCIPAL, _validate
-from .control_store import SQLiteControlPlaneStore
+from .control_store import create_control_plane_store
 
 _ACTION = re.compile(r"[a-z][a-z0-9_.-]{0,63}\Z")
 _SHA = re.compile(r"[a-f0-9]{64}\Z")
@@ -45,7 +45,7 @@ class ActionConsentService:
         # The host injects a trusted authenticator for a fresh, operator-click
         # assertion; no authenticator means all consent writes are DISABLED.
         self.owner_authenticator = owner_authenticator
-        self.store = store or SQLiteControlPlaneStore(state_root)
+        self.store = store if store is not None else create_control_plane_store(state_root)
         self.chat_access = chat_access or ChatAccessService(state_root, store=self.store)
         with self.store.connect("chat_access") as db:
             db.executescript("""
@@ -77,6 +77,60 @@ class ActionConsentService:
 
     def _db(self):
         return self.store.connect("chat_access")
+
+    def pending_intents(self, owner, agent_id=None, work_item_id=None, *, limit=50):
+        """Read-only projection of undecided action intents for approval cards.
+
+        Powers conversation/chat approval UX (Prisma shell): lists PROPOSED
+        intents with capability, body digest and expiry. Returns no
+        authorization and never extends an expiry.
+        """
+        _validate("owner", owner, _PRINCIPAL)
+        if agent_id is not None:
+            _validate("agent", agent_id, _PRINCIPAL)
+        if work_item_id is not None:
+            _validate("work item", work_item_id, _ID)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("bounded pending intent listing required")
+        clauses, args = ["owner=?"], [owner]
+        if agent_id is not None:
+            clauses.append("agent_id=?")
+            args.append(agent_id)
+        if work_item_id is not None:
+            clauses.append("work_item_id=?")
+            args.append(work_item_id)
+        now = time.time()
+        with self._db() as db:
+            rows = db.execute(
+                "SELECT action_id,agent_id,work_item_id,request_id,message_id,"
+                "capability,body_sha256,api_revision,expires,state "
+                "FROM action_api_intents WHERE " + " AND ".join(clauses) +
+                " ORDER BY expires ASC LIMIT ?", (*args, limit)).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            if item["state"] == "PROPOSED" and item["expires"] <= now:
+                item = {**item, "state": "EXPIRED"}
+            items.append(item)
+        return {"owner": owner, "items": items, "grants_created": False,
+                "approval_creates_effect": False}
+
+    def intent_status(self, action_id, owner):
+        """Read-only lifecycle state of one action intent (receipt view)."""
+        _validate("owner", owner, _PRINCIPAL)
+        if not isinstance(action_id, str) or not action_id.startswith("act-"):
+            raise ValueError("invalid action identity")
+        with self._db() as db:
+            row = db.execute("SELECT action_id,agent_id,work_item_id,request_id,"
+                             "message_id,capability,body_sha256,expires,state,"
+                             "consumed_operation_id FROM action_api_intents "
+                             "WHERE action_id=? AND owner=?", (action_id, owner)).fetchone()
+        if row is None:
+            raise FileNotFoundError("action intent not found for this owner")
+        item = dict(row)
+        if item["state"] == "PROPOSED" and item["expires"] <= time.time():
+            item["state"] = "EXPIRED"
+        return {**item, "effect_executed": item["state"] == "CONSUMED"}
 
     def _owner_assertion_digest(self, *, owner, purpose, owner_proof):
         """Authenticate an independent human click, NOT a model boolean.
@@ -392,7 +446,7 @@ class HostOwnerClickAuthenticator:
     def __init__(self, state_root, *, session_lookup, store=None, clock=time.time):
         if not callable(session_lookup):
             raise TypeError("trusted host session resolver required")
-        self.store=store or SQLiteControlPlaneStore(state_root)
+        self.store=store if store is not None else create_control_plane_store(state_root)
         self.session_lookup=session_lookup
         self.clock=clock
         with self.store.connect("chat_access") as db:

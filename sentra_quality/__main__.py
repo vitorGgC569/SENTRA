@@ -43,8 +43,114 @@ def main(argv: list[str] | None = None) -> int:
     attest = sub.add_parser("attest", help="calculate tracked file provenance evidence")
     attest.add_argument("name")
     attest.add_argument("path")
+    diag = sub.add_parser("selo-diagnostics", help="redacted Selo diagnostics snapshot (no secrets)")
+    diag.add_argument("--state-root", type=Path, required=True)
+    diag.add_argument("--owner", required=True)
+    tstats = sub.add_parser("selo-telemetry-stats", help="Selo OTel/Langfuse queue stats")
+    tstats.add_argument("--state-root", type=Path, required=True)
+    tstats.add_argument("--owner", required=True)
+    release = sub.add_parser("selo-release-verify", help="verify source+SBOM+Grype receipt for release")
+    release.add_argument("--sbom", type=Path, required=True)
+    release.add_argument("--sbom-sha256", required=True)
+    release.add_argument("--receipt", type=Path, required=True)
+    release.add_argument("--fail-at", default="high", choices=["critical", "high", "medium", "low"])
+    release.add_argument("--database-built", default=None,
+                         help="Grype DB build timestamp (ISO-8601); also read from receipt")
+    release.add_argument("--max-db-age-hours", type=int, default=120)
+    release.add_argument("--previous-receipt", type=Path, default=None)
+    learn = sub.add_parser("selo-learning-propose", help="propose a reviewed learning suggestion (activates nothing)")
+    learn.add_argument("--state-root", type=Path, required=True)
+    learn.add_argument("--owner", required=True)
+    learn.add_argument("--workspace", required=True)
+    learn.add_argument("--origin", type=Path, required=True, help="JSON file: operation_id/work_item_id/run_id/intent_sha256?")
+    learn.add_argument("--scope", type=Path, required=True, help="JSON file: non-empty scope object")
+    learn.add_argument("--result", type=Path, required=True, help="JSON file: state SUCCEEDED/FAILED + evidence_digest?")
+    learn.add_argument("--transcript", type=Path, required=True, help="original transcript text file (stored redacted)")
+    learn.add_argument("--ttl", type=int, default=None)
+    lreview = sub.add_parser("selo-learning-review", help="approve/reject a learning suggestion")
+    lreview.add_argument("--state-root", type=Path, required=True)
+    lreview.add_argument("--owner", required=True)
+    lreview.add_argument("suggestion_id")
+    lreview.add_argument("--verdict", required=True, choices=["APPROVED", "REJECTED"])
+    lreview.add_argument("--reviewer", required=True)
+    lreview.add_argument("--reason", default="")
+    lskill = sub.add_parser("selo-learning-skill", help="review bundle for Pacto SkillPack import (activates nothing)")
+    lskill.add_argument("--state-root", type=Path, required=True)
+    lskill.add_argument("--owner", required=True)
+    lskill.add_argument("suggestion_id")
+    lcmp = sub.add_parser("selo-eval-compare", help="compare two dataset runs over the same dataset version")
+    lcmp.add_argument("--state-root", type=Path, required=True)
+    lcmp.add_argument("--owner", required=True)
+    lcmp.add_argument("--run-a", required=True)
+    lcmp.add_argument("--run-b", required=True)
+    pipe = sub.add_parser("selo-pipeline-stats", help="OTel pipeline stats with loss accounting")
+    pipe.add_argument("--state-root", type=Path, required=True)
+    pipe.add_argument("--owner", required=True)
     args = parser.parse_args(argv)
     try:
+        if args.action == "selo-diagnostics":
+            from .diagnostics import DiagnosticsReport
+            print(json.dumps(DiagnosticsReport(args.state_root).build(args.owner),
+                             sort_keys=True, ensure_ascii=False))
+            return 0
+        if args.action == "selo-telemetry-stats":
+            from .otel_langfuse import SeloTelemetryExporter
+            print(json.dumps(SeloTelemetryExporter(args.state_root).stats(args.owner),
+                             sort_keys=True))
+            return 0
+        if args.action == "selo-release-verify":
+            from .release_gate import ReleaseGateError, verify_release
+            outcome = verify_release(
+                third_party_root=args.root, trusted_pins=args.trusted_pins,
+                sbom=args.sbom, expected_sbom_sha256=args.sbom_sha256,
+                scan_receipt=args.receipt, fail_at=args.fail_at,
+                database_built=args.database_built,
+                max_database_age_hours=args.max_db_age_hours,
+                previous_receipt=args.previous_receipt)
+            print(json.dumps({"ok": outcome["approved"], **outcome}, sort_keys=True,
+                             ensure_ascii=False))
+            return 0 if outcome["approved"] else 3
+        if args.action == "selo-learning-propose":
+            from .learning_review import ReviewedLearningStore
+            store = ReviewedLearningStore(args.state_root)
+            outcome = store.propose(
+                args.owner, workspace_id=args.workspace,
+                origin=json.loads(args.origin.read_text(encoding="utf-8")),
+                scope=json.loads(args.scope.read_text(encoding="utf-8")),
+                result=json.loads(args.result.read_text(encoding="utf-8")),
+                transcript=args.transcript.read_text(encoding="utf-8"),
+                ttl_s=args.ttl)
+            print(json.dumps({"ok": True, **outcome}, sort_keys=True))
+            return 0
+        if args.action == "selo-learning-review":
+            from .learning_review import ReviewedLearningStore
+            item = ReviewedLearningStore(args.state_root).review(
+                args.owner, args.suggestion_id, verdict=args.verdict,
+                reviewer=args.reviewer, reason=args.reason)
+            print(json.dumps({"ok": True, "suggestion_id": item["suggestion_id"],
+                              "status": item["status"],
+                              "revision": item["revision"]}, sort_keys=True))
+            return 0
+        if args.action == "selo-learning-skill":
+            from .learning_review import ReviewedLearningStore
+            bundle = ReviewedLearningStore(args.state_root).review_bundle(
+                args.owner, args.suggestion_id)
+            print(json.dumps({"ok": True, **bundle}, sort_keys=True,
+                             ensure_ascii=False))
+            return 0
+        if args.action == "selo-eval-compare":
+            from .langfuse_eval import LangfuseEvalStore
+            result = LangfuseEvalStore(args.state_root).compare_runs(
+                args.owner, run_a=args.run_a, run_b=args.run_b)
+            print(json.dumps({"ok": True, **result}, sort_keys=True,
+                             ensure_ascii=False))
+            return 0
+        if args.action == "selo-pipeline-stats":
+            from .otel_langfuse import OTelPipeline
+            print(json.dumps({"ok": True,
+                              **OTelPipeline(args.state_root).stats(args.owner)},
+                             sort_keys=True))
+            return 0
         if args.action=="grype-diff":
             result=scan_diff(json.loads(args.previous.read_text(encoding="utf-8")),
                              json.loads(args.current.read_text(encoding="utf-8")))
@@ -89,6 +195,13 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, sort_keys=True, ensure_ascii=False))
         return 0
     except (GateFailure, VulnerabilityGateError, OSError,ValueError,KeyError) as exc:
+        try:
+            from .release_gate import ReleaseGateError
+            if isinstance(exc, ReleaseGateError):
+                print(json.dumps({"ok": False, "error": str(exc)}, sort_keys=True), file=sys.stderr)
+                return 2
+        except ImportError:
+            pass
         # Never include source file contents, tokens or remote subprocess output.
         print(json.dumps({"ok": False, "error": str(exc)}, sort_keys=True), file=sys.stderr)
         return 2

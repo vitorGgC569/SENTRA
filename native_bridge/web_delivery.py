@@ -37,6 +37,7 @@ class WebDeliveryJournal:
         return {"provider": job.provider, "conversation_url": job.conversation_url,
                 "new_chat": job.new_chat, "prompt_sha256": hashlib.sha256(job.prompt.encode()).hexdigest(),
                 "images_sha256": [hashlib.sha256(image.encode()).hexdigest() for image in job.images],
+                **({"attachments": job.attachments} if job.attachments else {}),
                 "project_id": job.project_id, "project_url": job.project_url, "model": job.model,
                 **({"dispatch_mode": job.dispatch_mode,
                     "requested_model": job.requested_model,
@@ -87,7 +88,9 @@ class WebDeliveryJournal:
                         (self.clock(), job_id))
 
     def receipt(self, job_id, evidence):
-        if not isinstance(evidence, dict) or set(evidence) != {"conversation_id", "message_id", "prompt_sha256", "images_attached"}:
+        legacy = {"conversation_id", "message_id", "prompt_sha256", "images_attached"}
+        binary = legacy | {"attachments", "attachment_names"}
+        if not isinstance(evidence, dict) or set(evidence) not in (legacy, binary):
             raise ValueError("exact Web receipt schema required")
         for key in ("conversation_id", "message_id"):
             if not isinstance(evidence[key], str) or not _ID.fullmatch(evidence[key]):
@@ -104,6 +107,13 @@ class WebDeliveryJournal:
         job = self.decode_payload(payload_row[0], job_id)
         if type(evidence["images_attached"]) is not int or evidence["images_attached"] != len(job.get("images", [])):
             raise ValueError("Web receipt attachment count mismatch")
+        refs = job.get("attachments", [])
+        if refs:
+            if (set(evidence) != binary or evidence["attachments"] != refs
+                    or evidence["attachment_names"] != [ref["name"] for ref in refs]):
+                raise ValueError("Web receipt does not cover the exact submitted binary set")
+        elif set(evidence) != legacy:
+            raise ValueError("unexpected binary set in text/image legacy receipt")
         if not job.get("new_chat"):
             from sentra_core.conversation import ConversationIdentity
             expected = ConversationIdentity.parse(job["conversation_url"]).conversation_id

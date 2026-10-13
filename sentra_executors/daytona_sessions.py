@@ -6,6 +6,7 @@ SDK/transport postconditions are provider reports, not sandbox attestation.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import importlib.metadata
 import inspect
 import json
@@ -18,10 +19,12 @@ from urllib.parse import urlsplit
 
 from .identity_sessions import SessionExecutor,SessionScope,SessionJournal,declare_session_machine
 from .rpa import ExecutorFailure,effect_checkpoint,AuthorizedPaths
+from .daytona_computer import COMPUTER_ACTIONS, ComputerSelector, perform_computer
 
 DAYTONA_SESSION_ACTIONS=frozenset({'session.list','sandbox.create','sandbox.read','sandbox.reconcile','sandbox.start','sandbox.stop','sandbox.delete',
+    'sandbox.archive','sandbox.network','sandbox.network.reconcile',
     'pty.create','pty.reattach','pty.read','pty.write','pty.resize','pty.cancel','pty.disconnect',
-    'command.create','command.execute','command.read','command.input','command.cancel','evidence.export'})
+    'command.create','command.execute','command.read','command.input','command.cancel','evidence.export'}) | COMPUTER_ACTIONS
 
 
 @dataclass(frozen=True)
@@ -59,6 +62,12 @@ class DaytonaSessionBinding:
     max_sessions:int=16
     allow_pty_input:bool=False
     allowed_commands:tuple[str,...]=()
+    computer_pid:int|None=None
+    computer_selectors:tuple[ComputerSelector,...]=()
+    preview_ports:tuple[int,...]=()
+    preview_origins:tuple[str,...]=()
+    max_preview_bytes:int=8*1024*1024
+    network_profiles:tuple[tuple[str,tuple[str,...]],...]=(('blocked',()),)
 
     def __post_init__(self):
         if (not self.capability_id or not set(self.actions)<=DAYTONA_SESSION_ACTIONS or
@@ -67,12 +76,32 @@ class DaytonaSessionBinding:
                 not 1<=self.max_read_bytes<=1024*1024 or not 1<=self.max_sessions<=64 or
                 not self.cwd.startswith('/') or '\x00' in self.cwd or type(self.allow_pty_input) is not bool):
             raise ValueError('invalid_daytona_session_binding')
+        selectors=tuple(ComputerSelector(**dict(s,actions=tuple(s.get('actions',('read',)))))
+                        if isinstance(s,dict) else s for s in self.computer_selectors)
+        object.__setattr__(self,'computer_selectors',selectors)
+        if (self.computer_pid is not None and (type(self.computer_pid) is not int or self.computer_pid<1) or
+                len(selectors)>128 or len({s.key for s in selectors})!=len(selectors) or
+                any(type(p) is not int or not 1<=p<=65535 for p in self.preview_ports) or
+                not 1<=self.max_preview_bytes<=32*1024*1024):
+            raise ValueError('invalid_daytona_computer_or_preview_profile')
+        from .playwright_browser import origin
+        if any(origin(v)!=v or not v.startswith('https://') for v in self.preview_origins):
+            raise ValueError('canonical_https_preview_origins_required')
+        profiles=tuple((name,tuple(str(ipaddress.ip_network(cidr,strict=True)) for cidr in cidrs))
+                       for name,cidrs in self.network_profiles)
+        if (not profiles or len(profiles)>8 or len({name for name,_ in profiles})!=len(profiles) or
+                any(not name or len(cidrs)>32 or any(ipaddress.ip_network(c).prefixlen==0 for c in cidrs)
+                    for name,cidrs in profiles) or dict(profiles).get('blocked')!=()):
+            raise ValueError('bounded_daytona_network_profiles_required')
+        object.__setattr__(self,'network_profiles',profiles)
 
     @property
     def identity(self):
         return hashlib.sha256(json.dumps([self.capability_id,self.connection.api_url,self.connection.target,
             self.connection.allowed_sdk_versions,self.connection.pty_handle_sha256,self.existing_sandbox_ids,
-            self.trusted_snapshot,self.allow_pty_input,self.allowed_commands,self.cwd,self.actions],sort_keys=True).encode()).hexdigest()
+            self.trusted_snapshot,self.allow_pty_input,self.allowed_commands,self.cwd,self.actions,
+            self.computer_pid,[(s.key,s.role,s.name,s.actions) for s in self.computer_selectors],
+            self.preview_ports,self.preview_origins,self.max_preview_bytes,self.network_profiles],sort_keys=True).encode()).hexdigest()
 
 
 class DaytonaSessionBackend:
@@ -117,11 +146,18 @@ class DaytonaSessionBackend:
             self.clients[key]=client
         return self.clients[key],daytona,version
 
-    def _sandbox(self,client,b,row):
+    def _sandbox(self,client,b,row,*,reconcile_network=False):
         sid=row['metadata'].get('sandbox_id',row['remote_id'])
         effect_checkpoint(); sandbox=client.get(sid)
-        if sandbox.id!=sid or getattr(sandbox,'public',None) is not False or getattr(sandbox,'network_block_all',None) is not True:
+        if sandbox.id!=sid or getattr(sandbox,'public',None) is not False:
             raise ExecutorFailure('daytona_remote_postconditions_changed')
+        profile=row['metadata'].get('network_profile','blocked')
+        allowed=dict(b.network_profiles)[profile]
+        actual=getattr(sandbox,'network_allow_list',None) or ''
+        current=tuple(sorted(c.strip() for c in actual.split(',') if c.strip()))
+        matches=(getattr(sandbox,'network_block_all',None) is True and not allowed or
+                 getattr(sandbox,'network_block_all',None) is False and bool(allowed) and current==tuple(sorted(allowed)))
+        if not matches and not reconcile_network:raise ExecutorFailure('daytona_remote_network_profile_changed')
         if row['metadata'].get('managed'):
             labels=getattr(sandbox,'labels',{}) or {}
             if labels.get('sentra-scope')!=row['scope'] or labels.get('sentra-resource')!=row['metadata']['resource_token']:
@@ -138,7 +174,8 @@ class DaytonaSessionBackend:
                 row=self.journal.get(a['session_id'],scope,'daytona',b.identity)
                 return {'artifact':self.journal.export(row,b.paths,a['output'])}
             client,sdk,version=self._sdk(b)
-            mutating=action not in {'sandbox.read','sandbox.reconcile','pty.read','command.read','pty.reattach'}
+            mutating=action not in {'sandbox.read','sandbox.reconcile','sandbox.network.reconcile','pty.read','command.read','pty.reattach',
+                                   'computer.observe','computer.status','computer.screenshot'}
             if mutating:
                 old=self.journal.reserve_effect(a['_operation_id'],scope,a)
                 if old is not None:return old
@@ -184,20 +221,45 @@ class DaytonaSessionBackend:
                         return {'session_id':row['id'],'sandbox_id':observed.id,'creation_replayed':False,
                                 'provider_reported_private':True,'attested_isolation':False,
                                 'original_operation_requires_central_reconciliation':True}
-                    sandbox=self._sandbox(client,b,row)
+                    sandbox=self._sandbox(client,b,row,reconcile_network=action=='sandbox.network.reconcile')
                     process=sandbox.process
                     if action.startswith('sandbox.'):
                         if row['metadata']['resource_kind']!='sandbox':raise ExecutorFailure('daytona_resource_kind_mismatch')
                         if action=='sandbox.read':pass
+                        elif action=='sandbox.network.reconcile':
+                            actual=getattr(sandbox,'network_allow_list',None) or ''
+                            current=tuple(sorted(c.strip() for c in actual.split(',') if c.strip()))
+                            candidates=[name for name,cidrs in b.network_profiles if
+                                (not cidrs and sandbox.network_block_all is True) or
+                                (cidrs and sandbox.network_block_all is False and tuple(sorted(cidrs))==current)]
+                            if len(candidates)!=1:raise ExecutorFailure('daytona_unconfigured_or_ambiguous_network_profile')
+                            self.journal.update(row,metadata=dict(row['metadata'],network_profile=candidates[0],
+                                                                  pending_network_profile=None))
+                            return {'session_id':row['id'],'network_profile':candidates[0],'network_update_replayed':False}
                         else:
                             if not row['metadata'].get('managed'):raise ExecutorFailure('cannot_administer_borrowed_sandbox')
                             effect_checkpoint();dispatched=True
                             if action=='sandbox.start':sandbox.start(timeout=b.timeout_seconds-5)
                             elif action=='sandbox.stop':sandbox.stop(timeout=b.timeout_seconds-5)
                             elif action=='sandbox.delete':client.delete(sandbox,timeout=b.timeout_seconds-5)
+                            elif action=='sandbox.archive':
+                                if str(getattr(sandbox.state,'value',sandbox.state)).lower()!='stopped':
+                                    raise ExecutorFailure('daytona_archive_requires_explicit_stop')
+                                sandbox.archive()
+                            elif action=='sandbox.network':
+                                cidrs=dict(b.network_profiles)[a['profile']]
+                                self.journal.update(row,metadata=dict(row['metadata'],pending_network_profile=a['profile']))
+                                sandbox.update_network_settings(network_block_all=not bool(cidrs),
+                                                                network_allow_list=','.join(cidrs) if cidrs else None)
+                                self.journal.update(row,metadata=dict(row['metadata'],network_profile=a['profile'],pending_network_profile=None))
+                                self._sandbox(client,b,row)
                         result={'session_id':row['id'],'requested_action':action,
                             'remote_state':'deleted' if action=='sandbox.delete' else str(getattr(sandbox.state,'value',sandbox.state))}
                         self.journal.update(row,state='DELETED' if action=='sandbox.delete' else 'OBSERVED')
+                    elif action in COMPUTER_ACTIONS:
+                        dispatched=mutating
+                        result=perform_computer(self,sandbox,row,b,a)
+                        self.journal.append(row,'computer',json.dumps(result,allow_nan=False).encode())
                     elif action in {'pty.create','command.create'}:
                         if row['metadata']['resource_kind']!='sandbox':raise ExecutorFailure('daytona_parent_sandbox_required')
                         rid='sentra-'+hashlib.sha256((scope+a['_operation_id']).encode()).hexdigest()[:32]
@@ -402,7 +464,10 @@ class DaytonaSessionExecutor(SessionExecutor):
         if type(action) is not str or action not in b.actions:raise ValueError('daytona_session_action_denied')
         fields={'session.list':{'limit'},'pty.create':{'rows','cols'},'pty.read':{'after','wait_seconds'},'pty.write':{'text'},
             'pty.resize':{'rows','cols'},'command.execute':{'command'},'command.input':{'text'},
-            'command.read':{'after','wait_seconds'},'sandbox.read':{'inventory_sandbox_id'},'evidence.export':{'output'}}.get(action,set())
+            'command.read':{'after','wait_seconds'},'sandbox.read':{'inventory_sandbox_id'},'evidence.export':{'output'},
+            'sandbox.network':{'profile'},'computer.focus':{'reference'},'computer.invoke':{'reference','invoke_action'},
+            'computer.set_value':{'reference','value'},'computer.screenshot':{'output'},
+            'preview.fetch':{'port','path','output'}}.get(action,set())
         if set(a)-({'action','session_id'}|fields):raise ValueError('invalid_daytona_session_arguments')
         if action not in {'session.list','sandbox.create','sandbox.read'} and (type(a.get('session_id')) is not str or not a['session_id']):
             raise ValueError('bound_daytona_session_required')
@@ -418,9 +483,22 @@ class DaytonaSessionExecutor(SessionExecutor):
         if action=='pty.resize' and not {'rows','cols'}<=set(a):raise ValueError('pty_size_required')
         if 'after' in a and (type(a['after']) is not int or a['after']<0):raise ValueError('invalid_cursor')
         if 'wait_seconds' in a and (type(a['wait_seconds']) not in (int,float) or not 0<a['wait_seconds']<=3):raise ValueError('bounded_read_required')
-        if action=='evidence.export':
+        if action in {'computer.focus','computer.invoke','computer.set_value'}:
+            if type(a.get('reference')) is not str or not a['reference']:raise ValueError('computer_observation_reference_required')
+        if action=='computer.invoke' and (type(a.get('invoke_action')) is not str or not 1<=len(a['invoke_action'])<=128):
+            raise ValueError('explicit_accessibility_pattern_required')
+        if action=='computer.set_value' and (type(a.get('value')) is not str or len(a['value'])>8192):raise ValueError('bounded_computer_value_required')
+        if action=='sandbox.network' and a.get('profile') not in dict(b.network_profiles):raise ValueError('declared_network_profile_required')
+        if action=='preview.fetch':
+            if a.get('port') not in b.preview_ports or type(a.get('port')) is not int:raise ValueError('preview_port_not_configured')
+            path=a.get('path','/')
+            if (type(path) is not str or not path.startswith('/') or path.startswith('//') or len(path)>2048 or
+                    any(c in path for c in ('\\','?','#','%','\r','\n','\x00')) or '..' in path.split('/')):
+                raise ValueError('bounded_preview_path_required')
+        if action in {'evidence.export','computer.screenshot','preview.fetch'}:
             path=b.paths.resolve(a.get('output'),write=True)
-            if path.suffix.lower()!='.json':raise ValueError('json_evidence_required')
+            if action=='evidence.export' and path.suffix.lower()!='.json':raise ValueError('json_evidence_required')
+            if action=='computer.screenshot' and path.suffix.lower()!='.png':raise ValueError('png_screenshot_required')
             a['output']=str(path)
         a['_scope']=SessionScope.from_request(request).key;a['_operation_id']=request.operation_id
         return json.loads(json.dumps(a,allow_nan=False))

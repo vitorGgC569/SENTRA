@@ -40,8 +40,9 @@ class CentralExecutorFactory:
     """Central-service-consumed factory, NOT an alternate control plane.
 
     The owner/principal are trusted constructor data, never request arguments.
-    Only exact browser lab read-only is dispatchable by this version. Other
-    executor declarations remain discoverable but NOT auto-authorized.
+    Host-configured adapters use register_execution for physical admission.
+    Inventory declarations alone remain discoverable and cannot dispatch.
+    Interactive input additionally requires durable agent input possession.
     """
 
     def __init__(self, *, control: ControlPlaneService, owner: str,
@@ -68,6 +69,7 @@ class CentralExecutorFactory:
         self._declarations: dict[str, Any] = {}
         self._read_only_bindings: dict[str, BrowserReadBinding] = {}
         self._execution_machines: set[str] = set()
+        self._input_resources: dict[str, str] = {}
 
     def _registry_policy(self, request: OperationRequest):
         from sentra_runtime.contracts import PolicyDecision
@@ -136,14 +138,36 @@ class CentralExecutorFactory:
             self.durable_intent_authority.budgets=self.control.budgets
         from sentra_runtime.machine_budget import BudgetedMachinePolicy
         from sentra_runtime.observations import is_observation
+        from .input_control import InputBoundPolicy, resource_for_declaration
+        input_policy = self.policy if isinstance(self.policy, InputBoundPolicy) else None
+        if input_policy is not None:
+            self.policy = input_policy.policy
         if self.durable_intent_authority.observation_predicate is None:
             self.durable_intent_authority.observation_predicate=lambda request:is_observation(request,
                 self._declarations[request.machine_id].machine.kind) if request.machine_id in self._declarations else False
         if not isinstance(self.policy,BudgetedMachinePolicy):
             self.policy=BudgetedMachinePolicy(self.policy,control=self.control,owner=self.owner,
                 observation_predicate=self.durable_intent_authority.observation_predicate)
+        if input_policy is not None:
+            input_policy.policy = self.policy
+            self.policy = input_policy
         registered = self.register_inventory(declaration)
         self._execution_machines.add(registered.machine.machine_id)
+        resource = resource_for_declaration(declaration)
+        if resource is not None:
+            self._input_resources[registered.machine.machine_id] = resource
+            if not isinstance(self.policy, InputBoundPolicy):
+                self.policy = InputBoundPolicy(self.policy, control=self.control,
+                    owner=self.owner, resources=self._input_resources)
+            if getattr(declaration.adapter, '_shared_resource', None) is None:
+                from .integral import bind_shared_resource
+                bind_shared_resource(declaration, state_root=self.control.durable.root,
+                                     resource_id='input:' + resource)
+        if declaration.machine.kind == 'playwright_browser':
+            from .browser_sessions import PersistentPlaywrightBackend
+            if not isinstance(declaration.adapter.backend, PersistentPlaywrightBackend):
+                declaration.adapter.backend = PersistentPlaywrightBackend.for_control(
+                    declaration.adapter.backend, self.control, registered.machine.machine_id)
         return registered
 
     def dispatch_request(self, *, run_id: str, work_item_id: str,
@@ -197,6 +221,25 @@ class CentralExecutorFactory:
             raise AuthorizationRequired("run/work_item/capability binding not active")
 
     async def submit(self, *, run_id: str, request: OperationRequest) -> OperationResult:
+        from .input_control import InputBoundPolicy
+        if isinstance(self.policy, InputBoundPolicy):
+            with self.policy.scope(request):
+                return await self._submit_admitted(run_id=run_id, request=request)
+        return await self._submit_admitted(run_id=run_id, request=request)
+
+    async def submit_human_input(self, *, run_id: str, request: OperationRequest,
+                                 workspace_id: str, expected_epoch: int) -> OperationResult:
+        """Authenticated owner host path, with unchanged WorkItem/effect gates."""
+        from .input_control import human_input_scope, needs_input
+        self._validate_link(run_id=run_id, request=request)
+        resource = self._input_resources.get(request.machine_id)
+        if resource is None or not needs_input(request):
+            raise AuthorizationRequired('registered human input action required')
+        with human_input_scope(self.control, owner=self.owner, workspace_id=workspace_id,
+                machine_id=request.machine_id, resource_id=resource, expected_epoch=expected_epoch):
+            return await self.submit(run_id=run_id, request=request)
+
+    async def _submit_admitted(self, *, run_id: str, request: OperationRequest) -> OperationResult:
         """Only durable reservation can admit effect; no legacy unsafe fallback."""
         self._validate_link(run_id=run_id, request=request)
         if self.policy(request).allowed is not True:

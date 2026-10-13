@@ -1,0 +1,163 @@
+{
+    "version":  1,
+    "date":  "2026-10-11",
+    "validation_executed":  false,
+    "third_party_sources_modified":  false,
+    "implementation":  "Independent SENTRA adapters and source instrumentation; central authority preserved",
+    "sources":  [
+                    {
+                        "project":  "ufo",
+                        "revision":  "a795552d976c4c019d7c2f778a0effb5cef7de6b",
+                        "license":  "MIT",
+                        "paths":  [
+                                      "ufo/automator/ui_control/controller.py",
+                                      "ufo/experience/summarizer.py",
+                                      "galaxy/constellation/orchestrator/constellation_manager.py"
+                                  ],
+                        "use":  "Application receiver vocabulary, scoped experience and capability/load selection patterns; no UFO planner/dispatcher imported",
+                        "upstream":  "https://github.com/microsoft/UFO",
+                        "license_files":  [
+                                              "LICENSE"
+                                          ]
+                    },
+                    {
+                        "project":  "pywinauto",
+                        "revision":  "18d2a95cebed2f0061ab4e4c80c3a76ece5dd4f3",
+                        "license":  "BSD-3-Clause",
+                        "paths":  [
+                                      "pywinauto/windows/uia_element_info.py",
+                                      "pywinauto/controls/uiawrapper.py",
+                                      "pywinauto/timings.py"
+                                  ],
+                        "use":  "Runtime API dependency, live UIA cache/runtime identity/semantic patterns; ship actual package license",
+                        "upstream":  "https://github.com/pywinauto/pywinauto",
+                        "license_files":  [
+                                              "LICENSE"
+                                          ]
+                    },
+                    {
+                        "project":  "daytona",
+                        "revision":  "fc98a5032c04e13de737b8d4d45dd2c7e5d1291a",
+                        "license":  "AGPL-3.0 repository/server; Apache-2.0 annotated Python SDK sources",
+                        "paths":  [
+                                      "libs/sdk-python/src/daytona/_sync/computer_use.py",
+                                      "libs/sdk-python/src/daytona/_sync/sandbox.py",
+                                      "libs/sdk-python/src/daytona/_sync/process.py",
+                                      "apps/proxy/pkg/proxy/proxy.go"
+                                  ],
+                        "use":  "Independent SDK/API client, AT-SPI and private preview-token header; no server daemon copied",
+                        "upstream":  "https://github.com/daytonaio/daytona",
+                        "license_files":  [
+                                              ".licenserc-clients.yaml",
+                                              ".licenserc.yaml",
+                                              "LICENSE"
+                                          ]
+                    },
+                    {
+                        "project":  "hcsshim",
+                        "revision":  "ab8249e8a1110ff5f052d3710fe57f29c45503d3",
+                        "license":  "MIT",
+                        "paths":  [
+                                      "interface.go",
+                                      "container.go",
+                                      "internal/jobcontainers/jobcontainer.go"
+                                  ],
+                        "use":  "Existing exported Go bridge retained; headless HCS lifecycle/resources, not GUI isolation",
+                        "upstream":  "https://github.com/microsoft/hcsshim",
+                        "license_files":  [
+                                              "LICENSE"
+                                          ]
+                    },
+                    {
+                        "project":  "gvisor",
+                        "revision":  "25e4d4778b06a66f268e13c2b8b0abc433096693",
+                        "license":  "Apache-2.0",
+                        "paths":  [
+                                      "runsc/config/config.go",
+                                      "runsc/cmd/checkpoint.go",
+                                      "runsc/cmd/restore.go"
+                                  ],
+                        "use":  "Optional pinned runsc CLI runtime; existing OCI/checkpoint provider composed",
+                        "upstream":  "https://github.com/google/gvisor",
+                        "license_files":  [
+                                              "LICENSE"
+                                          ]
+                    },
+                    {
+                        "project":  "playwright-mcp",
+                        "revision":  "b8b4183e099f136cbec0388a6088d4aa2f6b9685",
+                        "license":  "Apache-2.0",
+                        "paths":  [
+                                      "config.d.ts",
+                                      "index.js",
+                                      "package.json"
+                                  ],
+                        "use":  "Browser-context/evidence/reference patterns; actual runtime is Python Playwright and its Chromium package, not this clone\u0027s index.js",
+                        "upstream":  "https://github.com/microsoft/playwright-mcp",
+                        "license_files":  [
+                                              "LICENSE"
+                                          ]
+                    },
+                    {
+                        "project":  "guacamole-client",
+                        "revision":  "38e8cb8ff5cd1fbd4c08a1a5d94340c37741230b",
+                        "license":  "Apache-2.0",
+                        "paths":  [
+                                      "guacamole-common-js/src/main/webapp/modules/Client.js",
+                                      "guacamole-common-js/src/main/webapp/modules/SessionRecording.js"
+                                  ],
+                        "use":  "Actual client/tunnel/playback dependency; standard clipboard/blob/end/ack instruction protocol",
+                        "upstream":  "https://github.com/apache/guacamole-client",
+                        "license_files":  [
+                                              "LICENSE"
+                                          ]
+                    },
+                    {
+                        "project":  "guacamole-server",
+                        "revision":  "ae12b8e51aa6287d0eca7a50c6cac04af4a71590",
+                        "license":  "Apache-2.0",
+                        "paths":  [
+                                      "src/libguac/recording.c",
+                                      "src/protocols/rdp/rdp.c"
+                                  ],
+                        "use":  "Separately configured guacd; channel selection and selective recording patterns",
+                        "upstream":  "https://github.com/apache/guacamole-server",
+                        "license_files":  [
+                                              "LICENSE"
+                                          ]
+                    },
+                    {
+                        "project":  "rustdesk",
+                        "revision":  "1d4abd0258bb6678cdd5e2abe3a2af59fd3d7dbe",
+                        "license":  "AGPL-3.0",
+                        "paths":  [
+                                      "src/client.rs",
+                                      "src/client/io_loop.rs",
+                                      "src/core_main.rs",
+                                      "libs/base/protos/message.proto",
+                                      "libs/scrap/src/common/mod.rs"
+                                  ],
+                        "use":  "Reviewable instrumentation patch for an owned native build; retain source/license/notices of the composite build; no stock CLI embedding claim",
+                        "upstream":  "https://github.com/rustdesk/rustdesk",
+                        "license_files":  [
+
+                                          ]
+                    },
+                    {
+                        "project":  "rpaframework",
+                        "revision":  "7a419fb7a7bdc02ac7531328a3d8e308ef2bcc0c",
+                        "license":  "Apache-2.0",
+                        "paths":  [
+                                      "packages/main/src/RPA/Excel/Files.py",
+                                      "packages/main/src/RPA/Tables.py",
+                                      "packages/pdf/src/RPA/PDF/keywords/document.py"
+                                  ],
+                        "use":  "Existing deterministic document adapters retained; actual openpyxl/pypdf/Excel/LibreOffice/OCR dependencies retain their own notices",
+                        "upstream":  "https://github.com/robocorp/rpaframework",
+                        "license_files":  [
+                                              "LICENSE"
+                                          ]
+                    }
+                ],
+    "shipping_requirement":  "Resolve full revisions via third_party/SENTRA_SOURCES_MANIFEST.json and include actual dependency/bundle LICENSE/NOTICE/SBOM; listed revisions do not prove runtime acceptance"
+}

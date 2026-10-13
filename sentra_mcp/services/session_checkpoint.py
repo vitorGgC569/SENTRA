@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from sentra_remote.secrets import protect_secret, unprotect_secret
-from .control_store import ControlPlaneStore, SQLiteControlPlaneStore
+from .control_store import ControlPlaneStore, create_control_plane_store
 
 
 SENSITIVE_CHECKPOINT_KEYS = {
@@ -69,11 +69,14 @@ class SessionCheckpointService:
         store: ControlPlaneStore | None = None,
         clock=time.time,
     ) -> None:
-        self.store = store or SQLiteControlPlaneStore(state_root)
-        self.path = self.store.path_for("session_checkpoint")
+        self.store = store or create_control_plane_store(state_root)
+        # Native PG has no file namespace. Do not even resolve path_for there.
+        self.path = (None if getattr(self.store, "backend", "sqlite") == "postgres"
+                     else self.store.path_for("session_checkpoint"))
         self.clock = clock
         with self._connect() as db:
-            db.execute("PRAGMA secure_delete=ON")
+            if getattr(self.store, "backend", "sqlite") != "postgres":
+                db.execute("PRAGMA secure_delete=ON")
             db.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS session_checkpoints(
@@ -148,12 +151,19 @@ class SessionCheckpointService:
             raise RuntimeError("session checkpoint ciphertext binding mismatch")
         return envelope["value"]
 
-    def _migrate_protected_checkpoints(self, db: sqlite3.Connection) -> None:
+    def _migrate_protected_checkpoints(self, db) -> None:
         """Fail-closed transaction for legacy plaintext checkpoint/cursor fields.
 
-        The cleanup marker survives a crash between durable UPDATE and VACUUM;
-        this cannot scrub OS snapshots, cloud backups or SSD historical pages.
+        SQLite file backend: the cleanup marker survives a crash between
+        durable UPDATE and VACUUM; VACUUM + WAL truncation then rewrite SQLite
+        free pages. This cannot scrub OS snapshots, cloud backups or SSD
+        historical pages.
+        PostgreSQL backend: MVCC row versions and backups are NOT forensic
+        erasure. Any legacy plaintext row (or a pending cleanup marker) fails
+        closed here and requires an explicit administrator retention purge;
+        the marker is never cleared and no erasure is claimed.
         """
+        pg = getattr(self.store, "backend", "sqlite") == "postgres"
         db.execute("CREATE TABLE IF NOT EXISTS session_checkpoint_storage_security "
                    "(key TEXT PRIMARY KEY, cleanup_pending INTEGER NOT NULL)")
         db.commit()
@@ -173,6 +183,11 @@ class SessionCheckpointService:
                         self._open_protected(raw, ident, field)
                         updates.append(raw)
                         continue
+                    if pg:
+                        raise RuntimeError(
+                            "legacy plaintext session checkpoint requires an explicit "
+                            "administrator retention purge in PostgreSQL; refusing "
+                            "silent migration (MVCC/backups are not erasure)")
                     try:
                         value = json.loads(raw)
                     except (ValueError, TypeError) as exc:
@@ -196,6 +211,11 @@ class SessionCheckpointService:
             "SELECT cleanup_pending FROM session_checkpoint_storage_security "
             "WHERE key='os_crypto'").fetchone()
         if pending and pending[0]:
+            if pg:
+                raise RuntimeError(
+                    "pending session checkpoint storage cleanup requires an explicit "
+                    "administrator retention purge in PostgreSQL; refusing to clear "
+                    "the marker (MVCC/backups are not erasure)")
             db.execute("VACUUM")
             checkpoint = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             if checkpoint and checkpoint[0]:
@@ -342,6 +362,28 @@ class SessionCheckpointService:
     @staticmethod
     def _continuation_row(row: sqlite3.Row) -> dict[str, Any]:
         return dict(row)
+
+    def history(self, owner: str, *, chat_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        """Bounded checkpoint lineage for Compact&Resume/Home projections (read-only)."""
+        chat_id = _text("chat_id", chat_id, 256, required=True)
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise ValueError("limit must be 1..200")
+        with self._connect() as db:
+            rows = db.execute(
+                "SELECT * FROM session_checkpoints WHERE owner=? AND chat_id=? "
+                "ORDER BY created_at DESC,source_seq DESC LIMIT ?",
+                (owner, chat_id, limit)).fetchall()
+        return [self._row(row) for row in rows]
+
+    def latest_summary(self, owner: str, *, chat_id: str) -> dict[str, Any]:
+        """Latest pinned summary + cursor for continuity handshakes (read-only)."""
+        item = self.latest(owner, chat_id=chat_id)
+        checkpoint = item.get("checkpoint") or {}
+        return {"checkpoint_id": item["checkpoint_id"], "run_id": item["run_id"],
+                "chat_id": item["chat_id"], "summary": checkpoint.get("summary"),
+                "payload_sha256": item.get("payload_sha256"),
+                "conversation_id": item.get("conversation_id"),
+                "created_at": item.get("created_at")}
 
     def continuation(self, owner: str, continuation_id: str) -> dict[str, Any]:
         ident = _text("continuation_id", continuation_id, 120, required=True)

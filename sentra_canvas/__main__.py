@@ -16,6 +16,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from .service import Canvas
 from .store import Denied
+from sentra_mcp.services.shell_coordinator import ShellConflict
+from sentra_collab.authority import SnapshotConflict
 
 STATIC=Path(__file__).parent/"static"
 
@@ -31,6 +33,8 @@ class CanvasServer(ThreadingHTTPServer):
         self._collab_lock=threading.RLock()
         super().__init__(("127.0.0.1",port),CanvasHandler)
         canvas._agent_port=self.server_port
+        canvas._shell_origins=(f"http://127.0.0.1:{self.server_port}",
+                               f"http://localhost:{self.server_port}")
 
     def collaboration(self):
         from .collaboration import CollaborationProcess
@@ -85,7 +89,7 @@ class CanvasHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options","DENY")
         self.send_header("Content-Security-Policy",
             "default-src 'self'; connect-src 'self' ws://127.0.0.1:*; script-src 'self'; "
-            "style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; "
+            "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; base-uri 'none'; "
             "form-action 'none'; frame-ancestors 'none'")
         self.send_header("Referrer-Policy","no-referrer")
         self.end_headers()
@@ -96,6 +100,8 @@ class CanvasHandler(BaseHTTPRequestHandler):
             if not self._allowed():
                 self._send(403,{"error":"invalid local origin"});return
             fn()
+        except (ShellConflict,SnapshotConflict):
+            self._send(409,{"error":"resource revision changed; reload before saving"})
         except (ValueError,TypeError) as exc:
             self._send(400,{"error":str(exc)[:200]})
         except (Denied,PermissionError):
@@ -139,14 +145,43 @@ class CanvasHandler(BaseHTTPRequestHandler):
                           else "application/octet-stream")
             self._send(200,file.read_bytes(),content_type)
             return
+        if path.path.startswith("/api/channels/webhook/"):
+            connector_id=path.path.removeprefix("/api/channels/webhook/")
+            qs={key: values[0] for key,values in parse_qs(path.query).items() if len(values)==1}
+            value=self.server.canvas.channel_challenge(connector_id,qs)
+            self._send(200,str(value).encode("utf-8"),"text/plain; charset=utf-8")
+            return
         if not self._auth():
             self._send(401,{"error":"local bearer token required"});return
         qs=parse_qs(path.query)
         ws=(qs.get("ws") or [""])[0]
         a=self.server.canvas
+        if path.path == '/api/shell/generated-media':
+            fields = {'project_id','space_id','conversation_id','message_id','asset_id'}
+            if set(qs) != fields or any(len(qs[key]) != 1 for key in fields):
+                raise ValueError('exact generated file message scope required')
+            from .shell_generated_media import ShellGeneratedMedia
+            a._shell_service()
+            manifest, content = ShellGeneratedMedia(a._shell_runtime).read(**{key:qs[key][0] for key in fields})
+            self._send(200, content, manifest['mime_type'])
+            return
         if path.path=="/api/desktop/surfaces":
             from .electron_host import electron_status
             self._send(200,{"electron":electron_status(),"terminal":{"available":True,"authority":"Canvas/ConPTY"}});return
+        if path.path=="/api/shell/delivery":
+            fields={"project_id", "space_id", "conversation_id", "operation_id"}
+            if set(qs) != fields or any(len(qs[key]) != 1 for key in fields):
+                raise ValueError("exact scope required for delivery inspection")
+            self._send(200,a.shell_delivery_inspect(qs["project_id"][0],
+                qs["space_id"][0],qs["conversation_id"][0],qs["operation_id"][0]))
+            return
+        if path.path=="/api/shell/live":
+            fields={"project_id", "space_id", "conversation_id"}
+            if set(qs) != fields or any(len(qs[key]) != 1 for key in fields):
+                raise ValueError("exact conversation scope required for live preview")
+            self._send(200,a.shell_live_preview(qs["project_id"][0],
+                qs["space_id"][0],qs["conversation_id"][0]))
+            return
         if path.path=="/api/health":
             self._send(200,{"ok":True,"provider_ready":"unverified",
                            "terminal_backend":"Windows ConPTY",
@@ -157,6 +192,11 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.workspaces());return
         if path.path=="/api/integrations":
             self._send(200,a.integrations());return
+        if path.path=="/api/center/task/files":
+            if set(qs) != {"ws", "conversation_id"} or any(len(qs[key]) != 1 for key in ("ws", "conversation_id")):
+                raise ValueError("exact project and conversation required")
+            self._send(200,a.center_file_work_items(ws,qs["conversation_id"][0]))
+            return
         if path.path=="/api/center/capabilities":
             self._send(200,a.center_capabilities(ws));return
         if path.path=="/api/center/machines":
@@ -210,7 +250,7 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.center_telemetry(ws));return
         if path.path=="/api/center/operation":
             self._send(200,a.center_operation(ws,(qs.get("operation_id") or [""])[0]));return
-        if path.path=="/api/models":
+        if path.path in {"/api/models","/sentra/model-catalog"}:
             self._send(200,a.model_catalog());return
         if path.path=="/api/workspace":
             self._send(200,a.workspace_detail(ws));return
@@ -240,6 +280,23 @@ class CanvasHandler(BaseHTTPRequestHandler):
 
     def _post(self):
         route=urlsplit(self.path).path
+        if route.startswith(("/api/channels/webhook/", "/api/interop/webhook/")):
+            # Verify the provider signature over the original bytes. This route
+            # only commits authenticated inbox evidence, never an owner effect.
+            if self.headers.get("Content-Type","").split(";")[0]!="application/json":
+                raise ValueError("JSON webhook required")
+            length=int(self.headers.get("Content-Length","0"))
+            if not 0<length<=1048576:
+                raise ValueError("invalid webhook size")
+            raw=self.rfile.read(length)
+            if len(raw)!=length:
+                raise ValueError("incomplete webhook body")
+            if route.startswith("/api/channels/webhook/"):
+                value=self.server.canvas.channel_receive(route.removeprefix("/api/channels/webhook/"),raw,dict(self.headers))
+            else:
+                value=self.server.canvas.interop_receive(route.removeprefix("/api/interop/webhook/"),raw,dict(self.headers))
+            self._send(200,value)
+            return
         agent_route=route=="/api/agent/control"
         if not agent_route and not self._auth():
             self._send(401,{"error":"local bearer token required"});return
@@ -248,6 +305,7 @@ class CanvasHandler(BaseHTTPRequestHandler):
         length=int(self.headers.get("Content-Length","0"))
         body_limit = (1500000 if route == "/api/collab/host" else
                       2_010_000 if route=="/api/center/machine/configure" else
+                      800000 if route=="/api/shell/bridge" else
                       160000 if route=="/api/center/project-review" else
                       131072 if route in {"/api/center/execute","/api/agent/control"} else 16384)
         if not 0<length<=body_limit:
@@ -262,6 +320,12 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.agent_control(authorization[7:],p))
             return
         ws=p.get("ws","")
+        if route=="/api/shell/bridge":
+            response=a.shell_bridge(p)
+            if p.get("action")=="document_session" and response.get("ok") is True:
+                response={**response,"value":{**response["value"],**self.server.collaboration()}}
+            self._send(200,response)
+            return
         if route=="/api/collab/host":
             self._send(200,{"ok":True,"value":a.collab_host_call(p["method"],p["params"])})
             return
@@ -288,6 +352,8 @@ class CanvasHandler(BaseHTTPRequestHandler):
                 raise ValueError("invalid Compact&Resume fields")
             self._send(200,a.center_compact_resume(ws,action=p["action"],arguments=p["arguments"]));return
         if route=="/api/center/machine/configure":
+            if p.get("kind") in {"workspace-files", "terminal"} and p.get("approve") is not True:
+                raise Denied("explicit workspace machine consent required")
             self._send(200,a.center_configure_machine(ws,p["agent_id"],p["kind"],
                 profiles=p.get("profiles"),headless=p.get("headless",True),
                 recalculation_backends=p.get("recalculation_backends"),ocr_backends=p.get("ocr_backends"),
@@ -299,7 +365,7 @@ class CanvasHandler(BaseHTTPRequestHandler):
             if p.get("approve") is not True:raise Denied("explicit browser collector consent required")
             self._send(200,a.center_browser_evidence(ws,configuration=p["configuration"]));return
         if route=="/api/center/skill-library":
-            if p.get("action")!="disclose" and p.get("approve") is not True:
+            if p.get("action") not in {"list","disclose","versions","latest","review"} and p.get("approve") is not True:
                 raise Denied("explicit skill import, activation or revocation consent required")
             self._send(200,a.center_skill_library(ws,action=p["action"],parameters=p.get("parameters")));return
         if route=="/api/center/chat-access":
@@ -349,10 +415,10 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.center_mcp_account(ws,action=action,
                 attempt_id=p.get("attempt_id"),approved=True));return
         if route=="/api/center/plugin-bundles":
-            if p.get("approve") is not True:
+            if p.get("action") not in {"inspect","supervision"} and p.get("approve") is not True:
                 raise Denied("explicit MCPB registration or catalog change approval required")
             action=p.get("action","stage")
-            if action not in {"stage","inspect","register","disable"}:
+            if action not in {"stage","inspect","register","disable","supervision","supervision_sweep"}:
                 raise ValueError("unsupported MCPB catalog action")
             self._send(200,a.center_plugin_bundles(ws,action=action,
                 source=p.get("source"),package_sha256=p.get("package_sha256"),
@@ -360,7 +426,13 @@ class CanvasHandler(BaseHTTPRequestHandler):
         if route=="/api/center/network/pairing":
             self._send(200,a.center_network_pairing(ws));return
         if route=="/api/center/task/prepare":
-            self._send(200,a.center_prepare_task(ws,p["machine_id"],p["capabilities"],p["objective"]))
+            self._send(200,a.center_prepare_task(ws,p["machine_id"],p["capabilities"],p["objective"],
+                conversation_id=p.get("conversation_id"), approve=p.get("approve") is True))
+            return
+        if route=="/api/center/task/revoke":
+            if set(p) != {"ws", "work_item_id", "conversation_id", "approve"} or p["approve"] is not True:
+                raise Denied("explicit and scoped file grant revocation required")
+            self._send(200,a.center_revoke_files(ws,p["work_item_id"],p["conversation_id"],approve=True))
             return
         if route=="/api/center/execute":
             self._send(200,a.center_execute(ws,p["work_item_id"],p["machine_id"],
@@ -464,6 +536,8 @@ def main(argv=None):
     p.add_argument("--no-open",action="store_true",help="do not open UI")
     p.add_argument("--ui",choices=("native","electron","terminal"),default="native",
                    help="desktop UI host, Electron view or SENTRA CLI terminal")
+    p.add_argument("--surface",choices=("shell-home","desktop","native"),default="shell-home",
+                   help="shell-first Home/Dots/Spaces surface; Canvas stays as internal view")
     p.add_argument("--broker",action="store_true",help="run persistent local Canvas owner")
     args=p.parse_args(argv)
     from .broker import connect_or_start,publish_endpoint,remove_endpoint
@@ -475,8 +549,15 @@ def main(argv=None):
         if args.ui == "electron":
             from .electron_host import launch_electron
             return launch_electron(endpoint,wait=True)
-        from .native_app import launch_native
-        launch_native(endpoint,serve=False)
+        from .native_app import launch_native, resolve_surface
+        surface_file = {"shell-home": "shell-home.html", "desktop": "desktop.html",
+                        "native": "native.html"}[args.surface]
+        # Shell-first with fallback: resolve_surface prefers the shipped shell
+        # bundle and falls back to the current desktop bundle.
+        from pathlib import Path as _Path
+        if not (_Path(__file__).parent / "static" / surface_file).is_file():
+            surface_file = resolve_surface()
+        launch_native(endpoint,serve=False,surface=surface_file)
         return 0
     app=Canvas(args.root,state_dir=args.state_dir)
     server=None

@@ -125,6 +125,48 @@ def _write_state(payload: dict[str, Any], *, install_dir: Path | None = None,
 
 @serialized_update
 def apply_update(
+    installer: Path, install_dir: Path, *, parent_pid: int, version: str,
+    manifest_url: str, state_dir: Path | None = None, register_system: bool = True,
+    mcp_port: int | None = None, relay_port: int | None = None,
+    stop_after_doctor: bool = False, restart_desktop: bool = True,
+    coordinated_handoff: Path | None = None,
+) -> int:
+    kwargs = dict(parent_pid=parent_pid, version=version, manifest_url=manifest_url,
+        state_dir=state_dir, register_system=register_system, mcp_port=mcp_port,
+        relay_port=relay_port, stop_after_doctor=stop_after_doctor,
+        restart_desktop=restart_desktop, coordinated_handoff=coordinated_handoff)
+    if coordinated_handoff is None:
+        return _apply_update(installer, install_dir, **kwargs)
+    _wait_pid(parent_pid)
+    from .app_exit_update import load_handoff, helper_effect_context, read_helper_outcome
+    value = load_handoff(coordinated_handoff, install_dir)
+    context = helper_effect_context(value)
+    kwargs['parent_pid'] = 0
+    # Same central receipt/fence/grant, with the existing OS lock and keepalive.
+    from sentra_runtime.contracts import OperationResult
+    def persist_outcome():
+        evidence = read_helper_outcome(coordinated_handoff, owner=value['owner'],
+            operation_id=value['operation_id'], installation_id=value['installation_id'])
+        if evidence['state'] not in {'SUCCEEDED', 'FAILED'}:
+            raise RuntimeError('update helper outcome uncertain; never relaunch Setup')
+        context.checkpoint()
+        accepted = context.authority.record_result(context.receipt,
+            OperationResult(value['operation_id'], evidence['state'],
+                evidence={'handoff_sha256': evidence['handoff_sha256'],
+                          'helper_pid': evidence['helper_pid'], 'result': evidence['result']}))
+        if accepted is not True:
+            raise RuntimeError('update central receipt unconfirmed; observe without reapplying')
+    try:
+        result = context.run_sync(_apply_update, installer, install_dir, **kwargs)
+    except BaseException:
+        try: persist_outcome()
+        except Exception: pass
+        raise
+    persist_outcome()
+    return result
+
+
+def _apply_update(
     installer: Path,
     install_dir: Path,
     *,
@@ -137,6 +179,7 @@ def apply_update(
     relay_port: int | None = None,
     stop_after_doctor: bool = False,
     restart_desktop: bool = True,
+    coordinated_handoff: Path | None = None,
 ) -> int:
     install_dir = _validate_install_dir(
         install_dir,
@@ -151,7 +194,8 @@ def apply_update(
         raise ValueError("repair installation identity with Setup before updating")
     # Fail before stopping any process or copying a binary when durable
     # migration of the real SQLite state has not been coordinated by the host.
-    _require_offline_migration_contract(state_dir, install_dir)
+    if coordinated_handoff is None:
+        _require_offline_migration_contract(state_dir, install_dir)
     namespace = hashlib.sha256(identity.encode()).hexdigest()
     rollback_root = install_dir.parent / "Rollback" / namespace
     from .program_stage import (require_no_interrupted_stage, stage_program_backup,
@@ -159,8 +203,18 @@ def apply_update(
     # Check for an earlier crash BEFORE any process is touched.
     require_no_interrupted_stage(rollback_root)
     _wait_pid(parent_pid)
-    from .installer import _stop_installed_processes
-    _stop_installed_processes(install_dir)
+    if coordinated_handoff is not None:
+        from .app_exit_update import load_handoff
+        handoff = load_handoff(coordinated_handoff, install_dir)
+        if handoff['version'] != version or Path(handoff['installer']) != installer:
+            raise PermissionError('coordinated update version/package mismatch')
+        # Exclusive claim is created BEFORE Setup, never inferred from exit code.
+        with coordinated_handoff.with_suffix('.claimed').open('x',encoding='utf-8') as claim:
+            json.dump({'helper_pid':os.getpid(),'operation_id':handoff['operation_id']},claim)
+            claim.flush();os.fsync(claim.fileno())
+    else:
+        from .installer import _stop_installed_processes
+        _stop_installed_processes(install_dir)
     backup, stage_journal = stage_program_backup(install_dir, rollback_root, identity)
     try:
         mark_program_stage(stage_journal, "APPLYING", identity)
@@ -174,6 +228,8 @@ def apply_update(
             str(installer), "--silent", "--install-dir", str(install_dir),
             "--upgrade", "--no-launch", "--no-git",
         ]
+        if coordinated_handoff is not None:
+            command += ['--offline-handoff',str(coordinated_handoff)]
         if mcp_port is not None:
             command += ["--mcp-port", str(mcp_port)]
         if relay_port is not None:
@@ -187,6 +243,9 @@ def apply_update(
         tunnel_archives = list(installer.parent.glob("tunnel-client-v*-windows-amd64.zip"))
         if len(tunnel_archives) == 1:
             command += ["--tunnel-archive", str(tunnel_archives[0])]
+        if coordinated_handoff is not None:
+            from .lifecycle_effects import checkpoint_effect
+            checkpoint_effect()
         result = subprocess.run(
             command,
             timeout=300,
@@ -197,6 +256,9 @@ def apply_update(
         desktop = install_dir / "sentra-desktop.exe"
         if not desktop.is_file():
             raise RuntimeError("update completed without sentra-desktop.exe")
+        if coordinated_handoff is not None:
+            from .app_exit_update import verify_installed_components
+            verify_installed_components(install_dir,handoff['components'])
         _write_state({
             "version": version,
             "previous_backup": str(backup),
@@ -205,6 +267,10 @@ def apply_update(
             "updated_at": time.time(),
         }, install_dir=install_dir, state_dir=state_dir)
         mark_program_stage(stage_journal, "COMMITTED", identity)
+        if coordinated_handoff is not None:
+            from .app_exit_update import write_helper_outcome
+            write_helper_outcome(coordinated_handoff,handoff,state='SUCCEEDED',
+                result={'version':version,'phase':'COMMITTED','program_transaction_id':stage_journal.stem})
         if restart_desktop and not stop_after_doctor:
             _start_desktop(install_dir)
         return 0
@@ -219,6 +285,10 @@ def apply_update(
             mark_program_stage(stage_journal, "RESTORED", identity)
             if restart_desktop:
                 _start_desktop(install_dir)
+        if coordinated_handoff is not None:
+            from .app_exit_update import write_helper_outcome
+            write_helper_outcome(coordinated_handoff,handoff,state='FAILED',
+                result={'phase':'RESTORED','version':version})
         raise
 
 
@@ -349,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
     apply.add_argument("--relay-port", type=int)
     apply.add_argument("--stop-after-doctor", action="store_true")
     apply.add_argument("--no-desktop-restart", action="store_true")
+    apply.add_argument("--handoff-file", type=Path)
     rollback = sub.add_parser("rollback")
     rollback.add_argument("--install-dir", required=True)
     rollback.add_argument("--parent-pid", type=int, required=True)
@@ -375,6 +446,7 @@ def main(argv: list[str] | None = None) -> int:
                 relay_port=args.relay_port,
                 stop_after_doctor=args.stop_after_doctor,
                 restart_desktop=not args.no_desktop_restart,
+                coordinated_handoff=args.handoff_file,
             )
         if args.command == "rollback":
             return rollback_update(

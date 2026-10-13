@@ -65,7 +65,7 @@ def test_history_workspace_acl_byte_quota_and_fail_closed(tmp_path):
     hist = dict(conversation_id="chat-abc123", message_id="msg-abc123",
                 revision=0, role="user", state="complete")
     with pytest.raises(ValueError):
-        history.record_frame("owner", "ws", **hist, body="x" * 131073)
+        history.record_frame("owner", "ws", **hist, body="x" * 800001)
     with pytest.raises(ValueError):
         history.record_frame("owner", "ws", **{**hist, "revision": -1}, body="x")
     history.record_frame("owner", "ws", **hist, body="private content")

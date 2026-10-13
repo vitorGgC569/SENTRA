@@ -12,6 +12,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+from pathlib import Path
 import re
 import secrets
 import sqlite3
@@ -382,6 +384,17 @@ class JobStore:
                             (min(row[3], self.clock() + float(self.LEASE_WINDOW_S)), self.clock(), jid))
             self.db.commit()
 
+    def leased_payload(self, jid, worker, token):
+        """Host-only bounded read; never claim/requeue/renew a send."""
+        with self.lock:
+            row = self.db.execute("SELECT payload,state,worker,lease,lease_until,deadline FROM jobs WHERE id=?",
+                                  (jid,)).fetchone()
+            if (row is None or row[1] != "LEASED" or row[2] != worker
+                    or not isinstance(token, str) or not secrets.compare_digest(row[3], token)
+                    or self.clock() >= min(row[4], row[5])):
+                raise PermissionError("attachment read requires exact live worker lease")
+            return self._decode_payload(row[0], jid)
+
     def progress(self, jid, worker, token, phase, *, single_use_send=False):
         ProgressReport(job_id=jid, worker=worker, lease_token=token, phase=phase).validate()
         with self.lock, self.db:
@@ -553,6 +566,16 @@ class JobStore:
             return {"submitted": sum(counts.values()), "completed": counts.get('COMPLETED',0),
                     "failed": counts.get('FAILED',0), "queued": counts.get('QUEUED',0),
                     "leased": counts.get('LEASED',0)}
+
+    def namespace_identity(self):
+        """Identify the actual outbox without exposing its host path or contents."""
+        with self.lock:
+            filename = next((row[2] for row in self.db.execute('PRAGMA database_list')
+                             if row[1] == 'main'), '')
+            if not filename:
+                return None  # an in-memory relay cannot own a durable Canvas outbox
+            normalized = str(Path(filename).resolve()).casefold()
+            return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
 
     def close(self):
         with self.lock:

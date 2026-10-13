@@ -1,0 +1,35 @@
+{
+  "upstream": "https://github.com/CopilotKit/OpenDots",
+  "commit": "625452e06cde74cb25b0ce319e2c1be0488f5a5f",
+  "license": "MIT",
+  "copyright": "Copyright (c) Atai Barkai",
+  "license_file": "LICENSE",
+  "source_component": "src/client/Mascot.tsx",
+  "component_modifications": "Adapted to JSX, Portuguese accessible labels and SENTRA status; original asset bytes retained.",
+  "files": {
+    "blue.png": {
+      "source_path": "public/dots/blue.png",
+      "sha256": "bf8ef19c7b7d753c11ba05e411f15a0733bcb810541bc88fb34c38427c6a6040",
+      "git_blob": "8533fc988836ab37703974097b11181003982f84",
+      "modified": false
+    },
+    "mint.png": {
+      "source_path": "public/dots/mint.png",
+      "sha256": "aebbd4a27e346b7a2f41976bcdae4b144e42219cce77182053cfe4140bb6486f",
+      "git_blob": "25447a01f8ee81441924f8155bd300f257d8175e",
+      "modified": false
+    },
+    "orange.png": {
+      "source_path": "public/dots/orange.png",
+      "sha256": "bf9a2f9f6859c2931b9a4062117deb7d06fba77b190b5ad52a90587f368b34a7",
+      "git_blob": "9efdc48060911eb4594bae53bd6f80a71f45cd84",
+      "modified": false
+    },
+    "purple.png": {
+      "source_path": "public/dots/purple.png",
+      "sha256": "9fb3e53fc90b4fe881e1c1f8121dd32fbe9882dbc989156c40b0a8fadc348441",
+      "git_blob": "15cbb5b78133c9c14a2894c6b9c6ee8bbbdbade1",
+      "modified": false
+    }
+  }
+}

@@ -1,0 +1,46 @@
+name: Integral release components (final phase only)
+on:
+  workflow_dispatch:
+    inputs:
+      final_phase_authorized:
+        type: boolean
+        required: true
+        default: false
+      artifact_run_id:
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compose:
+    if: inputs.final_phase_authorized
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Fetch reviewed materialized source-pipeline outputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN: ${{ inputs.artifact_run_id }}
+        shell: pwsh
+        run: gh run download $env:ARTIFACT_RUN --name sentra-integral-runtimes --dir materialized
+      - name: Transport real WASM/SBOM and native HCS/RustDesk manifests
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          python -B scripts/commander/materialize_release_components.py --final-phase-authorized --staging staging --quickjs materialized/quickjs --hcs materialized/hcs --rustdesk materialized/rustdesk
+      - name: Preserve runtime distribution payload for final Setup/release job
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: Compress-Archive -LiteralPath staging/runtime,staging/runtime-components.json -DestinationPath sentra-integral-runtimes.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: sentra-integral-runtime-payload
+          path: sentra-integral-runtimes.zip
+          if-no-files-found: error

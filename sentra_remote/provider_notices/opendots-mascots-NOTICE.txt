@@ -1,0 +1,23 @@
+SENTRA Desktop — Third-party notice: OpenDots mascots (CopilotKit/OpenDots)
+===============================================================================
+
+Component: mascot artwork blue/mint/orange/purple.png
+Upstream: https://github.com/CopilotKit/OpenDots @ 625452e06cde74cb25b0ce319e2c1be0488f5a5f
+Source paths: public/dots/{blue,mint,orange,purple}.png
+License: MIT, Copyright (c) Atai Barkai (see LICENSE shipped alongside)
+Provenance record: sentra_canvas/desktop_ui/src/assets/opendots/PROVENANCE.json
+  (per-file sha256 + upstream git blob IDs; bytes unmodified)
+
+SENTRA modification record (per contracts L166, NOTICE por modificação):
+- PNG bytes: UNMODIFIED (digests re-verified at release staging; mismatch
+  refuses the staging — see _stage_opendots_artwork in
+  scripts/commander/release_assets.py).
+- Source component adaptation only: upstream src/client/Mascot.tsx adapted to
+  JSX with Portuguese accessible labels and SENTRA status; original asset
+  bytes retained.
+- Release transport: LICENSE + PROVENANCE.json + this NOTICE ship under
+  docs/opendots/ in every Setup/MSI payload, hence into every install.
+
+Protocol pins observed (Prisma-owned package.json, recorded here only):
+- @tiptap bubble + floating-menu 3.31.3 (pins+overrides); no install/lock/
+  build executed in this phase.

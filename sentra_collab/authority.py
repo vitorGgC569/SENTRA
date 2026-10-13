@@ -19,6 +19,7 @@ import time
 from contextlib import contextmanager
 
 from sentra_mcp.services.control_plane import ControlPlaneService
+from .authority_guard import begin_authority_guard, guard_query
 
 
 ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
@@ -71,11 +72,12 @@ def validate_presentation(value):
 
 
 class CollaborationAuthority:
-    def __init__(self, control: ControlPlaneService, *, owner: str, clock=time.time):
+    def __init__(self, control: ControlPlaneService, *, owner: str, clock=time.time, documents=None):
         if not isinstance(control, ControlPlaneService) or not owner:
             raise ValueError("real control plane and owner required")
         self.control, self.owner, self.clock = control, owner, clock
         self.store = control.store
+        self.documents = documents
         with self._db() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version > 1:
@@ -129,14 +131,12 @@ class CollaborationAuthority:
         # These databases are read guards, not replicated grant authorities.
         # BEGIN IMMEDIATE locks attached writers through the snapshot commit,
         # ordering it against revoke, task state changes and run cancellation.
-        for alias, path in (("auth", self.store.path_for("authorization")),
-                            ("gov", self.store.path_for("governance")),
-                            ("core", self.control.durable.root / "durable.sqlite3")):
-            db.execute("ATTACH DATABASE ? AS " + alias, (str(path),))
-        db.execute("BEGIN IMMEDIATE")
+        return begin_authority_guard(db, self.store, self.control.durable.root / "durable.sqlite3", owner=self.owner)
 
     def _guard_current(self, db, row, action):
-        item = db.execute("SELECT * FROM gov.work_items WHERE work_item_id=? AND owner=?",
+        if action == "write" and getattr(db, "_collaboration_member_role", None) == "reader":
+            raise CollaborationDenied("collaboration tenant is read-only")
+        item = guard_query(db, self.store, "SELECT * FROM gov.work_items WHERE work_item_id=? AND owner=?",
                           (row["work_item"], self.owner)).fetchone()
         if item is None or item["state"] != "RUNNING":
             raise CollaborationDenied("collaboration task no longer active")
@@ -145,12 +145,12 @@ class CollaborationAuthority:
                 or json.loads(item["metadata_json"]).get("workspace_id") != row["workspace"]
                 or "canvas.collab." + action not in json.loads(item["required_capabilities_json"])):
             raise CollaborationDenied("collaboration task scope changed")
-        run = db.execute("SELECT state FROM core.runs WHERE run_id=? AND owner=?",
+        run = guard_query(db, self.store, "SELECT state FROM core.runs WHERE run_id=? AND owner=?",
                          (item["run_id"], self.owner)).fetchone()
         if run is None or run["state"] != "RUNNING":
             raise CollaborationDenied("collaboration run no longer active")
         for permission in ("read", "write") if action == "write" else ("read",):
-            grant = db.execute("SELECT * FROM auth.authorization_grants WHERE grant_id=? AND owner=?",
+            grant = guard_query(db, self.store, "SELECT * FROM auth.authorization_grants WHERE grant_id=? AND owner=?",
                                (row[permission + "_grant"], self.owner)).fetchone()
             if (grant is None or grant["revoked"] or grant["principal_id"] != row["principal"]
                     or grant["principal_type"] != row["principal_type"]
@@ -158,7 +158,14 @@ class CollaborationAuthority:
                 raise CollaborationDenied("collaboration grant no longer active")
 
     def issue(self, *, workspace_id, principal_id, work_item_id,
-              principal_type="user", permission="read", ttl_seconds=300):
+              principal_type="user", permission="read", ttl_seconds=300,
+              project_id=None, space_id=None, document_id=None):
+        if document_id is not None or space_id is not None or project_id is not None:
+            if self.documents is None or project_id != workspace_id or not space_id or not document_id:
+                raise CollaborationDenied("document collaboration requires composed document authority and exact scope")
+            return self.documents.issue(project_id=project_id, space_id=space_id, document_id=document_id,
+                principal_id=principal_id, work_item_id=work_item_id, principal_type=principal_type,
+                permission=permission, ttl_seconds=ttl_seconds)
         workspace_id, principal_id = _id(workspace_id), _id(principal_id)
         if (principal_type not in {"user", "agent"} or permission not in {"read", "write"}
                 or type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 900):
@@ -191,7 +198,7 @@ class CollaborationAuthority:
                 "work_item,permission,read_grant,write_grant,expires) VALUES(?,?,?,?,?,?,?,?,?)",
                 (fingerprint,workspace_id,principal_id,principal_type,work_item_id,permission,
                  grants["read"],grants.get("write"),expires))
-            epoch = cur.lastrowid
+            epoch = db.execute("SELECT epoch FROM collaboration_tickets WHERE fingerprint=?", (fingerprint,)).fetchone()["epoch"]
         return {"token": token, "workspaceId": workspace_id, "principalId": principal_id,
                 "permission": permission, "epoch": epoch, "expiresAt": expires,
                 "documentName": "sentra-collab:v1:" + workspace_id}

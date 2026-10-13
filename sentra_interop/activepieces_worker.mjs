@@ -70,7 +70,7 @@ try{
       auth:input.auth ?? undefined,propsValue:input.props,
       executionType:input.execution_type ?? 'BEGIN',
       project:{id:input.project_id,externalId:()=>rpc('project.externalId',{})},
-      flows:{current:{id:input.flow_id,version:{id:input.flow_version}},list:()=>unsupported('flows.list')},
+      flows:{current:{id:input.flow_id,version:{id:input.flow_version}},list:params=>rpc('flows.list',params ?? {})},
       step:{name:input.member},
       store:{get:(key,scope)=>rpc('store.get',{key,scope}),put:(key,value,scope)=>rpc('store.put',{key,value,scope}),
              delete:(key,scope)=>rpc('store.delete',{key,scope})},
@@ -79,12 +79,13 @@ try{
              upload:async({fileName,data})=>rpc('files.upload',{fileName,data:(await bytes(data)).toString('base64')})},
       output:{update:params=>rpc('output.update',params)},
       tags:{add:params=>rpc('tags.add',params)},
-      run:{id:input.operation_id,canPause:false,stop:()=>unsupported('run.stop'),respond:()=>unsupported('run.respond'),
-           createWaitpoint:()=>unsupported('run.createWaitpoint'),waitForWaitpoint:()=>unsupported('run.waitForWaitpoint')},
+      run:{id:input.operation_id,canPause:(input.context_services ?? []).includes('run.createWaitpoint'),stop:params=>rpc('run.stop',params ?? {}),respond:params=>rpc('run.respond',params ?? {}),
+           createWaitpoint:params=>rpc('run.createWaitpoint',params ?? {}),waitForWaitpoint:id=>rpc('run.waitForWaitpoint',{waitpointId:id})},
       server:input.server ?? deniedObject('server'),
       webhookUrl:input.webhook_url,
       payload:input.trigger_payload,
       setSchedule:schedule=>rpc('schedule.set',schedule),
+      app:{createListeners:params=>rpc('app.createListeners',params)},
     };
     if(input.execution_type==='RESUME')context.resumePayload=input.resume_payload;
     const fn=hook==='action'?member.run:hook==='trigger-run'?member.run:member[hook];

@@ -73,6 +73,37 @@ class ToolExposureRegistry:
             db.execute("UPDATE plugin_schema_epoch SET generation=generation+1 WHERE id=1")
         return {"tools": len(tools), "enabled": enabled, "names_reserved_when_disabled": True}
 
+    def conflict_report(self, provider_id, methods):
+        """Read-only exposure pre-check (pluginExposure port), no reservation.
+
+        Reports name collisions against reservations held by other
+        providers (including disabled ones), schema budget overruns and
+        the resulting tool count, without changing any publication.
+        The host UI calls this before import/registration review.
+        """
+        if (not isinstance(provider_id, str) or not 1 <= len(provider_id) <= 256
+                or provider_id == "sentra-core"):
+            raise ValueError("provider identity required")
+        try:
+            tools = self.descriptors(methods)
+        except ValueError as exc:
+            return {"provider_id": provider_id, "valid": False,
+                    "reason": str(exc)[:200], "collisions": [],
+                    "tool_count": 0, "grants_created": False}
+        collisions = []
+        with closing(self.store.connect("plugin_worker")) as db:
+            for tool in tools:
+                old = db.execute("SELECT provider_id FROM plugin_tool_names WHERE name_key=?",
+                                 (tool["name"].casefold(),)).fetchone()
+                if old and old[0] != provider_id:
+                    collisions.append({"name": tool["name"],
+                                       "reserved_by": old[0],
+                                       "reserved_when_disabled": True})
+        return {"provider_id": provider_id, "valid": not collisions,
+                "collisions": collisions, "tool_count": len(tools),
+                "names_reserved_when_disabled": True,
+                "grants_created": False, "reservation_changed": False}
+
     def disable(self, provider_id):
         with closing(self.store.connect("plugin_worker")) as db, db:
             db.execute("UPDATE plugin_tool_names SET enabled=0 WHERE provider_id=?", (provider_id,))

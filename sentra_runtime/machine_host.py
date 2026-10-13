@@ -38,6 +38,9 @@ class MachineHost:
         self._closed = False
         self._factories = {}
         self._inventory = {}
+        self._configuration_handlers = {}
+        self._runtime_host_resolver = None
+        self._canvas_adapter = None
         self._thread = threading.Thread(target=self._serve, daemon=True,
                                         name="sentra-machine-host")
         self._thread.start()
@@ -150,6 +153,41 @@ class MachineHost:
             "recalculation_backends":[asdict(p) for p in recalculation],"ocr_backends":[asdict(p) for p in ocr]})
         return dict(self._inventory[machine_id])
 
+    def configure_workspace_files(self, *, workspace_id: str, workspace_root: str, agent_id: str) -> dict:
+        """Owner-configured UTF-8 files machine. No WorkItems or Grants created."""
+        return self._call(self._configure_workspace_files(workspace_id, workspace_root, agent_id))
+
+    async def _configure_workspace_files(self, workspace_id, workspace_root, agent_id):
+        from sentra_executors.central_integration import CentralExecutorFactory
+        from sentra_executors.workspace_files import (FILE_CAPABILITIES, WorkspaceFilesBinding,
+                                                       declare_workspace_files_machine)
+        from .workspace_paths import workspace_paths
+        root = Path(workspace_root).resolve(strict=True)
+        if not root.is_dir() or not workspace_id or not agent_id:
+            raise ValueError("trusted Canvas workspace and Dot required")
+        machine_id = self._machine_id(workspace_id, agent_id, "workspace-files")
+        if machine_id in self._inventory:
+            return dict(self._inventory[machine_id])
+        paths = workspace_paths(root, self.control.durable.root)
+        bindings = tuple(WorkspaceFilesBinding(capability_id=cap, paths=paths, actions=tuple(actions))
+                         for cap, actions in FILE_CAPABILITIES.items())
+        factory = CentralExecutorFactory(control=self.control, owner=self.owner, agent_id=agent_id)
+        declaration = declare_workspace_files_machine(machine_id=machine_id,
+            owner_principal_id=agent_id, bindings=bindings, policy=factory.policy)
+        factory.register_execution(declaration)
+        self._factories[machine_id] = factory
+        self._inventory[machine_id] = {
+            "machine_id": machine_id, "kind": "workspace-files",
+            "workspace_id": workspace_id, "agent_id": agent_id,
+            "capabilities": list(FILE_CAPABILITIES),
+            "actions": {cap: list(actions) for cap, actions in FILE_CAPABILITIES.items()},
+            "registered": True, "grant_created": False,
+        }
+        self.configurations.put(machine_id, {
+            "kind": "workspace-files", "workspace_id": workspace_id,
+            "workspace_root": str(root), "agent_id": agent_id})
+        return dict(self._inventory[machine_id])
+
     def configure_browser(self, *, workspace_id: str, workspace_root: str,
                           agent_id: str, profiles: list[dict], headless: bool = True) -> dict:
         return self._call(self._configure_browser(workspace_id, workspace_root, agent_id,
@@ -228,6 +266,176 @@ class MachineHost:
             return dict(self._inventory[machine_id])
         return self._call(configure())
 
+    def configure_interop(self, *, workspace_id, workspace_root, agent_id, kind, provider_config):
+        async def configure():
+            from sentra_interop.provider_machine import InteropProviderMachine
+            if kind not in {"acp", "a2a", "mcp", "channels", "acp_registry"} or not isinstance(provider_config, dict) or provider_config.get("enabled") is not True:
+                raise ValueError("explicit enabled interop provider configuration required")
+            root = Path(workspace_root).resolve(strict=True)
+            if not root.is_dir() or not workspace_id or not agent_id:
+                raise ValueError("trusted workspace and agent required")
+            machine_id = self._machine_id(workspace_id, agent_id, kind)
+            if machine_id in self._inventory:
+                raise ValueError("interop machine configuration is immutable")
+            configured = json.loads(json.dumps(provider_config, allow_nan=False))
+            common = dict(owner=self.owner, agent_id=agent_id, machine_id=machine_id, workspace_root=str(root))
+            if kind == "channels":
+                from sentra_interop.channel_machine import ChannelProviderMachine
+                factory = ChannelProviderMachine(self.control, configuration={k:v for k,v in configured.items() if k != "enabled"}, **common)
+            elif kind == "acp_registry":
+                from sentra_interop.registry_machine import RegistryProviderMachine
+                factory = RegistryProviderMachine(self.control, configuration=configured, **common)
+            else:
+                factory = InteropProviderMachine(self.control, kind=kind, configuration=configured, **common)
+            inventory = {**factory.catalog(), "machine_id": machine_id, "workspace_id": workspace_id, "agent_id": agent_id}
+            self.configurations.put(machine_id, {"kind": kind, "workspace_id": workspace_id,
+                "workspace_root": str(root), "agent_id": agent_id, "provider_config": configured})
+            self._factories[machine_id] = factory
+            self._inventory[machine_id] = inventory
+            return dict(inventory)
+        return self._call(configure())
+
+    def configure_executor(self, *, workspace_id, workspace_root, agent_id, kind, provider_config):
+        from sentra_executors.integral import configure_executor
+        return configure_executor(self, workspace_id=workspace_id, workspace_root=workspace_root,
+                                  agent_id=agent_id, kind=kind, provider_config=provider_config)
+
+    def application_action(self, *, workspace_id, work_item_id, machine_id, capability_id,
+                           operation_id, request_key, command, selector_key, text=None):
+        from sentra_executors.ufo_actions import UFOApplicationActions
+        return self._call(UFOApplicationActions(self._dispatch).execute(workspace_id=workspace_id,
+            work_item_id=work_item_id, machine_id=machine_id, capability_id=capability_id,
+            operation_id=operation_id, request_key=request_key, command=command,
+            selector_key=selector_key, text=text))
+
+    def input_status(self, *, workspace_id, machine_id, work_item_id=None, capability_id=None):
+        async def status():
+            from sentra_executors.input_control import InputControl
+            config = self._inventory.get(machine_id)
+            factory = self._factories.get(machine_id)
+            if config is None or config["workspace_id"] != workspace_id:
+                raise AuthorizationRequired("machine outside workspace")
+            resource = getattr(factory, "_input_resources", {}).get(machine_id)
+            if not resource:
+                raise ValueError("machine does not expose human/agent input control")
+            value = InputControl(self.control, owner=self.owner).status(resource_id=resource, workspace_id=workspace_id)
+            value.pop("resource_id", None)
+            value.pop("principal_id", None)
+            value["ttl_remaining_seconds"] = max(0, int(value.get("expires_at", 0) - time.time()))
+            value["grant_status"] = "unknown"
+            if work_item_id and capability_id:
+                item = self.control.work_item_info(work_item_id, self.owner)
+                if (item.get("metadata", {}).get("workspace_id") != workspace_id or item.get("metadata", {}).get("machine_id") != machine_id
+                        or item.get("assignee_agent_id") != config["agent_id"] or capability_id not in config["capabilities"]):
+                    value["grant_status"] = "denied"
+                else:
+                    policy = BoundWorkItemPolicy(owner=self.owner, principal_type="agent",
+                        authorization=self.control.authorization, governance=self.control.governance)
+                    probe = OperationRequest("op-input-status", config["agent_id"], machine_id, capability_id, work_item_id, "input-status", {})
+                    value["grant_status"] = "granted" if policy(probe).allowed is True else "denied"
+            return value
+        return self._call(status(), timeout=15)
+
+    def input_handoff(self, *, workspace_id, machine_id, holder, expected_epoch,
+                      ttl_seconds=60, work_item_id=None, capability_id=None, operation_id=None, arguments=None, request_key=None,
+                      only_if_available=False):
+        async def handoff():
+            from sentra_executors.input_control import InputControl
+            config = self._inventory.get(machine_id)
+            factory = self._factories.get(machine_id)
+            if config is None or config["workspace_id"] != workspace_id:
+                raise AuthorizationRequired("machine outside workspace")
+            resource = getattr(factory, "_input_resources", {}).get(machine_id)
+            if not resource:
+                raise ValueError("machine does not expose human/agent input control")
+            request = None
+            if holder == "agent":
+                item = self.control.work_item_info(work_item_id, self.owner)
+                if (item.get("metadata", {}).get("workspace_id") != workspace_id
+                        or item.get("metadata", {}).get("machine_id") != machine_id
+                        or item.get("assignee_agent_id") != config["agent_id"]):
+                    raise AuthorizationRequired("input WorkItem outside machine/workspace")
+                request = factory.dispatch_request(run_id=item["run_id"], work_item_id=work_item_id,
+                    machine_id=machine_id, capability_id=capability_id, operation_id=operation_id,
+                    arguments=arguments or {}, idempotency_key=request_key)
+            return InputControl(self.control, owner=self.owner).handoff(resource_id=resource, workspace_id=workspace_id,
+                machine_id=machine_id, holder=holder, expected_epoch=expected_epoch, request_key=request_key,
+                ttl_seconds=ttl_seconds, request=request, only_if_available=only_if_available)
+        return self._call(handoff(), timeout=15)
+
+    def dispatch_human(self, *, workspace_id, work_item_id, machine_id, capability_id,
+                       operation_id, arguments, expected_epoch, idempotency_key=None):
+        async def dispatch():
+            from sentra_executors.input_control import human_input_scope
+            config = self._inventory.get(machine_id)
+            factory = self._factories.get(machine_id)
+            if config is None or config["workspace_id"] != workspace_id:
+                raise AuthorizationRequired("human input machine outside workspace")
+            resource = getattr(factory, "_input_resources", {}).get(machine_id)
+            if not resource:
+                raise ValueError("machine has no human input resource")
+            if not isinstance(arguments, dict) or set(arguments) & {"human", "owner", "principal", "principal_id", "resource_id"}:
+                raise ValueError("human input authority is server-derived")
+            with human_input_scope(self.control, owner=self.owner, workspace_id=workspace_id,
+                                   machine_id=machine_id, resource_id=resource, expected_epoch=expected_epoch):
+                return await self._dispatch(workspace_id, work_item_id, machine_id, capability_id,
+                                            operation_id, arguments, idempotency_key)
+        return self._call(dispatch())
+
+    def receive_interop_callback(self, machine_id, raw_body, headers):
+        async def receive():
+            config = self._inventory.get(machine_id)
+            factory = self._factories.get(machine_id)
+            if config is None or config.get("kind") != "a2a" or not callable(getattr(factory, "receive_callback", None)):
+                raise ValueError("A2A callback provider is not configured")
+            if not isinstance(raw_body, bytes) or len(raw_body) > 2_000_000 or not isinstance(headers, dict):
+                raise ValueError("bounded raw callback request required")
+            return factory.receive_callback(raw_body=raw_body, headers=headers)
+        return self._call(receive(), timeout=30)
+
+    def attach_runtime_adapters(self, *, runtime_host_resolver=None, canvas=None):
+        """Attach trusted host dependencies before restore; no TaskRuntime fork."""
+        if runtime_host_resolver is not None and not callable(runtime_host_resolver):
+            raise ValueError("trusted runtime host resolver required")
+        if canvas is not None and self.owner != "canvas:" + canvas.store.principal:
+            raise PermissionError("Canvas adapter belongs to another principal")
+        self._runtime_host_resolver = runtime_host_resolver
+        self._canvas_adapter = canvas
+
+    def configure_runtime(self, *, workspace_id, workspace_root, agent_id, provider, binding_id, runtime_host=None):
+        if runtime_host is None:
+            if not callable(self._runtime_host_resolver):
+                raise RuntimeError("subordinate runtime provider host is not configured")
+            runtime_host = self._runtime_host_resolver(workspace_id)
+        if getattr(runtime_host,"control",None) is not self.control or getattr(runtime_host,"owner",None) != self.owner:
+            raise PermissionError("runtime provider must share the exact Control Plane and owner")
+        async def configure():
+            from sentra_interop.workflow_runtime_machine import configure_runtime_machine
+            # An async SDK loader primes the sync machine constructor's cache
+            # on this owned loop. A sync provider must already be preconnected.
+            loader = getattr(runtime_host,"restore_async",None)
+            if callable(loader):
+                await loader(binding_id)
+            return configure_runtime_machine(self, workspace_id=workspace_id,workspace_root=workspace_root,
+                agent_id=agent_id,provider=provider,binding_id=binding_id,runtime_host=runtime_host)
+        return self._call(configure())
+
+    def configure_computer(self, *, workspace_id, workspace_root, agent_id):
+        async def configure():
+            from sentra_executors.local_computer import configure_computer
+            return configure_computer(self, workspace_id=workspace_id, workspace_root=workspace_root, agent_id=agent_id)
+        return self._call(configure())
+
+    def configure_terminal(self, *, workspace_id, workspace_root, agent_id, canvas=None):
+        canvas = canvas or self._canvas_adapter
+        if canvas is None or self.owner != "canvas:" + canvas.store.principal:
+            raise RuntimeError("fenced terminal Canvas adapter is not configured for this owner")
+        async def configure():
+            from sentra_interop.workflow_runtime_machine import configure_terminal_machine
+            return configure_terminal_machine(self,workspace_id=workspace_id,workspace_root=workspace_root,
+                agent_id=agent_id,canvas_principal=canvas.store.principal,canvas=canvas)
+        return self._call(configure())
+
     def configure_workflow(self,*,workspace_id,workspace_root,agent_id,definitions):
         async def configure():
             from .workflow_machine import DocumentWorkflowMachine,WORKFLOW_CAPABILITIES
@@ -299,9 +507,9 @@ class MachineHost:
                 if not isinstance(parameters,dict) or any(not isinstance(k,str) or not isinstance(v,str) for k,v in parameters.items()):
                     raise ValueError("configured Guacamole plugin parameters required")
                 config["parameters"]=tuple(sorted(parameters.items()))
-                for field in ("allowed_input","supported_versions","actions"):
+                for field in ("allowed_input","supported_versions","actions","record_input"):
                     if field in config:config[field]=tuple(config[field])
-                capability="remote:control" if config.get("allowed_input") else "remote:view"
+                capability="remote:control" if config.get("allowed_input") or config.get("clipboard_enabled") and "clipboard.write" in config.get("actions", ()) else "remote:view"
                 binding=GuacamoleBinding(capability_id=capability,paths=paths,
                     secrets=(lambda:{name:resolve() for name,resolve in resolvers.items()}) if resolvers else None,**config)
                 declaration=declare_guacamole_machine(machine_id=machine_id,owner_principal_id=agent_id,
@@ -319,7 +527,13 @@ class MachineHost:
                 config["executable"]=native["executable"];config["build_manifest"]=native["build_manifest"]
                 persisted.update(executable=native["executable"],build_manifest=native["build_manifest"])
                 runtime=private/"native-runtime";runtime.mkdir(mode=0o700,exist_ok=True)
-                if "actions" in config:config["actions"]=tuple(config["actions"])
+                for field in ("actions", "allowed_input", "allowed_keycodes"):
+                    if field in config:config[field]=tuple(config[field])
+                login_ref = config.pop("login_credential_ref", None)
+                if "login_credential" in config:
+                    raise ValueError("RustDesk login credential must reference the central vault")
+                if login_ref:
+                    config["login_credential"] = secret(login_ref, "rustdesk:" + machine_id + ":login")
                 binding=RustDeskPeerBinding(capability_id="rustdesk:session",paths=paths,runtime_root=str(runtime),
                     host_runtime_paths=AuthorizedPaths((str(runtime),),(str(runtime),)),
                     manifest_paths=AuthorizedPaths((native["bundle_root"],),()),**config)
@@ -339,6 +553,19 @@ class MachineHost:
             return dict(inventory)
         return self._call(configure())
 
+    def attach_configuration_handler(self, kind, handler):
+        """Trusted root composition slot; configuration never grants execution."""
+        if kind != "code-mode" or not callable(handler):
+            raise ValueError("trusted code-mode configuration handler required")
+        self._configuration_handlers[kind] = handler
+
+    def configure_code(self, *, workspace_id, workspace_root, agent_id, provider_config):
+        handler = self._configuration_handlers.get("code-mode")
+        if handler is None:
+            raise RuntimeError("code-mode Canvas adapter is not configured")
+        return handler(self, workspace_id=workspace_id, workspace_root=workspace_root,
+                       agent_id=agent_id, provider_config=provider_config)
+
     def restore(self, validate_scope):
         """Rebuild dispatch bindings only after the host checks current scope.
 
@@ -347,13 +574,36 @@ class MachineHost:
         """
         if not callable(validate_scope):
             raise ValueError("trusted scope validator required")
+        from sentra_executors.integral import EXECUTOR_KINDS
         for entry in self.configurations.entries():
             config = entry["configuration"]
             try:
                 validate_scope(config)
-                if entry["machine_id"] != self._machine_id(config["workspace_id"],config["agent_id"],config["kind"]):
+                identity_kind = config["kind"]
+                if identity_kind in {"runtime-temporal","runtime-langgraph"}:
+                    identity_kind += "-" + config["binding_id"][-8:]
+                if entry["machine_id"] != self._machine_id(config["workspace_id"],config["agent_id"],identity_kind):
                     raise ValueError("machine identity changed")
-                if config["kind"] == "documents":
+                if config["kind"] in {"runtime-temporal","runtime-langgraph"}:
+                    self.configure_runtime(workspace_id=config["workspace_id"],workspace_root=config["workspace_root"],
+                        agent_id=config["agent_id"],provider=config["provider"],binding_id=config["binding_id"])
+                elif config["kind"] == "computer-local":
+                    self.configure_computer(workspace_id=config["workspace_id"], workspace_root=config["workspace_root"], agent_id=config["agent_id"])
+                elif config["kind"] == "virtualbox_vm":
+                    from sentra_canvas.shell_dot_vm import configure_virtualbox_machine
+                    configure_virtualbox_machine(self, workspace_id=config['workspace_id'], workspace_root=config['workspace_root'],
+                        agent_id=config['agent_id'], root_dot_id=config['root_dot_id'])
+                elif config["kind"] == "workspace-files":
+                    self.configure_workspace_files(workspace_id=config["workspace_id"],
+                        workspace_root=config["workspace_root"], agent_id=config["agent_id"])
+                elif config["kind"] == "terminal":
+                    if self.owner != "canvas:" + config["canvas_principal"]:
+                        raise PermissionError("terminal restore principal changed")
+                    self.configure_terminal(workspace_id=config["workspace_id"],workspace_root=config["workspace_root"],agent_id=config["agent_id"])
+                elif config["kind"] == "code-mode":
+                    self.configure_code(workspace_id=config["workspace_id"],workspace_root=config["workspace_root"],
+                        agent_id=config["agent_id"],provider_config=config["provider_config"])
+                elif config["kind"] == "documents":
                     self.configure_documents(**{key:config[key] for key in ("workspace_id","workspace_root","agent_id")},
                         recalculation_backends=config.get("recalculation_backends",[]),ocr_backends=config.get("ocr_backends",[]))
                 elif config["kind"] == "browser":
@@ -366,6 +616,12 @@ class MachineHost:
                 elif config["kind"] == "openhands":
                     self.configure_openhands(workspace_id=config["workspace_id"],workspace_root=config["workspace_root"],
                         agent_id=config["agent_id"],provider_config=config["provider_config"])
+                elif config["kind"] in {"acp", "a2a", "mcp", "channels", "acp_registry"}:
+                    self.configure_interop(workspace_id=config["workspace_id"],workspace_root=config["workspace_root"],
+                        agent_id=config["agent_id"],kind=config["kind"],provider_config=config["provider_config"])
+                elif config["kind"] in EXECUTOR_KINDS:
+                    self.configure_executor(workspace_id=config["workspace_id"],workspace_root=config["workspace_root"],
+                        agent_id=config["agent_id"],kind=config["kind"],provider_config=config["provider_config"])
                 elif config["kind"] == "workflow":
                     self.configure_workflow(workspace_id=config["workspace_id"],workspace_root=config["workspace_root"],
                         agent_id=config["agent_id"],definitions=config["definitions"])
@@ -383,7 +639,7 @@ class MachineHost:
                     if item["workspace_id"] == workspace_id]
         return self._call(get(), timeout=10)
 
-    def task_catalog(self, *, workspace_id, agent_ids=None):
+    def task_catalog(self, *, workspace_id, agent_ids=None, conversation_id=None):
         async def get():
             rows=self.control.list_work_items(self.owner,states=["RUNNING"],limit=1000)["items"]
             result=[]
@@ -394,13 +650,18 @@ class MachineHost:
                     if (config["workspace_id"]!=workspace_id or item.get("assignee_agent_id")!=agent
                             or item.get("metadata",{}).get("machine_id")!=ident
                             or agent_ids is not None and agent not in agent_ids):continue
+                    scoped = config['kind'] in {'workspace-files', 'terminal', 'computer-local', 'virtualbox_vm'}
+                    if conversation_id is not None and scoped and item.get('metadata', {}).get('conversation_id') != conversation_id:
+                        continue
                     factory=self._factories[ident];caps=[]
                     for cap in sorted(set(item["required_capabilities"])&set(config["capabilities"])):
                         request=OperationRequest("op-discovery",agent,ident,cap,item["work_item_id"],"discovery",{})
                         if factory.policy(request).allowed is True:caps.append(cap)
                     if caps and self.control.durable.run_status(item["run_id"],self.owner,include_details=False)["state"]=="RUNNING":
                         result.append({"work_item_id":item["work_item_id"],"machine_id":ident,
-                            "agent_id":agent,"capabilities":caps,"objective":item["objective"]})
+                            "agent_id":agent,"capabilities":caps,"objective":item["objective"],
+                            **({"conversation_id": item.get("metadata", {}).get("conversation_id")}
+                               if scoped else {})})
             return result
         return self._call(get(),timeout=15)
 

@@ -411,6 +411,44 @@ class ProjectRevisionWatcher:
             self._closed = True
             self.pending, self.pending_since = None, None
 
+    def _observe(self):
+        """Recover a rename in the same bounded directory by file identity.
+
+        Names alone and matching text hashes cannot prove a rename. Never follow
+        links, recurse, search other folders or expose protected entries.
+        """
+        try:
+            _base, target = confined(self.root, self.relative)
+        except FileNotFoundError:
+            previous = getattr(self, "_identity", None)
+            if not previous:
+                raise
+            relative = Path(self.relative)
+            base, parent = confined(self.root, str(relative.parent) if str(relative.parent) != "." else "")
+            candidates = []
+            with os.scandir(parent) as entries:
+                for index, entry in enumerate(entries):
+                    if index >= MAX_LIST:
+                        raise ValueError("rename observation directory exceeds bounded limit")
+                    path = Path(entry.path)
+                    if (entry.is_symlink() or (hasattr(path, "is_junction") and path.is_junction())
+                            or not entry.is_file(follow_symlinks=False)
+                            or entry.name.lower() in SENSITIVE_NAMES
+                            or path.suffix.lower() not in TEXT_EXT | {".pdf"}):
+                        continue
+                    info = entry.stat(follow_symlinks=False)
+                    if (info.st_dev, info.st_ino) == previous and info.st_ino:
+                        candidates.append(path.relative_to(base).as_posix())
+            if len(candidates) != 1:
+                raise FileNotFoundError("watched file disappeared; rename cannot be established")
+            old = self.relative
+            self.relative = candidates[0]
+            revision = project_revision(self.root, self.relative)
+            return revision, old
+        info = target.stat()
+        self._identity = (info.st_dev, info.st_ino)
+        return project_revision(self.root, self.relative), None
+
     def poll(self, *, now: float | None = None) -> dict:
         import math
         import time
@@ -424,7 +462,13 @@ class ProjectRevisionWatcher:
                 raise ValueError("watcher clock cannot run backward")
             # The read is *inside* this lock to serialize simultaneous polls.
             # A reader never commits a SHA from another in-flight observation.
-            revision = project_revision(self.root, self.relative)
+            revision, renamed_from = self._observe()
+            if renamed_from:
+                # Debounce the revised bytes independently after a rename. The
+                # notification itself never grants permission to write a path.
+                self.pending, self.pending_since = None, None
+                self._last_now = moment
+                return {**revision, "state": "renamed", "previous_path": renamed_from}
             self._last_now = moment
             sha = revision["sha256"]
             if self.committed is None:
@@ -441,3 +485,100 @@ class ProjectRevisionWatcher:
             self.committed = sha
             self.pending, self.pending_since = None, None
             return {**revision, "state": "changed"}
+
+
+class ProjectWatchRegistry:
+    """Owner-HTTP read projection with bounded, expiring watcher handles.
+
+    The Canvas composition supplies project_id/root from its trusted workspace.
+    A handle cannot cross projects. No filesystem notification starts effects.
+    """
+    def __init__(self, *, max_watchers=128, ttl_seconds=300, clock=None):
+        import threading
+        import time
+        if type(max_watchers) is not int or not 1 <= max_watchers <= 512:
+            raise ValueError("invalid watcher quota")
+        if type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 900:
+            raise ValueError("invalid watcher lifetime")
+        self.clock = clock or time.monotonic
+        self.max_watchers, self.ttl_seconds = max_watchers, ttl_seconds
+        self._lock, self._watchers = threading.RLock(), {}
+
+    def _expire(self):
+        for handle, (_, watcher, until) in list(self._watchers.items()):
+            if until <= self.clock():
+                watcher.close()
+                del self._watchers[handle]
+
+    def start(self, project_id, root, relative, *, debounce_seconds=.35):
+        import secrets
+        from sentra_collab.authority import _id
+        _id(project_id)
+        watcher = ProjectRevisionWatcher(root, relative, debounce_seconds=debounce_seconds)
+        with self._lock:
+            self._expire()
+            if len(self._watchers) >= self.max_watchers:
+                raise ValueError("project watcher quota reached")
+            initial = watcher.poll()
+            handle = "watch-" + secrets.token_hex(16)
+            self._watchers[handle] = (project_id, watcher, self.clock() + self.ttl_seconds)
+            return {**initial, "watch_id": handle, "project_id": project_id}
+
+    def poll(self, project_id, watch_id):
+        with self._lock:
+            self._expire()
+            row = self._watchers.get(watch_id)
+            if not row or row[0] != project_id:
+                raise PermissionError("watcher is expired or belongs to another project")
+            result = row[1].poll()
+            self._watchers[watch_id] = (project_id, row[1], self.clock() + self.ttl_seconds)
+            return {**result, "watch_id": watch_id, "project_id": project_id}
+
+    def close(self, project_id, watch_id):
+        with self._lock:
+            row = self._watchers.get(watch_id)
+            if row and row[0] != project_id:
+                raise PermissionError("watcher belongs to another project")
+            if row:
+                row[1].close()
+                del self._watchers[watch_id]
+            return {"closed": True, "watch_id": watch_id, "project_id": project_id}
+
+
+PROJECT_REVIEW_ACTIONS = frozenset({"project_file_list", "project_file_preview", "project_file_diff",
+    "project_file_pdf_text", "project_file_pdf_visual", "project_watch_start", "project_watch_poll", "project_watch_close"})
+
+
+class ProjectReviewService:
+    """Read-only shell adapter. Root resolver belongs to Canvas authority."""
+    def __init__(self, resolve_root):
+        if not callable(resolve_root):
+            raise ValueError("trusted project root resolver required")
+        self.resolve_root = resolve_root
+        self.watchers = ProjectWatchRegistry()
+
+    def dispatch(self, action, payload, *, project_id):
+        from sentra_collab.authority import _id
+        _id(project_id)
+        if action not in PROJECT_REVIEW_ACTIONS or not isinstance(payload, dict):
+            raise ValueError("unsupported project read action")
+        if set(payload) & {"root", "owner", "principal_id", "grant", "content"}:
+            raise PermissionError("project preview cannot supply filesystem authority")
+        root = self.resolve_root(project_id)
+        relative = payload.get("path", "")
+        if action == "project_file_list":
+            return list_level(root, relative)
+        if action == "project_file_preview":
+            return file_preview(root, relative)
+        if action == "project_file_diff":
+            return git_diff(root, relative)
+        if action == "project_file_pdf_text":
+            return pdf_text_page(root, relative, page=payload.get("page", 1))
+        if action == "project_file_pdf_visual":
+            return pdf_visual_page(root, relative, page=payload.get("page", 1), dpi=payload.get("dpi", 72))
+        if action == "project_watch_start":
+            return self.watchers.start(project_id, root, relative)
+        watch_id = _id(payload.get("watch_id"))
+        if action == "project_watch_poll":
+            return self.watchers.poll(project_id, watch_id)
+        return self.watchers.close(project_id, watch_id)

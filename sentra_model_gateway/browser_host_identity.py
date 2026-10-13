@@ -23,6 +23,10 @@ def _host_post(descriptor: dict, path: str, payload: dict) -> dict:
         raise PermissionError("Browser Host control authentication is unavailable")
     connection = http.client.HTTPConnection(endpoint.hostname, endpoint.port, timeout=5)
     try:
+        from sentra_runtime.effect_boundary import current_effect_context
+        context = current_effect_context.get()
+        if context is not None:
+            context.checkpoint()
         connection.request("POST", path, json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(),
             {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
         response = connection.getresponse()
@@ -106,3 +110,64 @@ def read_host_message(descriptor: dict, tab: dict, *, trace_id: str, expected: d
             or observed.get("collector_sha256") != collector["sha256"]):
         raise PermissionError("Browser Host message collector source changed")
     return observed
+
+
+def read_host_approval(descriptor: dict, tab: dict, *, trace_id: str) -> dict:
+    """Read-only observed approval state from the authenticated Browser Host.
+
+    Returns {"state": "pending|idle|unknown", "tool_name": ...} as *data*.
+    This client never clicks, accepts or dismisses approval UI; the operator
+    and the durable consent gate remain the only approval authority.
+    """
+    binding = _binding(tab, trace_id)
+    snapshot = _host_post(descriptor, "/v1/sentra/approval-snapshot", binding)
+    for field in ("surface_id", "document_id", "identity_epoch"):
+        if snapshot.get(field) != binding[field]:
+            raise PermissionError("Browser Host document identity changed")
+    state = snapshot.get("approval_state")
+    if state not in {"pending", "idle", "unknown"}:
+        raise PermissionError("Browser Host approval state is not observed")
+    tool = snapshot.get("tool_name")
+    if tool is not None and (not isinstance(tool, str) or not 1 <= len(tool) <= 200):
+        raise PermissionError("Browser Host approval tool name is invalid")
+    return {"state": state, "tool_name": tool,
+            "document_id": binding["document_id"],
+            "identity_epoch": binding["identity_epoch"],
+            "effect_performed": False}
+
+
+def read_host_account_catalog(descriptor: dict, tab: dict, *, trace_id: str,
+                              provider: str, account_verifier=None) -> dict:
+    """Read-only authenticated account model/effort catalog snapshot.
+
+    The Host binds the catalog to the current document/identity epoch and its
+    own authentication revision. Callers must treat a missing attestor or an
+    unverified account as fail-closed: no catalog, no model assumption.
+    Raw account identifiers never escape into audit/errors.
+    """
+    if provider not in {"chatgpt", "gemini"}:
+        raise ValueError("catalog provider must be chatgpt or gemini")
+    binding = _binding(tab, trace_id)
+    snapshot = _host_post(descriptor, "/v1/sentra/account-catalog",
+                          {**binding, "provider": provider})
+    for field in ("surface_id", "document_id", "identity_epoch"):
+        if snapshot.get(field) != binding[field]:
+            raise PermissionError("Browser Host document identity changed")
+    if not callable(account_verifier) or account_verifier(snapshot) is not True:
+        raise PermissionError("current browser account/profile identity is unverified by host")
+    models = snapshot.get("models")
+    efforts = snapshot.get("efforts")
+    if (not isinstance(models, list) or not models or len(models) > 64
+            or not isinstance(efforts, list) or len(efforts) > 64
+            or any(not isinstance(e, str) or not 1 <= len(e) <= 120 for e in [*models, *efforts])):
+        raise PermissionError("Browser Host account catalog is invalid")
+    revision = snapshot.get("authentication_revision")
+    if type(revision) is not int or revision < 0:
+        raise PermissionError("current browser account authentication revision is unverified")
+    return {"provider": provider, "models": list(models), "efforts": list(efforts),
+            "authentication_revision": revision,
+            "document_id": binding["document_id"],
+            "identity_epoch": binding["identity_epoch"],
+            "account_verified": True, "catalog_complete": snapshot.get("catalog_complete") is True,
+            "selection_verified": snapshot.get("selection_verified") is True,
+            "model": snapshot.get("model"), "effort": snapshot.get("effort")}

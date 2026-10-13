@@ -64,6 +64,11 @@ class BoundWorkItemPolicy:
                 return PolicyDecision(False, "work item owner mismatch")
             if str(item.get("state")) != "RUNNING":
                 return PolicyDecision(False, "work item is not in RUNNING state")
+            durable = getattr(self.governance, "durable", None)
+            if self.principal_type == "agent" and durable is not None:
+                agent = durable.agent_info(request.principal_id, self.owner)
+                if agent["run_id"] != item["run_id"] or agent["desired_state"] == "WAITING":
+                    return PolicyDecision(False, "agent is outside the active Run or paused")
             assigned_field = (
                 "assignee_agent_id" if self.principal_type == "agent"
                 else "assignee_user_id" if self.principal_type == "user" else None

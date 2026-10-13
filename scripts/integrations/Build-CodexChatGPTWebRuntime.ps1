@@ -222,8 +222,10 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Root dependency install failed" }
     & $Bun run typecheck
     if ($LASTEXITCODE -ne 0) { throw "Patched upstream typecheck failed" }
-    & $Bun test "tests/gemini-web.test.ts" "tests/gemini-web-adapter.test.ts" "tests/chatgpt-model-selection.test.ts" "tests/chatgpt-web-models.test.ts" "tests/model-catalog.test.ts" "tests/server-models.test.ts"
+    & $Bun test "tests/gemini-web.test.ts" "tests/gemini-web-adapter.test.ts" "tests/chatgpt-model-selection.test.ts" "tests/chatgpt-web-models.test.ts" "tests/model-catalog.test.ts" "tests/server-models.test.ts" "tests/runtime-layout.test.ts"
     if ($LASTEXITCODE -ne 0) { throw "Patched Gemini Web integration tests failed" }
+    & node --test "launcher/tests/saved-conversations.test.cjs"
+    if ($LASTEXITCODE -ne 0) { throw "Saved ChatGPT conversation persistence tests failed" }
     Push-Location (Join-Path $Source "launcher")
     try {
         & $Bun install --frozen-lockfile

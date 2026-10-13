@@ -8,7 +8,7 @@
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 1, maxTabs: 1 };
 const OMA_POLL_MS = 2000;
-const OMA_SW_VERSION = "1.6.52";
+const OMA_SW_VERSION = "1.7.0";
 const OMA_BUILD_ID = chrome.runtime.getManifest().sentra_build_id || "missing-build-id";
 const OMA_SOURCE_HASH = chrome.runtime.getManifest().sentra_source_hash || "missing-source-hash";
 const omaEvidenceBusy = new Set();
@@ -25,6 +25,12 @@ let omaIdFlushPromise = null;
 const omaIdFresh = () => crypto.randomUUID();
 const omaIdWorker = id => "TAB-" + id;
 const omaIdRoute = url => /^https:\/\/chatgpt\.com\/c\/([A-Za-z0-9_-]{8,160})(?:[/?#]|$)/.exec(String(url || ""))?.[1] || null;
+// Brisa 1.7.0: conversation-evidence V2 (nonce-bound page proof) is ChatGPT
+// only. Gemini tabs keep full send/collect/status support, but any request
+// for V2 conversation proof on a Gemini route fails closed with
+// identity_unknown instead of fabricating attribution. No DOM, route or
+// model label is ever treated as account proof on either provider.
+const omaIdRouteDenied = url => /^https:\/\/gemini\.google\.com\/app\/([A-Za-z0-9_-]{1,256})(?:\/|\?|$)/.test(String(url || ""));
 const omaIdDocumentKey = id => OMA_ID_DOC_PREFIX + id;
 const omaIdRevokeKey = id => OMA_ID_REVOKE_PREFIX + id;
 function omaIdProfileEpoch() {
@@ -200,6 +206,166 @@ async function omaIdReconcileTabs() {
   await omaIdFlushInvalidations();
 }
 // SENTRA_IDENTITY_REVOCATION_END
+// Only an already committed, parent-bound assistant image_asset_pointer may
+// initiate this read-only download. Never follow a page-provided URL or a
+// redirect. Extension credentials go ONLY to the fixed ChatGPT first-party API.
+async function omaUploadNativeAssets(tabId, identity, tracked, frame, requestId) {
+  if (!frame.complete || !Array.isArray(frame.assets) || !frame.assets.length) return;
+  if (frame.assets.length > 4 || new Set(frame.assets).size !== frame.assets.length) throw Error('NATIVE_IMAGE_SET_INVALID');
+  const hash = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))]
+    .map(x => x.toString(16).padStart(2,'0')).join('');
+  const verifyScope = async () => {
+    const tab = await chrome.tabs.get(tabId);
+    const doc = (await chrome.storage.local.get(omaIdDocumentKey(tabId)))[omaIdDocumentKey(tabId)];
+    const active = await omaLoadActive(tabId);
+    if (omaIdRoute(tab.url) !== frame.conversation_id ||
+        doc?.document_id !== tracked.document_id || doc?.identity_epoch !== tracked.identity_epoch ||
+        !doc?.observed || active?.job_id !== identity.job_id || active?.worker !== identity.worker ||
+        active?.lease_token !== identity.lease_token || active?.proven_request_id !== requestId)
+      throw Error('NATIVE_IMAGE_ORIGINAL_SCOPE_LOST');
+  };
+  await verifyScope();
+  const base = { ...identity, request_id:requestId, source_sha256:OMA_SOURCE_HASH,
+    document_id:tracked.document_id, identity_epoch:tracked.identity_epoch,
+    conversation_id:frame.conversation_id, message_id:frame.message_id };
+  for (const fileId of frame.assets) {
+    if (!/^file-[A-Za-z0-9_-]{8,160}$/.test(fileId)) throw Error('NATIVE_IMAGE_POINTER_INVALID');
+    await verifyScope();
+    const path = new URL('https://chatgpt.com/backend-api/estuary/content');
+    path.searchParams.set('id', fileId);
+    const response = await fetch(path.href, { method:'GET', credentials:'include',
+      redirect:'error', cache:'no-store', headers:{'Accept':'image/png, image/jpeg'} });
+    if (!response.ok || response.redirected || response.url !== path.href ||
+        !response.body) throw Error('NATIVE_IMAGE_TRUSTED_FETCH_UNAVAILABLE');
+    const mime = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
+    if (!['image/png','image/jpeg'].includes(mime)) throw Error('NATIVE_IMAGE_MIME_REFUSED');
+    const length = response.headers.get('content-length');
+    if (length && (!/^\d+$/.test(length) || Number(length) > 8 * 1024 * 1024))
+      throw Error('NATIVE_IMAGE_TOO_LARGE');
+    const reader = response.body.getReader(), chunks = []; let total = 0;
+    try {
+      for (;;) {
+        const part = await reader.read();
+        if (part.done) break;
+        total += part.value.length;
+        if (total > 8 * 1024 * 1024) throw Error('NATIVE_IMAGE_TOO_LARGE');
+        chunks.push(part.value);
+      }
+    } finally { reader.releaseLock(); }
+    if (!total) throw Error('NATIVE_IMAGE_EMPTY');
+    const bytes = new Uint8Array(total); let index = 0;
+    for (const part of chunks) { bytes.set(part,index); index += part.length; }
+    if (mime === 'image/png' && !(bytes[0] === 137 && bytes[1] === 80 && bytes[2] === 78 && bytes[3] === 71))
+      throw Error('NATIVE_IMAGE_SIGNATURE_MISMATCH');
+    if (mime === 'image/jpeg' && !(bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255))
+      throw Error('NATIVE_IMAGE_SIGNATURE_MISMATCH');
+    const sha256 = await hash(bytes);
+    const filename = 'chatgpt-native-' +
+      (await hash(new TextEncoder().encode(fileId))).slice(0,16) +
+      (mime === 'image/png' ? '.png' : '.jpg');
+    const manifest = { ...base, file_id:fileId, mime_type:mime, filename,
+      byte_length:bytes.length, sha256 };
+    for (let part = 0; part * 65536 < bytes.length; part++) {
+      await verifyScope();
+      const chunk = bytes.subarray(part*65536, Math.min(bytes.length,(part+1)*65536));
+      let binary = '';
+      for (let i = 0; i < chunk.length; i += 8192)
+        binary += String.fromCharCode(...chunk.subarray(i,i+8192));
+      const data_base64 = btoa(binary);
+      const ack = await omaRelay('/jobs/generated-asset/chunk', {method:'POST',
+        body:JSON.stringify({...manifest,part,chunk_sha256:await hash(chunk),data_base64})});
+      if (ack?.part !== part || !/^web-native-[a-f0-9]{40}$/.test(ack?.asset_id || ''))
+        throw Error('NATIVE_IMAGE_CHUNK_ACK_INVALID');
+    }
+    await verifyScope();
+    const ack = await omaRelay('/jobs/generated-asset/finalize', {method:'POST',
+      body:JSON.stringify({ ...base, file_id:fileId })});
+    if (ack?.sha256 !== sha256 || ack?.byte_length !== bytes.length)
+      throw Error('NATIVE_IMAGE_FINAL_ACK_INVALID');
+  }
+}
+
+async function omaPublishAssistantFrame(tabId, identity, job) {
+  if (!String(job.job_id || '').startsWith('websend_')) return false;
+  await omaSendToTab(tabId,{operation:'SENTRA_BOUND_OBSERVATION',job_id:job.job_id});
+  const delivery = await omaRelay('/jobs/delivery?job_id=' + encodeURIComponent(job.job_id));
+  const receipt = delivery?.receipt;
+  if (delivery?.state !== 'sent' || !receipt) throw Error('ASSISTANT_FRAME_REQUIRES_EXACT_USER_RECEIPT');
+  const tracked = (await chrome.storage.local.get(omaIdDocumentKey(tabId)))[omaIdDocumentKey(tabId)];
+  if (!tracked?.observed || tracked.worker !== identity.worker || tracked.route !== receipt.conversation_id) throw Error('ASSISTANT_DOCUMENT_UNOWNED');
+  const active = await omaLoadActive(tabId);
+  if (!active || active.job_id !== identity.job_id || active.worker !== identity.worker ||
+      active.lease_token !== identity.lease_token) throw Error('ASSISTANT_ORIGINAL_WORKER_CHANGED');
+  // Re-read committed parent metadata even if the first receipt ACK was lost
+  // or generation was active at Send. This POST joins the ALREADY stored exact
+  // receipt; it cannot accept new receipt bytes, renew a lease or click Send.
+  const proof = await omaObserveConversation(tabId,{messageId:receipt.message_id,conversationId:receipt.conversation_id});
+  if (!proof || proof.worker !== identity.worker) throw Error('ASSISTANT_ORIGINAL_REQUEST_UNKNOWN');
+  await omaRelay('/jobs/receipt-observation',{method:'POST',body:JSON.stringify({ ...identity,
+    request_id:proof.request_id,source_sha256:OMA_SOURCE_HASH,document_id:proof.document_id,identity_epoch:proof.identity_epoch })});
+  active.proven_request_id = proof.request_id;
+  await omaSaveActive(tabId,{proven_request_id:proof.request_id});
+  const scan = await chrome.scripting.executeScript({ target:{tabId},world:'MAIN',
+    func: expected => globalThis.__sentraConversationEvidence?.assistantFrame?.(expected) || null,
+    args:[{ request_id:active.proven_request_id, parent_user_message_id:receipt.message_id,
+            document_id:tracked.document_id, conversation_id:receipt.conversation_id }] });
+  // request_id is deliberately resolved below from the proven parent scan;
+  // a delivery job ID or timestamp is never substituted for MCP metadata.
+  const frame = scan.find(item => item.frameId === 0)?.result;
+  if (!frame) return false; // no child yet, virtualization or unsupported committed schema
+  const before = await omaLoadActive(tabId);
+  const signature = [...new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(frame.body + '\0' + frame.complete + '\0' + JSON.stringify(frame.assets || []))))].map(x=>x.toString(16).padStart(2,'0')).join('');
+  if (before?.assistant_signature === signature && before?.assistant_message_id === frame.message_id &&
+      before?.assistant_frame_acked === true && before?.assistant_answered === true) {
+    if (!before?.assistant_final) {
+      await omaUploadNativeAssets(tabId,identity,tracked,frame,active.proven_request_id);
+      await omaSaveActive(tabId,{assistant_final:true});
+    }
+    return true; // never repeat an already attested Web assistant frame
+  }
+  const revision = before?.assistant_signature === signature ? before.assistant_revision : (before?.assistant_revision || 0) + 1;
+  await omaSaveActive(tabId,{assistant_signature:signature,assistant_message_id:frame.message_id,assistant_revision:revision,assistant_frame_acked:false});
+  const fresh = (await chrome.storage.local.get(omaIdDocumentKey(tabId)))[omaIdDocumentKey(tabId)];
+  if (fresh?.document_id !== tracked.document_id || fresh?.identity_epoch !== tracked.identity_epoch) throw Error('ASSISTANT_DOCUMENT_CHANGED');
+  const result = await omaRelay('/jobs/response-frame',{method:'POST',body:JSON.stringify({ ...identity,
+    source_sha256:OMA_SOURCE_HASH,request_id:active.proven_request_id,document_id:tracked.document_id,identity_epoch:tracked.identity_epoch,
+    conversation_id:frame.conversation_id,message_id:frame.message_id,parent_user_message_id:frame.parent_user_message_id,
+    revision,body:frame.body,complete:frame.complete,
+    native_file_ids:frame.complete ? frame.assets : [] })});
+  const answered = result?.state === 'ANSWERED';
+  await omaSaveActive(tabId,{assistant_frame_acked:true,assistant_answered:answered});
+  if (answered) {
+    await omaUploadNativeAssets(tabId,identity,tracked,frame,active.proven_request_id);
+    await omaSaveActive(tabId,{assistant_final:true});
+  }
+  return answered;
+}
+
+async function omaResolveBinarySet(identity, job) {
+  const refs = job.attachments || [];
+  if (!Array.isArray(refs) || refs.length > 4) throw Error('BINARY_SET_OUTSIDE_QUOTA');
+  const output = [];
+  const sha = async bytes => [...new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))].map(x => x.toString(16).padStart(2,'0')).join('');
+  for (const ref of refs) {
+    if (!Number.isSafeInteger(ref.bytes) || ref.bytes < 1 || ref.bytes > 20 * 1024 * 1024 ||
+        !/^web-asset-[a-f0-9]{32}$/.test(ref.asset_id || '')) throw Error('BINARY_DESCRIPTOR_INVALID');
+    const bytes = new Uint8Array(ref.bytes); let offset = 0;
+    for (let part = 0; offset < ref.bytes; part++) {
+      const chunk = await omaRelay('/jobs/attachment-chunk', { method:'POST', body:JSON.stringify({
+        ...identity, asset_id:ref.asset_id, part, source_sha256:OMA_SOURCE_HASH }) });
+      if (chunk.part !== part || !Number.isSafeInteger(chunk.bytes) || chunk.bytes < 1 || chunk.bytes > 65536) throw Error('BINARY_CHUNK_INVALID');
+      const raw = Uint8Array.from(atob(chunk.data_base64), character => character.charCodeAt(0));
+      if (raw.length !== chunk.bytes || offset + raw.length > ref.bytes || await sha(raw) !== chunk.sha256) throw Error('BINARY_CHUNK_CHANGED');
+      bytes.set(raw, offset); offset += raw.length;
+    }
+    if (await sha(bytes) !== ref.sha256) throw Error('BINARY_SET_CONTENT_CHANGED');
+    const parts = [];
+    for (let offset = 0; offset < bytes.length; offset += 32766) parts.push(btoa(String.fromCharCode(...bytes.subarray(offset, offset + 32766))));
+    output.push({ ...ref, data_url:'data:' + ref.mime + ';base64,' + parts.join('') });
+  }
+  return output;
+}
+
 async function omaRecordDeliveryReceipt(identity, job, sent, sendingConfirmed = false) {
   const receipt = sent?.result?.delivery_receipt;
   if (!receipt) return { state: 'unconfirmed', automatic_resend: false };
@@ -244,6 +410,7 @@ async function omaRecordDeliveryReceipt(identity, job, sent, sendingConfirmed = 
       proof.conversation_id === evidence.conversation_id) {
     // Exactly ONE authenticated receipt attempt. A failed/uncertain HTTP
     // acknowledgement cannot trigger a fallback POST or another Web send.
+    await omaSaveActive(Number(tabMatch[1]),{proven_request_id:proof.request_id});
     await chrome.storage.local.set({ [receiptKey]: {worker:identity.worker, v2:true} });
     return omaRelay('/jobs/delivery-receipt', { method: 'POST', body: JSON.stringify({
       job_id: job.job_id, worker: identity.worker, lease_token: identity.lease_token,
@@ -266,6 +433,11 @@ async function omaObserveConversation(tabId, expected = null) {
   const owned = await omaOwnedTabIds();
   if (!owned.has(tabId)) return;
   const before = await chrome.tabs.get(tabId);
+  // Explicit fail-closed: Gemini routes never produce V2 conversation proof.
+  if (omaIdRouteDenied(before.url)) {
+    await omaIdInvalidate(tabId, "identity_unknown");
+    return;
+  }
   const initialRoute = omaIdRoute(before.url);
   if (!initialRoute) {
     await omaIdInvalidate(tabId, "identity_unknown");
@@ -318,7 +490,7 @@ async function omaObserveConversation(tabId, expected = null) {
     // be interpreted as operator approval. No account or model is inferred.
     let witnessed = null;
     if (expected && typeof expected.messageId === 'string' &&
-        expected.conversationId === route && evidence.state === 'idle' &&
+        expected.conversationId === route && ['idle','generating'].includes(evidence.state) &&
         Array.isArray(evidence.requests)) {
       const matches = evidence.requests.filter(row =>
         row?.message_id === expected.messageId &&
@@ -754,6 +926,7 @@ async function omaSaveActive(tabId, patch) {
     await chrome.storage.local.set({ [key]: { ...prev, ...patch, tabId, updated: Date.now() } });
   } catch (error) {
     await omaNoteError("active_save", error);
+    throw error; // metadata must be durable before a physical Send fence
   }
 }
 
@@ -786,6 +959,40 @@ async function omaClearActive(tabId) {
   }
 }
 
+async function omaFinishActive(tabId) {
+  const active = await omaLoadActive(tabId);
+  if (String(active?.job_id || '').startsWith('websend_') && active?.send_reserved && !active?.assistant_final) {
+    await omaSaveActive(tabId,{observe_only:true});
+    return; // keep original lease/digests only; no body, prompt, bytes or resend
+  }
+  await omaClearActive(tabId);
+}
+
+async function omaObserveRelayJob(tabId, active) {
+  const worker = omaWorkers.get(tabId);
+  if (!worker || worker.state !== 'IDLE') return;
+  worker.state = 'WAITING_RESPONSE';
+  const identity = {job_id:active.job_id,worker:active.worker,lease_token:active.lease_token};
+  try {
+    const disposition = await omaRelay('/jobs/recovery-disposition', {
+      method:'POST', body:JSON.stringify(identity),
+    }).catch(() => null); // older hosts keep the existing observation-only path
+    if (disposition?.job_id === active.job_id && disposition.release_unsent_reference === true &&
+        disposition.automatic_resend === false) {
+      await omaClearActive(tabId);
+      return; // release this stale reference only; never requeue or Send it
+    }
+    if (await omaPublishAssistantFrame(tabId,identity,active)) await omaClearActive(tabId);
+    else await omaSaveActive(tabId,{observe_only:true});
+  } catch (_) {
+    // No STOP_GENERATION, WAIT_RESPONSE/Continue, lease renew, claim, progress,
+    // new receipt or second Send on recovery. Central status remains uncertain.
+    await omaSaveActive(tabId,{observe_only:true,observation_unavailable:true});
+  } finally {
+    worker.state = 'IDLE';
+  }
+}
+
 async function omaRenewIdentity(identity) {
   await omaRelay("/jobs/lease", { method: "POST", body: JSON.stringify(identity) });
 }
@@ -814,6 +1021,7 @@ async function omaProgressPhase(tabId, identity, phase) {
 async function omaRenewActive(tabId) {
   const active = await omaLoadActive(tabId);
   if (!active || !active.job_id || !active.lease_token) return false;
+  if (String(active.job_id).startsWith('websend_') && active.observe_only) return false;
   await omaRenewIdentity({ job_id: active.job_id, worker: active.worker, lease_token: active.lease_token });
   active.hb_sw = (active.hb_sw || 0) + 1;
   active.updated = Date.now();
@@ -837,6 +1045,10 @@ async function omaRenewAllActive() {
     } catch (e) {
       await omaNoteError("renew_active");
       if (String((e && e.message) || e).includes("RELAY_HTTP_400")) {
+        if (String(active.job_id).startsWith('websend_')) {
+          await omaSaveActive(tabId,{observe_only:true});
+          continue;
+        }
         // Servidor declarou o lease morto: gera├º├úo ├│rf├ú nunca postar├í.
         // Para (economiza quota/compute) e para de rastrear.
         try {
@@ -858,6 +1070,13 @@ async function omaRenewAllActive() {
 async function omaPostResult(identity, jobRef, payload) {
   const workerIdentity = identity.worker || payload.worker;
   const merged = { ...payload, ...identity, worker: workerIdentity };
+  if (String(jobRef.job_id || '').startsWith('websend_')) {
+    if (payload.status === 'COMPLETED') return; // independently attested endpoint owns completion
+    merged.error = String(payload.error || 'Web observation uncertain').slice(0,240);
+    merged.result = '';
+    await omaRelay('/jobs/result',{method:'POST',body:JSON.stringify(merged)});
+    return; // never persist model bodies/errors in plaintext browser outbox
+  }
   await chrome.storage.local.set({ [`oma_result_${jobRef.job_id}`]: merged });
   await omaFlushOutbox();
 }
@@ -965,11 +1184,46 @@ async function omaEnsureTabs(desiredTabs = OMA_POOL.minTabs) {
   await omaRememberControllerOrigin(tab);
   await omaRememberOwned(tab.id);
   omaWorkers.set(tab.id, { state: "IDLE", adopted: true, original_url: String(tab.url || "") });
+  await omaEnsureContentScript(tab.id);
+}
+
+async function omaEnsureContentScript(tabId) {
+  if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") return false;
+  try {
+    const status = await chrome.tabs.sendMessage(tabId, { operation: "GET_STATUS" });
+    if (status && status.ok && status.result && status.result.cs_version === OMA_SW_VERSION) {
+      return true;
+    }
+  } catch (_) {}
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["recovery-guard.js", "selectors.js", "observer.js", "content-script.js"],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    return true;
+  } catch (err) {
+    await omaNoteError("content_script_inject", err);
+    return false;
+  }
 }
 
 async function omaSendToTab(tabId, message) {
   try {
-    const reply = await chrome.tabs.sendMessage(tabId, message);
+    let reply = null;
+    try {
+      reply = await chrome.tabs.sendMessage(tabId, message);
+    } catch (_) {
+      reply = null;
+    }
+    if (!reply || reply.ok !== true) {
+      const injected = await omaEnsureContentScript(tabId);
+      if (injected) {
+        try {
+          reply = await chrome.tabs.sendMessage(tabId, message);
+        } catch (_) {}
+      }
+    }
     if (!reply || reply.ok !== true) {
       throw new Error((reply && reply.error) || "content-script returned no result");
     }
@@ -1328,7 +1582,7 @@ async function omaWaitConversationResponse(tabId, identity, job, renew) {
     slices++;
     if (slices % 3 === 1) await omaProgressPhase(tabId, identity, "waiting");
     try {
-      waited = await omaSendReadOnlyToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice });
+      waited = await omaSendReadOnlyToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice, read_only: String(identity.job_id || "").startsWith("websend_") });
       const hb = waited && waited.result && waited.result.hb_cs;
       if (typeof hb === "number" && Number.isFinite(hb)) csHb += hb;
       break;
@@ -1386,6 +1640,7 @@ async function omaProcessJob(tabId, job) {
     // (Antes: QUALQUER erro abortava uma gera├º├úo saud├ível.)
     if (!String((e && e.message) || e).includes("RELAY_HTTP_400")) return;
     leaseLost = true;
+    if (String(job.job_id).startsWith("websend_")) { await omaSaveActive(tabId,{observe_only:true}); return; }
     try {
       await omaSendToTab(tabId, { operation: "STOP_GENERATION" });
     } catch (stopError) {
@@ -1406,8 +1661,11 @@ async function omaProcessJob(tabId, job) {
         await omaWaitSettled(tabId);
       }
       const selectedModel = await omaApplyRequestedModel(tabId, job);
+      const binaryAttachments = await omaResolveBinarySet(identity, job);
       await omaProgressPhase(tabId, identity, "ready");
-      const sendingConfirmed = await omaProgressPhase(tabId, identity, "sending");
+      if (String(job.job_id).startsWith("websend_")) await omaSendToTab(tabId,{operation:"SENTRA_BOUND_OBSERVATION",job_id:job.job_id});
+    await omaSaveActive(tabId,{send_reserved:true});
+    const sendingConfirmed = await omaProgressPhase(tabId, identity, "sending");
       if (omaJobProvider(job) === "chatgpt" && !sendingConfirmed) {
         throw new Error("SEND_FENCED: relay did not acknowledge sending before effect");
       }
@@ -1415,7 +1673,7 @@ async function omaProcessJob(tabId, job) {
         operation: "SEND_MESSAGE",
         delivery_id: job.job_id,
         text: job.prompt,
-        images: job.images || [],
+        images: job.images || [], attachments: binaryAttachments,
       });
       const attached = (sent && sent.result && sent.result.images_attached) || 0;
       await omaRecordDeliveryReceipt(identity, job, sent, sendingConfirmed);
@@ -1701,6 +1959,25 @@ async function omaProcessJob(tabId, job) {
             try { await chrome.tabs.update(previousActiveId, { active: true }); } catch (_) {}
           }
         }
+      } else if (action === "stream_snapshot") {
+        // Read-only streaming snapshot (message-index + revision + bounded
+        // prefix metadata). Never sends, never proves delivery.
+        const reply = await omaSendToTab(tabId, { operation: "STREAM_SNAPSHOT" });
+        result = (reply && reply.result) || {};
+      } else if (action === "approval_status") {
+        // Deny-only approval observation. The worker reports the human
+        // approval card; nothing here clicks or dismisses page UI.
+        const reply = await omaSendToTab(tabId, { operation: "APPROVAL_STATUS" });
+        result = { ...((reply && reply.result) || {}), effect_performed: false };
+      } else if (action === "attach_info") {
+        // Read-only composer attachment inventory (labels/counts, no bytes).
+        const reply = await omaSendToTab(tabId, { operation: "ATTACH_INFO" });
+        result = (reply && reply.result) || {};
+      } else if (action === "model_catalog") {
+        // Observed model labels only (verified:false). The relay/host must
+        // attest the account before any consumer treats this as a catalog.
+        const reply = await omaSendToTab(tabId, { operation: "MODEL_CATALOG_OBSERVE" });
+        result = (reply && reply.result) || {};
       } else if (action === "close") {
         result = { closed: true, tab_preserved: true, controller_released: true };
         releaseAfter = true;
@@ -1877,7 +2154,10 @@ async function omaProcessJob(tabId, job) {
     await omaApplyRequestedModel(tabId, job);
     if (leaseLost) throw new Error("LEASE_LOST");
     await renew();
+    const binaryAttachments = await omaResolveBinarySet(identity, job);
     await omaProgressPhase(tabId, identity, "ready");
+    if (String(job.job_id).startsWith("websend_")) await omaSendToTab(tabId,{operation:"SENTRA_BOUND_OBSERVATION",job_id:job.job_id});
+    await omaSaveActive(tabId,{send_reserved:true});
     const sendingConfirmed = await omaProgressPhase(tabId, identity, "sending");
     if (omaJobProvider(job) === "chatgpt" && !sendingConfirmed) {
       throw new Error("SEND_FENCED: relay did not acknowledge sending before effect");
@@ -1885,7 +2165,7 @@ async function omaProcessJob(tabId, job) {
     // A channel/submit error is not proof that nothing was sent. Never replay.
     const sent = await omaSendToTab(tabId, {
       operation: "SEND_MESSAGE", text: job.prompt, images: job.images || [],
-      delivery_id: job.job_id,
+      delivery_id: job.job_id, attachments: binaryAttachments,
     });
     const attached = (sent && sent.result && sent.result.images_attached) || 0;
     await omaRecordDeliveryReceipt(identity, job, sent, sendingConfirmed);
@@ -1917,7 +2197,7 @@ async function omaProcessJob(tabId, job) {
       slices++;
       if (slices % 3 === 1) await omaProgressPhase(tabId, identity, "waiting");
       try {
-        waited = await omaSendToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice });
+        waited = await omaSendToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice, read_only: String(identity.job_id || "").startsWith("websend_") });
         const hb = waited && waited.result && waited.result.hb_cs;
         if (typeof hb === "number" && Number.isFinite(hb)) csHb += hb;
         break;
@@ -1927,6 +2207,9 @@ async function omaProcessJob(tabId, job) {
         if (m) { try { csHb += parseInt(m[1], 10); } catch (_) {} }
         if (/TIMEOUT/.test(msg) && Date.now() < waitDeadline) {
           await omaSaveActive(tabId, { slices });
+          if (String(job.job_id).startsWith("websend_")) {
+            try { await omaPublishAssistantFrame(tabId,identity,job); } catch (_) {}
+          }
           continue;
         }
         throw e;
@@ -1955,6 +2238,10 @@ async function omaProcessJob(tabId, job) {
       } catch (_) {
         titleUpdated = false;
       }
+    }
+    if (String(job.job_id).startsWith("websend_")) {
+      if (!await omaPublishAssistantFrame(tabId,identity,job)) throw Error("ASSISTANT_FINAL_PROOF_UNAVAILABLE");
+      return;
     }
     await postResult({
       job_id: job.job_id, task_id: job.task_id, status: "COMPLETED",
@@ -1986,7 +2273,7 @@ async function omaProcessJob(tabId, job) {
     });
   } finally {
     clearInterval(heartbeat);
-    await omaClearActive(tabId);
+    await omaFinishActive(tabId);
     if (omaWorkers.has(tabId)) {
       // Preserva last_conv entre jobs (guarda anti-contamina├º├úo); limpa o resto.
       omaWorkers.set(tabId, { state: "IDLE", last_conv: omaWorkers.get(tabId).last_conv });
@@ -2001,6 +2288,10 @@ const omaResumeBusy = new Set();
 // reenvia: s├│ renova, espera fatiado (o baseline da tab continua intacto) e
 // posta. Respeita o deadline original ÔÇö resume n├úo estende o timeout do job.
 async function omaResumeJob(tabId, active) {
+  if (String(active.job_id).startsWith("websend_")) {
+    if (!omaWorkers.has(tabId)) omaWorkers.set(tabId,{state:"IDLE"});
+    return omaObserveRelayJob(tabId,active);
+  }
   if (!omaWorkers.has(tabId)) omaWorkers.set(tabId, { state: "IDLE" });
   const worker = omaWorkers.get(tabId);
   if (!worker || worker.state !== "IDLE") return;
@@ -2047,7 +2338,7 @@ async function omaResumeJob(tabId, active) {
       slices++;
       if (slices % 3 === 1) await omaProgressPhase(tabId, identity, "waiting");
       try {
-        waited = await omaSendToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice });
+        waited = await omaSendToTab(tabId, { operation: "WAIT_RESPONSE", timeout_ms: slice, read_only: String(identity.job_id || "").startsWith("websend_") });
         const hb = waited && waited.result && waited.result.hb_cs;
         if (typeof hb === "number" && Number.isFinite(hb)) csHb += hb;
         break;
@@ -2079,6 +2370,10 @@ async function omaResumeJob(tabId, active) {
     if (resumedConvKey) {
       const mem = omaWorkers.get(tabId);
       if (mem) mem.last_conv = resumedConvKey;
+    }
+    if (String(active.job_id).startsWith("websend_")) {
+      if (!await omaPublishAssistantFrame(tabId,identity,active)) throw Error("ASSISTANT_FINAL_PROOF_UNAVAILABLE");
+      return;
     }
     await omaPostResult(identity, active, {
       job_id: active.job_id, task_id: active.task_id, status: "COMPLETED",
@@ -2133,7 +2428,7 @@ async function omaRecoverActive() {
         await omaClearActive(tabId); // tab sumiu: para de rastrear, servidor expira
         continue;
       }
-      if (!active.sent || (active.kind && active.kind !== "CHAT_TASK")) continue;
+      if ((!active.sent && !active.send_reserved) || (active.kind && active.kind !== "CHAT_TASK")) continue;
       omaResumeBusy.add(tabId);
       // Sem await (paralelo como o poll); a trava + WAITING s├¡ncrono evitam
       // que o poll lease outro job para esta tab no mesmo tick.
@@ -2215,7 +2510,7 @@ async function omaTick() {
     await omaHeartbeatWorkers();
     await omaRecoverActive(); // órfãos de restart antes de leasear trabalho novo
     for (const [tabId, worker] of omaWorkers) {
-      if (worker.state !== "IDLE") continue;
+      if (worker.state !== "IDLE" || await omaLoadActive(tabId)) continue;
       const busy = [...omaWorkers.values()].filter((w) => w.state !== "IDLE").length;
       if (busy >= desiredTabs) break;
       let data = null;
@@ -2257,7 +2552,7 @@ async function omaEnsureRecoveryGuardOnExistingTabs() {
   if (!chrome.scripting || typeof chrome.scripting.executeScript !== "function") return;
   let tabs = [];
   try {
-    tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*"] });
+    tabs = await chrome.tabs.query({ url: ["https://chatgpt.com/*", "https://gemini.google.com/*"] });
   } catch (e) {
     await omaNoteError("recovery_guard_query_tabs", e);
     return;
@@ -2267,9 +2562,9 @@ async function omaEnsureRecoveryGuardOnExistingTabs() {
     let current = false;
     try {
       const status = await chrome.tabs.sendMessage(tab.id, {
-        operation: "SENTRA_RECOVERY_GUARD_STATUS",
+        operation: "GET_STATUS",
       });
-      current = !!(status && status.ok && status.version === OMA_SW_VERSION);
+      current = !!(status && status.ok && status.result && status.result.cs_version === OMA_SW_VERSION);
     } catch (probeError) {
       await omaNoteError("recovery_guard_probe", probeError);
     }
@@ -2277,7 +2572,7 @@ async function omaEnsureRecoveryGuardOnExistingTabs() {
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        files: ["recovery-guard.js"],
+        files: ["recovery-guard.js", "selectors.js", "observer.js", "content-script.js"],
       });
     } catch (e) {
       await omaNoteError("recovery_guard_inject", e);

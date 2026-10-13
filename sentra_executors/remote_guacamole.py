@@ -5,6 +5,7 @@ attestation service and never interprets guacd ready as authenticated guest ID.
 """
 from __future__ import annotations
 import codecs
+import base64
 import hashlib
 import json
 import math
@@ -19,7 +20,8 @@ from dataclasses import dataclass,field
 from .identity_sessions import SessionExecutor,SessionScope,SessionJournal,declare_session_machine
 from .rpa import ExecutorFailure,effect_checkpoint,AuthorizedPaths,atomic_output
 
-GUAC_ACTIONS=frozenset({'session.list','open','reattach','read','write','close','recording.export','recording.read'})
+GUAC_ACTIONS=frozenset({'session.list','status','open','reattach','read','write','close','recording.export','recording.read',
+                       'clipboard.read','clipboard.write'})
 
 
 def encode_instruction(opcode,*arguments):
@@ -81,6 +83,10 @@ class GuacamoleBinding:
     max_read_bytes:int=256*1024
     width:int=1280
     height:int=800
+    clipboard_enabled:bool=False
+    max_clipboard_bytes:int=65536
+    record_input:tuple[str,...]=()
+    record_output:bool=True
 
     def __post_init__(self):
         if (not self.capability_id or not self.host or type(self.port) is not int or not 1<=self.port<=65535 or self.protocol not in {'rdp','vnc','ssh'} or
@@ -90,6 +96,9 @@ class GuacamoleBinding:
             self.tls and not re.fullmatch('[0-9a-f]{64}',self.server_certificate_sha256 or '') or
             not self.tls and self.host not in {'127.0.0.1','::1'}):
             raise ValueError('invalid_explicit_guacamole_transport')
+        if (type(self.clipboard_enabled) is not bool or type(self.record_output) is not bool or not 1<=self.max_clipboard_bytes<=1024*1024 or
+                not set(self.record_input)<=set(self.allowed_input)|({'clipboard'} if self.clipboard_enabled else set())):
+            raise ValueError('invalid_guacamole_clipboard_or_recording_profile')
         params=dict(self.parameters)
         if len(params)!=len(self.parameters) or not params.get('hostname'):
             raise ValueError('guacamole_configured_target_required')
@@ -103,13 +112,35 @@ class GuacamoleBinding:
         # Changing route/transport/policy invalidates persisted sessions.
         return hashlib.sha256(json.dumps([self.capability_id,self.host,self.port,self.protocol,
             self.parameters,self.tls,self.ca_file,self.server_certificate_sha256,self.allowed_input,
-            self.supported_versions,self.actions],sort_keys=True).encode()).hexdigest()
+            self.supported_versions,self.actions,self.clipboard_enabled,self.max_clipboard_bytes,
+            self.record_input,self.record_output],sort_keys=True).encode()).hexdigest()
 
 
 class _GuacdConnection:
     def __init__(self,sock,b):
         self.sock=sock;self.binding=b;self.parser=GuacamoleParser(max_bytes=b.max_instruction_bytes)
         self.pending=deque();self.closed=False
+        self.clipboard_streams={};self.clipboard=None;self.output_index=0
+        self.live_events=deque();self.live_sequence=0;self.live_bytes=0
+
+    def append_live(self,data):
+        self.live_sequence+=1;self.live_bytes+=len(data)
+        self.live_events.append({'sequence':self.live_sequence,'time_ns':time.time_ns(),'channel':'guacamole',
+            'data_base64':base64.b64encode(data).decode(),'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data)})
+        while self.live_events and (self.live_bytes>self.binding.max_read_bytes*8 or len(self.live_events)>2000):
+            self.live_bytes-=self.live_events.popleft()['bytes']
+
+    def read_live(self,after):
+        if after>self.live_sequence:raise ExecutorFailure('guacamole_live_cursor_ahead')
+        events=[];used=0
+        for event in self.live_events:
+            if event['sequence']<=after:continue
+            if used+event['bytes']>self.binding.max_read_bytes:break
+            used+=event['bytes'];events.append({k:v for k,v in event.items() if k!='bytes'})
+        first=self.live_events[0]['sequence'] if self.live_events else None
+        return {'events':events,'cursor':events[-1]['sequence'] if events else after,
+            'first_sequence':first,'gap':first is not None and after<first-1,'bytes':used,
+            'more':bool(events) and events[-1]['sequence']<self.live_sequence,'durable_recording_enabled':False}
 
     def send(self,opcode,*args):
         effect_checkpoint();self.sock.settimeout(self.binding.io_timeout_seconds)
@@ -172,10 +203,12 @@ class GuacamoleBackend:
                     raise ExecutorFailure('invalid_guacamole_secret_provider')
                 values.update(secrets)
             # Disable channels rather than trusting the viewer to omit controls.
-            values.update({'read-only':'false' if b.allowed_input else 'true','disable-upload':'true','disable-download':'true',
+            permits_control=bool(b.allowed_input) or b.clipboard_enabled and 'clipboard.write' in b.actions
+            values.update({'read-only':'false' if permits_control else 'true','disable-upload':'true','disable-download':'true',
                 'sftp-disable-upload':'true','sftp-disable-download':'true','enable-drive':'false',
-                'enable-printing':'false','disable-copy':'true','disable-paste':'true','enable-audio':'false'})
-            if not b.allowed_input and 'read-only' not in names:
+                'enable-printing':'false','disable-copy':'false' if b.clipboard_enabled else 'true',
+                'disable-paste':'false' if b.clipboard_enabled else 'true','enable-audio':'false'})
+            if not permits_control and 'read-only' not in names:
                 raise ExecutorFailure('guacamole_plugin_has_no_view_only_parameter')
             conn.send('size',str(b.width),str(b.height),'96');conn.send('audio');conn.send('video')
             conn.send('image','image/png','image/jpeg');conn.send('timezone','UTC')
@@ -203,8 +236,11 @@ class GuacamoleBackend:
                     conn,rid,version=self._connect(b,b.protocol)
                     self.connections[row['id']]=conn
                     self.journal.update(row,remote_id=rid,state='CONNECTED',metadata={'protocol':b.protocol,'version':version,
-                        'transport_certificate_pinned':b.tls,'guest_identity_attested':False,'view_only':not bool(b.allowed_input)})
-                    result={'session_id':row['id'],'protocol_version':version,'view_only':not bool(b.allowed_input),
+                        'transport_certificate_pinned':b.tls,'guest_identity_attested':False,
+                        'view_only':not (bool(b.allowed_input) or b.clipboard_enabled and 'clipboard.write' in b.actions),
+                        'record_output':b.record_output,'record_input':list(b.record_input)})
+                    result={'session_id':row['id'],'protocol_version':version,
+                        'view_only':not (bool(b.allowed_input) or b.clipboard_enabled and 'clipboard.write' in b.actions),
                         'daemon_certificate_pinned':b.tls,'guest_identity_attested':False}
                     self.journal.complete_effect(a['_operation_id'],result);return result
                 except Exception as exc:
@@ -212,9 +248,20 @@ class GuacamoleBackend:
                     raise ExecutorFailure(exc.code if isinstance(exc,ExecutorFailure) else 'guacamole_connect_error',
                         uncertain=True,evidence={'session_id':row['id']}) from exc
             row=self.journal.get(a['session_id'],scope,'guacamole',b.identity)
+            if action=='status':
+                conn=self.connections.get(row['id'])
+                return {'session_id':row['id'],'provider':'guacamole','state':row['state'],'epoch':row['epoch'],
+                        'scope_verified':True,'session_scope_sha256':row['scope'],'binding_sha256':b.identity,
+                        'local_transport_connected':conn is not None and not conn.closed,
+                        'remote_state_observed':False,
+                        'view_only':not (bool(b.allowed_input) or b.clipboard_enabled and 'clipboard.write' in b.actions),
+                        'allowed_input':list(b.allowed_input),'clipboard_enabled':b.clipboard_enabled,
+                        'record_output':b.record_output,'provider_accessed':False}
             if action=='recording.export':
+                if not b.record_output:raise ExecutorFailure('guacamole_output_recording_disabled')
                 return {'artifact':self.journal.export(row,b.paths,a['output'])}
             if action=='recording.read':
+                if not b.record_output:raise ExecutorFailure('guacamole_output_recording_disabled')
                 # Offline data only. Never obtains a live socket or sends input.
                 result=self.journal.read(row,after=a.get('after',0),max_bytes=b.max_read_bytes)
                 return dict(result,playback_only=True,transport_accessed=False)
@@ -231,6 +278,21 @@ class GuacamoleBackend:
                 if conn is not None:effect_checkpoint();conn.close();self.connections.pop(row['id'],None)
                 self.journal.update(row,state='CLOSED');return {'session_id':row['id'],'tunnel_closed':True,'remote_os_session_deleted':False}
             if conn is None or conn.closed:raise ExecutorFailure('guacamole_explicit_reattach_required')
+            if action=='clipboard.write':
+                if not b.clipboard_enabled:raise ExecutorFailure('guacamole_clipboard_channel_disabled')
+                prior=self.journal.reserve_effect(a['_operation_id'],scope,a)
+                if prior is not None:return prior
+                index=str(conn.output_index);conn.output_index+=1
+                data=a['text'].encode('utf-8');effect_checkpoint()
+                conn.send('clipboard',index,'text/plain')
+                for offset in range(0,len(data),4096):
+                    conn.send('blob',index,base64.b64encode(data[offset:offset+4096]).decode())
+                conn.send('end',index)
+                if 'clipboard' in b.record_input:self.journal.append(row,'input.clipboard',data)
+                result={'session_id':row['id'],'clipboard_bytes_sent':len(data),
+                        'effect_semantically_verified':False,'host_clipboard_accessed':False,
+                        'input_recorded':'clipboard' in b.record_input}
+                self.journal.complete_effect(a['_operation_id'],result);return result
             if action=='write':
                 prior=self.journal.reserve_effect(a['_operation_id'],scope,a)
                 if prior is not None:return prior
@@ -238,7 +300,8 @@ class GuacamoleBackend:
                 if opcode not in {'sync','ack','nop'} and opcode not in b.allowed_input:
                     raise ExecutorFailure('guacamole_input_channel_denied')
                 effect_checkpoint();conn.send(opcode,*args)
-                result={'written':True,'input_recorded':False};self.journal.complete_effect(a['_operation_id'],result)
+                if opcode in b.record_input:self.journal.append(row,'input.'+opcode,encode_instruction(opcode,*args))
+                result={'written':True,'input_recorded':opcode in b.record_input};self.journal.complete_effect(a['_operation_id'],result)
                 return result
             deadline=time.monotonic()+a.get('wait_seconds',.5);used=0;count=0
             try:
@@ -246,12 +309,27 @@ class GuacamoleBackend:
                     effect_checkpoint()
                     try:instruction=conn.receive(timeout=min(.2,max(.001,deadline-time.monotonic())))
                     except socket.timeout:continue
+                    if instruction[0]=='clipboard' and b.clipboard_enabled:
+                        if len(instruction)!=3 or instruction[2]!='text/plain' or len(conn.clipboard_streams)>=4:
+                            raise ExecutorFailure('guacamole_clipboard_stream_type_or_limit')
+                        conn.clipboard_streams[instruction[1]]=bytearray();count+=1;continue
+                    if instruction[0] in {'blob','end'} and len(instruction)>1 and instruction[1] in conn.clipboard_streams:
+                        index=instruction[1];buffer=conn.clipboard_streams[index]
+                        if instruction[0]=='blob':
+                            if len(instruction)!=3:raise ExecutorFailure('guacamole_clipboard_blob_arity')
+                            block=base64.b64decode(instruction[2],validate=True);buffer.extend(block)
+                            if len(buffer)>b.max_clipboard_bytes:raise ExecutorFailure('guacamole_clipboard_byte_limit')
+                            conn.send('ack',index,'OK','0');used+=len(block)
+                        else:
+                            conn.clipboard=bytes(buffer);conn.clipboard_streams.pop(index)
+                        count+=1;continue
                     if instruction[0] in {'clipboard','file','filesystem','audio','video','pipe'}:
                         conn.close();self.connections.pop(row['id'],None)
                         raise ExecutorFailure('guacamole_server_sent_disabled_channel')
                     raw=encode_instruction(*instruction)
                     for start in range(0,len(raw),b.max_read_bytes):
-                        self.journal.append(row,'guacamole',raw[start:start+b.max_read_bytes])
+                        if b.record_output:self.journal.append(row,'guacamole',raw[start:start+b.max_read_bytes])
+                        else:conn.append_live(raw[start:start+b.max_read_bytes])
                     used+=len(raw);count+=1
                     if instruction[0]=='sync':
                         conn.send('sync',*instruction[1:])
@@ -270,6 +348,11 @@ class GuacamoleBackend:
                 raise
             except Exception:
                 conn.close();self.connections.pop(row['id'],None);raise
+            if action=='clipboard.read':
+                if not b.clipboard_enabled:raise ExecutorFailure('guacamole_clipboard_channel_disabled')
+                return {'session_id':row['id'],'text':conn.clipboard.decode('utf-8') if conn.clipboard is not None else None,
+                        'available':conn.clipboard is not None,'host_clipboard_accessed':False}
+            if not b.record_output:return dict(conn.read_live(a.get('after',0)),session_id=row['id'])
             return self.journal.read(row,after=a.get('after',0),max_bytes=b.max_read_bytes)
 
 
@@ -285,12 +368,15 @@ class GuacamoleExecutor(SessionExecutor):
         a=dict(request.arguments);action=a.get('action')
         if type(action) is not str or action not in b.actions:raise ValueError('guacamole_action_denied')
         fields={'session.list':{'limit'},'read':{'after','wait_seconds'},'recording.read':{'after'},'recording.export':{'output'},
-                'write':{'opcode','args'}}.get(action,set())
+                'write':{'opcode','args'},'clipboard.read':{'wait_seconds'},'clipboard.write':{'text'}}.get(action,set())
         if set(a)-({'action'}|fields|({'session_id'} if action not in {'open','session.list'} else set())):raise ValueError('invalid_guacamole_arguments')
         if action not in {'open','session.list'} and (type(a.get('session_id')) is not str or not a['session_id']):raise ValueError('bound_guacamole_session_required')
         if 'limit' in a and (type(a['limit']) is not int or not 1<=a['limit']<=100):raise ValueError('bounded_session_list_required')
         if 'after' in a and (type(a['after']) is not int or a['after']<0):raise ValueError('invalid_cursor')
         if 'wait_seconds' in a and (type(a['wait_seconds']) not in (int,float) or not 0<a['wait_seconds']<=3):raise ValueError('bounded_tunnel_read_required')
+        if action.startswith('clipboard.') and not b.clipboard_enabled:raise ValueError('guacamole_clipboard_channel_not_configured')
+        if action=='clipboard.write' and (type(a.get('text')) is not str or len(a['text'].encode())>b.max_clipboard_bytes):
+            raise ValueError('bounded_guacamole_clipboard_text_required')
         if action=='write':
             opcode,args=a.get('opcode'),a.get('args')
             if opcode not in set(b.allowed_input)|{'sync','ack','nop'} or not isinstance(args,list) or len(args)>16 or any(type(v) is not str or len(v)>1024 for v in args):

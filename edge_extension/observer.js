@@ -88,7 +88,7 @@ function omaLastAssistantText() {
   return omaNodeReadableText(fallback[fallback.length - 1]);
 }
 
-function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null) {
+function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null, readOnly = false) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
     let previousHash = null;
@@ -128,6 +128,10 @@ function omaWaitForStableResponse(timeoutMs, stableSamples = 3, baseline = null)
         // A new non-warning assistant response proves the recovered turn moved on.
         if (recoveryPending && count > recoveryPending.count) recoveryPending = null;
         return false;
+      }
+      if (readOnly) {
+        finish(false, new Error('CENTRAL_TURN_AWAITS_OPERATOR: additional checks observed without recovery effect'));
+        return true;
       }
 
       const signature = (

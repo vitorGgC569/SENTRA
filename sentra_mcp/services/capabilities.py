@@ -33,6 +33,17 @@ SEMANTIC_ERRORS = {
     "STATE_CONFLICT",
 }
 
+COORDINATOR_CAPABILITIES = tuple("canvas.coordinator." + action for action in (
+    "dot_create", "team_create", "connect", "delegate", "handoff", "pause",
+    "resume", "cancel", "reassign", "pause_dot", "resume_dot"))
+
+
+def selo_capability_catalog():
+    """Exact callable catalog, not evidence of configuration or a granted right."""
+    from .selo_composition import _ACTIONS
+    return tuple(sorted("selo." + provider + "." + action
+                        for provider, actions in _ACTIONS.items() for action in actions))
+
 
 def _canonical(value: Any) -> bytes:
     return json.dumps(
@@ -274,6 +285,23 @@ class CapabilityService:
             "plugin_build_identity": "browser" in surfaces,
             "invasive_fallback_default": "fail_closed",
             "surfaces": surfaces,
+            "policy_veto_chain": True,
+            "identity_registry": True,
+            "audit_anchors_tessera_immudb": True,
+            "memory_projection": True,
+            "cost_ledger": True,
+            "diagnostics_redacted": True,
+            "telemetry_otel_langfuse": True,
+            "grype_release_gate": True,
+            "benchmark_selo_gate": True,
+            "learning_review": True,
+            "langfuse_eval": True,
+            "otel_pipeline": True,
+            "audit_trust_witness": True,
+            "grype_freshness_diff": True,
+            "coordinator_capability_catalog": list(COORDINATOR_CAPABILITIES),
+            "selo_capability_catalog": list(selo_capability_catalog()),
+            "optional_provider_configuration_required": True,
         }
 
     async def target_manifest(self, target: str | None) -> dict[str, Any]:

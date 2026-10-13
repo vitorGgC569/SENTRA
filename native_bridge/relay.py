@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -21,7 +22,7 @@ class RelayState(JobStore):
     POOL_LEASE_WINDOW_S = 45.0
 
     def __init__(self, extension_dir=None, db_path=":memory:", *, browser_evidence=None,
-                 authenticated_control=None):
+                 authenticated_control=None, assistant_observer=None):
         super().__init__(db_path)
         self.extension_dir = extension_dir
         self.browser_evidence = browser_evidence or (
@@ -35,10 +36,19 @@ class RelayState(JobStore):
                 authenticated_control, self).authenticated_receipts
             from .web_send import WebSendAuthority
             self.web_send = WebSendAuthority(authenticated_control, self)
+        self.generated_assets = None
+        if authenticated_control is not None:
+            from .web_generated_assets import WebGeneratedAssets
+            self.generated_assets = WebGeneratedAssets(authenticated_control, self)
+        self.streaming = None
+        self.assistant_observer = None
+        if assistant_observer is not None:
+            self.attach_assistant_observer(assistant_observer)
         self._last_poll = {}
         self._worker_status = {}
         self._extension_seen = 0.0
         self._extension_status = {}
+        self._extension_id = None
         self._pool_owner = None
         self._pool_seen = 0.0
         self._bootstrap_successes = 0
@@ -63,6 +73,139 @@ class RelayState(JobStore):
             self.browser_evidence.require_dispatch_ready(
                 "local-operator", identity.conversation_id)
         return super().submit(job)
+
+    def attachment_chunk(self, *, job_id, worker, lease_token, asset_id, part):
+        if self.web_send is None or self.authenticated_control is None:
+            raise PermissionError("binary composer requires bound central Web authority")
+        job = self.leased_payload(job_id, worker, lease_token)
+        refs = job.get("attachments", [])
+        ref = next((item for item in refs if item["asset_id"] == asset_id), None)
+        bound = self.web_send.binding(job_id)
+        if ref is None or bound is None:
+            raise PermissionError("attachment is not in this original job intent")
+        self.web_send._authority(bound)
+        from sentra_mcp.services.web_history_assets import WebAssetDrafts
+        drafts = WebAssetDrafts(self.authenticated_control)
+        status = drafts._row(bound["owner"], asset_id)
+        if (status["work_item_id"], status["run_id"], status["expected_sha256"]) != (
+                bound["work_item_id"], bound["run_id"], ref["sha256"]):
+            raise PermissionError("attachment read scope changed")
+        return drafts.read_chunk(bound["owner"], asset_id, part)
+
+    def leased_payload(self, job_id, worker, lease_token):
+        # Host-only metadata for the account observer. The chosen worker is
+        # the actual leased worker, not an optional job target or another Edge.
+        return {**super().leased_payload(job_id, worker, lease_token), "leased_worker": worker}
+
+    def attach_assistant_observer(self, observer):
+        """Server-only independent browser observer; never an HTTP payload."""
+        if not callable(observer) or self.authenticated_control is None or self.web_send is None:
+            raise ValueError("independent host observer and shared Control Plane required")
+        from browser.streaming import StreamingLedger
+        from .stream_ingest import assistant_attestor_from_streaming
+        self.streaming = StreamingLedger(self.authenticated_control.store)
+        self.assistant_observer = observer
+        self.web_send.assistant_attestor = assistant_attestor_from_streaming(
+            self.authenticated_control, self.streaming, host_observer=observer)
+
+    def store_result(self, result, token):
+        bound = self.web_send.binding(result.job_id) if self.web_send is not None else None
+        if bound is not None and result.status == "COMPLETED":
+            # A renderer text/WAIT_RESPONSE success cannot complete a bound
+            # model turn. Only the independently attested final history does.
+            with self.lock:
+                original = self.db.execute("SELECT worker,lease FROM jobs WHERE id=?", (result.job_id,)).fetchone()
+                if (original is None or original[0] != result.worker or not isinstance(token, str)
+                        or not secrets.compare_digest(original[1] or "", token)):
+                    raise PermissionError("completion has a foreign original worker lease")
+            if self.web_send.status(bound["owner"], result.job_id)["state"] != "ANSWERED":
+                raise PermissionError("renderer result cannot replace independent final assistant proof")
+            return  # status repaired history→outbox ACK; no renderer overwrite
+        return super().store_result(result, token)
+
+    def _original_worker(self, job_id, worker, lease_token):
+        with self.lock:
+            lease = self.db.execute("SELECT worker,lease FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if (lease is None or lease[0] != worker or not isinstance(lease_token, str)
+                    or not secrets.compare_digest(lease[1] or "", lease_token)):
+                raise PermissionError("observation has a foreign original worker lease")
+
+    def recovery_disposition(self, *, job_id, worker, lease_token):
+        """Release only an original browser reference with durable pre-Send proof.
+
+        This observation never changes a job, grants a lease, or authorizes a
+        click. Failed work remains failed and uncertain operations stay retained.
+        """
+        if not str(job_id).startswith('websend_') or not worker or not lease_token:
+            raise PermissionError('original Web worker lease required')
+        self._original_worker(job_id, worker, lease_token)
+        bound = self.web_send.binding(job_id) if self.web_send is not None else None
+        pending = self.pending_status(job_id)
+        safe = bool(bound and bound.get('send_fence') == 0 and
+            bound.get('stage') in {'QUEUED', 'FAILED', 'REJECTED', 'CANCELLED'} and
+            pending.get('state') == 'FAILED' and pending.get('may_have_sent') is False and
+            pending.get('phase') in {'preparing', 'navigating', 'settling', 'ready'})
+        return {'job_id':job_id, 'release_unsent_reference':safe, 'automatic_resend':False}
+
+    def receipt_observation(self, *, job_id, worker, lease_token, request_id, extension_id,
+                            source_sha256, document_id, identity_epoch):
+        """Repair a stored exact receipt by observation, never another Send.
+
+        This collector-only route retains the original lease after expiry. It
+        accepts no new receipt bytes, grant, owner or effect intent.
+        """
+        if self.web_send is None:
+            raise PermissionError("central Web authority is unavailable")
+        self._original_worker(job_id, worker, lease_token)
+        bound = self.web_send.binding(job_id)
+        if bound is None or not bound["send_fence"] or bound["worker"] != worker:
+            raise PermissionError("receipt observation lacks original send binding")
+        return self.web_send.reconcile(bound["owner"], job_id, worker=worker, request_id=request_id,
+            extension_id=extension_id, source_sha256=source_sha256,
+            document_id=document_id, identity_epoch=identity_epoch)
+
+    def response_frame(self, *, job_id, worker, lease_token, request_id, extension_id,
+                       source_sha256, document_id, identity_epoch, conversation_id,
+                       message_id, parent_user_message_id, revision, body, complete,
+                       native_file_ids=None):
+        """Observe original effect only; exact late proof can repair uncertainty.
+
+        Renderer frames are protected observation data. Independent host proof
+        is mandatory before WebSend.answer/history can mark ANSWERED.
+        The ORIGINAL worker lease token is checked without renewing/reclaiming.
+        """
+        if self.streaming is None or not callable(self.assistant_observer):
+            raise PermissionError("independent assistant observation is not configured")
+        if type(complete) is not bool or not isinstance(body, str) or len(body) > 200000:
+            raise ValueError("bounded exact assistant frame required")
+        bound = self.web_send.binding(job_id)
+        if bound is None or not bound["send_fence"] or bound["worker"] != worker:
+            raise PermissionError("assistant frame lacks the original send intent/worker")
+        self._original_worker(job_id, worker, lease_token)
+        self.web_send._authority(bound, effect=False)
+        principal = self.web_send._collector(extension_id, source_sha256)
+        delivery = self.delivery_status(job_id)
+        receipt = (delivery or {}).get("receipt")
+        if not receipt or delivery["state"] != "sent" or receipt["message_id"] != parent_user_message_id or receipt["conversation_id"] != conversation_id:
+            raise PermissionError("assistant frame differs from original exact user receipt")
+        self.web_send.receipts.require_attested(bound["owner"], run_id=bound["run_id"], job_id=job_id, evidence=receipt)
+        self.web_send.receipts.prove_message(owner=bound["owner"], run_id=bound["run_id"],
+            browser_principal=principal, request_id=request_id, worker=worker,
+            conversation_id=conversation_id, message_id=parent_user_message_id,
+            document_id=document_id, identity_epoch=identity_epoch)
+        if native_file_ids is None:
+            native_file_ids = []  # compatible direct host calls without binary metadata
+        if not complete and native_file_ids:
+            raise ValueError("partial assistant cannot declare native generated images")
+        if complete:
+            self.generated_assets.declare(owner=bound["owner"],job_id=job_id,
+                conversation_id=conversation_id,message_id=message_id,file_ids=native_file_ids)
+        self.streaming.record_frame(principal=principal, conversation_id=conversation_id,
+            message_id=message_id, revision=revision, text=body)
+        return self.web_send.answer(bound["owner"], job_id, request_id=request_id, worker=worker,
+            browser_principal=principal, conversation_id=conversation_id, message_id=message_id,
+            revision=revision, body=body, identity_epoch=identity_epoch, complete=complete,
+            parent_user_message_id=parent_user_message_id)
 
 
     def attested_web_receipt(self, *, job_id, worker, lease_token, evidence,
@@ -228,11 +371,15 @@ class RelayState(JobStore):
                 "last_seen": self._bootstrap_last_seen,
             }
 
-    def mark_extension(self, status=None):
+    def mark_extension(self, status=None, *, extension_id=None):
         if status is not None and not isinstance(status, dict):
             raise ValueError("extension status must be an object")
+        if extension_id is not None and not re.fullmatch('[a-p]{32}', extension_id):
+            raise ValueError('invalid authenticated extension origin')
         with self.lock:
             self._extension_seen = time.time()
+            if extension_id is not None:
+                self._extension_id = extension_id
             if isinstance(status, dict):
                 self._extension_status = dict(status)
 
@@ -243,6 +390,7 @@ class RelayState(JobStore):
         age_s = (time.time() - last_seen) if last_seen else None
         return {
             "online": bool(last_seen and age_s is not None and age_s <= self.EXTENSION_ONLINE_WINDOW_S),
+            "extension_id": self._extension_id,
             "last_seen": last_seen or None,
             "age_s": round(age_s, 3) if age_s is not None else None,
             "status": status,
@@ -573,8 +721,37 @@ def make_handler(state, token):
                         # requeue a lease whose Web send may already have happened.
                         state.release_worker(collector["worker"])
                     return self._send(outcome)
+                if self.path in ("/browser-evidence/approval",
+                                 "/browser-evidence/account-catalog"):
+                    # Native host approval/account-catalog ingress (Rastro relay,
+                    # Brisa V2 adapter + service). Deny-only observations; the
+                    # human approval card is never clicked and no grant is made.
+                    collector = self._browser_collector(data)
+                    try:
+                        from browser.evidence_http_v2 import dispatch_authenticated_v2
+                    except ImportError:
+                        return self._send({"error": "browser evidence V2 adapter "
+                                                    "unavailable; Brisa composition required",
+                                           "automatic_resend": False}, 503)
+                    def _host_owned(extension_id, worker):
+                        try:
+                            return state.worker_status(worker).get("online") is True
+                        except ValueError:
+                            return False
+                    return self._send(dispatch_authenticated_v2(
+                        service=state.browser_evidence, path=self.path,
+                        payload=data, extension_id=collector["extension_id"],
+                        source_sha256=collector["source_sha256"],
+                        worker=collector["worker"],
+                        authorized_worker=_host_owned))
+                if self.path == '/jobs/recovery-disposition':
+                    if set(data) != {'job_id', 'worker', 'lease_token'}:
+                        raise ValueError('exact original worker identity required')
+                    return self._send(state.recovery_disposition(**data))
                 if self.path == "/extension/heartbeat":
-                    state.mark_extension(data.get("status"))
+                    origin = self.headers.get('Origin', '')
+                    extension_id = origin.removeprefix('chrome-extension://') if origin.startswith('chrome-extension://') else None
+                    state.mark_extension(data.get("status"), extension_id=extension_id)
                     return self._send({"ok": True, "extension": state.extension_status()})
                 if self.path == "/workers/heartbeat":
                     worker = str(data.get("worker") or "")
@@ -599,6 +776,41 @@ def make_handler(state, token):
                     if set(data) - allowed:
                         raise ValueError("unknown job fields")
                     return self._send({"job_id": state.submit(ChatJob(**data))})
+                if self.path == "/jobs/attachment-chunk":
+                    if set(data) != {"job_id", "worker", "lease_token", "asset_id", "part", "source_sha256"}:
+                        raise ValueError("exact binary chunk request required")
+                    self._browser_collector(data)
+                    data.pop("source_sha256")
+                    return self._send(state.attachment_chunk(**data))
+                if self.path == "/jobs/generated-asset/chunk":
+                    required = {"job_id", "worker", "lease_token", "request_id", "source_sha256",
+                        "document_id", "identity_epoch", "conversation_id", "message_id", "file_id",
+                        "mime_type", "filename", "byte_length", "sha256", "part", "chunk_sha256", "data_base64"}
+                    if set(data) != required or state.generated_assets is None:
+                        raise ValueError("exact authenticated native image chunk required")
+                    collector = self._browser_collector(data)
+                    return self._send(state.generated_assets.chunk(**data, extension_id=collector["extension_id"]))
+                if self.path == "/jobs/generated-asset/finalize":
+                    required = {"job_id", "worker", "lease_token", "request_id", "source_sha256",
+                        "document_id", "identity_epoch", "conversation_id", "message_id", "file_id"}
+                    if set(data) != required or state.generated_assets is None:
+                        raise ValueError("exact authenticated native image finalization required")
+                    collector = self._browser_collector(data)
+                    return self._send(state.generated_assets.finalize(**data, extension_id=collector["extension_id"]))
+                if self.path == "/jobs/response-frame":
+                    base = {"job_id", "worker", "lease_token", "request_id", "source_sha256",
+                        "document_id", "identity_epoch", "conversation_id", "message_id",
+                        "parent_user_message_id", "revision", "body", "complete"}
+                    if set(data) not in (base, base | {"native_file_ids"}):
+                        raise ValueError("exact scoped assistant frame schema required")
+                    collector = self._browser_collector(data)
+                    return self._send(state.response_frame(**data, extension_id=collector["extension_id"]))
+                if self.path == "/jobs/receipt-observation":
+                    if set(data) != {"job_id", "worker", "lease_token", "request_id", "source_sha256",
+                                     "document_id", "identity_epoch"}:
+                        raise ValueError("exact original receipt observation schema required")
+                    collector = self._browser_collector(data)
+                    return self._send(state.receipt_observation(**data, extension_id=collector["extension_id"]))
                 if self.path == "/jobs/result":
                     lease_token = data.pop("lease_token", "")
                     state.store_result(ChatResult(**data), lease_token)
@@ -645,6 +857,9 @@ def make_handler(state, token):
             parsed = urlparse(self.path)
             if parsed.path == "/health":
                 return self._send({"ok": True, "authentication": "bearer",
+                                   "web_send_configured": state.web_send is not None,
+                                   "generated_assets_configured": state.generated_assets is not None,
+                                   "outbox_identity": state.namespace_identity(),
                                    **state.counts(), "workers_online": state.workers_online(),
                                    "workers_ever_seen": state.workers_ever_seen(),
                                    "extension": state.extension_status(),
@@ -719,7 +934,7 @@ class BoundedHTTPServer(ThreadingHTTPServer):
 
 class RelayServer:
     def __init__(self, host="127.0.0.1", port=8765, extension_dir=None, token=None, db_path=":memory:",
-                 browser_evidence=None, authenticated_control=None):
+                 browser_evidence=None, authenticated_control=None, assistant_observer=None):
         if host not in {"127.0.0.1", "localhost"}:
             raise ValueError("relay must bind loopback only")
         self.token = token or secrets.token_urlsafe(32)
@@ -728,7 +943,7 @@ class RelayServer:
         if extension_dir is not None:
             write_extension_bootstrap(Path(extension_dir), self.token)
         self.state = RelayState(extension_dir, db_path, browser_evidence=browser_evidence,
-                                authenticated_control=authenticated_control)
+                                authenticated_control=authenticated_control, assistant_observer=assistant_observer)
         try:
             self.server = BoundedHTTPServer((host, port), make_handler(self.state, self.token))
         except OSError:

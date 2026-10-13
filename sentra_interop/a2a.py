@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import base64
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
@@ -16,7 +17,7 @@ from .gate import DispatchOutcome, EffectRejected, InteropGate
 
 TERMINAL = frozenset({"completed", "failed", "canceled", "rejected"})
 STATES = frozenset({"submitted", "working", "input-required", "auth-required", *TERMINAL})
-PART_TYPES = frozenset({"text", "data"})
+PART_TYPES = frozenset({"text", "data", "raw", "url"})
 MAX_EVENT_BYTES = 65536
 
 
@@ -37,6 +38,36 @@ def _bounded(payload: Any) -> None:
         raise A2AValidationError("invalid JSON") from exc
     if len(encoded) > MAX_EVENT_BYTES:
         raise A2AValidationError("A2A payload too large")
+
+
+def normalize_parts(parts):
+    if not isinstance(parts,list) or len(parts)>16:raise A2AValidationError("invalid A2A parts")
+    result=[]
+    for part in parts:
+        if not isinstance(part,Mapping):raise A2AValidationError("invalid A2A part")
+        kinds=PART_TYPES.intersection(part)
+        if len(kinds)!=1 or set(part)-PART_TYPES-{"metadata","filename","mediaType"}:
+            raise A2AValidationError("ambiguous A2A part")
+        kind=next(iter(kinds));value=part[kind]
+        if kind=="text" and (not isinstance(value,str) or len(value.encode())>32768):raise A2AValidationError("invalid text part")
+        if kind=="raw":
+            if not isinstance(value,str) or len(value)>45000:raise A2AValidationError("A2A binary chunk exceeds bound")
+            try:base64.b64decode(value,validate=True)
+            except ValueError as exc:raise A2AValidationError("invalid A2A binary chunk") from exc
+        if kind=="url":
+            from urllib.parse import urlsplit
+            parsed=urlsplit(value) if isinstance(value,str) else None
+            if parsed is None or parsed.scheme!="https" or not parsed.hostname or parsed.username or parsed.password:
+                raise A2AValidationError("invalid A2A artifact reference")
+            # A URL is an inert descriptor. Download needs a separate scoped
+            # network/artifact capability and is never performed here.
+        for field in ("filename","mediaType"):
+            if field in part and (not isinstance(part[field],str) or len(part[field])>256 or "\0" in part[field]):
+                raise A2AValidationError("invalid A2A part metadata")
+        if "metadata" in part and not isinstance(part["metadata"],Mapping):raise A2AValidationError("invalid A2A part metadata")
+        result.append({"type":kind,**dict(part)})
+    _bounded(result)
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,14 +124,13 @@ class A2AEnvelope:
             if kind not in PART_TYPES:
                 # filePart URI can be an SSRF or untrusted binary; intentionally denied.
                 raise A2AValidationError("unsupported part type")
-            expected = {"type", kind}
-            if set(part) != expected:
+            expected = {"type", kind,"metadata","filename","mediaType"}
+            if set(part) - expected:
                 raise A2AValidationError("unexpected A2A part payload")
             if kind == "text" and (not isinstance(part.get("text"), str) or
                                     len(part["text"]) > 32768):
                 raise A2AValidationError("invalid text part")
-            if kind == "data" and not isinstance(part.get("data"), Mapping):
-                raise A2AValidationError("invalid data part")
+            normalize_parts([{key:value for key,value in part.items() if key!="type"}])
         _bounded({"parts": self.parts, "state": self.state})
 
     @classmethod
@@ -136,16 +166,7 @@ class A2AEnvelope:
         if not isinstance(parts, list):
             raise A2AValidationError("invalid A2A parts")
         # Proto JSON uses text/data keys rather than an explicit "type".
-        normalized: list[Mapping[str, Any]] = []
-        for part in parts:
-            if not isinstance(part, Mapping):
-                raise A2AValidationError("invalid A2A part")
-            if set(part) == {"text"} and isinstance(part["text"], str):
-                normalized.append({"type": "text", "text": part["text"]})
-            elif set(part) == {"data"} and isinstance(part["data"], Mapping):
-                normalized.append({"type": "data", "data": dict(part["data"])})
-            else:
-                raise A2AValidationError("file/unknown parts are not accepted")
+        normalized=normalize_parts(parts)
         return cls(identity, _required(task_id, "task_id"), _required(context_id, "context_id"),
                    event_id, sequence, state, tuple(normalized))
 
@@ -178,7 +199,7 @@ class A2AEnvelope:
                 raise A2AValidationError("artifact stream requires verified task state")
             artifact = update.get("artifact")
             if not isinstance(artifact, Mapping) or not set(artifact).issubset(
-                {"artifactId", "parts", "name", "description", "metadata"}
+                {"artifactId", "parts", "name", "description", "metadata","extensions"}
             ):
                 raise A2AValidationError("invalid artifact")
             base = cls.from_task_event(
@@ -198,10 +219,7 @@ class A2AEnvelope:
 
     def to_task_status_event(self) -> Mapping[str, Any]:
         """Protocol-shaped payload for an authenticated enclosing A2A transport."""
-        parts = [
-            {"text": part["text"]} if part["type"] == "text" else {"data": dict(part["data"])}
-            for part in self.parts
-        ]
+        parts = [{key:value for key,value in part.items() if key!="type"} for part in self.parts]
         if self.artifact_id is not None:
             return {"taskId": self.task_id, "contextId": self.context_id,
                     "artifact": {"artifactId": self.artifact_id, "parts": parts},

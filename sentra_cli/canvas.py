@@ -22,12 +22,69 @@ class CanvasBridge:
         port = os.environ.get("SENTRA_CANVAS_AGENT_PORT", "")
         self.port = int(port) if port.isdigit() and 1 <= int(port) <= 65535 else None
         self.is_available = bool(self.port and len(self._token) >= 32)
+        self.is_shell_scope = os.environ.get('SENTRA_CANVAS_AGENT_SCOPE', '') == 'shell'
 
     def execute(self, raw_args, request_key):
         if not self.is_available:
             raise RuntimeError("SENTRA Canvas connection is unavailable")
         action, _, value = raw_args.partition("|")
         action=action.strip().lower()
+        if action in {'vm_create', 'vm_status', 'vm_frame', 'vm_input'}:
+            body = {'action': action, 'workspace': self.workspace}
+            if action == 'vm_input':
+                spec = json.loads(value)
+                if (not isinstance(spec, dict) or spec.get('action') not in {'input.key', 'input.mouse'}
+                        or set(spec) - ({'action','scancodes'} if spec.get('action') == 'input.key'
+                            else {'action','x','y','buttons','wheel'})
+                        or not isinstance(request_key, str) or not 1 <= len(request_key) <= 128 or len(value) > 4000):
+                    raise ValueError('bounded VM input and persistent request identity required')
+                body.update(value=json.dumps(spec, ensure_ascii=False, sort_keys=True), request_key=request_key)
+            if action == 'vm_frame' and value.strip():
+                raise ValueError('VM frame read takes no arguments')
+            if action == 'vm_create':
+                spec = json.loads(value)
+                if (not isinstance(spec, dict) or set(spec) - {'os_family', 'cpus', 'memory_mb', 'disk_gb', 'iso_path'}
+                        or not isinstance(request_key, str) or not 1 <= len(request_key) <= 128 or len(value) > 4000):
+                    raise ValueError('bounded persistent VM configuration required')
+                body.update(value=value, request_key=request_key)
+            return json.dumps(self._request(body), ensure_ascii=False)
+        if self.is_shell_scope and action in {'create_agent', 'create_terminal', 'create_team', 'connect', 'dispatch', 'network_whitelist'}:
+            raise PermissionError('shell coordination requires the central coordinator_intent protocol')
+        if action in {'children', 'child_reply'}:
+            if not self.is_shell_scope:
+                raise PermissionError('child conversations are available only to a live shell Dot turn')
+            if action == 'children':
+                if value.strip():
+                    raise ValueError('children read takes no selector or conversation id')
+                return json.dumps(self._request({'action': action, 'workspace': self.workspace}), ensure_ascii=False)
+            if not isinstance(request_key, str) or not 1 <= len(request_key) <= 128 or '\0' in request_key:
+                raise ValueError('persistent child reply identity required')
+            if not value or len(value) > 100000:
+                raise ValueError('bounded child reply JSON required')
+            reply = json.loads(value)
+            if (not isinstance(reply, dict) or set(reply) != {'conversation_id', 'content'}
+                    or not isinstance(reply['conversation_id'], str) or not reply['conversation_id']
+                    or not isinstance(reply['content'], str) or not 1 <= len(reply['content']) <= 100000):
+                raise ValueError('child reply requires only conversation_id and bounded content')
+            canonical = json.dumps(reply, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
+            return json.dumps(self._request({'action': action, 'workspace': self.workspace,
+                'value': canonical, 'request_key': request_key}), ensure_ascii=False)
+        if action == 'coordinator_intent':
+            if not isinstance(request_key, str) or not 1 <= len(request_key) <= 128 or '\0' in request_key:
+                raise ValueError('persistent coordination identity required')
+            if not value or len(value) > 4000:
+                raise ValueError('bounded structured coordinator intent required')
+            intent = json.loads(value)
+            if not isinstance(intent, dict) or intent.get('kind') not in {
+                'create_dot', 'create_team', 'connect', 'delegate', 'handoff',
+                'pause', 'resume', 'cancel', 'reassign', 'pause_dot', 'resume_dot',
+                'dot_tool_dispatch', 'consolidate_tool_dispatches'}:
+                raise ValueError('unsupported coordinator intent kind')
+            canonical = json.dumps(intent, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(',', ':'))
+            if len(canonical) > 4000:
+                raise ValueError('coordinator intent exceeds host value limit')
+            return json.dumps(self._request({'action': action, 'workspace': self.workspace,
+                'value': canonical, 'request_key': request_key}), ensure_ascii=False)
         if action in {"machine_list", "machine_execute", "machine_observe", "machine_experiences"}:
             body = {"action": action, "workspace": self.workspace}
             if action == "machine_execute":
@@ -35,9 +92,16 @@ class CanvasBridge:
                     raise ValueError("persistent machine operation identity required")
                 values = json.loads(value)
                 if (not isinstance(values, dict)
-                        or set(values) != {"work_item_id", "machine_id", "capability_id", "arguments"}
+                        or set(values) - {"work_item_id", "machine_id", "capability_id", "arguments", "observation_id"}
+                        or not {"work_item_id", "machine_id", "capability_id", "arguments"} <= set(values)
                         or not isinstance(values["arguments"], dict)):
                     raise ValueError("machine command requires scoped task/capability/arguments")
+                observation = values.pop("observation_id", None)
+                if observation is not None:
+                    if (values["arguments"].get("action") not in {"read", "stat"}
+                            or not isinstance(observation, str) or not 1 <= len(observation) <= 64
+                            or not re.fullmatch("[a-zA-Z0-9_-]+", observation)):
+                        raise ValueError("observation_id is allowed only for repeated read/stat calls")
                 body.update(values)
                 body["operation_id"] = "op-canvas-" + hashlib.sha256(request_key.encode()).hexdigest()[:40]
                 body["request_key"] = request_key
@@ -69,6 +133,12 @@ class CanvasBridge:
         if not self.is_available:return None
         return self._request({"action":"context","workspace":self.workspace})
 
+    def authority_checkpoint(self):
+        """Revalidate the live turn without rebuilding its machine catalog."""
+        if not self.is_available:
+            return None
+        return self._request({"action": "checkpoint", "workspace": self.workspace})
+
     def receipt(self, ident: str, status: str) -> None:
         if not self.is_available or not ident:
             return
@@ -84,9 +154,20 @@ class CanvasBridge:
             headers={"Authorization":"Bearer "+self._token,
                      "Content-Type":"application/json"})
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),_NoRedirect())
+        timeout = 130 if body.get("action") in {"machine_execute", "vm_create", "vm_frame", "vm_input"} else 8
+        intent = body.get('intent')
+        if body.get('action') == 'coordinator_intent' and intent is None:
+            intent = json.loads(body.get('value') or '{}')
+        if body.get('action') == 'coordinator_intent' and isinstance(intent, dict) and intent.get('kind') == 'dot_tool_dispatch':
+            requested = intent.get('timeout_s', 300)
+            if type(requested) not in {int, float} or not 1 <= requested <= 600:
+                raise ValueError('bounded tool timeout required')
+            timeout = requested + 15
         try:
-            with opener.open(request,timeout=130 if body.get("action") == "machine_execute" else 8) as response:
-                limit=2_100_000 if body.get("action","").startswith("machine_") else 65536
+            with opener.open(request,timeout=timeout) as response:
+                # The executor caps a PNG frame at 1 MiB; its JSON Base64
+                # envelope exceeds the ordinary 64 KiB control response limit.
+                limit=2_100_000 if body.get("action","").startswith("machine_") or body.get("action") == "vm_frame" else 65536
                 payload=response.read(limit+1)
                 if len(payload)>limit:
                     raise RuntimeError("Canvas response exceeded limit")

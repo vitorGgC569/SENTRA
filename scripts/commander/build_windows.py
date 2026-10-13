@@ -38,7 +38,7 @@ def _source_fingerprint() -> dict[str, str]:
     # The pinned Web Models patch is a product input just like its PowerShell
     # builder; both must invalidate provenance before a new Setup is accepted.
     # Packaged license/notice text is part of the distributed artifact too.
-    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".ico", ".patch", ".txt", ".md"}
+    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".h", ".go", ".mod", ".sum", ".sh", ".wasm"}
     files = {ROOT / name for name in ("main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt")}
     # The Setup bundles this onboarding guide, while the vendored xterm
     # licenses have no suffix and would otherwise be missed by the scan.
@@ -106,7 +106,7 @@ def _update_build_status(**changes: object) -> None:
     temp.replace(BUILD_STATUS_PATH)
 
 
-from scripts.commander.extension_identity import stamp_extension_identity
+from scripts.commander.extension_identity import stage_extension_source
 
 
 class _BuildLock:
@@ -260,7 +260,8 @@ def _build(
     if windowed:
         prefix.append("--noconsole")
     if name in {"sentra-canvas", "sentra-desktop", "sentra-human"}:
-        icon = ROOT / "sentra_canvas" / "assets" / "SENTRA.ico"
+        icon_name = "SENTRA-DOT.ico" if name == "sentra-canvas" else "SENTRA.ico"
+        icon = ROOT / "sentra_canvas" / "assets" / icon_name
         if not icon.is_file():
             raise FileNotFoundError("official SENTRA icon is missing: " + str(icon))
         prefix += ["--icon", str(icon)]
@@ -269,6 +270,10 @@ def _build(
         prefix += ["--add-data", f"{ROOT / 'sentra_canvas' / 'assets'}{os.pathsep}sentra_canvas/assets"]
     if mcp_payload:
         prefix += ["--collect-all", "playwright", "--hidden-import", "pyarrow.parquet"]
+    if mcp_payload or name in {'sentra-canvas', 'sentra-cli', 'sentra-update-helper'}:
+        from scripts.commander.runtime_dependencies import require_wasmtime_pin
+        require_wasmtime_pin()
+        prefix += ['--collect-all', 'wasmtime']
     if extra:
         prefix += extra
     args[0:0] = prefix
@@ -621,7 +626,14 @@ def build_human(dist: Path, work: Path, spec: Path) -> None:
 
 
 def build_installer(dist: Path, work: Path, spec: Path) -> None:
-    stamp_extension_identity(ROOT / "edge_extension")
+    import tempfile
+    work.mkdir(parents=True, exist_ok=True)
+    extension_parent = Path(tempfile.mkdtemp(prefix='sentra-extension-release-', dir=work))
+    staged_extension = extension_parent / 'edge_extension'
+    stage_extension_source(ROOT / 'edge_extension', staged_extension)
+    from scripts.commander.runtime_dependencies import stage_wasmtime_notices
+    runtime_legal = extension_parent / 'wasmtime'
+    stage_wasmtime_notices(runtime_legal)
     missing = [name for name in PAYLOAD_NAMES if not (dist / name).is_file()]
     if missing:
         raise RuntimeError("installer payload missing: " + ", ".join(missing))
@@ -662,13 +674,26 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     installer_extra: list[str] = [
         "--add-data", f"{electron_payload}{os.pathsep}payload/sentra-electron",
     ]
+    if not (dist / 'runtime-components.json').is_file() or not (dist / 'runtime').is_dir():
+        raise RuntimeError('materialized QuickJS/HCS/RustDesk release components required; stage via release_components in final phase')
+    installer_extra += ['--add-data', f"{dist / 'runtime'}{os.pathsep}payload/runtime",
+                        '--add-data', f"{dist / 'runtime-components.json'}{os.pathsep}payload"]
     for name in PAYLOAD_NAMES:
         installer_extra += ["--add-data", f"{dist / name}{os.pathsep}payload"]
     installer_extra += [
-        "--add-data", f"{ROOT / 'edge_extension'}{os.pathsep}edge_extension",
+        "--add-data", f"{staged_extension}{os.pathsep}edge_extension",
         "--add-data", f"{ROOT / 'docs'}{os.pathsep}docs",
         "--add-data", f"{dist / 'web-models'}{os.pathsep}payload/web-models",
+        "--add-data", f"{ROOT / 'sentra_remote/provider_notices'}{os.pathsep}docs/provider_notices",
+        "--add-data", f"{runtime_legal}{os.pathsep}docs/wasmtime",
     ]
+    for name in ('opendots', 'guacamole'):
+        legal = ROOT / 'sentra_canvas/desktop_ui/src/assets' / name
+        required = ('LICENSE', 'PROVENANCE.json', 'NOTICE') if name == 'guacamole' else ('LICENSE', 'PROVENANCE.json')
+        for filename in required:
+            if not (legal / filename).is_file():
+                raise FileNotFoundError('integral Setup legal asset missing: ' + name + '/' + filename)
+            installer_extra += ['--add-data', f"{legal / filename}{os.pathsep}docs/{name}"]
     _build(
         "SENTRA-Setup",
         "installer_entry.py",
@@ -710,9 +735,8 @@ def main() -> int:
     work = Path(args.work).resolve()
     spec = Path(args.spec).resolve()
     with _BuildLock(ROOT / ".sentra" / "build-windows.lock"):
-        # Identity stamping is an intentional input mutation, before the snapshot.
-        if args.phase in {"all", "installer"}:
-            stamp_extension_identity(ROOT / "edge_extension")
+        # Extension identity is materialized only in an isolated Setup staging
+        # directory; live extension/preview inputs remain unchanged.
         sources = _source_fingerprint()
         started_at = time.time()
         _update_build_status(

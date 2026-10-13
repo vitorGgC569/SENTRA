@@ -1,5 +1,6 @@
 // SENTRA collaboration: display-only document validation.
 import {createHash} from 'node:crypto';
+import {documentScope,documentProjection} from './document_policy.mjs';
 export const DOC_PREFIX = 'sentra-collab:v1:';
 export const MAX_UPDATE_BYTES = 65536;
 export const MAX_SNAPSHOT_BYTES = 1048576;
@@ -9,6 +10,8 @@ const allowedKeys = (v, names) => validObject(v) && Object.keys(v).every(k => na
 const range = (v, low, high) => typeof v === "number" && Number.isFinite(v) && v >= low && v <= high;
 const deny = () => { throw new Error("collaboration-denied"); };
 export function workspaceFromDocument(name) {
+  const scope=documentScope(name);
+  if(scope)return scope.workspaceId;
   if (typeof name !== "string" || !name.startsWith(DOC_PREFIX)) deny();
   const ws = name.slice(DOC_PREFIX.length);
   if (!ID.test(ws)) deny();
@@ -35,6 +38,9 @@ export function validateCanvasState(state) {
 }
 export function validateYDocument(doc, Y) {
   if (!doc?.share || !Y?.Map) deny();
+  if(doc.share.has('content') || doc.share.has('metadata')) {
+    documentProjection(doc,Y);return true;
+  }
   for (const [name,value] of doc.share) {
     if (!["layout","nodes","notes"].includes(name) || !(value instanceof Y.Map)) {
       deny();
@@ -62,6 +68,7 @@ export class AccessGate {
   }
   async authenticate({token, documentName}) {
     const workspaceId = workspaceFromDocument(documentName);
+    const scope=documentScope(documentName);
     if (typeof token !== "string" || token.length < 24 || token.length > 4096) deny();
     for (const [key,expiry] of this.consumed)
       if (expiry <= this.now()) this.consumed.delete(key);
@@ -71,16 +78,18 @@ export class AccessGate {
     this.inFlight.add(fingerprint);
     try {
     let grant;
-    try { grant = await this.resolveGrant({token, workspaceId}); }
+    try { grant = await this.resolveGrant({token, workspaceId,...(scope?{documentId:scope.documentId}:{})}); }
     catch { deny(); }
     if (!grant || grant.workspaceId !== workspaceId ||
       typeof grant.principalId !== "string" || !ID.test(grant.principalId) ||
       !["read","write"].includes(grant.permission) ||
       !range(grant.expiresAt, this.now()+1, this.now()+900000) ||
       !Number.isSafeInteger(grant.epoch) || grant.epoch < 0) deny();
+    if(scope&&(grant.documentId!==scope.documentId||typeof grant.spaceId!=='string'||!ID.test(grant.spaceId)))deny();
     const context = Object.freeze({
       workspaceId, principalId: grant.principalId, permission: grant.permission,
-      epoch: grant.epoch, expiresAt: grant.expiresAt
+      epoch: grant.epoch, expiresAt: grant.expiresAt,
+      ...(scope?{documentId:grant.documentId,spaceId:grant.spaceId}:{})
     });
     await this.authorize(context, "read");
     // Host MUST atomically consume fingerprint in durable/shared replay storage.
@@ -88,7 +97,8 @@ export class AccessGate {
     let consumed=false;
     try { consumed=await this.consumeNonce({
       fingerprint, workspaceId, principalId:context.principalId,
-      epoch:context.epoch, expiresAt:context.expiresAt
+      epoch:context.epoch, expiresAt:context.expiresAt,
+      ...(scope?{documentId:context.documentId,spaceId:context.spaceId,permission:context.permission}:{})
     }); } catch { deny(); }
     if (consumed !== true) deny();
     this.consumed.set(fingerprint, context.expiresAt);

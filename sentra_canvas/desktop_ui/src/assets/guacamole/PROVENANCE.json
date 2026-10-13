@@ -1,0 +1,11 @@
+{
+  "package": "guacamole-common-js",
+  "version": "1.5.0",
+  "integrity": "sha512-zxztif3GGhKbg1RgOqwmqot8kXgv2HmHFg1EvWwd4q7UfEKvBcYZ0f+7G8HzvU+FUxF0Psqm9Kl5vCbgfrRgJg==",
+  "registry_tarball": "https://registry.npmjs.org/guacamole-common-js/-/guacamole-common-js-1.5.0.tgz",
+  "repack_repository": "https://github.com/padarom/guacamole-common-js",
+  "canonical_upstream": "https://guacamole.apache.org/",
+  "license": "Apache-2.0",
+  "is_apache_clone": false,
+  "purpose": "Protocol viewer; input governed by SENTRA Control Plane and ticket input epoch"
+}

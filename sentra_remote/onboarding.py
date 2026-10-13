@@ -112,6 +112,56 @@ def _dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def build_shell_onboarding(status: dict[str, Any]) -> dict[str, Any]:
+    """Shell-first first-run: Home/Dots/Spaces with recoverable migration.
+
+    Pure projection over verified health; never asserts ChatGPT
+    installation, model rights or migration success without proof.
+    """
+    shell = _dict(status.get("shell"))
+    migration = _dict(status.get("shell_migration"))
+    ready = bool(shell.get("ready"))
+    linked = migration.get("linked", 0) if isinstance(migration.get("linked"), int) else 0
+    pending = migration.get("pending", 0) if isinstance(migration.get("pending"), int) else 0
+    if ready and pending == 0:
+        stage, title = "SHELL_READY", "Shell is ready"
+        detail = (
+            f"Home, Dots, Spaces and conversations share the same agents "
+            f"and authoritative state ({linked} workspaces linked)."
+            if linked else
+            "Home, Dots, Spaces and conversations share the same agents and authoritative state."
+        )
+    elif ready:
+        stage, title = "SHELL_MIGRATE", "Link existing projects to Spaces"
+        detail = (
+            f"{pending} existing Canvas workspaces can be linked to Spaces "
+            f"without copying or renaming. The linkage is repeatable and idempotent."
+        )
+    else:
+        stage, title = "SHELL_PENDING", "Shell bundle pending"
+        detail = "The Canvas surface remains fully usable; the shell bundle ships with the next staged update."
+    return {
+        "stage": stage,
+        "title": title,
+        "detail": detail,
+        "shell_ready": ready,
+        "linked_workspaces": linked,
+        "pending_workspaces": pending,
+        "actions": (
+            ("open_home", "Open Home", "Review Spaces, Dots and recent conversations."),
+            ("link_spaces", "Link Spaces", "Repeatable workspace-to-Space linkage with preserved IDs."),
+        ),
+    }
+
+
+def describe_setup_axes(status: dict[str, Any], *, current_version: str = "",
+                        newest_version: str = "") -> dict[str, Any]:
+    """Vitra-owned thin projection delegating to setup_states (no duplication)."""
+    from .setup_states import describe_setup_states
+    return describe_setup_states(status, current_version=current_version,
+                                 newest_version=newest_version)
+
+
 def _openai_actions(*, reauth: bool = False) -> tuple[OnboardingAction, ...]:
     return (
         OnboardingAction(

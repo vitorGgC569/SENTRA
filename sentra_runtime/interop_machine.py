@@ -10,7 +10,8 @@ from sentra_interop.host_scope import HostScopedInteropGate
 from .provider_content import ProviderContentStore,text_digest
 
 OPENHANDS_CAPABILITIES=("openhands:create","openhands:message","openhands:read","openhands:events",
-                       "openhands:evidence","openhands:run","openhands:cancel")
+                       "openhands:evidence","openhands:run","openhands:cancel",
+                       "openhands:condense","openhands:health","openhands:tool_link","openhands:delete")
 
 
 class OpenHandsMachine:
@@ -43,10 +44,16 @@ class OpenHandsMachine:
             if digest_key in args and args[digest_key]!=text_digest(text):raise ValueError("provider message digest conflict")
             args[digest_key]=text_digest(text)
         if capability_id=="openhands:create":
+            if "config_sha256" in args and args["config_sha256"] != self.config.fingerprint:
+                raise ValueError("OpenHands configuration fingerprint conflict")
+            args["config_sha256"] = self.config.fingerprint
             if "conversation_id" in args:raise ValueError("remote identity belongs to the host; use the stable local conversation identity")
             args["conversation_id"]=self.content.resource_id(machine_id=machine_id,work_item_id=work_item_id,local_id=args.get("local_id"))
             args.setdefault("initial_message_sha256",None);args.setdefault("parent_local_id",None)
         if capability_id=="openhands:message":args.setdefault("run",False)
+        if capability_id=="openhands:events":
+            args.setdefault("page_id", None)
+            args.setdefault("limit", 100)
         request=OperationRequest(operation_id,self.agent_id,machine_id,capability_id,work_item_id,
                                  idempotency_key or operation_id,args)
         item=self.control.work_item_info(work_item_id,self.owner)
@@ -67,7 +74,7 @@ class OpenHandsMachine:
         transport=OpenHandsHTTPTransport(self.config)
         identities=OpenHandsIdentityStore(str(root/"openhands.sqlite3"),workspace=str(root))
         provider=OpenHandsAgentServerProvider(gate,config=self.config,identity_store=identities,
-            transport=transport,message_resolver=self.content.resolve)
+            transport=transport,message_resolver=self.content.resolve,operation_resolver=self._resolve_operation)
         async def handler(request):
             if request.principal_id!=self.agent_id:raise AuthorizationRequired("OpenHands agent identity mismatch")
             if self.secret_ref:
@@ -77,6 +84,16 @@ class OpenHandsMachine:
         for capability in OPENHANDS_CAPABILITIES:central.bind_provider(capability,handler)
         self._bindings[run_id]=(central,provider)
         return central,provider
+
+    def _resolve_operation(self, request, operation_id):
+        item = self.control.work_item_info(request.work_item_id, self.owner)
+        operation = self.control.durable.operation_status(operation_id, self.owner)
+        if (request.principal_id != self.agent_id or item.get("assignee_agent_id") != self.agent_id
+                or operation["run_id"] != item["run_id"]
+                or operation.get("progress", {}).get("work_item_id") != item["work_item_id"]
+                or not operation.get("intent_sha256")):
+            raise AuthorizationRequired("OpenHands tool link requires a bound central Operation")
+        return {"operation_id": operation["operation_id"], "work_item_id": item["work_item_id"], "intent_sha256": operation["intent_sha256"]}
 
     async def submit(self,*,run_id,request):
         if self.control.durable.run_status(run_id,self.owner,include_details=False)["state"]!="RUNNING":

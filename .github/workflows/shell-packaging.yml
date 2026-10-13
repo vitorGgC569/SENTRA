@@ -1,0 +1,44 @@
+name: Shell packaging contract
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "sentra_remote/shell_migration.py"
+      - "sentra_remote/coordinated_upgrade.py"
+      - "sentra_remote/install_doctor.py"
+      - "sentra_remote/diagnostics.py"
+      - "sentra_remote/onboarding.py"
+      - "sentra_remote/setup_assistant.py"
+      - "sentra_cli/shell_bridge.py"
+      - "sentra_cli/repl.py"
+      - "sentra_canvas/electron_host.py"
+      - "sentra_canvas/native_app.py"
+      - "sentra_canvas/__main__.py"
+      - "sentra_electron/policy.cjs"
+      - "sentra_electron/main.cjs"
+      - "scripts/commander/shell_release_probe.py"
+      - "scripts/commander/build_canvas.py"
+      - "scripts/commander/release_assets.py"
+      - "scripts/commander/release_doctor.py"
+
+permissions:
+  contents: read
+
+jobs:
+  shell-contract:
+    name: Shell packaging contract (read-only)
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Setup Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Read-only shell packaging probe
+        shell: pwsh
+        run: python -B scripts/commander/shell_release_probe.py --static sentra_canvas/static

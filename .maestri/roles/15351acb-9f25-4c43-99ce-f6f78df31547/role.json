@@ -1,0 +1,8 @@
+{
+  "color" : "#AF52DE",
+  "icon" : "person.text.rectangle",
+  "id" : "15351ACB-9F25-4C43-99CE-F6F78DF31547",
+  "name" : "Integral control plane",
+  "prompt" : "Voce e Nexo. Leia docs\/SENTRA_IMPLEMENTACAO_INTEGRAL_2026-10-11.md e implemente integralmente sua responsabilidade conforme a tabela. Execute maestri list primeiro e leia a nota todos-os-projetos-ja-estao-clo. Implementacao integral primeiro; NENHUM teste, build, lint, benchmark ou validacao ate liberacao do Codex principal. Nao use skills\/MCP SENTRA. Nao recrute agentes adicionais. Nao altere arquivos de outros donos. Nao commit\/push\/reset\/stash. Registre entrega em docs\/integral\/Nexo.md e reporte progresso, dependencias e resultado ao principal com maestri ask Codex. Trabalhe autonomamente agora.",
+  "schemaVersion" : 1
+}

@@ -26,7 +26,8 @@ from .rpa import (AuthorizedPaths, DiagnosedExecutor, ExecutorFailure,
 
 BROWSER_ACTIONS = frozenset({'open', 'close', 'navigate', 'observe', 'click',
                             'fill', 'read', 'screenshot', 'evidence', 'network',
-                            'diagnostics', 'capture.start', 'capture.stop'})
+                            'diagnostics', 'capture.start', 'capture.stop',
+                            'session.list', 'session.status', 'session.events', 'session.export'})
 RESOURCE_TYPES = frozenset({'document', 'stylesheet', 'image', 'media', 'font',
                            'script', 'xhr', 'fetch', 'texttrack', 'eventsource', 'other'})
 
@@ -888,12 +889,14 @@ class PlaywrightBrowserExecutor(DiagnosedExecutor):
             'navigate': {'url'}, 'observe': set(), 'screenshot': {'output'},
             'evidence': {'after_sequence'}, 'diagnostics': set(),
             'capture.start': set(), 'capture.stop': {'output'},
+            'session.list': {'limit'}, 'session.status': set(),
+            'session.events': {'after'}, 'session.export': {'output'},
             'click': {'observation_id', 'page_id', 'revision', 'element_ref', 'role', 'name','frame_id'},
             'fill': {'observation_id', 'page_id', 'revision', 'element_ref', 'role', 'name','frame_id','text'},
             'read': {'observation_id', 'page_id', 'revision', 'element_ref', 'role', 'name','frame_id'}}[action]
-        if set(a) - ({'action'} | fields | ({'session_id'} if action != 'open' else set())):
+        if set(a) - ({'action'} | fields | ({'session_id'} if action not in {'open','session.list'} else set())):
             raise ValueError('invalid_browser_arguments')
-        if action not in {'open', 'diagnostics'} and (type(a.get('session_id')) is not str or not a['session_id']):
+        if action not in {'open', 'diagnostics', 'session.list'} and (type(a.get('session_id')) is not str or not a['session_id']):
             raise ValueError('browser_session_required')
         if action == 'diagnostics' and 'session_id' in a and (type(a['session_id']) is not str or not a['session_id']):
             raise ValueError('invalid_diagnostic_session')
@@ -911,7 +914,7 @@ class PlaywrightBrowserExecutor(DiagnosedExecutor):
                     raise ValueError('invalid_semantic_constraint')
         if action == 'fill' and (type(a.get('text')) is not str or len(a['text']) > b.max_text_chars):
             raise ValueError('invalid_browser_text')
-        if action in {'screenshot', 'capture.stop'}:
+        if action in {'screenshot', 'capture.stop', 'session.export'}:
             if b.artifact_paths is None:
                 raise ValueError('browser_artifact_scope_required')
             output = b.artifact_paths.resolve(a.get('output'), write=True)
@@ -920,6 +923,10 @@ class PlaywrightBrowserExecutor(DiagnosedExecutor):
             a['output'] = str(output)
         if 'after_sequence' in a and (type(a['after_sequence']) is not int or a['after_sequence'] < 0):
             raise ValueError('invalid_evidence_cursor')
+        if 'after' in a and (type(a['after']) is not int or a['after'] < 0):
+            raise ValueError('invalid_provider_cursor')
+        if 'limit' in a and (type(a['limit']) is not int or not 1 <= a['limit'] <= 100):
+            raise ValueError('invalid_provider_list_limit')
         a['_scope'] = json.dumps([self.machine_id, self.owner_principal_id, b.capability_id, request.work_item_id])
         a['_operation_id'] = request.operation_id
         return a

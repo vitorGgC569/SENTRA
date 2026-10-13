@@ -10,7 +10,7 @@ uma no composer via clipboard real ANTES do texto e confirma quantas anexaram
 (`images_attached` no resultado; 0 com imagens enviadas = paste falhou, job
 FAILED honesto, nada enviado). Nunca executa "paste" sem antes escrever o
 próprio conteúdo (jamais toca no clipboard do usuário). Após atualizar os
-arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.6.52).
+arquivos, RECARREGUE a extensão em `edge://extensions` (versão atual 1.7.0).
 
 Anti-morte-silenciosa MV3: WAIT fatiado em 25s (cada fatia renova o lease),
 job ativo persistido em storage (restart retoma sem reenviar), a tab pinga o
@@ -44,9 +44,40 @@ SW a cada ~10s (mensagem acorda SW suspenso) e o worker carrega telemetria
 Novas instalações começam desativadas. Tokens não vão para prompts; jobs possuem
 lease, expiração e correlação por tarefa/worker. Resultados aguardam ACK e sobrevivem
 ao restart do relay. Falhas de entrega incertas não são automaticamente reenviadas.
-A versão 1.6.52 usa controller lazy único, `CHAT_START/CHAT_COLLECT` por
+A versão 1.7.0 usa controller lazy único, `CHAT_START/CHAT_COLLECT` por
 `conversation_id`, lifecycle explícito de `browser_close/shutdown` e recovery
 limitado de avisos transitórios “additional checks”.
+
+## Brisa 1.7.0 — observed-only evidence (deny-only)
+
+Novos `BROWSER_ACTION` somente-leitura (nenhum envia, clica aprovação ou cria grant):
+
+- `stream_snapshot` → `{message_index, revision, prefix_chars, truncated, finished}`:
+  snapshot parcial da resposta por índice de mensagem com contador local de
+  revisão. O Python (`browser/streaming.py`) persiste por
+  `(principal, conversation_id, message_id)` com revisão monotônica e teto de
+  32k chars/overflow referenciado. Nunca é prova de entrega.
+- `approval_status` → `{state: pending|idle|unknown, tool_name}`: observa o
+  cartão de aprovação humano da página. `BROWSER_CLICK` recusa qualquer alvo
+  dentro de UI de aprovação (`APPROVAL_CLICK_REFUSED`); só o humano age na
+  página. O ledger Python (`browser/approval.py` +
+  `BrowserEvidenceService.observe_approval/approval_status`) espelha o estado
+  e alimenta `require_dispatch_ready` e o consent gate (Pacto).
+- `attach_info` → chips/etiquetas do composer (sem bytes): inventário para
+  viewers. Descritores tipados com quotas em `browser/attachments.py`
+  (image/png-jpeg, pdf, text/code; máx 4 por turno).
+- `model_catalog` → `{observed_labels, verified:false}`: rótulos observados,
+  NUNCA catálogo autenticado. O catálogo real vem do Host autenticado
+  (`read_host_account_catalog`) e do ledger
+  (`publish_account_catalog`/`account_catalog_status`, fail-closed).
+- Prova de conversa V2 (`conversation-evidence.js`) continua ChatGPT-only;
+  rotas Gemini negam fechado (`identity_unknown`), sem fabricar atribuição.
+
+> Re-stamp pendente (release/Vitra): `sentra_source_hash` e
+> `sentra-bootstrap.json` (proof) precisam ser regenerados com
+> `scripts/commander/extension_identity.py` após esta implementação. Até lá,
+> testes de identidade da extensão falharão de forma explícita — o que é o
+> comportamento correto, não homologação.
 
 Controller: existe no máximo uma referência SENTRA a uma aba ChatGPT já aberta.
 O paralelismo de research é lógico, não visual: `CHAT_START` envia em uma conversa

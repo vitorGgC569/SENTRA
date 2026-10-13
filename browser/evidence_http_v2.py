@@ -14,11 +14,16 @@ from sentra_mcp.services.browser_evidence import BrowserEvidenceService
 CHALLENGE = "/browser-evidence/challenge"
 OBSERVE = "/browser-evidence/observe"
 INVALIDATE = "/browser-evidence/invalidate"
+APPROVAL_OBSERVE = "/browser-evidence/approval"
+ACCOUNT_CATALOG = "/browser-evidence/account-catalog"
 
 _ALLOWED = {
     CHALLENGE: frozenset({"source_sha256", "worker", "document_id", "identity_epoch"}),
     OBSERVE: frozenset({"source_sha256", "worker", "evidence"}),
     INVALIDATE: frozenset({"source_sha256", "worker", "document_id", "identity_epoch", "reason"}),
+    APPROVAL_OBSERVE: frozenset({"source_sha256", "worker", "conversation_id", "state", "tool_name"}),
+    ACCOUNT_CATALOG: frozenset({"source_sha256", "worker", "provider", "models", "efforts",
+                                "document_id", "identity_epoch", "authentication_revision"}),
 }
 _EVIDENCE_KEYS = frozenset({
     "nonce", "document_id", "conversation_id", "route_conversation_id",
@@ -65,6 +70,30 @@ def dispatch_authenticated_v2(*, service: BrowserEvidenceService, path: str,
         if not isinstance(evidence["identity_epoch"], str):
             raise ValueError("V2 observation epoch required")
         return service.observe(**kwargs, evidence=evidence)
+    if path == APPROVAL_OBSERVE:
+        # Deny-only approval observation. The relay reports the human approval
+        # card; nothing here clicks, accepts or dismisses page UI.
+        if payload["state"] not in {"pending", "cleared", "unknown"}:
+            raise ValueError("unknown approval observation state")
+        if payload["tool_name"] is not None and not isinstance(payload["tool_name"], str):
+            raise ValueError("approval tool name must be a string or null")
+        return service.observe_approval(
+            **kwargs, conversation_id=payload["conversation_id"],
+            state=payload["state"], tool_name=payload["tool_name"])
+    if path == ACCOUNT_CATALOG:
+        # Host-attested account catalog. The relay must have verified the
+        # account attestation and collector binding before this call; the
+        # ledger additionally binds the catalog to document/epoch.
+        if payload["provider"] not in {"chatgpt", "gemini"}:
+            raise ValueError("catalog provider must be chatgpt or gemini")
+        if (not isinstance(payload["models"], list) or not isinstance(payload["efforts"], list)
+                or type(payload["authentication_revision"]) is not int):
+            raise ValueError("exact V2 account catalog envelope required")
+        return service.publish_account_catalog(
+            **kwargs, provider=payload["provider"], models=payload["models"],
+            efforts=payload["efforts"], document_id=payload["document_id"],
+            identity_epoch=payload["identity_epoch"],
+            authentication_revision=payload["authentication_revision"])
     if not isinstance(payload["identity_epoch"], str):
         raise ValueError("V2 invalidation epoch required")
     return service.invalidate_document(

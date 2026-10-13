@@ -97,10 +97,12 @@ class ActivepiecesCatalog:
 
 class ActivepiecesProjectionStore:
     """Piece/run/connection mappings and protected outputs, not operations authority."""
-    def __init__(self,database,*,workspace):
+    def __init__(self,database,*,workspace,control=None,store=None):
+        self.control,self.configured_store=control,store
         root,self.path=Path(workspace).resolve(),Path(database).resolve()
         if self.path==root or not self.path.is_relative_to(root): raise ValueError("piece store outside workspace")
-        self.path.parent.mkdir(parents=True,exist_ok=True)
+        from .workflow_storage import projection_path
+        projection_path(database,workspace,control=control,store=store)
         with self.db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS ap_invocations(
                 invocation_id TEXT PRIMARY KEY,principal TEXT NOT NULL,machine TEXT NOT NULL,work_item TEXT NOT NULL,
@@ -116,19 +118,16 @@ class ActivepiecesProjectionStore:
             db.execute("""CREATE TABLE IF NOT EXISTS ap_subscriptions(
                 id TEXT PRIMARY KEY,principal TEXT NOT NULL,machine TEXT NOT NULL,work_item TEXT NOT NULL,
                 descriptor_digest TEXT NOT NULL,member TEXT NOT NULL,connection_id TEXT,enable_operation TEXT)""")
-            if "work_item_reference" not in {r[1] for r in db.execute("PRAGMA table_info(ap_trigger_events)")}:
-                db.execute("ALTER TABLE ap_trigger_events ADD COLUMN work_item_reference TEXT")
-            if "disable_operation" not in {r[1] for r in db.execute("PRAGMA table_info(ap_subscriptions)")}:
-                db.execute("ALTER TABLE ap_subscriptions ADD COLUMN disable_operation TEXT")
-            if "subscription_id" not in {r[1] for r in db.execute("PRAGMA table_info(ap_invocations)")}:
-                db.execute("ALTER TABLE ap_invocations ADD COLUMN subscription_id TEXT")
+            from .workflow_storage import ensure_column
+            ensure_column(db,"ap_trigger_events","work_item_reference","TEXT")
+            ensure_column(db,"ap_subscriptions","disable_operation","TEXT")
+            ensure_column(db,"ap_invocations","subscription_id","TEXT")
 
     @contextmanager
     def db(self):
-        db=sqlite3.connect(self.path,timeout=10); db.row_factory=sqlite3.Row
-        try:
-            with db: yield db
-        finally: db.close()
+        from .workflow_storage import projection_db
+        with projection_db(self.path,control=self.control,store=self.configured_store) as db:
+            yield db
 
     def begin(self,request,invocation_id,descriptor,member,hook,connection_id):
         if not isinstance(invocation_id,str) or not 1<=len(invocation_id)<=512: raise ValueError("invalid piece invocation ID")
@@ -217,6 +216,12 @@ class ActivepiecesPieceProvider:
     def __init__(self,gate,*,catalog,store,backend,connection_resolver=None,input_resolver=None,trigger_admitter=None,trigger_lookup=None):
         if not callable(getattr(gate,"physical_context",None)): raise ValueError("pieces need host durable physical admission")
         self.gate=gate if isinstance(gate,HostScopedInteropGate) else HostScopedInteropGate(gate)
+        authority=getattr(gate,"authority",None)
+        configured=getattr(getattr(authority,"durable",None),"store",None)
+        if configured is not None:
+            supplied=getattr(store,"configured_store",None) or getattr(getattr(store,"control",None),"store",None)
+            if supplied is not configured:
+                raise ValueError("hosted Activepieces projections must share gate authority store by identity")
         self.catalog,self.store,self.backend=catalog,store,backend
         self.connection_resolver,self.input_resolver=connection_resolver,input_resolver
         self.trigger_admitter,self.trigger_lookup=trigger_admitter,trigger_lookup

@@ -10,7 +10,7 @@ import re
 import time
 from typing import Any
 
-from .control_store import SQLiteControlPlaneStore
+from .control_store import create_control_plane_store
 
 
 class WebQuotaConflict(RuntimeError):
@@ -19,7 +19,7 @@ class WebQuotaConflict(RuntimeError):
 
 class WebQuotaObservations:
     def __init__(self, state_root: str, *, store=None, clock=time.time):
-        self.store = store or SQLiteControlPlaneStore(state_root)
+        self.store = store or create_control_plane_store(state_root)
         self.clock = clock
         with self.store.connect("provider_content") as db:
             db.executescript("""

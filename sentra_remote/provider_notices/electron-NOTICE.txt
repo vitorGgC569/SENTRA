@@ -1,0 +1,17 @@
+SENTRA Desktop — Third-party notice: Electron display
+======================================================
+
+Component: Electron display (optional provider "electron")
+Pinned version: tracked in sentra-electron/sentra-surface-build.json at pack time
+Source: pinned npm Electron (see sentra_electron/package-lock.json);
+  staged payload validated by scripts/commander/stage_electron.py
+License: MIT (Electron); full third-party notices at
+  sentra_electron/THIRD_PARTY_NOTICES.md (ships inside the payload).
+Upstream: https://www.electronjs.org / https://github.com/electron/electron
+
+Notes for SENTRA distribution:
+- Electron is a DISPLAY of the authoritative Canvas broker, never a tool
+  host (see sentra_electron/main.cjs restrictions). Only the staged,
+  fingerprinted renderer ships; node_modules/npm hooks never ship.
+- This NOTICE is the pin record; per-module notices travel in
+  sentra_electron/THIRD_PARTY_NOTICES.md.

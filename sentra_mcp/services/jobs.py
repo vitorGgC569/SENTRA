@@ -18,6 +18,15 @@ from ..config import MCPConfig
 from .durable import DurableRunService
 from .repository import RepositoryService
 
+def _job_result(value):
+    if value is None:
+        return None
+    if value.startswith("protected:"):
+        from sentra_core.conversations import _decode
+        return _decode(value[len("protected:"):])
+    return json.loads(value)
+
+
 _TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"}
 
 
@@ -30,31 +39,42 @@ class JobService:
         *,
         durable: DurableRunService | None = None,
         db_path: Path | None = None,
+        control=None,
+        machine_host=None,
     ) -> None:
         self.config = config
         self.audit = audit
         self.repository = repository
-        self.durable = durable
+        self.control = control if control is not None else getattr(machine_host, "control", None)
+        self.machine_host = machine_host
+        if machine_host is not None and machine_host.control is not self.control:
+            raise ValueError("jobs must share MachineHost control")
+        self.durable = self.control.durable if self.control is not None else durable
+        configured_store = getattr(self.durable, "store", None)
+        if self.control is None and getattr(configured_store, "backend", "sqlite") == "postgres":
+            raise ValueError("hosted PostgreSQL jobs require configured control and MachineHost")
         self.db_path = Path(db_path or (config.resolved_state_root / "jobs.sqlite3"))
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
+        if self.control is not None:
+            self.db = self.control.store.connect("execution_workspace")
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+            self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            self.db.row_factory = sqlite3.Row
         self.lock = threading.RLock()
         # All async jobs execute on one durable event loop. Shared async
         # services (RepositoryService, subprocess transports, etc.) must never
         # migrate between per-job loops.
-        self.loop = asyncio.new_event_loop()
-        self.loop_ready = threading.Event()
         self.tasks: dict[str, Any] = {}
         self.done_events: dict[str, threading.Event] = {}
-        self.worker_thread = threading.Thread(
-            target=self._loop_main,
-            name="sentra-job-loop",
-            daemon=True,
-        )
-        self.worker_thread.start()
-        if not self.loop_ready.wait(5):
-            raise RuntimeError("job event loop failed to start")
+        self.loop_ready = threading.Event()
+        self.worker_thread = None
+        self.loop = getattr(machine_host, "_loop", None)
+        if self.control is None:
+            self.loop = asyncio.new_event_loop()
+            self.worker_thread = threading.Thread(target=self._loop_main, name="sentra-job-loop", daemon=True)
+            self.worker_thread.start()
+            if not self.loop_ready.wait(5):
+                raise RuntimeError("job event loop failed to start")
         self.db.executescript(
             """
             CREATE TABLE IF NOT EXISTS jobs(
@@ -79,14 +99,10 @@ class JobService:
                 ON jobs(owner, created DESC);
             """
         )
-        existing_columns = {
-            str(row["name"]) for row in self.db.execute("PRAGMA table_info(jobs)").fetchall()
-        }
+        from sentra_interop.workflow_storage import ensure_column
         for column in ("run_id", "operation_id", "idempotency_key", "resource_key", "principal"):
-            if column not in existing_columns:
-                self.db.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
-        if "producer_pid" not in existing_columns:
-            self.db.execute("ALTER TABLE jobs ADD COLUMN producer_pid INTEGER")
+            ensure_column(self.db, "jobs", column, "TEXT")
+        ensure_column(self.db, "jobs", "producer_pid", "INTEGER")
         self.db.execute(
             "CREATE INDEX IF NOT EXISTS idx_jobs_principal_created "
             "ON jobs(principal, created DESC)"
@@ -204,6 +220,9 @@ class JobService:
                     "result": str(result.get("result", ""))[: self.config.max_output_bytes // 2],
                     "output_truncated": True,
                 }, ensure_ascii=False)
+        if payload is not None:
+            from sentra_core.conversations import _encode
+            payload="protected:"+_encode(json.loads(payload))
         with self.lock:
             now = time.time()
             self.db.execute(
@@ -215,7 +234,7 @@ class JobService:
                 "SELECT owner,run_id,operation_id FROM jobs WHERE id=?",
                 (job_id,),
             ).fetchone()
-        if self.durable is not None and row is not None and row["operation_id"]:
+        if self.control is None and self.durable is not None and row is not None and row["operation_id"]:
             mapped = {
                 "PENDING": "QUEUED",
                 "RUNNING": "RUNNING",
@@ -239,7 +258,7 @@ class JobService:
                         },
                         event_type=f"JOB_{state}",
                         result=(
-                            json.loads(payload)
+                            _job_result(payload)
                             if mapped == "SUCCEEDED" and payload
                             else None
                         ),
@@ -310,6 +329,46 @@ class JobService:
                 },
             )
 
+    async def execute_admitted(self, request):
+        """Run an actual registered operation on the owned central loop/fence."""
+        from sentra_runtime.effect_boundary import current_effect_context
+        from sentra_runtime.contracts import OperationResult
+        if self.control is None:
+            raise PermissionError("configured control required")
+        context = current_effect_context.get()
+        if context is None or context.request != request:
+            raise PermissionError("repository job outside exact central admission")
+        args = dict(request.arguments)
+        operation, target = args.get("operation"), args.get("target", "")
+        if request.capability_id != "repository:operate" or set(args) != {"operation", "target"} or operation not in {"TEST", "BUILD", "LINT", "TYPECHECK", "BENCH"}:
+            raise PermissionError("registered repository operation intent required")
+        run = self.control.durable.run_status(context.receipt.run_id, context.receipt.owner, include_details=False)
+        item = self.control.work_item_info(request.work_item_id, context.receipt.owner)
+        if item["run_id"] != run["run_id"] or item.get("assignee_agent_id") != request.principal_id:
+            raise PermissionError("repository job WorkItem mismatch")
+        job_id = "central-" + request.operation_id
+        with self.lock:
+            with self.db:
+                self.db.execute("BEGIN IMMEDIATE")
+                old = self.db.execute("SELECT state FROM jobs WHERE id=? AND owner=?", (job_id, context.receipt.owner)).fetchone()
+                if old:
+                    raise PermissionError("repository job exists or is uncertain; never replay")
+                self.db.execute("INSERT INTO jobs(id,owner,principal,operation,target,workspace,run_id,operation_id,idempotency_key,producer_pid,state,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?,'RUNNING',?,?)",
+                    (job_id, context.receipt.owner, request.principal_id, operation, target, run["workspace"], run["run_id"], request.operation_id, request.idempotency_key, os.getpid(), time.time(), time.time()))
+        self.tasks[job_id] = asyncio.current_task()
+        try:
+            context.checkpoint()
+            outcome = await self.repository.run_registered(operation, target, run["workspace"], context.receipt.owner)
+            context.checkpoint()
+            state = "FAILED" if outcome.get("passed") is False else "SUCCEEDED"
+            self._set(job_id, "FAILED" if state == "FAILED" else "COMPLETED", result=outcome)
+            return OperationResult(request.operation_id, state, evidence={"job_id": job_id, "result": outcome}, error="REGISTERED_OPERATION_FAILED" if state == "FAILED" else None)
+        except BaseException as exc:
+            self._set(job_id, "INTERRUPTED", error=type(exc).__name__)
+            raise
+        finally:
+            self.tasks.pop(job_id, None)
+
     def _job_done(self, job_id: str, future: Any) -> None:
         with self.lock:
             self.tasks.pop(job_id, None)
@@ -333,6 +392,8 @@ class JobService:
     ) -> dict[str, Any]:
         if self._closed:
             raise RuntimeError("job service is shut down")
+        if self.control is not None:
+            raise PermissionError("hosted jobs execute through execute_admitted inside MachineHost; no detached unfenced launch")
         op = str(operation).strip().upper()
         if op not in {"TEST", "LINT", "TYPECHECK", "BUILD", "BENCH"}:
             raise ValueError("operation must be TEST, LINT, TYPECHECK, BUILD or BENCH")
@@ -529,7 +590,7 @@ class JobService:
             "updated": row["updated"],
         }
         if include_result:
-            data["result"] = json.loads(row["result_json"]) if row["result_json"] else None
+            data["result"] = _job_result(row["result_json"])
         return data
 
     def status(
@@ -668,9 +729,10 @@ class JobService:
                 task.result(timeout=remaining)
             except Exception:
                 pass
-        if not self.loop.is_closed():
-            self.loop.call_soon_threadsafe(self.loop.stop)
-        if self.worker_thread.is_alive():
-            self.worker_thread.join(timeout=5)
+        if self.worker_thread is not None:
+            if not self.loop.is_closed():
+                self.loop.call_soon_threadsafe(self.loop.stop)
+            if self.worker_thread.is_alive():
+                self.worker_thread.join(timeout=5)
         with self.lock:
             self.db.close()

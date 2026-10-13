@@ -41,6 +41,28 @@ def authenticated():
     except (OSError,subprocess.TimeoutExpired):return False
 
 
+def native_failure_category(event: dict) -> str:
+    """Classify native Codex errors without ever echoing provider-controlled text."""
+    payload = event.get("error")
+    source = payload if isinstance(payload, dict) else {}
+    raw = " ".join(str(part or "") for part in
+                   (event.get("message"), source.get("message"),
+                    source.get("code"), source.get("type"))).lower()[:1600]
+    if any(word in raw for word in ("rate limit", "429", "too many requests", "capacity", "overloaded")):
+        return "rate_limited"
+    if any(word in raw for word in ("unauthorized", "authentication", "sign in", "401", "expired session")):
+        return "authentication"
+    if any(word in raw for word in ("quota", "billing", "credits exhausted", "usage limit")):
+        return "quota"
+    if any(word in raw for word in ("model not found", "unsupported model", "invalid model")):
+        return "model_unavailable"
+    if any(word in raw for word in ("timeout", "connection", "network", "dns", "stream disconnect")):
+        return "network_or_timeout"
+    if any(word in raw for word in ("sandbox", "permission denied", "filesystem")):
+        return "sandbox_or_permission"
+    return "unknown"
+
+
 def parse_response(data,returncode):
     if len(data)>MAX_OUTPUT:raise NativeModelError("native model response exceeded its output limit")
     events=[]
@@ -54,7 +76,9 @@ def parse_response(data,returncode):
         kind=event.get("type")
         if completed:raise NativeModelError("native model emitted data after its terminal event")
         if kind=="thread.started":native_thread=event.get("thread_id")
-        if kind in {"error","turn.failed"}:raise NativeModelError("native model turn failed")
+        if kind in {"error", "turn.failed"}:
+            raise NativeModelError("native model turn failed (category: " +
+                                   native_failure_category(event) + ")")
         item=event.get("item",{})
         if kind in {"item.started","item.updated","item.completed"} and isinstance(item,dict):
             if item.get("type") in {"command_execution","file_change","mcp_tool_call","web_search"}:
@@ -72,7 +96,7 @@ def parse_response(data,returncode):
     return messages[-1],native_thread,usage
 
 
-def generate(config,messages,model,delivery,*,usage_callback=None):
+def generate(config,messages,model,delivery,*,usage_callback=None,checkpoint=None):
     suffix=model.removeprefix(PREFIX)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}",suffix):
         raise NativeModelError("invalid native model selection")
@@ -97,6 +121,7 @@ def generate(config,messages,model,delivery,*,usage_callback=None):
     process=None
     delivery("codex-cli",ident,"submitted")
     try:
+        if checkpoint is not None: checkpoint()
         process=TaskProcess(command,cwd=str(config.workspace),stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
@@ -104,6 +129,7 @@ def generate(config,messages,model,delivery,*,usage_callback=None):
         pending=prompt.encode("utf-8")
         while True:
             try:
+                if checkpoint is not None: checkpoint()
                 value=pending;pending=None
                 output,_=process.communicate(input=value,timeout=min(.25,max(.01,deadline-time.monotonic())))
                 break

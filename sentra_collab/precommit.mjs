@@ -4,6 +4,8 @@
  * Host commit MUST atomically fence revision and live grant epoch.
  */
 import * as Y from "yjs";
+import {createHash} from 'node:crypto';
+import {initializeDocument,documentScope} from './document_policy.mjs';
 import { validateYDocument, MAX_SNAPSHOT_BYTES, MAX_UPDATE_BYTES,
   workspaceFromDocument } from "./policy.mjs";
 
@@ -28,10 +30,13 @@ export class PrecommitGate {
     this.pending=new WeakMap();
     this.quarantined=new Set(); // ambiguous commit requires explicit sidecar restart
   }
-  setRevision(documentName,revision) {
+  setRevision(documentName,revision,{recovered=false}={}) {
     workspaceFromDocument(documentName);
     if (!Number.isSafeInteger(revision) || revision < 0) deny();
     this.revisions.set(documentName,revision);
+    // Only the server's fresh onLoadDocument may clear quarantine, after it
+    // reconstructs a new Y.Doc from the committed host snapshot.
+    if(recovered)this.quarantined.delete(documentName);
   }
   async acquire(key) {
     const previous=this.tails.get(key) ?? Promise.resolve();
@@ -67,7 +72,7 @@ export class PrecommitGate {
       const candidate=new Y.Doc();
       let after;
       try {
-        for (const root of roots) candidate.getMap(root);
+        initializeDocument(candidate,Y,documentName);
         Y.applyUpdate(candidate,before);
         Y.applyUpdate(candidate,payload);
         after=snapshotOf(candidate);
@@ -88,8 +93,10 @@ export class PrecommitGate {
         const response=await Promise.race([
           Promise.resolve().then(()=>this.commitSnapshot({
             workspaceId:workspaceFromDocument(documentName),
+            ...(documentScope(documentName)||{}),
             principalId:context.principalId, epoch:context.epoch, context,
-            expectedRevision, snapshot:after
+            expectedRevision, snapshot:after,
+            mutation_id:'yjs-'+createHash('sha256').update(documentName+':'+context.epoch+':'+expectedRevision+':').update(after).digest('hex')
           })),
           new Promise((_,reject)=>{
             timer=setTimeout(()=>reject(Error("collaboration-commit-uncertain")),

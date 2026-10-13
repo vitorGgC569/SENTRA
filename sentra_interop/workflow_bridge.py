@@ -38,7 +38,11 @@ class SubagentWorkflowBridge:
             or not all(isinstance(x, str) and 0 < len(x) <= 128
                        for x in (workflow_id, work_item_id, principal_id))):
             raise ValueError("invalid trusted workflow scope or local ledger path")
-        target.parent.mkdir(parents=True, exist_ok=True)
+        authority = getattr(gate, "authority", None)
+        durable = getattr(authority, "durable", None)
+        self.configured_store = getattr(durable, "store", None)
+        from .workflow_storage import projection_path
+        projection_path(database, workspace_root, store=self.configured_store)
         self.gate, self.database, self.workflow_id = gate, target, workflow_id
         self.work_item_id, self.principal_id = work_item_id, principal_id
         self.worker = None
@@ -57,7 +61,7 @@ class SubagentWorkflowBridge:
             existing = conn.execute("SELECT work_item_id,principal_id,schema_version "
                                     "FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
             if existing:
-                if existing != (work_item_id, principal_id, SCHEMA_VERSION):
+                if tuple(existing[key] for key in ("work_item_id","principal_id","schema_version")) != (work_item_id, principal_id, SCHEMA_VERSION):
                     raise ValueError("checkpoint schema/identity mismatch")
             else:
                 conn.execute("INSERT INTO workflows VALUES (?,?,?,?,?)",
@@ -73,7 +77,7 @@ class SubagentWorkflowBridge:
         from .workflow_checkpoint import WorkflowCheckpointStore
         from .workflow_worker import CheckpointedWorkflowWorker
         self.worker=CheckpointedWorkflowWorker(self.gate,
-            store=WorkflowCheckpointStore(str(self.database),workspace=str(self.database.parent)),
+            store=WorkflowCheckpointStore(str(self.database),workspace=str(self.database.parent),store=self.configured_store),
             definitions=definitions,bindings=bindings,worker_version=worker_version,
             compatible_worker_versions=compatible_worker_versions,payload_resolver=payload_resolver,
             scope=(self.workflow_id,self.principal_id,self.gate.machine.machine_id,self.work_item_id))
@@ -102,16 +106,9 @@ class SubagentWorkflowBridge:
 
     @contextmanager
     def _db(self):
-        conn = sqlite3.connect(self.database,timeout=10)
-        try:
-            conn.execute("PRAGMA busy_timeout=10000")
+        from .workflow_storage import projection_db
+        with projection_db(self.database,store=self.configured_store) as conn:
             yield conn
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
 
     def checkpoint(self) -> Mapping[str, Any]:
         if self.worker is not None:

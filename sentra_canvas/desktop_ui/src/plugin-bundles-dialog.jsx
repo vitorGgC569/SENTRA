@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { api, route } from './api';
+import { shellBridge } from './shell-bridge';
 import { Modal } from './primitives';
 
 /** Owner actions only. MCPB entries are metadata, never executable grants. */
@@ -9,17 +9,24 @@ export function PluginBundlesDialog({ ws, close }) {
   const [approve, setApprove] = useState(false), [busy, setBusy] = useState(false);
   const [error, setError] = useState(''), [message, setMessage] = useState('');
   const [inspection, setInspection] = useState(null);
+  const [supervision, setSupervision] = useState(null);
+  const [codeMode, setCodeMode] = useState(null);
+  const [pending, setPending] = useState(null);
   async function refresh() {
-    const value = await api(route('/api/center/plugin-bundles', { ws }));
+    const value = await shellBridge({ project_id: ws, action: 'plugin_bundle_list' });
     setPackages(value.packages || []);
+    if (value.supervision) setSupervision(value.supervision);
+    if (value.code_mode) setCodeMode(value.code_mode);
   }
   useEffect(() => { refresh().catch(e => setError(e.message)); }, [ws]);
   async function perform(action, extra = {}) {
     setBusy(true); setError(''); setMessage('');
     try {
-      const value = await api('/api/center/plugin-bundles', {
-        ws, action, approve: true, ...extra,
-      });
+      const payload = pending || { project_id: ws, action: 'plugin_bundle_' + action, ...extra, request_key: crypto.randomUUID() };
+      setPending(payload);
+      const value = await shellBridge(payload);
+      if (value.state === 'UNCERTAIN' || value.status === 'uncertain') { setError('Operação incerta; consulte a mesma chave.'); return; }
+      setPending(null);
       if (action === 'inspect') {
         setInspection(value);
         setMessage('Manifesto verificado. Nenhum processo foi iniciado.');
@@ -31,7 +38,7 @@ export function PluginBundlesDialog({ ws, close }) {
         if (action === 'stage') { setSource(''); setSha(''); setApprove(false); }
         await refresh();
       }
-    } catch (e) { setError(e.message); } finally { setBusy(false); }
+    } catch (e) { setError(e.message); if (!e.uncertain) setPending(null); } finally { setBusy(false); }
   }
   const button = {padding:'8px 12px',borderRadius:8,
     border:'1px solid #43434a',background:'#27272b',color:'#f2f2f2',cursor:'pointer'};
@@ -60,6 +67,7 @@ export function PluginBundlesDialog({ ws, close }) {
         Importar inativo
       </button>
       <div style={{display:'grid',gap:8}}>
+        {pending && <div role="status">Resposta pendente · {pending.request_key}<button disabled={busy} onClick={() => perform('consult')}>Consultar mesma intenção</button></div>}
         <strong style={{fontSize:12}}>Pacotes no workspace</strong>
         {!packages.length && <small style={{color:'#a9a9b1'}}>Nenhum pacote importado.</small>}
         {packages.map(pkg => {
@@ -69,7 +77,7 @@ export function PluginBundlesDialog({ ws, close }) {
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12}}>
               <strong style={{fontSize:13}}>{pkg.name} <span style={{fontWeight:400,opacity:.7}}>{pkg.version}</span></strong>
               <small style={{opacity:.7}}>{state === 'REGISTERED' ? 'Registrado' :
-                state === 'DISABLED' ? 'Desativado' : 'Inativo'}</small>
+                state === 'DISABLED' ? 'Desativado' : state === 'REMOVED' ? 'Removido · auditoria retida' : 'Inativo'}</small>
             </div>
             <small style={{fontFamily:'monospace',opacity:.7}}>{pkg.package_sha256.slice(0,20)}</small>
             <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
@@ -79,6 +87,8 @@ export function PluginBundlesDialog({ ws, close }) {
                 onClick={() => perform('register',{package_sha256:pkg.package_sha256})}>Registrar no SENTRA</button>}
               {state === 'REGISTERED' && <button style={button} disabled={busy}
                 onClick={() => perform('disable',{package_sha256:pkg.package_sha256})}>Desativar registro</button>}
+              {state && state !== 'REMOVED' && <button style={button} disabled={busy}
+                onClick={() => perform('uninstall',{package_sha256:pkg.package_sha256})}>Desinstalar registro (reter auditoria)</button>}
             </div>
             {pkg.registration?.plugin_id && <small style={{color:'#b1b1b8'}}>
               Control Plane: {pkg.registration.plugin_id}</small>}
@@ -89,6 +99,16 @@ export function PluginBundlesDialog({ ws, close }) {
         <strong style={{fontSize:12}}>Manifesto conferido</strong>
         <p style={{fontSize:12,marginTop:8}}>{inspection.name} {inspection.version} · {inspection.server_type} · {inspection.entry_point}</p>
         <small style={{color:'#b1b1b8'}}>Autor: {inspection.author_name}. Configuração exigida: {inspection.required_user_config_keys.join(', ') || 'nenhuma'}.</small>
+      </div>}
+      {supervision && <div style={{borderTop:'1px solid #35353b',paddingTop:10}}>
+        <strong style={{fontSize:12}}>Supervisão MCPB</strong>
+        <p style={{fontSize:12,marginTop:8}}>Sessões HTTP: {Object.entries(supervision.http_sessions || {}).map(([k,v]) => `${k} ${v}`).join(' · ') || 'nenhuma'}.</p>
+        <small style={{color:'#b1b1b8'}}>Tíquetes de limpeza pendentes: {(supervision.cleanup_tickets || []).length}. Nenhum contêiner é removido sem operação dedicada com grant.</small>
+      </div>}
+      {codeMode && <div style={{borderTop:'1px solid #35353b',paddingTop:10}}>
+        <strong style={{fontSize:12}}>Code Mode</strong>
+        <p style={{fontSize:12,marginTop:8}}>Motor: {codeMode.engine} · {codeMode.enabled ? 'pronto' : (codeMode.reason || 'indisponível')}.</p>
+        <small style={{color:'#b1b1b8'}}>Execução limitada (fuel/memória/tempo/ferramentas); cada ferramenta exige grant central.</small>
       </div>}
       <small style={{color:'#a9a9b1'}}>Servidores MCPB padrão dependem de um executor MCP stdio autorizado; registrar não os inicia nem expõe ferramentas no ChatGPT.</small>
       {message && <p role="status" style={{color:'#8fd8b6'}}>{message}</p>}

@@ -37,6 +37,22 @@ const OMA_CHATGPT_SELECTORS = {
     "a[href='/']",
   ],
   modelTrigger: [],
+  // Brisa 1.7.0: observed-only selectors. The extension reports approval and
+  // attachment state; it never clicks approval UI (see content-script guard).
+  approvalCard: [
+    "[data-testid='connector-approval']",
+    "[data-testid='tool-approval']",
+    "[data-testid='approval-card']",
+    "[data-testid='confirmation-card']",
+  ],
+  attachmentChip: [
+    "[data-testid='composer-attachment']",
+    "[data-testid='file-chip']",
+    "[aria-label*='Anexo']",
+    "[aria-label*='Attachment']",
+    "[aria-label*='Remover anexo']",
+    "[aria-label*='Remove attachment']",
+  ],
 };
 
 const OMA_GEMINI_SELECTORS = {
@@ -85,6 +101,15 @@ const OMA_GEMINI_SELECTORS = {
     "button[aria-label*='model' i]",
     "button[aria-haspopup='menu']",
     "button[aria-haspopup='listbox']",
+  ],
+  // Brisa 1.7.0: Gemini approval/attachment observation uses the same
+  // deny-only contract; selectors stay conservative (generic roles only).
+  approvalCard: [
+    "[role='alertdialog']",
+  ],
+  attachmentChip: [
+    "[aria-label*='Attachment']",
+    "[aria-label*='Remove attachment']",
   ],
 };
 

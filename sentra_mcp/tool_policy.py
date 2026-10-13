@@ -89,3 +89,45 @@ def filter_tool_names(names: list[str], allowlist: tuple[str, ...]) -> list[str]
         return list(names)
     allowed = frozenset(allowlist)
     return [name for name in names if name in allowed]
+
+
+def minimal_surface_snapshot(*, registry, chat_access, provider_ids,
+                             allowed_names=None, principal, request_id=None,
+                             previous=None) -> dict[str, Any]:
+    """Per-conversation minimal MCP projection (A07: one authority, distinct views).
+
+    Composes the versioned, selectively disclosed schema snapshot from the
+    central ToolExposureRegistry with the ChatAccess denial boundary for
+    the calling (principal, request_id) pair. No grant is created; a chat
+    denial fails closed before any tool descriptor is returned.
+    ``registry``/``chat_access`` are injected so this helper never builds
+    a parallel store or second authority.
+    """
+    if chat_access is not None:
+        chat_access.require_allowed(principal, request_id)
+    snapshot = registry.publication_snapshot(
+        provider_ids, allowed_names=allowed_names, previous=previous)
+    return {**snapshot, "principal": principal,
+            "conversation_attributed": request_id is not None,
+            "grants_created": False}
+
+
+def composition_surface(*, registry, provider_id, methods, chat_access,
+                        provider_ids, allowed_names, principal,
+                        request_id=None, previous=None) -> dict[str, Any]:
+    """One-shot composition helper for the central shell handshake.
+
+    Combines the read-only collision pre-check (including disabled providers)
+    with the per-conversation minimal snapshot. Either denial fails closed;
+    no reservation and no grant is created. ``provider_id``/``methods`` are
+    the candidate under review; ``provider_ids``/``allowed_names`` are the
+    owner-approved projection.
+    """
+    collisions = registry.conflict_report(provider_id, methods)
+    snapshot = minimal_surface_snapshot(
+        registry=registry, chat_access=chat_access, provider_ids=provider_ids,
+        allowed_names=allowed_names, principal=principal,
+        request_id=request_id, previous=previous)
+    return {"collisions": collisions, "snapshot": snapshot,
+            "admissible": collisions.get("valid", False),
+            "grants_created": False, "reservation_changed": False}

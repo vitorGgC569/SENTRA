@@ -1,0 +1,29 @@
+SENTRA Desktop — Third-party notice: guacamole-common-js 1.5.0
+================================================================
+
+Component: guacamole-common-js (protocol viewer assets)
+Pinned version: 1.5.0 (exact pin in sentra_canvas/desktop_ui/package.json)
+Source: npm registry tarball
+  https://registry.npmjs.org/guacamole-common-js/-/guacamole-common-js-1.5.0.tgz
+Tarball SRI: sha512-zxztif3GGhKbg1RgOqwmqot8kXgv2HmHFg1EvWwd4q7UfEKvBcYZ0f+7G8HzvU+FUxF0Psqm9Kl5vCbgfrRgJg==
+  (see sentra_canvas/desktop_ui/src/assets/guacamole/PROVENANCE.json)
+Repack repository (NOT the current ASF clone):
+  https://github.com/padarom/guacamole-common-js
+Canonical upstream: https://guacamole.apache.org/
+License: Apache-2.0 (see LICENSE shipped alongside)
+ASF NOTICE: preserved verbatim (see NOTICE shipped alongside)
+
+SENTRA notes (per contracts L166, NOTICE por arquivo/modificação):
+- This is the padarom repack pinned at 1.5.0, explicitly NOT a current ASF
+  clone (is_apache_clone: false in PROVENANCE.json). No ASF source files
+  were copied; LICENSE+NOTICE travel for attribution of the protocol
+  origin.
+- Purpose in SENTRA: protocol viewer only; input is governed by the SENTRA
+  Control Plane and ticket input epoch (see PROVENANCE.json purpose).
+- Release transport: LICENSE + NOTICE + PROVENANCE.json ship under
+  docs/guacamole/ in every Setup/MSI payload
+  (see _stage_guacamole_legal in scripts/commander/release_assets.py);
+  present-but-incomplete fails the staging.
+- JS bytes arrive via the pinned npm tarball at UI build time
+  (Prisma/materialize domain, untouched here); no install/build executed
+  in this phase; package-lock untouched.

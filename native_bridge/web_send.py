@@ -63,10 +63,21 @@ class WebSendAuthority:
             for statement in schema.split(";"):
                 if statement.strip():
                     db.execute(statement)
-            previous = db.execute("SELECT sql FROM sqlite_master WHERE name='web_send_active_conversation'").fetchone()
-            predicate = "WHERESTAGEIN('SENDING','UNCONFIRMED')"
-            if previous and predicate not in "".join(previous[0].upper().split()):
-                db.execute("DROP INDEX web_send_active_conversation")
+            if getattr(self.store, "backend", "sqlite") == "postgres":
+                previous = db.raw.execute("SELECT indexdef FROM pg_indexes WHERE schemaname=%s AND indexname=%s",
+                    (self.store.schema("session_checkpoint"), "web_send_active_conversation")).fetchone()
+                # Native namespace lock is already held by BEGIN IMMEDIATE.
+                if previous and ("'SENDING'" not in previous["indexdef"] or
+                                 "'UNCONFIRMED'" not in previous["indexdef"] or "'SENT'" in previous["indexdef"]):
+                    from psycopg import sql
+                    db.raw.execute(sql.SQL("DROP INDEX {}.{}").format(
+                        sql.Identifier(self.store.schema("session_checkpoint")),
+                        sql.Identifier("web_send_active_conversation")))
+            else:
+                previous = db.execute("SELECT sql FROM sqlite_master WHERE name='web_send_active_conversation'").fetchone()
+                predicate = "WHERESTAGEIN('SENDING','UNCONFIRMED')"
+                if previous and predicate not in "".join(previous[0].upper().split()):
+                    db.execute("DROP INDEX web_send_active_conversation")
             db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS web_send_active_conversation
                     ON web_send_intents(owner,workspace,conversation_key)
                     WHERE stage IN ('SENDING','UNCONFIRMED')""")
@@ -153,30 +164,52 @@ class WebSendAuthority:
               conversation_key: str, prompt: str, conversation_url: str | None = None,
               requested_model: str | None = None, requested_effort: str | None = None,
               target_worker: str = "", timeout_s: int = 180, dispatch_mode: str = "external",
-              submission_index: int = 0) -> dict:
+              submission_index: int = 0, images: list | None = None, attachments: list | None = None,
+              wait_for_answer: bool = True) -> dict:
         identity, key = self._identity(owner, request_identity)
         if type(submission_index) is not int or not 0 <= submission_index <= 1024:
             raise ValueError("submission_index must be 0..1024")
         if not isinstance(conversation_key, str) or not 1 <= len(conversation_key) <= 512:
             raise ValueError("bounded logical conversation_key required")
+        if type(wait_for_answer) is not bool:
+            raise ValueError("wait_for_answer must be explicit boolean")
+        if images is not None:
+            # Staged-attachment bytes ride the SAME fenced intent: image shas
+            # join the intent identity, so a replay with different bytes is a
+            # conflict, never a silent substitution. Caps enforced by ChatJob.
+            if (not isinstance(images, list) or len(images) > 2
+                    or any(not isinstance(item, str) for item in images)):
+                raise ValueError("admission images must be 0..2 data URLs")
         job_id = "websend_" + _sha(_json([key, submission_index]))
         job = ChatJob(job_id=job_id, task_id=operation_id, prompt=prompt, timeout_s=timeout_s,
-                      kind="CHAT_SEND" if conversation_url else "CHAT_START", new_chat=not bool(conversation_url),
+                      kind="CHAT_TASK" if wait_for_answer else ("CHAT_SEND" if conversation_url else "CHAT_START"), new_chat=not bool(conversation_url),
                       conversation_url=conversation_url, delivery_key="websend:" + job_id,
                       target_worker=target_worker, dispatch_mode=dispatch_mode,
-                      requested_model=requested_model, requested_effort=requested_effort)
+                      requested_model=requested_model, requested_effort=requested_effort,
+                      images=list(images) if images else [], attachments=list(attachments or []))
         job.validate()
+        if job.attachments:
+            from sentra_mcp.services.web_history_assets import WebAssetDrafts
+            drafts = WebAssetDrafts(self.control)
+            for ref in job.attachments:
+                asset = drafts._row(owner, ref["asset_id"])
+                drafts._check(asset)
+                if (asset["run_id"], asset["work_item_id"], asset["principal_id"], asset["workspace"],
+                    asset["expected_sha256"], asset["expected_bytes"], asset["content_type"], asset["state"]) != (
+                    run_id, work_item_id, principal_id, workspace, ref["sha256"], ref["bytes"], ref["mime"], "READY_LOCAL"):
+                    raise PermissionError("binary attachment differs from immutable send scope")
         bound = dict(owner=owner, run_id=run_id, operation_id=operation_id, work_item_id=work_item_id,
                      principal_id=principal_id, grant_id=grant_id, workspace=workspace, conversation_key=conversation_key)
         self._authority(bound)
-        material = {**bound, "job": {k: v for k, v in job.to_dict().items() if k != "created_at"}}
+        material = {**bound, "job": {k: v for k, v in job.to_dict().items()
+                                    if k != "created_at" and not (k == "attachments" and not v)}}
         intent = _sha(_json(material))
         now = self.jobs.clock()
         with self.store.connect("session_checkpoint") as db:
             db.execute("BEGIN IMMEDIATE")
             request = db.execute("SELECT run_id,operation_id FROM web_response_requests WHERE owner=? AND request_identity_sha256=?",
                                  (owner, identity)).fetchone()
-            if request and tuple(request) != (run_id, operation_id):
+            if request and (request["run_id"], request["operation_id"]) != (run_id, operation_id):
                 raise WebSendConflict("physical submission has another Responses authority")
             old = db.execute("SELECT * FROM web_send_intents WHERE job_id=?", (job_id,)).fetchone()
             if old and old["intent_sha256"] != intent:
@@ -234,7 +267,7 @@ class WebSendAuthority:
             self._authority(row)
             durable._verify_fence_locked(resource_key, fencing_token)
             lease = durable.db.execute("SELECT run_id,operation_id,owner FROM leases WHERE resource_key=?", (resource_key,)).fetchone()
-            if not lease or tuple(lease) != (row["run_id"], row["operation_id"], owner):
+            if not lease or (lease["run_id"], lease["operation_id"], lease["owner"]) != (row["run_id"], row["operation_id"], owner):
                 raise PermissionError("central lease does not belong to this Web Operation")
             self.jobs._expire()
             job = self.jobs.db.execute("SELECT state,worker,lease,lease_until,deadline FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -324,8 +357,9 @@ class WebSendAuthority:
             raise ValueError("complete must be boolean")
         if not isinstance(body, str) or len(body) > 200000:
             raise ValueError("answer must fit existing ChatResult text limit (200000 chars)")
-        # Serialize identity/revision and history persistence across processes.
-        # The send-intent lock is separate from provider_content's history DB.
+        # Reserve identity/revision before independent host I/O. Do not hold a
+        # namespace writer lock while the observer reads other CP namespaces:
+        # native PG and SQLite must both permit observation-only recovery.
         history = WebHistoryStore(self.control.durable.state_root, store=self.store)
         ingress = AuthenticatedWebFrameIngress(self.control, history, assistant_attestor=self.assistant_attestor)
         with self.store.connect("session_checkpoint") as db:
@@ -333,23 +367,29 @@ class WebSendAuthority:
             live = db.execute("SELECT answer_message_id,answer_revision,stage FROM web_send_intents WHERE job_id=?", (job_id,)).fetchone()
             if (live[0] and live[0] != message_id) or (live[1] is not None and revision < live[1]):
                 raise WebSendConflict("assistant message identity or revision changed")
-            if live[2] == "ANSWERED" and not complete:
-                raise WebSendConflict("final answer cannot reopen streaming")
-            args = dict(run_id=row["run_id"], browser_principal=browser_principal, request_id=request_id,
-                        worker=worker, conversation_id=conversation_id, message_id=message_id, revision=revision,
-                        state="complete" if complete else "partial", body=body, identity_epoch=identity_epoch)
-            parent = parent_user_message_id if parent_user_message_id is not None else delivery["receipt"]["message_id"]
-            if parent != delivery["receipt"]["message_id"]:
-                raise PermissionError("assistant parent differs from original user receipt")
-            if request_id != attestation["request_id"]:
-                # A distinct assistant request must itself have witnessed
-                # message correlation, AND the host must prove its role/body
-                # and parent. Metadata alone never authorizes ANSWERED.
-                ingress.proof.prove_message(owner=owner, run_id=row["run_id"], browser_principal=browser_principal,
-                    request_id=request_id, worker=worker, conversation_id=conversation_id,
-                    message_id=message_id, identity_epoch=identity_epoch)
-            args["request_id"] = attestation["request_id"]
-            ingress.record_answer(owner, job_id=job_id, parent_user_message_id=parent, **args)
+            if live[2] == "ANSWERED" and (not complete or live[1] != revision):
+                raise WebSendConflict("final answer permits only its exact existing revision")
+            db.execute("UPDATE web_send_intents SET answer_message_id=?,answer_revision=?,updated=? WHERE job_id=?",
+                       (message_id, revision, self.jobs.clock(), job_id))
+        args = dict(run_id=row["run_id"], browser_principal=browser_principal, request_id=request_id,
+                    worker=worker, conversation_id=conversation_id, message_id=message_id, revision=revision,
+                    state="complete" if complete else "partial", body=body, identity_epoch=identity_epoch)
+        parent = parent_user_message_id if parent_user_message_id is not None else delivery["receipt"]["message_id"]
+        if parent != delivery["receipt"]["message_id"]:
+            raise PermissionError("assistant parent differs from original user receipt")
+        if request_id != attestation["request_id"]:
+            ingress.proof.prove_message(owner=owner, run_id=row["run_id"], browser_principal=browser_principal,
+                request_id=request_id, worker=worker, conversation_id=conversation_id,
+                message_id=message_id, identity_epoch=identity_epoch)
+        args["request_id"] = attestation["request_id"]
+        ingress.record_answer(owner, job_id=job_id, parent_user_message_id=parent, **args)
+        self._authority(self._row(owner, job_id), effect=False)
+        self.receipts.require_attested(owner, run_id=row["run_id"], job_id=job_id, evidence=delivery["receipt"])
+        with self.store.connect("session_checkpoint") as db:
+            db.execute("BEGIN IMMEDIATE")
+            live = db.execute("SELECT answer_message_id,answer_revision,stage FROM web_send_intents WHERE job_id=?", (job_id,)).fetchone()
+            if live[0] != message_id or live[1] != revision or (live[2] == "ANSWERED" and not complete):
+                raise WebSendConflict("a newer assistant observation superseded this frame")
             db.execute("UPDATE web_send_intents SET stage=?,answer_message_id=?,answer_revision=?,updated=? WHERE job_id=?",
                        ("ANSWERED" if complete else "ANSWERING", message_id, revision, self.jobs.clock(), job_id))
         return self.status(owner, job_id)
@@ -364,10 +404,10 @@ class WebSendAuthority:
                                "WHERE owner=? AND workspace=? AND conversation_id=? AND message_id=?",
                                (row["owner"], row["workspace"], delivery["receipt"]["conversation_id"],
                                 row["answer_message_id"])).fetchone()
-        if frame is None or tuple(frame)[:3] != (row["answer_revision"], "assistant", "complete"):
+        if frame is None or (frame["revision"], frame["role"], frame["state"]) != (row["answer_revision"], "assistant", "complete"):
             raise WebSendConflict("final history does not match committed assistant identity/revision")
         self.jobs._complete_attested_answer(row["job_id"], worker=row["worker"],
-                                           receipt=delivery["receipt"], body=_plain(frame[3]))
+                                           receipt=delivery["receipt"], body=_plain(frame["protected_body"]))
 
     def status(self, owner: str, job_id: str) -> dict:
         row = self._row(owner, job_id)

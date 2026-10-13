@@ -9,7 +9,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from .control_store import ControlPlaneStore, SQLiteControlPlaneStore
+from .control_store import ControlPlaneStore, create_control_plane_store
 
 BUDGET_SCOPE_TYPES = {
     "instance", "workspace", "goal", "work_item", "run", "operation", "agent", "provider",
@@ -49,7 +49,7 @@ class BudgetPolicyService:
         store: ControlPlaneStore | None = None,
         clock=time.time,
     ) -> None:
-        self.store = store or SQLiteControlPlaneStore(state_root)
+        self.store = store or getattr(governance, "store", None) or create_control_plane_store(state_root)
         self.path = self.store.path_for("budget_policy")
         self.governance = governance
         self.clock = clock
@@ -181,7 +181,37 @@ class BudgetPolicyService:
             "agent": "agent_id",
             "provider": "provider",
         }
+        if scope_type == "work_item":
+            return policy.get("scope_id") in context.get("_work_item_ancestors",[context.get("work_item_id")])
         return str(context.get(mapping[scope_type]) or "") == str(policy.get("scope_id") or "")
+
+    def _work_item_ancestors(self,owner,work_item_id,run_id=None):
+        result, current, scoped_run = [],work_item_id,run_id
+        while current:
+            if current in result or len(result) >= 32:
+                raise BudgetExceeded("work item budget lineage is cyclic or exceeds the depth bound")
+            item = self.governance.work_item_info(current,owner)
+            scoped_run = scoped_run or item["run_id"]
+            if item["run_id"] != scoped_run:
+                raise BudgetExceeded("work item budget lineage crosses Runs")
+            result.append(current)
+            current = item.get("parent_work_item_id")
+        return result
+
+    @staticmethod
+    def _budget_tree_sql():
+        return ("WITH RECURSIVE budget_tree(work_item_id,run_id) AS ("
+            "SELECT work_item_id,run_id FROM work_items WHERE owner=? AND work_item_id=? "
+            "UNION SELECT w.work_item_id,w.run_id FROM work_items w JOIN budget_tree t "
+            "ON w.parent_work_item_id=t.work_item_id AND w.run_id=t.run_id WHERE w.owner=?) ")
+
+    def descendant_work_items(self,owner,work_item_id):
+        with self.governance._connect() as db:
+            rows = db.execute(self._budget_tree_sql()+"SELECT work_item_id FROM budget_tree LIMIT 10001",
+                              (owner,work_item_id,owner)).fetchall()
+        if len(rows) > 10000:
+            raise BudgetExceeded("work item usage-report lineage exceeds the bounded read")
+        return [row["work_item_id"] for row in rows]
 
     @staticmethod
     def _metric_value(summary: dict[str, Any], metric: str) -> float:
@@ -194,6 +224,7 @@ class BudgetPolicyService:
         return float(summary.get(metric, 0) or 0)
 
     def _summary_for(self, owner: str, policy: dict[str, Any]) -> dict[str, Any]:
+        prefix = ""
         where = ["owner=?"]
         params: list[Any] = [owner]
         mapping = {
@@ -207,14 +238,20 @@ class BudgetPolicyService:
         }
         if policy["scope_type"] != "instance":
             column = mapping[policy["scope_type"]]
-            where.append(f"{column}=?")
-            params.append(policy["scope_id"])
+            if policy["scope_type"] == "work_item":
+                prefix = self._budget_tree_sql()
+                where.append("work_item_id IN (SELECT work_item_id FROM budget_tree)")
+                params = [owner,policy["scope_id"],owner,*params]
+            else:
+                where.append(f"{column}=?")
+                params.append(policy["scope_id"])
         if policy.get("window_seconds") is not None:
             where.append("created_at>=?")
             params.append(self.clock() - float(policy["window_seconds"]))
         clause = " AND ".join(where)
         with self.governance._connect() as db:
             row = db.execute(
+                prefix +
                 f"SELECT COALESCE(SUM(actual_cost),0) actual_cost,"
                 f"COALESCE(SUM(market_cost),0) market_cost,"
                 f"COALESCE(SUM(quota_usage),0) quota_usage,"
@@ -250,6 +287,7 @@ class BudgetPolicyService:
             "agent_id": agent_id,
             "provider": provider,
         }
+        context["_work_item_ancestors"] = self._work_item_ancestors(owner,work_item_id,run_id) if work_item_id else []
         proposed_values = {key: 0.0 for key in BUDGET_METRICS}
         for key, raw in dict(proposed or {}).items():
             if key not in BUDGET_METRICS:

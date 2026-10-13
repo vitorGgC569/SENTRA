@@ -13,11 +13,11 @@ import uuid
 from typing import Any
 
 from sentra_remote.secrets import protect_secret, unprotect_secret
-from .control_store import SQLiteControlPlaneStore
+from .control_store import create_control_plane_store
 
 _ALLOWED = {"image/png", "image/jpeg", "application/pdf", "text/plain"}
-_MAX_BYTES = 4 * 1024 * 1024
-_MAX_TOTAL = 16 * 1024 * 1024
+_MAX_BYTES = 20 * 1024 * 1024
+_MAX_TOTAL = 128 * 1024 * 1024
 _CHUNK = 64 * 1024
 _IDENT = re.compile(r"^[A-Za-z0-9_-]{8,160}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
@@ -30,7 +30,7 @@ class WebAssetConflict(RuntimeError):
 class WebAssetDrafts:
     def __init__(self, control: Any, *, clock=time.time):
         self.control, self.clock = control, clock
-        self.store = getattr(control, "store", None) or SQLiteControlPlaneStore(
+        self.store = getattr(control, "store", None) or create_control_plane_store(
             control.durable.state_root)
         with self.store.connect("provider_content") as db:
             db.executescript("""
@@ -51,6 +51,9 @@ class WebAssetDrafts:
                     protected_base64 TEXT NOT NULL,
                     PRIMARY KEY(asset_id,part));
             """)
+            db.execute("CREATE TABLE IF NOT EXISTS web_asset_stage_keys("
+                       "owner TEXT NOT NULL,request_key TEXT NOT NULL,asset_id TEXT NOT NULL,"
+                       "fingerprint TEXT NOT NULL,PRIMARY KEY(owner,request_key))")
 
     def _row(self, owner: str, asset_id: str) -> dict[str, Any]:
         with self.store.connect("provider_content") as db:
@@ -77,7 +80,7 @@ class WebAssetDrafts:
     def begin(self, owner: str, *, run_id: str, work_item_id: str,
               principal_id: str, conversation_id: str, message_id: str,
               content_type: str, expected_bytes: int, expected_sha256: str,
-              operator_approved: bool = False) -> dict[str, Any]:
+              operator_approved: bool = False, request_key: str | None = None) -> dict[str, Any]:
         if operator_approved is not True:
             raise PermissionError("human consent required to stage attachment")
         if (not isinstance(conversation_id,str) or not _IDENT.fullmatch(conversation_id)
@@ -85,7 +88,8 @@ class WebAssetDrafts:
             raise ValueError("exact bounded Web message identity required")
         if content_type not in _ALLOWED:
             raise ValueError("unsupported Web attachment format")
-        if type(expected_bytes) is not int or not 1 <= expected_bytes <= _MAX_BYTES:
+        maximum = 8 * 1024 * 1024 if content_type.startswith("image/") else _MAX_BYTES
+        if type(expected_bytes) is not int or not 1 <= expected_bytes <= maximum:
             raise ValueError("Web attachment exceeds maximum bytes")
         if not isinstance(expected_sha256,str) or not _SHA.fullmatch(expected_sha256):
             raise ValueError("expected SHA-256 is mandatory")
@@ -98,6 +102,19 @@ class WebAssetDrafts:
             raise WebAssetConflict("Run lacks bound workspace")
         with self.store.connect("provider_content") as db:
             db.execute("BEGIN IMMEDIATE")
+            import json
+            fingerprint = hashlib.sha256(json.dumps([run_id, work_item_id, principal_id,
+                conversation_id, message_id, content_type, expected_bytes, expected_sha256],
+                separators=(",", ":")).encode()).hexdigest()
+            if request_key is not None:
+                if not isinstance(request_key, str) or not 1 <= len(request_key) <= 200:
+                    raise ValueError("bounded attachment staging request_key required")
+                old = db.execute("SELECT * FROM web_asset_stage_keys WHERE owner=? AND request_key=?",
+                                 (owner, request_key)).fetchone()
+                if old:
+                    if old["fingerprint"] != fingerprint:
+                        raise WebAssetConflict("staging key conflicts with original content/scope")
+                    return self.status(owner, old["asset_id"])
             used = db.execute(
                 "SELECT COALESCE(SUM(expected_bytes),0) FROM web_asset_drafts "
                 "WHERE owner=? AND workspace=? AND state!='DELETED'",
@@ -110,6 +127,9 @@ class WebAssetDrafts:
                        (ident,owner,workspace,run_id,work_item_id,principal_id,
                         conversation_id,message_id,content_type,expected_bytes,
                         expected_sha256,self.clock()))
+            if request_key is not None:
+                db.execute("INSERT INTO web_asset_stage_keys VALUES(?,?,?,?)",
+                           (owner, request_key, ident, fingerprint))
         return self.status(owner,ident)
 
     def put_chunk(self, owner: str, asset_id: str, *, part: int,
@@ -118,7 +138,7 @@ class WebAssetDrafts:
         self._check(item)
         if item["state"] != "RECEIVING":
             raise WebAssetConflict("attachment is not receiving chunks")
-        if type(part) is not int or not 0 <= part < 64:
+        if type(part) is not int or not 0 <= part < (_MAX_BYTES + _CHUNK - 1) // _CHUNK:
             raise ValueError("bounded part index required")
         if not isinstance(content,bytes) or not 1 <= len(content) <= _CHUNK:
             raise ValueError("bounded binary chunk required")
@@ -185,6 +205,22 @@ class WebAssetDrafts:
         if len(raw) != item["expected_bytes"] or hashlib.sha256(raw).hexdigest() != item["expected_sha256"]:
             raise WebAssetConflict("attachment digest changed")
         return raw
+
+    def read_chunk(self, owner, asset_id, part):
+        item = self._row(owner, asset_id)
+        self._check(item)
+        if item["state"] != "READY_LOCAL" or type(part) is not int or not 0 <= part < 320:
+            raise WebAssetConflict("bounded finalized attachment chunk required")
+        with self.store.connect("provider_content") as db:
+            row = db.execute("SELECT * FROM web_asset_chunks WHERE asset_id=? AND part=?",
+                             (asset_id, part)).fetchone()
+        if row is None:
+            raise FileNotFoundError("attachment chunk not found")
+        raw = base64.b64decode(unprotect_secret(row["protected_base64"]), validate=True)
+        if len(raw) != row["bytes_count"] or hashlib.sha256(raw).hexdigest() != row["sha256"]:
+            raise WebAssetConflict("attachment chunk integrity failure")
+        return {"part": part, "data_base64": base64.b64encode(raw).decode("ascii"),
+                "sha256": row["sha256"], "bytes": len(raw)}
 
     def status(self, owner: str, asset_id: str) -> dict[str, Any]:
         item = self._row(owner,asset_id)

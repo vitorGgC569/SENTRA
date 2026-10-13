@@ -26,10 +26,12 @@ def namespace(value):
 
 
 class WorkflowCheckpointStore:
-    def __init__(self,database,*,workspace):
+    def __init__(self,database,*,workspace,control=None,store=None):
+        self.control,self.configured_store=control,store
         root,self.path=Path(workspace).resolve(),Path(database).resolve()
         if self.path==root or not self.path.is_relative_to(root): raise ValueError("workflow checkpoint outside workspace")
-        self.path.parent.mkdir(parents=True,exist_ok=True)
+        from .workflow_storage import projection_path
+        projection_path(database,workspace,control=control,store=store)
         with self.db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS wf_instances(
                 workflow_id TEXT NOT NULL,namespace TEXT NOT NULL,principal TEXT NOT NULL,machine TEXT NOT NULL,
@@ -52,12 +54,9 @@ class WorkflowCheckpointStore:
 
     @contextmanager
     def db(self):
-        db=sqlite3.connect(self.path,timeout=10)
-        db.row_factory=sqlite3.Row
-        try:
-            db.execute("PRAGMA busy_timeout=10000")
-            with db: yield db
-        finally: db.close()
+        from .workflow_storage import projection_db
+        with projection_db(self.path,control=self.control,store=self.configured_store) as db:
+            yield db
 
     def open(self,*,workflow_id,ns,definition,request,inputs,parent_namespace=None):
         ident(workflow_id); namespace(ns)

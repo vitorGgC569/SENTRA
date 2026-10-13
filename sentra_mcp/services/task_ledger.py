@@ -93,7 +93,8 @@ class DurableTaskLedger:
         *,
         store: ControlPlaneStore | None = None,
     ) -> None:
-        self.store = store or SQLiteControlPlaneStore(state_root)
+        from .control_store import create_control_plane_store
+        self.store = store or create_control_plane_store(state_root)
         self.path = self.store.path_for("task_ledger")
         with self._connect() as db:
             db.executescript(

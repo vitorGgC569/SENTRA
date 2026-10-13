@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass,asdict
 from pathlib import Path
 from .windows_identity import ProcessIdentity,WindowsIdentityProbe
@@ -53,7 +54,7 @@ class SemanticUIABinding:
     def __post_init__(self):
         if not self.capability_id or not self.window_title or not self.selectors or len(self.selectors)>256 or len({s.key for s in self.selectors})!=len(self.selectors):
             raise ValueError('invalid_semantic_uia_binding')
-        if not set(self.actions)<={'observe','wait','read','invoke','set_value','toggle','select','screenshot'} or not 2<=self.timeout_seconds<=120 or not 1<=self.max_text_chars<=65536 or type(self.require_foreground_for_mutation) is not bool:
+        if not set(self.actions)<={'observe','observe.hybrid','wait','read','invoke','set_value','toggle','select','screenshot'} or not 2<=self.timeout_seconds<=120 or not 1<=self.max_text_chars<=65536 or type(self.require_foreground_for_mutation) is not bool:
             raise ValueError('invalid_semantic_uia_limits')
 
 
@@ -80,6 +81,38 @@ def native_desktop_identity(expected:DesktopIdentity):
         return {'machine_guid':str(guid),'session_id':sid.value,'input_desktop':name.value,'os_isolation_attested':False}
     finally:
         user.CloseDesktop.argtypes=(wintypes.HANDLE,);user.CloseDesktop(handle)
+
+
+@contextmanager
+def desktop_input_lock(desktop):
+    """Kernel mutex in the actual interactive session, including guest workers.
+
+    Distinct SENTRA machines/controllers cannot overlap input patterns. A mutex
+    is exclusion, not OS confinement or permission to automate a desktop.
+    """
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    kernel.CreateMutexW.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.ReleaseMutex.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    name = 'Local\\SENTRA-Input-' + hashlib.sha256(json.dumps(asdict(desktop), sort_keys=True).encode()).hexdigest()
+    handle = kernel.CreateMutexW(None, False, name)
+    if not handle:
+        raise ExecutorFailure('desktop_input_mutex_unavailable')
+    owned = False
+    try:
+        state = kernel.WaitForSingleObject(handle, 0)
+        owned = state in {0, 0x80}  # WAIT_ABANDONED owns the mutex; revalidate target.
+        if not owned:
+            raise ExecutorFailure('interactive_desktop_input_owned_elsewhere')
+        yield
+    finally:
+        if owned:
+            kernel.ReleaseMutex(handle)
+        kernel.CloseHandle(handle)
 
 
 class UIAProbeEngine:
@@ -117,8 +150,10 @@ class UIAProbeEngine:
             # Property caching is confined to one observation; action lookup is fresh.
             info=control.element_info;info.set_cache_strategy(cached=True)
             try:
-                text=control.window_text();limit=profile['max_text_chars']
-                try:value=control.iface_value.CurrentValue
+                try:is_password=bool(info.element.CurrentIsPassword)
+                except Exception:is_password=True  # Unknown privacy property cannot expose a value.
+                text='' if is_password else control.window_text();limit=profile['max_text_chars']
+                try:value=None if is_password else control.iface_value.CurrentValue
                 except Exception:value=None
                 return {'selector_key':selector['key'],'runtime_id':runtime,'automation_id':info.automation_id,
                     'control_type':info.control_type,'name':info.name[:limit],
@@ -141,7 +176,9 @@ class UIAProbeEngine:
         if action=='screenshot':
             check();image=window.capture_as_image();checkpoint()
             image.save(args['_temporary_output'],format='PNG');check()
-            return {'width':image.width,'height':image.height,'window_only':True,'coordinate_input_used':False}
+            rect=window.rectangle()
+            return {'width':image.width,'height':image.height,'window_only':True,'coordinate_input_used':False,
+                    'window_rectangle':[rect.left,rect.top,rect.right,rect.bottom]}
         selector=next(s for s in selectors if s['key']==args['_selector_key'])
         if action=='wait':
             deadline=time.monotonic()+args.get('wait_seconds',5)
@@ -158,20 +195,21 @@ class UIAProbeEngine:
         if runtime!=args['_expected_runtime_id']:raise ExecutorFailure('uia_element_reference_stale')
         if action not in selector['actions']:raise ExecutorFailure('uia_selector_action_denied')
         if action!='read':
-            if not control.is_enabled() or not control.is_visible():raise ExecutorFailure('uia_control_unavailable')
-            check()
-            if window.window_text()!=profile['window_title']:raise ExecutorFailure('uia_window_title_changed')
-            if profile.get('require_foreground_for_mutation',True):
-                from ctypes import wintypes
-                user=ctypes.WinDLL('user32');user.GetForegroundWindow.restype=wintypes.HWND
-                if int(user.GetForegroundWindow() or 0)!=expected.hwnd:raise ExecutorFailure('uia_foreground_hardware_ownership_changed')
-            if list(control.element_info.runtime_id)!=runtime:raise ExecutorFailure('uia_element_recreated_before_action')
-            try:
-                if action=='invoke':control.iface_invoke.Invoke()
-                elif action=='set_value':control.iface_value.SetValue(args['value'])
-                elif action=='toggle':control.iface_toggle.Toggle()
-                elif action=='select':control.iface_selection_item.Select()
-            except Exception as exc:raise ExecutorFailure('uia_pattern_action_failed',uncertain=True) from exc
+            with desktop_input_lock(desktop):
+                if not control.is_enabled() or not control.is_visible():raise ExecutorFailure('uia_control_unavailable')
+                check()
+                if window.window_text()!=profile['window_title']:raise ExecutorFailure('uia_window_title_changed')
+                if profile.get('require_foreground_for_mutation',True):
+                    from ctypes import wintypes
+                    user=ctypes.WinDLL('user32');user.GetForegroundWindow.restype=wintypes.HWND
+                    if int(user.GetForegroundWindow() or 0)!=expected.hwnd:raise ExecutorFailure('uia_foreground_hardware_ownership_changed')
+                if list(control.element_info.runtime_id)!=runtime:raise ExecutorFailure('uia_element_recreated_before_action')
+                try:
+                    if action=='invoke':control.iface_invoke.Invoke()
+                    elif action=='set_value':control.iface_value.SetValue(args['value'])
+                    elif action=='toggle':control.iface_toggle.Toggle()
+                    elif action=='select':control.iface_selection_item.Select()
+                except Exception as exc:raise ExecutorFailure('uia_pattern_action_failed',uncertain=True) from exc
         check();return {'element':record(selector,control,runtime),'action':action,'coordinate_input_used':False,
                         'effect_semantically_verified':action=='set_value' and control.iface_value.CurrentValue==args.get('value')}
 
@@ -189,20 +227,36 @@ class SemanticUIABackend:
             profile_key=hashlib.sha256(json.dumps(profile,sort_keys=True).encode()).hexdigest()
             refs=self.references.setdefault((scope,profile_key),{})
             action=a['action'];worker_args=dict(a)
-            if action not in {'observe','wait','screenshot'}:
+            if action not in {'observe','observe.hybrid','wait','screenshot'}:
                 ref=refs.get(a['reference'])
                 if ref is None:raise ExecutorFailure('uia_reference_not_owned_or_observation_changed')
                 worker_args.update(_selector_key=ref['selector_key'],_expected_runtime_id=ref['runtime_id'])
             elif action=='wait':worker_args['_selector_key']=a['selector_key']
             def invoke(arguments):
+                remaining=deadline-time.monotonic()
+                if remaining<=0:raise ExecutorFailure('uia_compound_observation_deadline')
                 return self.runner.invoke(self.python,('-m','sentra_executors.uia_guest_worker'),input_document={
-                    'profile':profile,'arguments':arguments},timeout_seconds=b.timeout_seconds-1)
-            if action=='screenshot':
+                    'profile':profile,'arguments':arguments},timeout_seconds=remaining)
+            deadline=time.monotonic()+b.timeout_seconds-1
+            if action in {'screenshot','observe.hybrid'}:
                 metadata={}
-                def produce(path):metadata.update(invoke(dict(worker_args,_temporary_output=str(path))))
+                observed = invoke(dict(worker_args,action='observe')) if action=='observe.hybrid' else None
+                def produce(path):
+                    metadata.update(invoke(dict(worker_args,action='screenshot',_temporary_output=str(path))))
+                    if observed is not None:
+                        current=invoke(dict(worker_args,action='observe'))
+                        if current['elements']!=observed['elements']:
+                            raise ExecutorFailure('uia_changed_during_hybrid_observation')
                 def verify(path):
                     if path.read_bytes()[:8]!=b'\x89PNG\r\n\x1a\n':raise ExecutorFailure('uia_screenshot_not_png')
                 artifact=atomic_output(b.paths,a['output'],produce,verify,max_output_bytes=16*1024*1024)
+                if observed is not None:
+                    refs.clear();revision=uuid.uuid4().hex
+                    for element in observed['elements']:
+                        if 'runtime_id' in element:
+                            token=revision+':'+element['selector_key'];refs[token]=dict(element);element['reference']=token
+                    return {**observed,**metadata,'artifact':artifact,'revision':revision,
+                            'observation_mode':'uia_and_window_image','coordinate_input_used':False}
                 return dict(metadata,artifact=artifact)
             try:result=invoke(worker_args)
             finally:
@@ -226,13 +280,13 @@ class SemanticUIAExecutor(SessionExecutor):
         self.backend=backend or SemanticUIABackend()
     def _validate(self,request,b):
         a=dict(request.arguments);action=a.get('action')
-        fields={'observe':set(),'wait':{'selector_key','expected','wait_seconds'},'screenshot':{'output'},'set_value':{'reference','value'}}.get(action,{'reference'})
+        fields={'observe':set(),'observe.hybrid':{'output'},'wait':{'selector_key','expected','wait_seconds'},'screenshot':{'output'},'set_value':{'reference','value'}}.get(action,{'reference'})
         if action not in b.actions or set(a)-({'action'}|fields):raise ValueError('uia_action_or_fields_denied')
         if action=='wait':
             if a.get('selector_key') not in {s.key for s in b.selectors} or not isinstance(a.get('expected'),dict) or not a['expected'] or set(a['expected'])-{'text','value','enabled','visible'}:
                 raise ValueError('bounded_semantic_condition_required')
             if not 0<a.get('wait_seconds',5)<=min(10,b.timeout_seconds-2):raise ValueError('uia_wait_limit')
-        elif action=='screenshot':
+        elif action in {'screenshot','observe.hybrid'}:
             path=b.paths.resolve(a.get('output'),write=True)
             if path.suffix.lower()!='.png':raise ValueError('uia_png_output_required')
             a['output']=str(path)

@@ -6,6 +6,7 @@ Actual tools/call authorization belongs to ToolHiveMCPBoundary (injected client)
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import json
 import os
 import ctypes
@@ -14,6 +15,7 @@ from typing import Any, Mapping
 
 from sentra_runtime.contracts import OperationRequest, OperationResult
 from .gate import InteropGate
+from .acp_process import spawn_owned
 
 MAX_FRAME = 65536
 
@@ -66,8 +68,9 @@ class MCPStdioClient:
     """Owns only the direct child PID; no process tree sandbox claim."""
 
     def __init__(self, process: asyncio.subprocess.Process, gate: InteropGate,
-                 *, server_id: str) -> None:
+                 *, server_id: str, owner=None) -> None:
         self.process, self.gate, self.server_id = process, gate, server_id
+        self._owner = owner
         self._lock = asyncio.Lock()
         self._pending: dict[int, asyncio.Future] = {}
         self._late: set[int] = set()
@@ -75,20 +78,36 @@ class MCPStdioClient:
         self._dead: Exception | None = None
         self._closed = False
         self._initialized = False
-        self._reader = asyncio.create_task(self._reader_loop())
+        self.server_capabilities = {}
+        self.protocol_version = None
+        self.notifications = asyncio.Queue(maxsize=128)
+        self.request_handler = None
+        self._contexts = {}
+        self._server_tasks = set()
+        self._reader = asyncio.create_task(self._reader_loop(),context=contextvars.Context())
 
     @classmethod
     async def launch(cls, *, executable: str, argv: tuple[str, ...],
                      cwd: str, server_id: str, request: OperationRequest,
-                     gate: InteropGate, timeout: float = 10) -> "MCPStdioClient":
+                     gate: InteropGate, timeout: float = 10,env=None) -> "MCPStdioClient":
         if (request.capability_id != "mcp:launch" or not isinstance(server_id, str)
             or not server_id or len(server_id) > 128
-            or request.arguments != {"executable": executable, "args": list(argv),
-                                     "cwd": cwd, "server_id": server_id}
+            or any(request.arguments.get(k)!=v for k,v in {"executable":executable,"args":list(argv),
+                                     "cwd":cwd,"server_id":server_id}.items())
+            or set(request.arguments)-{"executable","args","cwd","server_id","local_id","executable_sha256","argument_file_pins","environment_sha256"}
             or not Path(executable).is_absolute() or not Path(executable).is_file()
             or not Path(cwd).is_absolute() or not Path(cwd).is_dir()
             or not isinstance(argv, tuple) or any(not isinstance(v, str) or "\0" in v for v in argv)):
             raise MCPStdioError("unapproved MCP launch specification")
+        environment={}
+        if env:
+            from .registry_install import validate_agent_env
+            from sentra_runtime.provider_content import text_digest
+            environment=dict(validate_agent_env(env))
+            if request.arguments.get("environment_sha256")!=text_digest(environment):raise MCPStdioError("MCP environment not bound to launch intent")
+        elif request.arguments.get("environment_sha256"):
+            from sentra_runtime.provider_content import text_digest
+            if request.arguments["environment_sha256"]!=text_digest({}):raise MCPStdioError("MCP environment digest mismatch")
         decision = await asyncio.wait_for(gate.decision(request), timeout)
         if not decision.allowed:
             raise MCPStdioError("MCP launch policy denied")
@@ -97,11 +116,24 @@ class MCPStdioClient:
             raise MCPStdioError("duplicate or uncertain MCP launch")
         client = None
         try:
-            process = await asyncio.wait_for(asyncio.create_subprocess_exec(
-                executable, *argv, cwd=cwd, env=_minimal_windows_runtime_env(),
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL, limit=MAX_FRAME+1), timeout)
-            client = cls(process, gate, server_id=server_id)
+            context_factory = getattr(gate,"physical_context",None)
+            context = context_factory(request) if callable(context_factory) else None
+            async def spawn():
+                import hashlib
+                if request.arguments.get("executable_sha256"):
+                    with Path(executable).open("rb") as source:
+                        if hashlib.file_digest(source,"sha256").hexdigest()!=request.arguments["executable_sha256"]:
+                            raise MCPStdioError("MCP executable pin changed")
+                for pinned_path,pinned_sha in request.arguments.get("argument_file_pins",{}).items():
+                    with Path(pinned_path).open("rb") as source:
+                        if hashlib.file_digest(source,"sha256").hexdigest()!=pinned_sha:
+                            raise MCPStdioError("MCP argument file pin changed")
+                return await spawn_owned(executable,argv,cwd=cwd,env={**_minimal_windows_runtime_env(),**environment},
+                    stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,limit=MAX_FRAME+1,
+                    checkpoint=context.checkpoint if context is not None else None)
+            process,owner = await asyncio.wait_for(context.run_async(spawn) if context else spawn(),timeout)
+            client = cls(process, gate, server_id=server_id, owner=owner)
             decision = await asyncio.wait_for(gate.decision(request), timeout)
             if not decision.allowed:
                 raise MCPStdioError("MCP launch policy revoked")
@@ -118,13 +150,19 @@ class MCPStdioClient:
         if self._dead or self._closed or self.process.stdin is None:
             raise MCPStdioError("MCP stdio disconnected")
         async with self._lock:
+            from sentra_runtime.effect_boundary import current_effect_context
+            context = current_effect_context.get()
+            if context is not None:
+                context.checkpoint()
             self.process.stdin.write(_encode(msg))
             await self.process.stdin.drain()
 
     async def _call(self, method: str, params: Mapping[str, Any], timeout: float) -> Mapping[str, Any]:
         if method not in {"initialize", "tools/list", "tools/call",
                            "resources/list", "resources/read",
-                           "prompts/list", "prompts/get"} or timeout <= 0:
+                           "prompts/list", "prompts/get", "resources/templates/list",
+                           "resources/subscribe", "resources/unsubscribe",
+                           "sentra/connect", "sentra/listen", "sentra/unlisten"} or timeout <= 0:
             raise MCPStdioError("MCP client method forbidden")
         if len(self._late) >= 4096:
             raise MCPStdioError("too many uncertain RPCs")
@@ -132,6 +170,8 @@ class MCPStdioClient:
         ident = self._seq
         fut = asyncio.get_running_loop().create_future()
         self._pending[ident] = fut
+        from sentra_runtime.effect_boundary import current_effect_context
+        self._contexts[ident] = current_effect_context.get()
         try:
             await self._send({"jsonrpc":"2.0", "id":ident, "method":method, "params":dict(params)})
             return await asyncio.wait_for(fut, timeout)
@@ -148,6 +188,7 @@ class MCPStdioClient:
                 if fut.cancelled():
                     self._late.add(ident)
                 self._pending.pop(ident, None)
+                self._contexts.pop(ident,None)
 
     async def _reader_loop(self) -> None:
         try:
@@ -162,14 +203,22 @@ class MCPStdioClient:
                 msg = _decode(line)
                 if "method" in msg:
                     if "id" in msg:
-                        # MCP sampling/roots/elicitation are *not* available.
-                        await self._send({"jsonrpc":"2.0","id":msg["id"],
-                                          "error":{"code":-32601, "message":"not supported"}})
+                        if type(msg["id"]) not in (str,int) or len(str(msg["id"]))>128 or len(self._server_tasks)>=32:
+                            raise MCPStdioError("invalid or excessive MCP reverse requests")
+                        task = asyncio.create_task(self._answer_server(msg))
+                        self._server_tasks.add(task)
+                        task.add_done_callback(self._server_tasks.discard)
                     else:
                         if msg["method"] not in {"notifications/message",
                                                  "notifications/progress",
-                                                 "notifications/tools/list_changed"}:
+                                                 "notifications/tools/list_changed",
+                                                 "notifications/resources/list_changed",
+                                                 "notifications/prompts/list_changed",
+                                                 "notifications/resources/updated",
+                                                 "notifications/elicitation/complete",
+                                                 "notifications/subscription/closed"}:
                             raise MCPStdioError("unexpected MCP notification")
+                        self.notifications.put_nowait(dict(msg))
                     continue
                 ident = msg.get("id")
                 if type(ident) is not int:
@@ -191,20 +240,52 @@ class MCPStdioClient:
             for f in list(self._pending.values()):
                 if not f.done():
                     f.set_exception(self._dead)
-            if self.process.returncode is None:
+            if self._owner is not None:
+                await self._owner.close()
+            elif self.process.returncode is None:
                 try:
                     self.process.terminate()
                 except ProcessLookupError:
                     pass
 
-    async def initialize(self, *, timeout: float = 3) -> None:
+    async def _answer_server(self,msg):
+        from sentra_runtime.effect_boundary import current_effect_context
+        contexts = [c for key,c in self._contexts.items() if c is not None and key in self._pending]
+        context = contexts[0] if len(contexts)==1 else None
+        token = current_effect_context.set(context)
+        try:
+            if msg.get("method")!="elicitation/create" or context is None or not callable(self.request_handler):
+                result={"jsonrpc":"2.0","id":msg["id"],"error":{"code":-32601,"message":"not supported"}}
+            else:
+                context.checkpoint()
+                response = await self.request_handler(msg,context.request)
+                context.checkpoint()
+                result={"jsonrpc":"2.0","id":msg["id"],"result":response}
+            await self._send(result)
+        except Exception:
+            # No sensitive exception or reverse request body goes to the peer.
+            try:
+                self.process.stdin.write(_encode({"jsonrpc":"2.0","id":msg["id"],
+                    "error":{"code":-32000,"message":"interaction unavailable"}}))
+                await self.process.stdin.drain()
+            except Exception:
+                pass
+        finally:
+            current_effect_context.reset(token)
+
+    async def initialize(self, *, timeout: float = 3, supported_versions=("2025-06-18",),
+                         elicitation=False) -> None:
         if self._initialized:
             raise MCPStdioError("MCP already initialized")
         response = await self._call("initialize", {
-            "protocolVersion":"2025-06-18",
-            "capabilities":{}, "clientInfo":{"name":"sentra-local","version":"1.0"}}, timeout)
-        if response.get("protocolVersion") != "2025-06-18":
+            "protocolVersion":supported_versions[0],
+            "capabilities":{"elicitation":{"form":{}}} if elicitation else {},
+            "clientInfo":{"name":"sentra-local","version":"1.0"}}, timeout)
+        if response.get("protocolVersion") not in supported_versions:
             raise MCPStdioError("unsupported MCP protocol version")
+        self.protocol_version=response["protocolVersion"]
+        self.server_capabilities=response.get("capabilities",{})
+        if not isinstance(self.server_capabilities,Mapping):raise MCPStdioError("invalid MCP capabilities")
         await self._send({"jsonrpc":"2.0","method":"notifications/initialized"})
         self._initialized = True
 
@@ -254,7 +335,12 @@ class MCPStdioClient:
         self._closed = True
         if self.process.stdin:
             self.process.stdin.close()
-        if self.process.returncode is None:
+        for task in self._server_tasks:
+            task.cancel()
+        await asyncio.gather(*self._server_tasks,return_exceptions=True)
+        if self._owner is not None:
+            await self._owner.close()
+        elif self.process.returncode is None:
             try:
                 self.process.terminate()
             except ProcessLookupError:

@@ -290,3 +290,78 @@ class SetupAssistant:
 
     def needs_openai_connection(self) -> bool:
         return not bool(load_tunnel_config(self.paths))
+
+    def shell_migration_status(self, stage_dir: "Path | None" = None) -> dict[str, Any]:
+        """Read-only shell linkage projection for Setup/Doctor surfaces."""
+        from pathlib import Path as _Path
+
+        from .onboarding import build_shell_onboarding
+        status: dict[str, Any] = {"shell": {"ready": False}, "shell_migration": {}}
+        if stage_dir is not None:
+            try:
+                from .shell_migration import migration_status
+                journal = migration_status(_Path(stage_dir))
+                status["shell_migration"] = journal
+                status["shell"] = {"ready": journal.get("phase") in {"COMMITTED", "STAGED"}}
+            except (OSError, ValueError):
+                status["shell_migration"] = {"phase": "unreadable"}
+        return build_shell_onboarding(status)
+
+    def prepare_shell_migration(
+        self, workspaces: list[dict[str, Any]], existing: dict[str, str],
+        stage_dir: "Path", *, owner_id: str, operation_id: str,
+        authorize=None, offline=None,
+    ) -> "Path":
+        """Stage workspace-to-Space links. Live stores are mutated only on commit."""
+        from .shell_migration import prepare_space_migration
+        return prepare_space_migration(
+            self.paths.state_dir, stage_dir, workspaces, existing,
+            installation_id=self.paths.install_dir.name,
+            owner_id=owner_id, operation_id=operation_id,
+            authorize=authorize, offline=offline,
+        )
+
+    def setup_states(self, *, current_version: str = "", newest_version: str = "") -> dict[str, Any]:
+        """Independent setup axes: local/tunnel/account-app/tools/version/extension.
+
+        Pure projection over verified runtime status; never starts processes.
+        """
+        from .setup_states import describe_setup_states
+        from sentra_version import PRODUCT_VERSION
+
+        status = self.runtime.status()
+        try:
+            from .product import collect_product_status
+            full = collect_product_status(self.paths, self.settings)
+            status = {**full, **status}
+        except (OSError, ValueError, RuntimeError):
+            pass
+        return describe_setup_states(
+            status,
+            current_version=current_version or PRODUCT_VERSION,
+            newest_version=newest_version,
+        )
+
+    def backup_status(self, stage_dir: "Path | None" = None) -> dict[str, Any]:
+        """Read-only coordinated-backup projection for Setup/Doctor surfaces."""
+        from pathlib import Path as _Path
+
+        if stage_dir is None:
+            return {"schema": 1, "phase": "absent"}
+        try:
+            from .coordinated_backup import backup_status
+            return backup_status(_Path(stage_dir))
+        except (OSError, ValueError):
+            return {"schema": 1, "phase": "unreadable"}
+
+    def staged_update_status(self, stage_dir: "Path | None" = None) -> dict[str, Any]:
+        """Read-only staged product-update projection (apply on app exit)."""
+        from pathlib import Path as _Path
+
+        if stage_dir is None:
+            return {"schema": 1, "phase": "absent"}
+        try:
+            from .coordinated_upgrade import coordinated_status
+            return coordinated_status(_Path(stage_dir))
+        except (OSError, ValueError):
+            return {"schema": 1, "phase": "unreadable"}

@@ -12,7 +12,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from .control_store import ControlPlaneStore, SQLiteControlPlaneStore
+from .control_store import ControlPlaneStore, create_control_plane_store
 
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{8,160}$")
@@ -34,7 +34,7 @@ class ChatAccessService:
     """
 
     def __init__(self, state_root: Path | str, *, store: ControlPlaneStore | None = None):
-        self.store = store or SQLiteControlPlaneStore(state_root)
+        self.store = store if store is not None else create_control_plane_store(state_root)
         db=self._db()
         try:
             db.executescript("""
@@ -169,6 +169,52 @@ class ChatAccessService:
             row=db.execute("SELECT enabled,revision FROM chat_access_strict WHERE principal=?",
                            (principal,)).fetchone()
             return {"strict":bool(row["enabled"]) if row else False,"revision":row["revision"] if row else 0}
+        finally:
+            db.close()
+
+    def conversation_consent_summary(self, principal: str, conversation_id: str):
+        """Read-only per-chat consent projection for conversation UX.
+
+        Combines chat trust/block policy, strict mode, proven request
+        evidence and live browser gate state. Advisory only: grants and
+        durable authorization remain the sole effect authorities.
+        """
+        _validate("principal", principal, _PRINCIPAL)
+        _validate("conversation ID", conversation_id, _ID)
+        db=self._db()
+        try:
+            chat=db.execute(
+                "SELECT trusted,blocked,revision,updated FROM chat_access_policy "
+                "WHERE principal=? AND conversation_id=?",
+                (principal,conversation_id)).fetchone()
+            strict=db.execute(
+                "SELECT enabled,revision FROM chat_access_strict WHERE principal=?",
+                (principal,)).fetchone()
+            proven=db.execute(
+                "SELECT COUNT(*) FROM chat_request_owners WHERE principal=? AND conversation_id=?",
+                (principal,conversation_id)).fetchone()[0]
+            gate=db.execute(
+                "SELECT state,observed FROM browser_chat_gates WHERE principal=? AND conversation_id=?",
+                (principal,conversation_id)).fetchone()
+            try:
+                pending=db.execute(
+                    "SELECT COUNT(*) FROM action_api_intents i JOIN chat_request_owners o "
+                    "ON o.principal=? AND o.request_id=i.request_id "
+                    "AND o.conversation_id=? WHERE i.state='PROPOSED'",
+                    (principal,conversation_id)).fetchone()[0]
+            except Exception:
+                pending=0
+            return {"conversation_id":conversation_id,
+                    "trusted":bool(chat["trusted"]) if chat else False,
+                    "blocked":bool(chat["blocked"]) if chat else False,
+                    "revision":chat["revision"] if chat else 0,
+                    "strict":bool(strict["enabled"]) if strict else False,
+                    "strict_revision":strict["revision"] if strict else 0,
+                    "proven_request_count":proven,
+                    "verified_origin_available":bool(proven),
+                    "browser_gate_state":gate["state"] if gate else "unobserved",
+                    "pending_approval_count":pending,
+                    "grants_created":False}
         finally:
             db.close()
 

@@ -13,7 +13,7 @@ import secrets
 import time
 
 from .chat_access import ChatAccessService, _ID, _PRINCIPAL, _validate
-from .control_store import SQLiteControlPlaneStore
+from .control_store import create_control_plane_store
 
 _EXTENSION = re.compile(r"^[a-p]{32}$")
 _SHA = re.compile(r"^[a-f0-9]{64}$")
@@ -25,7 +25,7 @@ _PAGE_STATES = {"idle", "generating", "awaiting_approval", "signed_out", "unknow
 
 class BrowserEvidenceService:
     def __init__(self, state_root, *, store=None, chat_access=None):
-        self.store = store or SQLiteControlPlaneStore(state_root)
+        self.store = store or create_control_plane_store(state_root)
         self.chat_access = chat_access or ChatAccessService(state_root, store=self.store)
         db = self.store.connect("chat_access")
         try:
@@ -68,6 +68,18 @@ class BrowserEvidenceService:
                 CREATE TABLE IF NOT EXISTS browser_host_surfaces(
                     collector_id TEXT NOT NULL,worker TEXT NOT NULL,surface_id TEXT NOT NULL,
                     PRIMARY KEY(collector_id,worker),UNIQUE(collector_id,surface_id));
+                CREATE TABLE IF NOT EXISTS browser_approval_observations(
+                    extension_id TEXT NOT NULL, worker TEXT NOT NULL,
+                    conversation_id TEXT NOT NULL, state TEXT NOT NULL,
+                    tool_name TEXT, observed REAL NOT NULL,
+                    PRIMARY KEY(extension_id,worker,conversation_id));
+                CREATE TABLE IF NOT EXISTS browser_account_catalogs(
+                    extension_id TEXT NOT NULL, provider TEXT NOT NULL,
+                    models TEXT NOT NULL, efforts TEXT NOT NULL,
+                    document_id TEXT NOT NULL, identity_epoch TEXT NOT NULL,
+                    authentication_revision INTEGER NOT NULL,
+                    observed REAL NOT NULL,
+                    PRIMARY KEY(extension_id,provider));
             """)
             db.execute("BEGIN IMMEDIATE")
             if "kind" not in {r["name"] for r in db.execute("PRAGMA table_info(browser_collectors)")}:
@@ -517,3 +529,145 @@ class BrowserEvidenceService:
             raise
         finally:
             db.close()
+
+    # -- Brisa 1.7.0: observed approval + attested account catalog ----------
+    # Both are data ledgers. Neither creates grants nor performs approval.
+
+    def observe_approval(self, *, extension_id, source_sha256, worker,
+                         conversation_id, state, tool_name=None):
+        """Record a page-observed approval state from an enrolled collector.
+
+        The extension reports the human approval card; SENTRA never clicks it.
+        State "pending" blocks dispatch via require_dispatch_ready; "cleared"
+        only records that the card is gone (the human acted in the page).
+        """
+        _validate("conversation identity", conversation_id, _ID)
+        if state not in {"pending", "cleared", "unknown"}:
+            raise ValueError("unknown approval observation state")
+        if tool_name is not None and (
+                not isinstance(tool_name, str) or not 1 <= len(tool_name) <= 200):
+            raise ValueError("approval tool name must be 1..200 characters")
+        db = self.store.connect("chat_access")
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            collector = self._collector(db, extension_id, source_sha256)
+            _validate("worker", worker, _WORKER)
+            now = time.time()
+            db.execute("INSERT INTO browser_approval_observations VALUES(?,?,?,?,?,?) "
+                       "ON CONFLICT(extension_id,worker,conversation_id) DO UPDATE SET "
+                       "state=excluded.state,tool_name=excluded.tool_name,observed=excluded.observed",
+                       (extension_id, worker, conversation_id, state, tool_name, now))
+            if state == "pending":
+                db.execute("INSERT INTO browser_chat_gates VALUES(?,?,?,?) "
+                           "ON CONFLICT(principal,conversation_id) DO UPDATE SET "
+                           "state=excluded.state,observed=excluded.observed",
+                           (collector["principal"], conversation_id, "awaiting_approval", now))
+            db.commit()
+            return {"state": state, "tool_name": tool_name,
+                    "effect_performed": False, "grants_created": False}
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def approval_status(self, principal, conversation_id, *, max_age_s=120):
+        """Conservative approval view for consent gates and the shell."""
+        _validate("principal", principal, _PRINCIPAL)
+        _validate("conversation identity", conversation_id, _ID)
+        if not isinstance(max_age_s, (int, float)) or max_age_s <= 0 or max_age_s > 3600:
+            raise ValueError("invalid approval freshness window")
+        db = self.store.connect("chat_access")
+        try:
+            row = db.execute(
+                "SELECT o.state,o.tool_name,o.observed FROM browser_approval_observations o "
+                "JOIN browser_collectors c ON c.extension_id=o.extension_id "
+                "WHERE c.principal=? AND o.conversation_id=? "
+                "ORDER BY o.observed DESC LIMIT 1",
+                (principal, conversation_id)).fetchone()
+        finally:
+            db.close()
+        if row is None:
+            return {"state": "unverified", "send_blocked": False,
+                    "evidence_present": False, "effect_performed": False}
+        age = max(0.0, time.time() - float(row["observed"]))
+        blocked = str(row["state"]) == "pending" or age > max_age_s
+        return {"state": str(row["state"]), "tool_name": row["tool_name"],
+                "age_s": round(age, 2), "send_blocked": bool(blocked),
+                "evidence_present": True, "effect_performed": False}
+
+    def publish_account_catalog(self, *, extension_id, source_sha256, worker,
+                                provider, models, efforts, document_id,
+                                identity_epoch, authentication_revision):
+        """Store a host-attested account model/effort catalog snapshot.
+
+        The caller (relay/host ingress) must have verified the collector
+        binding and the account attestation before invoking this. The catalog
+        is bound to the observed document/epoch so navigation invalidates it.
+        """
+        if provider not in {"chatgpt", "gemini"}:
+            raise ValueError("catalog provider must be chatgpt or gemini")
+        if (not isinstance(models, list) or not models or len(models) > 64
+                or not isinstance(efforts, list) or len(efforts) > 64
+                or any(not isinstance(e, str) or not 1 <= len(e) <= 120
+                       for e in [*models, *efforts])):
+            raise ValueError("account catalog entries must be 1..64 strings of 1..120 chars")
+        _validate("document identity", document_id, _ID)
+        _validate("identity epoch", identity_epoch, _ID)
+        if type(authentication_revision) is not int or authentication_revision < 0:
+            raise ValueError("authentication revision must be a non-negative integer")
+        db = self.store.connect("chat_access")
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            self._collector(db, extension_id, source_sha256)
+            _validate("worker", worker, _WORKER)
+            if db.execute("SELECT 1 FROM browser_revoked_documents "
+                          "WHERE extension_id=? AND worker=? AND document_id=?",
+                          (extension_id, worker, document_id)).fetchone():
+                raise PermissionError("revoked browser document cannot publish a catalog")
+            db.execute("INSERT INTO browser_account_catalogs VALUES(?,?,?,?,?,?,?,?) "
+                       "ON CONFLICT(extension_id,provider) DO UPDATE SET "
+                       "models=excluded.models,efforts=excluded.efforts,"
+                       "document_id=excluded.document_id,identity_epoch=excluded.identity_epoch,"
+                       "authentication_revision=excluded.authentication_revision,"
+                       "observed=excluded.observed",
+                       (extension_id, provider, ",".join(models), ",".join(efforts),
+                        document_id, identity_epoch, authentication_revision, time.time()))
+            db.commit()
+            return {"provider": provider, "models": list(models),
+                    "efforts": list(efforts), "grants_created": False}
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def account_catalog_status(self, principal, provider, *, max_age_s=600):
+        """Return the attested catalog or fail closed with an explicit reason."""
+        _validate("principal", principal, _PRINCIPAL)
+        if provider not in {"chatgpt", "gemini"}:
+            raise ValueError("catalog provider must be chatgpt or gemini")
+        if not isinstance(max_age_s, (int, float)) or max_age_s <= 0 or max_age_s > 86400:
+            raise ValueError("invalid catalog freshness window")
+        db = self.store.connect("chat_access")
+        try:
+            row = db.execute(
+                "SELECT k.models,k.efforts,k.authentication_revision,k.observed,"
+                "k.document_id,k.identity_epoch FROM browser_account_catalogs k "
+                "JOIN browser_collectors c ON c.extension_id=k.extension_id "
+                "WHERE c.principal=? AND c.enabled=1 AND k.provider=? LIMIT 1",
+                (principal, provider)).fetchone()
+        finally:
+            db.close()
+        if row is None:
+            return {"verified": False, "models": [], "efforts": [],
+                    "reason": "no_attested_catalog"}
+        age = max(0.0, time.time() - float(row["observed"]))
+        if age > max_age_s:
+            return {"verified": False, "models": [], "efforts": [],
+                    "reason": "attestation_stale", "age_s": round(age, 2)}
+        return {"verified": True,
+                "models": str(row["models"]).split(",") if row["models"] else [],
+                "efforts": str(row["efforts"]).split(",") if row["efforts"] else [],
+                "authentication_revision": int(row["authentication_revision"]),
+                "age_s": round(age, 2)}

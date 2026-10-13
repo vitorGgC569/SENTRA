@@ -13,7 +13,7 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from pathlib import Path
 
 from .identity_sessions import SessionExecutor,SessionScope,SessionJournal,declare_session_machine
@@ -38,6 +38,9 @@ class RustDeskPeerBinding:
     actions:tuple[str,...]=('session.list','open','read','reattach','close','evidence.export')
     host_runtime_paths:AuthorizedPaths|None=None
     manifest_paths:AuthorizedPaths|None=None
+    login_credential:object=field(default=None,repr=False,compare=False)
+    allowed_input:tuple[str,...]=()
+    allowed_keycodes:tuple[int,...]=()
 
     def __post_init__(self):
         if (not self.capability_id or not self.peer_alias or not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_-]{2,63}',self.peer_id) or
@@ -46,8 +49,14 @@ class RustDeskPeerBinding:
                 not self.rendezvous_public_key or not Path(self.executable).is_absolute() or
                 not Path(self.build_manifest).is_absolute() or not Path(self.runtime_root).is_absolute() or
                 not 5<=self.timeout_seconds<=60 or not .5<=self.lease_seconds<=5 or
-                not set(self.actions)<={'session.list','open','read','reattach','close','evidence.export'}):
+                not set(self.actions)<={'session.list','open','read','reattach','close','evidence.export',
+                    'login','desktop.status','frame','input.key','input.mouse'}):
             raise ValueError('explicit_pinned_rustdesk_peer_and_native_build_required')
+        if (not set(self.allowed_input)<={'key','mouse'} or
+                any(type(code) is not int or not 0<=code<=65535 for code in self.allowed_keycodes) or
+                len(self.allowed_keycodes)>1024 or
+                self.login_credential is not None and not callable(self.login_credential)):
+            raise ValueError('explicit_rustdesk_input_channels_and_credential_required')
         if self.host_runtime_paths is not None and not isinstance(self.host_runtime_paths,AuthorizedPaths):
             raise ValueError('trusted_host_runtime_paths_required')
         if self.manifest_paths is not None and (not isinstance(self.manifest_paths,AuthorizedPaths) or self.manifest_paths.write_roots):
@@ -89,7 +98,8 @@ class RustDeskPeerBinding:
     def identity(self):
         return hashlib.sha256(json.dumps([self.capability_id,self.peer_id,self.peer_key_sha256,
             self.rendezvous_server,self.rendezvous_public_key,self.executable,self.executable_sha256,
-            self.build_manifest,self.runtime_root,self.actions,self.lease_seconds],separators=(',',':')).encode()).hexdigest()
+            self.build_manifest,self.runtime_root,self.actions,self.lease_seconds,self.allowed_input,
+            self.allowed_keycodes],separators=(',',':')).encode()).hexdigest()
 
 
 class RustDeskNativeBackend:
@@ -114,6 +124,9 @@ class RustDeskNativeBackend:
                 manifest.get('executable_sha256')!=b.executable_sha256 or
                 manifest.get('stock_cli_supported') is not False or not manifest.get('source_revision')):
             raise ExecutorFailure('rustdesk_peer_pin_build_not_attested_by_host')
+        if (set(b.actions)&{'login','desktop.status','frame','input.key','input.mouse'} and
+                manifest.get('control_extension')!='sentra-desktop-control-v1'):
+            raise ExecutorFailure('rustdesk_desktop_control_native_build_required')
         files=manifest.get('bundle_sha256')
         if not isinstance(files,dict) or not files or len(files)>10000:
             raise ExecutorFailure('rustdesk_native_bundle_pins_required')
@@ -136,10 +149,13 @@ class RustDeskNativeBackend:
 
     def _lease(self,b,row,directory):
         effect_checkpoint()
+        from sentra_runtime.effect_boundary import current_effect_context
+        context=current_effect_context.get()
         path=directory/'lease.json';tmp=directory/'lease.next'
         b.runtime_paths.resolve(str(path),write=True);b.runtime_paths.resolve(str(tmp),write=True)
         data={'session_id':row['id'],'scope_sha256':row['scope'],
-              'expires_unix_ms':int((time.time()+b.lease_seconds)*1000)}
+              'expires_unix_ms':int((time.time()+b.lease_seconds)*1000),
+              'operation_id':context.request.operation_id if context is not None else None}
         tmp.write_text(json.dumps(data),encoding='utf-8');os.replace(tmp,path)
 
     def _receipt(self,b,row,process,directory):
@@ -181,9 +197,12 @@ class RustDeskNativeBackend:
                      'source_revision':manifest['source_revision'],'resource_kind':'owned-native-client'},state='STARTING')
                 directory=root/row['id'];effect_checkpoint();directory.mkdir(mode=0o700)
                 profile=directory/'profile';profile.mkdir(mode=0o700)
+                controls=directory/'control';controls.mkdir(mode=0o700)
+                frames=directory/'frames';frames.mkdir(mode=0o700)
                 config={'peer_id':b.peer_id,'peer_key_sha256':b.peer_key_sha256,'rendezvous_server':b.rendezvous_server,
                     'rendezvous_key':b.rendezvous_public_key,'profile':str(profile),'receipt':str(directory/'receipt.json'),
-                    'lease':str(directory/'lease.json'),'session_id':row['id'],'scope_sha256':scope}
+                    'lease':str(directory/'lease.json'),'session_id':row['id'],'scope_sha256':scope,
+                    'control_root':str(controls),'frame_root':str(frames)}
                 cfg=directory/'native.json';cfg.write_text(json.dumps(config),encoding='utf-8')
                 self._lease(b,row,directory)
                 env=dict(os.environ,SENTRA_RUSTDESK_CONFIG=str(cfg))
@@ -209,7 +228,8 @@ class RustDeskNativeBackend:
                             self.journal.update(row,state='PEER_VERIFIED')
                             result={'session_id':row['id'],'peer_alias':b.peer_alias,'peer_authenticated':True,
                                 'peer_key_sha256':b.peer_key_sha256,'desktop_login_asserted':False,
-                                'control_api_available':False,'lease_seconds':b.lease_seconds}
+                                'control_api_available':manifest.get('control_extension')=='sentra-desktop-control-v1',
+                                'lease_seconds':b.lease_seconds}
                             self.journal.complete_effect(a['_operation_id'],result);return result
                         time.sleep(.05)
                     raise ExecutorFailure('rustdesk_peer_verification_timeout',uncertain=True,evidence={'session_id':row['id']})
@@ -236,11 +256,126 @@ class RustDeskNativeBackend:
             if process.poll() is not None:self.journal.update(row,state='DISCONNECTED');raise ExecutorFailure('rustdesk_owned_client_disconnected')
             self._lease(b,row,directory);receipt=self._receipt(b,row,process,directory)
             if not receipt.get('peer_authenticated'):raise ExecutorFailure('rustdesk_peer_verification_receipt_missing')
+            if action in {'login','desktop.status','frame','input.key','input.mouse'}:
+                return self._desktop(b,a,row,item)
             if action=='reattach':self.journal.update(row,state='PEER_VERIFIED',new_epoch=True)
             return dict(self.journal.read(row,after=a.get('after',0)),session_id=row['id'],
                 identity_last_verified=True,current_transport_state='UNKNOWN',
                 desktop_login_asserted=False,native_process_alive=True,
                 automatic_native_reconnect_remains_pinned=True,lease_seconds=b.lease_seconds)
+
+    def _desktop_status(self,b,row,item):
+        process,_,_,directory=item
+        path=b.runtime_paths.resolve(str(directory/'control'/'desktop.json'),write=True)
+        if not path.is_file():return {'desktop_login_verified':False}
+        if path.stat().st_size>4096:raise ExecutorFailure('rustdesk_desktop_status_byte_limit')
+        value=json.loads(path.read_text(encoding='utf-8'))
+        if any(value.get(k)!=v for k,v in {'session_id':row['id'],'scope_sha256':row['scope'],
+            'native_pid':process.pid,'desktop_login_verified':True}.items()):
+            raise ExecutorFailure('rustdesk_desktop_session_identity_mismatch')
+        observed=value.get('observed_unix_ms')
+        if type(observed) is not int or not 0<=time.time()*1000-observed<=b.lease_seconds*1000+1000:
+            return {'desktop_login_verified':False,'reason':'native_connection_heartbeat_stale'}
+        return value
+
+    def _desktop(self,b,a,row,item):
+        process,_,_,directory=item;action=a['action']
+        if action=='desktop.status':
+            return dict(self._desktop_status(b,row,item),session_id=row['id'],native_process_alive=process.poll() is None)
+        if action=='frame':return self._frame(b,a,row,item)
+        prior=self.journal.reserve_effect(a['_operation_id'],row['scope'],a)
+        if prior is not None:return prior
+        root=directory/'control';pending=b.runtime_paths.resolve(str(root/'input.json'),write=True)
+        if pending.exists() or (root/'claimed-input.json').exists():
+            raise ExecutorFailure('rustdesk_native_input_pending_requires_reconciliation',uncertain=True)
+        operation=a['_operation_id']
+        if not re.fullmatch('[A-Za-z0-9_-]{1,128}',operation):raise ExecutorFailure('rustdesk_native_operation_id_invalid')
+        payload={k:a[k] for k in ('keycode','down','mask','x','y') if k in a}
+        payload.update(operation_id=operation,action=action,session_id=row['id'],scope_sha256=row['scope'],
+                       expires_unix_ms=int((time.time()+min(4,b.lease_seconds))*1000))
+        if action=='login':
+            if b.login_credential is None:raise ExecutorFailure('rustdesk_login_credential_not_configured')
+            password=b.login_credential()
+            if not isinstance(password,str) or not password or len(password)>4096:raise ExecutorFailure('rustdesk_login_credential_unavailable')
+            payload['password']=password
+        elif not self._desktop_status(b,row,item).get('desktop_login_verified'):
+            raise ExecutorFailure('rustdesk_desktop_login_required_before_input')
+        temporary=b.runtime_paths.resolve(str(root/'input.next'),write=True)
+        effect_checkpoint();temporary.write_text(json.dumps(payload),encoding='utf-8');os.replace(temporary,pending)
+        received=b.runtime_paths.resolve(str(root/(operation+'.json')),write=True)
+        try:
+            return self._wait_input_receipt(b,a,row,item,received)
+        finally:
+            # Credential IPC is transient. Only this operation's own packet may
+            # be removed; a native-owned claimed request stays UNCERTAIN until
+            # that retained process is known to have exited.
+            candidates=[pending,temporary]
+            if process.poll() is not None:candidates.append(root/'claimed-input.json')
+            for path in candidates:
+                try:
+                    path=b.runtime_paths.resolve(str(path),write=True)
+                    if path.is_file() and path.stat().st_size<=16384:
+                        document=json.loads(path.read_text(encoding='utf-8'))
+                        if document.get('operation_id')==operation:path.unlink()
+                except (OSError,ValueError):pass
+
+    def _wait_input_receipt(self,b,a,row,item,received):
+        process,_,_,directory=item;action=a['action'];operation=a['_operation_id']
+        deadline=time.monotonic()+b.timeout_seconds-2
+        while time.monotonic()<deadline:
+            self._lease(b,row,directory)
+            if process.poll() is not None:raise ExecutorFailure('rustdesk_native_input_process_lost',uncertain=True)
+            if received.is_file():
+                if received.stat().st_size>4096:raise ExecutorFailure('rustdesk_input_receipt_byte_limit',uncertain=True)
+                value=json.loads(received.read_text(encoding='utf-8'))
+                expected={'session_id':row['id'],'scope_sha256':row['scope'],'operation_id':operation,
+                          'native_pid':process.pid,'action':action,'sent':True}
+                if any(value.get(k)!=v for k,v in expected.items()):
+                    raise ExecutorFailure('rustdesk_input_receipt_invalid_or_send_failed',uncertain=True)
+                if action=='login' and not self._desktop_status(b,row,item).get('desktop_login_verified'):
+                    time.sleep(.05);continue
+                self.journal.append(row,'native-input-receipt',json.dumps(value).encode())
+                self.journal.complete_effect(operation,value)
+                return dict(value,desktop_login_verified=action=='login',input_values_recorded=False)
+            time.sleep(.05)
+        raise ExecutorFailure('rustdesk_native_input_receipt_timeout',uncertain=True,evidence={'session_id':row['id']})
+
+    def _frame(self,b,a,row,item):
+        try:from PIL import Image
+        except ImportError as exc:raise ExecutorFailure('rustdesk_frame_provider_missing_pillow') from exc
+        from .rpa import atomic_output
+        process,_,_,directory=item;root=directory/'frames'
+        gate=b.runtime_paths.resolve(str(root/'capture.json'),write=True)
+        started=int(time.time()*1000);deadline=time.monotonic()+b.timeout_seconds-2
+        try:
+            while time.monotonic()<deadline:
+                self._lease(b,row,directory)
+                effect_checkpoint();gate.write_text(json.dumps({'expires_unix_ms':int((time.time()+min(4,b.lease_seconds))*1000)}),encoding='utf-8')
+                manifest=b.runtime_paths.resolve(str(root/'frame.json'),write=True)
+                if manifest.is_file() and manifest.stat().st_size<=4096:
+                    value=json.loads(manifest.read_text(encoding='utf-8'))
+                    if value.get('captured_unix_ms',0)>=started:
+                        if any(value.get(k)!=v for k,v in {'session_id':row['id'],'scope_sha256':row['scope'],'native_pid':process.pid}.items()):
+                            raise ExecutorFailure('rustdesk_frame_identity_mismatch')
+                        rawpath=b.runtime_paths.resolve(str(root/'frame.raw'))
+                        if rawpath.stat().st_size>64*1024*1024:raise ExecutorFailure('rustdesk_frame_byte_limit')
+                        raw=rawpath.read_bytes()
+                        if len(raw)!=value['bytes'] or hashlib.sha256(raw).hexdigest()!=value['sha256']:
+                            time.sleep(.05);continue  # Concurrent next frame; read-only retry.
+                        width,height=value['width'],value['height']
+                        if type(width) is not int or type(height) is not int or not 1<=width<=8192 or not 1<=height<=8192 or value['format'] not in {'RGBA','BGRA'}:
+                            raise ExecutorFailure('rustdesk_frame_dimensions_or_format_invalid')
+                        stride=len(raw)//height
+                        if len(raw)%height or not width*4<=stride<=width*4+4096:raise ExecutorFailure('rustdesk_frame_stride_invalid')
+                        image=Image.frombytes('RGBA',(width,height),raw,'raw',value['format'],stride,1)
+                        artifact=atomic_output(b.artifact_paths,a['output'],lambda p:image.save(p,format='PNG'),
+                            lambda p:Image.open(p).verify(),max_output_bytes=64*1024*1024)
+                        return {'artifact':artifact,'session_id':row['id'],'width':width,'height':height,
+                                'desktop_login_verified':self._desktop_status(b,row,item).get('desktop_login_verified',False)}
+                time.sleep(.05)
+            raise ExecutorFailure('rustdesk_native_decoded_frame_timeout')
+        finally:
+            gate.unlink(missing_ok=True)
 
 
 class RustDeskExecutor(SessionExecutor):
@@ -254,15 +389,20 @@ class RustDeskExecutor(SessionExecutor):
     def _validate(self,request,b):
         a=dict(request.arguments);action=a.get('action')
         if type(action) is not str or action not in b.actions:raise ValueError('rustdesk_action_denied')
-        fields={'session.list':{'limit'},'read':{'after'},'evidence.export':{'output'}}.get(action,set())
+        fields={'session.list':{'limit'},'read':{'after'},'evidence.export':{'output'},'frame':{'output'},
+                'input.key':{'keycode','down'},'input.mouse':{'mask','x','y'}}.get(action,set())
         if set(a)-({'action'}|fields|({'session_id'} if action not in {'open','session.list'} else set())):
             raise ValueError('rustdesk_caller_cannot_supply_remote_id_key_endpoint_or_executable')
         if action not in {'open','session.list'} and (type(a.get('session_id')) is not str or not a['session_id']):raise ValueError('bound_rustdesk_session_required')
         if 'limit' in a and (type(a['limit']) is not int or not 1<=a['limit']<=100):raise ValueError('bounded_session_list_required')
         if 'after' in a and (type(a['after']) is not int or a['after']<0):raise ValueError('invalid_cursor')
-        if action=='evidence.export':
+        if action=='input.key' and ('key' not in b.allowed_input or a.get('keycode') not in b.allowed_keycodes or
+                type(a.get('keycode')) is not int or type(a.get('down')) is not bool):raise ValueError('rustdesk_key_not_allowlisted')
+        if action=='input.mouse' and ('mouse' not in b.allowed_input or any(type(a.get(k)) is not int for k in ('mask','x','y')) or
+                not 0<=a['mask']<=255 or not 0<=a['x']<=8192 or not 0<=a['y']<=8192):raise ValueError('rustdesk_mouse_denied_or_invalid')
+        if action in {'evidence.export','frame'}:
             path=b.resolve_artifact_output(a.get('output'))
-            if path.suffix.lower()!='.json':raise ValueError('json_evidence_required')
+            if path.suffix.lower()!=('.json' if action=='evidence.export' else '.png'):raise ValueError('rustdesk_artifact_extension_invalid')
             a['output']=str(path)
         a['_scope']=SessionScope.from_request(request).key;a['_operation_id']=request.operation_id
         return json.loads(json.dumps(a,allow_nan=False))

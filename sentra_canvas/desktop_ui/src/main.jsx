@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import { ReactFlow, ReactFlowProvider, Background, BackgroundVariant, MiniMap, Panel,
   applyNodeChanges, applyEdgeChanges, useReactFlow, useViewport } from '@xyflow/react';
 import * as Tooltip from '@radix-ui/react-tooltip';
@@ -22,6 +23,7 @@ import { ProjectReviewDialog } from './project-review-dialog';
 import { SkillLibraryDialog } from './skill-library-dialog';
 import { BrowserEvidenceDialog } from './browser-evidence-dialog';
 import { DurableWebDialog } from './durable-web-dialog';
+import { OpenDotsShell } from './shell-app';
 import '@xyflow/react/dist/style.css';
 import '@xterm/xterm/css/xterm.css';
 import './desktop.css';
@@ -48,6 +50,8 @@ function WorkspaceDesktop() {
   const [durableWebOpen, setDurableWebOpen] = useState(false);
   const [toasts, setToasts] = useState([]), [, terminalChanged] = useState(0);
   const [nativeReady, setNativeReady] = useState(Boolean(window.pywebview?.api));
+  const [canvasActive, setCanvasActive] = useState(false);
+  const canvasActiveRef = useRef(false); canvasActiveRef.current = canvasActive;
   const bridge = useRef({ ws: null, detail: null, nodes: [], links: [], x: 55, y: 55, scale: 1, move: null });
   const collaboration = useRef(null), actionsRef = useRef({}), requestSequence = useRef(0);
   const inspectorGeneration = useRef(0), noteTimers = useRef(new Map()), noteDrafts = useRef(new Map()), persisting = useRef(new Set());
@@ -170,6 +174,7 @@ function WorkspaceDesktop() {
     setEntry({ kind, target, point: point(), key: crypto.randomUUID() }); setTool('select');
   }
   async function showPanel(kind, target) {
+    window.dispatchEvent(new CustomEvent('sentra:shell-context'));
     setInspector(true);
     document.getElementById('inspector').hidden = false;
     const generation = ++inspectorGeneration.current;
@@ -290,6 +295,7 @@ function WorkspaceDesktop() {
   }, [viewport.x, viewport.y, viewport.zoom]);
   useEffect(() => {
     function keydown(e) {
+      if (!canvasActiveRef.current) return;
       if (e.target.closest('input,textarea,select,[contenteditable],.xterm,[role=dialog]') || entry || confirmation || expanded || network) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); setSearchText(''); setSearch(true); return; }
       if (search) return;
@@ -319,6 +325,27 @@ function WorkspaceDesktop() {
     ['pan', 'Mover canvas', Hand, () => setTool('pan')],
   ];
   return <DesktopContext.Provider value={context}><Tooltip.Provider delayDuration={380}>
+    <OpenDotsShell projectId={ws} workspaces={workspaces} models={models} onProject={chooseWorkspace}
+      onWorkspaceCreate={() => actionsRef.current.open('workspace')} onCanvasActive={setCanvasActive}
+      nativeControls={!new URLSearchParams(window.location.search).get('surface')?.startsWith('electron') && <div className="shell-native-controls">
+        <button disabled={!nativeReady} aria-label="Minimizar" onClick={() => guarded(() => window.pywebview.api.minimize())()}><Minus size={12} /></button>
+        <button disabled={!nativeReady} aria-label="Restaurar ou maximizar" onClick={() => guarded(() => window.pywebview.api.toggle_maximize())()}><Copy size={11} /></button>
+        <button disabled={!nativeReady} aria-label="Fechar SENTRA" onClick={() => guarded(async () => { await flushNotes(); await window.pywebview.api.close(); })()}><X size={14} /></button>
+      </div>}
+      onTools={kind => guarded(() => {
+        requireWS();
+        if (kind === 'history') setConversationSearchOpen(true);
+        else if (kind === 'access') setChatAccessOpen(true);
+        else if (kind === 'files') setProjectReviewOpen(true);
+        else if (kind === 'skills') setSkillLibraryOpen(true);
+        else if (kind === 'plugins') setPluginBundlesOpen(true);
+        else if (kind === 'web') setDurableWebOpen(true);
+        else if (kind === 'browser') setBrowserEvidenceOpen(true);
+        else if (kind === 'terminal') {
+          const graph = bridge.current.nodes.find(node => node.kind === 'terminal');
+          if (graph) setExpanded(graph.id); else actionsRef.current.open('terminal');
+        } else return showPanel(kind);
+      })()}>
     <div id="app" className={'desktop-shell ' + (!sidebar ? 'sidebar-closed' : '')}>
       <aside className="workspace-sidebar" hidden={!sidebar}>
         <div className="workspace-filter"><Search size={13} /><input value={filter} onChange={e => setFilter(e.target.value)}
@@ -348,7 +375,9 @@ function WorkspaceDesktop() {
           <button disabled={!nativeReady} aria-label="Restaurar ou maximizar" onClick={() => guarded(() => window.pywebview.api.toggle_maximize())()}><Copy size={11} /></button>
           <button disabled={!nativeReady} className="window-close" aria-label="Fechar SENTRA" onClick={() => guarded(async () => { await flushNotes(); await window.pywebview.api.close(); })()}><X size={14} /></button>
         </div>}
-        <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} colorMode="dark" onlyRenderVisibleElements={false}
+        {/* Visibility affects graph DOM only. TerminalPool owns every session
+            independently; PtySlot unmount only detaches its display host. */}
+        <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} colorMode="dark" onlyRenderVisibleElements
           minZoom={.2} maxZoom={2.5} defaultViewport={{ x: 55, y: 55, zoom: 1 }}
           nodesDraggable={tool !== 'pan' && tool !== 'link'} panOnDrag connectOnClick deleteKeyCode={null}
           nodesConnectable={tool !== 'pan'} zoomOnDoubleClick={false}
@@ -367,7 +396,12 @@ function WorkspaceDesktop() {
             for (const n of moved) updateGeometry(n.id, { x: n.position.x, y: n.position.y });
             guarded(async () => { for (const n of moved) await persistGeometry(n.id); })();
           }}
-          onNodeDoubleClick={(_, node) => { const d = resourceData(node.data.graph); if (d.terminal && !d.owner) setExpanded(node.id); }}
+          onNodeDoubleClick={(_, node) => {
+            const d = resourceData(node.data.graph);
+            if (node.data.graph.kind === 'agent' && d.resource?.id) {
+              window.dispatchEvent(new CustomEvent('sentra:shell-agent', { detail: { agent_id: d.resource.id } }));
+            } else if (d.terminal && !d.owner) setExpanded(node.id);
+          }}
           onConnect={guarded(async connection => {
             if (connection.source === connection.target) throw Error('Escolha outro nó como destino.');
             await api('/api/graph/link', { ws: requireWS(), source: connection.source, target: connection.target });
@@ -446,12 +480,13 @@ function WorkspaceDesktop() {
         <div className="workspace-caption"><img src="/sentra-logo.png" alt="" width="18" height="18" style={{verticalAlign:'middle',marginRight:8,borderRadius:4}} />{current?.name || 'SENTRA'}{ws && <span> · {nodes.length} nós</span>}</div>
         <button id="show-collaboration" hidden aria-pressed="false" type="button" />
       </main>
-      <aside id="inspector" className="desktop-inspector" hidden={!inspector}>
+    </div>
+    </OpenDotsShell>
+    <InspectorPortal><aside id="inspector" className="desktop-inspector" hidden={!inspector}>
         <header className="inspector-heading"><div><small id="inspector-label">WORKSPACE</small><h2 id="inspector-title">Detalhes</h2></div>
           <IconButton label="Fechar inspector" onClick={closeInspector}><X size={17} /></IconButton></header>
         <div id="inspector-tabs" hidden /><div id="inspector-content" />
-      </aside>
-    </div>
+      </aside></InspectorPortal>
     {entry && <EntryDialog key={entry.key} request={entry} close={() => setEntry(null)} />}
     {network && <NetworkDialog close={() => setNetwork(false)} />}
     {chatAccessOpen && ws && <ChatAccessDialog ws={ws} agents={bridge.current.detail?.agents || []} close={() => setChatAccessOpen(false)} />}
@@ -481,6 +516,12 @@ function WorkspaceDesktop() {
       <span>{t.message}</span><button aria-label="Dispensar aviso" onClick={() => setToasts(old => old.filter(x => x.id !== t.id))}><X size={14} /></button>
     </div>)}</div>
   </Tooltip.Provider></DesktopContext.Provider>;
+}
+
+function InspectorPortal({ children }) {
+  const [target, setTarget] = useState(null);
+  useEffect(() => { setTarget(document.getElementById('shell-inspector-slot')); }, []);
+  return target ? createPortal(children, target) : null;
 }
 
 class DesktopBoundary extends React.Component {

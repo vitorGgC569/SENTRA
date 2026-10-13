@@ -89,6 +89,71 @@ def audit_release(
     url = manifest.get("url")
     if not isinstance(url, str) or not url.startswith("https://") or not url.endswith("/" + names[2]):
         raise ValueError("update URL must be a matching HTTPS release URL")
+    shell = manifest.get("shell_surface")
+    shell_contract = "unchecked"
+    if shell is not None:
+        if (not isinstance(shell, dict)
+                or shell.get("bridge_contract") != "POST /api/shell/bridge"
+                or shell.get("canvas_role") != "internal_orchestration_view"):
+            raise ValueError("release shell surface contract mismatch")
+        shell_contract = str(shell.get("fallback") or "unknown")
+
+    sidecars_state = "absent"
+    sidecars = manifest.get("sidecars")
+    if sidecars is not None:
+        if not isinstance(sidecars, dict):
+            raise ValueError("release sidecars must be an object")
+        for kind in ("interop", "workflows", "quality"):
+            entry = sidecars.get(kind)
+            if entry is None or (isinstance(entry, dict) and entry.get("state") == "absent"):
+                continue
+            if (not isinstance(entry, dict) or not entry.get("name")
+                    or not entry.get("version") or len(str(entry.get("sha256") or "")) != 64
+                    or not entry.get("signer")):
+                raise ValueError(f"release sidecar manifest incomplete: {kind}")
+        combined = str(manifest.get("sidecars_combined_sha256") or "")
+        if combined and (len(combined) != 64
+                         or any(c not in "0123456789abcdef" for c in combined)):
+            raise ValueError("release sidecars combined digest is invalid")
+        sidecars_state = "verified-structure"
+
+    provider_pins_state = "absent"
+    provider_pins = manifest.get("provider_pins")
+    if provider_pins is not None:
+        if not isinstance(provider_pins, dict) or not isinstance(provider_pins.get("files"), list):
+            raise ValueError("release provider pins must carry a files inventory")
+        for entry in provider_pins["files"]:
+            if (not isinstance(entry, dict) or not entry.get("provider")
+                    or not entry.get("pin_version") or not entry.get("notice")):
+                raise ValueError("release provider pin entry incomplete")
+        provider_pins_state = "verified-structure"
+
+    artwork_state = "absent"
+    artwork = manifest.get("artwork_provenance")
+    if artwork is not None:
+        if not isinstance(artwork, dict):
+            raise ValueError("release artwork provenance must be an object")
+        sets = dict(artwork) if "opendots" in artwork or "guacamole" in artwork else {"opendots": artwork}
+        for key, entry in sets.items():
+            if key == "opendots":
+                if (not isinstance(entry, dict)
+                        or entry.get("license") != "MIT"
+                        or "Atai Barkai" not in str(entry.get("copyright") or "")
+                        or not str(entry.get("commit") or "").strip()
+                        or not isinstance(entry.get("files"), list) or not entry["files"]):
+                    raise ValueError("release opendots provenance incomplete (MIT/Atai Barkai/commit/files)")
+            elif key == "guacamole":
+                if (not isinstance(entry, dict)
+                        or entry.get("package") != "guacamole-common-js"
+                        or str(entry.get("version") or "") != "1.5.0"
+                        or entry.get("license") != "Apache-2.0"
+                        or entry.get("is_apache_clone") is not False
+                        or not str(entry.get("integrity") or "").startswith("sha512-")):
+                    raise ValueError("release guacamole provenance incomplete "
+                                     "(1.5.0/Apache-2.0/non-clone/SRI)")
+            else:
+                raise ValueError(f"unknown release artwork set: {key}")
+        artwork_state = "verified-structure:" + "+".join(sorted(sets))
 
     bom = _json(release / names[3])
     if bom.get("bomFormat") != "CycloneDX" or bom.get("specVersion") != "1.5":
@@ -167,6 +232,10 @@ def audit_release(
         "schema": 1, "result": "pass", "version": version,
         "artifacts_verified": len(names), "update_zip_components": 3,
         "sbom": "verified", "payload_provenance": provenance,
+        "shell_contract": shell_contract,
+        "sidecars": sidecars_state,
+        "provider_pins": provider_pins_state,
+        "artwork_provenance": artwork_state,
         "authenticode": "verified" if signer else "not_verified_unsigned_qa_only",
         "ready_for_install_smoke": bool(signer and provenance == "verified"),
         # Artifact integrity alone never certifies UI, account auth or clean install.

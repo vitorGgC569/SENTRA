@@ -2,6 +2,7 @@
 import * as Y from 'yjs';
 import {createCollabServer} from './server.mjs';
 import {validateYDocument,MAX_SNAPSHOT_BYTES} from './policy.mjs';
+import {initializeDocument,documentProjection,DOCUMENT_PREFIX} from './document_policy.mjs';
 const unavailable=()=>{throw Error('collaboration-control-plane-unavailable');};
 
 export class CentralCollabBridge {
@@ -13,9 +14,9 @@ export class CentralCollabBridge {
        !Number.isInteger(timeoutMs)||timeoutMs<100||timeoutMs>10000||typeof fetchImpl!=='function')unavailable();
     this.endpoint=endpoint.href;this.token=token;this.timeoutMs=timeoutMs;this.fetch=fetchImpl;
     this.callbacks=Object.freeze({
-      resolveGrant:p=>this.rpc('resolveGrant',p),
-      checkGrant:p=>this.rpc('checkGrant',p),
-      consumeNonce:p=>this.rpc('consumeNonce',p),
+      resolveGrant:p=>this.rpc(p.documentId?'documentResolveGrant':'resolveGrant',p),
+      checkGrant:p=>this.rpc(p.documentId?'documentCheckGrant':'checkGrant',p),
+      consumeNonce:p=>this.rpc(p.documentId?'documentConsumeNonce':'consumeNonce',p),
       loadSnapshot:p=>this.loadSnapshot(p),
       commitSnapshot:p=>this.commitSnapshot(p)
     });
@@ -40,9 +41,9 @@ export class CentralCollabBridge {
     return result.value;
   }
   async loadSnapshot(params) {
-    const stored=await this.rpc('loadSnapshot',params);
+    const stored=await this.rpc(params.documentId?'documentLoadSnapshot':'loadSnapshot',params);
     if(!stored||!Number.isSafeInteger(stored.revision)||stored.revision<0)unavailable();
-    if(stored.snapshot===null)return {revision:stored.revision,snapshot:null};
+    if(stored.snapshot===null)return {revision:stored.revision,snapshot:null,document:stored.document};
     if(typeof stored.snapshot!=='string'||stored.snapshot.length>Math.ceil(MAX_SNAPSHOT_BYTES*4/3)+8)unavailable();
     const bytes=Buffer.from(stored.snapshot,'base64');
     if(bytes.byteLength>MAX_SNAPSHOT_BYTES)unavailable();
@@ -52,11 +53,12 @@ export class CentralCollabBridge {
     if(!(params?.snapshot instanceof Uint8Array)||params.snapshot.length>MAX_SNAPSHOT_BYTES)unavailable();
     const doc=new Y.Doc();let presentation;
     try {
-      for(const key of ['layout','nodes','notes'])doc.getMap(key);
+      if(params.documentId)initializeDocument(doc,Y,DOCUMENT_PREFIX+params.workspaceId+':'+params.documentId);
+      else for(const key of ['layout','nodes','notes'])doc.getMap(key);
       Y.applyUpdate(doc,params.snapshot);validateYDocument(doc,Y);
-      presentation=Object.fromEntries(['layout','nodes','notes'].map(key=>[key,doc.getMap(key).toJSON()]));
+      presentation=params.documentId?documentProjection(doc,Y):Object.fromEntries(['layout','nodes','notes'].map(key=>[key,doc.getMap(key).toJSON()]));
     }finally{doc.destroy();}
-    return await this.rpc('commitSnapshot',{...params,
+    return await this.rpc(params.documentId?'documentCommitSnapshot':'commitSnapshot',{...params,
       snapshot:Buffer.from(params.snapshot).toString('base64'),presentation});
   }
 }

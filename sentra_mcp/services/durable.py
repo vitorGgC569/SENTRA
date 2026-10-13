@@ -139,7 +139,11 @@ class StaleFenceError(PermissionError):
 class DurableRunService:
     """Persistent universal runs, operations, events, leases and artifacts."""
 
-    def __init__(self, state_root: Path, *, clock=_now) -> None:
+    def __init__(self, state_root: Path, *, clock=_now, store=None) -> None:
+        from .control_store import create_control_plane_store
+        self.store = store or create_control_plane_store(state_root)
+        if getattr(self.store, "backend", "sqlite") == "postgres":
+            state_root = self.store.state_root
         self.state_root = Path(state_root).resolve()
         self.root = self.state_root / "durable"
         self.run_root = self.root / "runs"
@@ -149,12 +153,13 @@ class DurableRunService:
         self.artifact_root.mkdir(parents=True, exist_ok=True)
         self.clock = clock
         self.lock = threading.RLock()
-        self.db = sqlite3.connect(
-            str(self.root / "durable.sqlite3"),
-            check_same_thread=False,
-            timeout=10,
-        )
-        self.db.row_factory = sqlite3.Row
+        if getattr(self.store, "backend", "sqlite") == "postgres":
+            self.db = self.store.connect("durable")
+            self.lock = self.db.scope_lock()
+        else:
+            self.store.assert_active()
+            self.db = self.store.connect("durable",shared=True)
+            self.db.row_factory = sqlite3.Row
         self._init_schema()
 
     def _init_schema(self) -> None:
@@ -304,6 +309,10 @@ class DurableRunService:
                 CREATE INDEX IF NOT EXISTS idx_operations_run ON operations(run_id,updated_at);
                 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id,seq);
                 CREATE INDEX IF NOT EXISTS idx_resources_run ON resources(run_id,updated_at);
+                CREATE TABLE IF NOT EXISTS agent_run_memberships(
+                    owner TEXT NOT NULL,run_id TEXT NOT NULL,agent_id TEXT NOT NULL,
+                    snapshot_json TEXT NOT NULL,archived_at REAL NOT NULL,
+                    PRIMARY KEY(owner,run_id,agent_id));
                 """
             )
             # Forward-compatible migration for durable DBs created before
@@ -334,10 +343,16 @@ class DurableRunService:
             self.db.commit()
 
     def close(self) -> None:
+        if self.store.backend == "postgres":
+            with self.db._mutex:
+                self.db.close()
+            return
         with self.lock:
             self.db.close()
 
     def _run_row(self, run_id: str, owner: str | None = None) -> sqlite3.Row:
+        if owner is not None and hasattr(self.store, "assert_principal"):
+            self.store.assert_principal(owner)
         row = self.db.execute("SELECT * FROM runs WHERE run_id=?", (run_id,)).fetchone()
         if row is None:
             raise FileNotFoundError("run not found")
@@ -346,6 +361,8 @@ class DurableRunService:
         return row
 
     def _goal_row(self, goal_id: str, owner: str | None = None) -> sqlite3.Row:
+        if owner is not None and hasattr(self.store, "assert_principal"):
+            self.store.assert_principal(owner)
         row = self.db.execute("SELECT * FROM goals WHERE goal_id=?", (goal_id,)).fetchone()
         if row is None:
             raise FileNotFoundError("goal not found")
@@ -354,6 +371,8 @@ class DurableRunService:
         return row
 
     def _operation_row(self, operation_id: str, owner: str | None = None) -> sqlite3.Row:
+        if owner is not None and hasattr(self.store, "assert_principal"):
+            self.store.assert_principal(owner)
         row = self.db.execute(
             "SELECT * FROM operations WHERE operation_id=?", (operation_id,)
         ).fetchone()
@@ -364,6 +383,8 @@ class DurableRunService:
         return row
 
     def _agent_row(self, agent_id: str, owner: str | None = None) -> sqlite3.Row:
+        if owner is not None and hasattr(self.store, "assert_principal"):
+            self.store.assert_principal(owner)
         row = self.db.execute(
             "SELECT * FROM agents WHERE agent_id=?", (agent_id,)
         ).fetchone()
@@ -374,6 +395,8 @@ class DurableRunService:
         return row
 
     def _chat_row(self, chat_id: str, owner: str | None = None) -> sqlite3.Row:
+        if owner is not None and hasattr(self.store, "assert_principal"):
+            self.store.assert_principal(owner)
         row = self.db.execute(
             "SELECT * FROM chats WHERE chat_id=?", (chat_id,)
         ).fetchone()
@@ -775,7 +798,9 @@ class DurableRunService:
             raise ValueError("agent role is required")
         aid = _validate_id("agent_id", agent_id or ("agent-" + uuid.uuid4().hex))
         now = self.clock()
-        with self.lock:
+        with self.lock, self.db:
+            if getattr(self.store, "backend", "sqlite") == "sqlite":
+                self.db.execute("BEGIN IMMEDIATE")
             self._run_row(run_id, owner)
             if goal_id is not None:
                 goal = self._goal_row(goal_id, owner)
@@ -785,8 +810,22 @@ class DurableRunService:
                 "SELECT * FROM agents WHERE agent_id=?", (aid,)
             ).fetchone()
             if existing is not None:
-                if existing["owner"] != owner or existing["run_id"] != run_id:
+                if existing["owner"] != owner:
                     raise FileExistsError("agent_id already belongs to another run")
+                if existing["run_id"] != run_id:
+                    previous = self._run_row(existing["run_id"], owner)
+                    if previous["state"] not in TERMINAL_RUN_STATES:
+                        raise DurableStateConflict("agent identity is still assigned to an active run")
+                    self.db.execute("INSERT INTO agent_run_memberships VALUES(?,?,?,?,?) ON CONFLICT(owner,run_id,agent_id) "
+                        "DO UPDATE SET snapshot_json=excluded.snapshot_json,archived_at=excluded.archived_at",
+                        (owner, existing["run_id"], aid, _json(self._agent_info_locked(existing)), now))
+                    self.db.execute("UPDATE agents SET run_id=?,role=?,task_id=?,goal_id=?,state=?,desired_state=?,heartbeat_at=?,updated_at=?,metadata_json=? WHERE agent_id=? AND owner=?",
+                        (run_id, role, task_id, goal_id, state, desired_state, now, now, _json(metadata or {}), aid, owner))
+                    self._append_event_locked(run_id, "AGENT_IDENTITY_REASSIGNED", state=state,
+                        payload={"agent_id": aid, "previous_run_id": existing["run_id"], "grant_created": False})
+                    self.db.commit()
+                    self._project_locked(run_id)
+                    return self._agent_info_locked(self._agent_row(aid, owner))
                 return self._agent_info_locked(existing)
             self.db.execute(
                 "INSERT INTO agents(agent_id,run_id,owner,role,task_id,goal_id,state,desired_state,"
@@ -811,6 +850,10 @@ class DurableRunService:
             self.db.commit()
             self._project_locked(run_id)
             return self._agent_info_locked(self._agent_row(aid))
+
+    def agent_info(self, agent_id: str, owner: str) -> dict[str, Any]:
+        with self.lock:
+            return self._agent_info_locked(self._agent_row(agent_id, owner))
 
     def update_agent(
         self,
@@ -1069,6 +1112,32 @@ class DurableRunService:
             self._project_locked(row["run_id"])
             return self._chat_info_locked(self._chat_row(chat_id))
 
+    def pending_operation_intent(self, run_id, owner, *, operation_id, idempotency_key,
+                                 intent_sha256, resource_key, operation_context):
+        """Immutable optional-user intent awaiting a real authority decision."""
+        _validate_id("operation_id", operation_id)
+        _validate_id("resource_key", resource_key)
+        if not re.fullmatch(r"[0-9a-f]{64}", intent_sha256) or not idempotency_key or len(idempotency_key) > 240:
+            raise ValueError("invalid pending intent")
+        if set(operation_context) != {"work_item_id", "principal_id", "machine_id", "capability_id"}:
+            raise ValueError("full pending operation context required")
+        if not operation_context["capability_id"].startswith(("shell.voice.", "shell.attachments.")):
+            raise ValueError("pending intent is restricted to optional owner interactions")
+        with self.lock, self.db:
+            self._run_row(run_id, owner)
+            existing = self.db.execute("SELECT * FROM operations WHERE run_id=? AND idempotency_key=?", (run_id, idempotency_key)).fetchone()
+            if existing:
+                if (existing["operation_id"] != operation_id or existing["intent_sha256"] != intent_sha256
+                        or existing["resource_key"] != resource_key or _load(existing["progress_json"], {}) != operation_context):
+                    raise DurableStateConflict("pending optional intent changed")
+                return self._operation_info_locked(existing)
+            now = self.clock()
+            self.db.execute("INSERT INTO operations(operation_id,run_id,owner,idempotency_key,kind,state,readiness,progress_json,started_at,updated_at,heartbeat_at,cleanup_policy,intent_sha256,resource_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (operation_id, run_id, owner, idempotency_key, "sentra.machine.pending", "QUEUED", "UNKNOWN", _json(operation_context), now, now, now, "manual", intent_sha256, resource_key))
+            self._append_event_locked(run_id, "OPTIONAL_INTENT_AWAITING_AUTHORITY", operation_id=operation_id, state="QUEUED", payload={"intent_sha256": intent_sha256, "work_item_id": operation_context["work_item_id"]})
+            self.db.commit()
+            return self._operation_info_locked(self._operation_row(operation_id, owner))
+
     def reserve_operation_intent(
         self,
         run_id: str,
@@ -1081,6 +1150,7 @@ class DurableRunService:
         kind: str = "sentra.machine",
         ttl_s: float = 60.0,
         operation_context: dict[str, str] | None = None,
+        allow_cleanup: bool = False,
     ) -> dict[str, Any]:
         """Atomically bind operation intent, reservation and lease in the core DB.
 
@@ -1113,13 +1183,19 @@ class DurableRunService:
             try:
                 self.db.execute("BEGIN IMMEDIATE")
                 run = self._run_row(run_id, owner)
-                if run["state"] != "RUNNING":
+                cleanup = (allow_cleanup is True and kind == "sentra.machine.cleanup" and context.get("capability_id") in {
+                    "shell.voice.stop", "shell.voice.revoke", "shell.attachments.upload_abort"})
+                if run["state"] != "RUNNING" and not cleanup:
                     raise DurableStateConflict("run must be RUNNING")
                 existing = self.db.execute(
                     "SELECT * FROM operations WHERE run_id=? AND idempotency_key=?",
                     (run_id, key),
                 ).fetchone()
-                if existing is not None:
+                pending = existing is not None and existing["kind"] == "sentra.machine.pending" and existing["state"] == "QUEUED"
+                if pending and (existing["operation_id"] != oid or existing["intent_sha256"] != intent_sha256 or existing["resource_key"] != scope
+                        or _load(existing["progress_json"], {}) != context or not context.get("capability_id", "").startswith(("shell.voice.", "shell.attachments."))):
+                    raise DurableStateConflict("pending operation intent mismatch")
+                if existing is not None and not pending:
                     if (existing["operation_id"] != oid
                             or existing["kind"] != kind
                             or existing["intent_sha256"] != intent_sha256
@@ -1162,14 +1238,18 @@ class DurableRunService:
                     int(lease["fencing_token"]) if lease is not None else 0,
                     int(previous["fencing_token"]) if previous is not None else 0,
                 ) + 1
-                self.db.execute(
+                if pending:
+                    self.db.execute("UPDATE operations SET kind=?,state='STARTING',readiness='UNKNOWN',updated_at=?,heartbeat_at=?,fencing_token=? WHERE operation_id=? AND owner=? AND state='QUEUED' AND kind='sentra.machine.pending'",
+                        (kind, now, now, token, oid, owner))
+                else:
+                    self.db.execute(
                     "INSERT INTO operations(operation_id,run_id,owner,idempotency_key,"
                     "kind,state,readiness,progress_json,started_at,updated_at,"
                     "heartbeat_at,cleanup_policy,intent_sha256,resource_key,fencing_token)"
                     " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (oid, run_id, owner, key, kind, "STARTING", "UNKNOWN", _json(context),
                      now, now, now, "manual", intent_sha256, scope, token),
-                )
+                    )
                 self.db.execute(
                     "INSERT INTO lease_fences(resource_key,fencing_token) VALUES(?,?) "
                     "ON CONFLICT(resource_key) DO UPDATE SET fencing_token=excluded.fencing_token",
@@ -1228,7 +1308,7 @@ class DurableRunService:
                         or row["state"] != "RUNNING"
                         or lease["operation_id"] != operation_id
                         or lease["owner"] != owner
-                        or self._run_row(row["run_id"], owner)["state"] != "RUNNING"):
+                        or self._run_row(row["run_id"], owner)["state"] != "RUNNING" and row["kind"] != "sentra.machine.cleanup"):
                     raise StaleFenceError("physical effect binding is no longer active")
                 progress = _load(row["progress_json"], {})
                 first = progress.get("effect_started") is not True
@@ -2267,6 +2347,11 @@ class DurableRunService:
         ).fetchall()
         data["goals"] = [self._goal_info_locked(item) for item in goals]
         data["agents"] = [self._agent_info_locked(item) for item in agents]
+        archived = self.db.execute("SELECT snapshot_json FROM agent_run_memberships WHERE owner=? AND run_id=? ORDER BY agent_id",
+                                   (row["owner"], row["run_id"])).fetchall()
+        current_ids = {item["agent_id"] for item in data["agents"]}
+        data["agents"].extend(_load(item["snapshot_json"], {}) for item in archived
+                             if _load(item["snapshot_json"], {}).get("agent_id") not in current_ids)
         data["chats"] = [self._chat_info_locked(item) for item in chats]
         data["operations"] = [self._operation_info_locked(item) for item in operations]
         resource_views = [

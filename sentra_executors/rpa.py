@@ -437,13 +437,17 @@ class DiagnosedExecutor(GuardedExecutor):
 
     async def start(self, request):
         result = await super().start(request)
-        if result.error == 'backend_error':
+        if result.error in {'backend_error', 'physical_effect_error_requires_reconciliation'}:
             with self._diagnosis_lock:
                 failure = self._diagnoses.get(request.operation_id)
             if failure:
-                return await self._finish(request.operation_id,
-                    'uncertain' if failure.uncertain else 'failed',
-                    error=failure.code, evidence=failure.evidence)
+                async with self._lock:
+                    record = self._records[request.operation_id]
+                    if failure.uncertain:
+                        record.state = 'uncertain'
+                    record.error = failure.code
+                    record.evidence = {} if record.cancel_requested else dict(failure.evidence)
+                    return self._snapshot(request.operation_id, record)
         return result
 
 

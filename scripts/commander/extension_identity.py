@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -61,3 +62,22 @@ def stamp_extension_identity(root: Path) -> dict[str, Any]:
         "build_id": build_id,
         **identity,
     }
+
+
+def stage_extension_source(source: Path, destination: Path) -> dict[str, Any]:
+    """Final-phase source pipeline. Never restamps the live/source extension.
+
+    Installation-local HMAC bootstrap cannot be distributed to another machine.
+    The installed relay creates it with its real local token after installation.
+    """
+    source = Path(source).resolve(strict=True)
+    destination = Path(destination).absolute()
+    if destination.exists() or destination.resolve().is_relative_to(source):
+        raise PermissionError("extension staging must be a new isolated directory")
+    if any(p.is_symlink() or (hasattr(p, 'is_junction') and p.is_junction()) for p in source.rglob('*')):
+        raise PermissionError("linked extension source cannot be shipped")
+    shutil.copytree(source, destination, ignore=shutil.ignore_patterns('sentra-bootstrap.json', '*.tmp', '__pycache__'))
+    identity = stamp_extension_identity(destination)
+    record = {**identity, "bootstrap": "installation-local-HMAC-required", "source_mutated": False}
+    (destination / 'sentra-distribution.json').write_text(json.dumps(record, sort_keys=True, indent=2) + '\n', encoding='utf-8')
+    return record

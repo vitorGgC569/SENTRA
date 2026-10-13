@@ -16,6 +16,9 @@ from .mcp_sdk_compat import MCPTypescriptCompatClient
 from .acp_verified import ACPVerifiedResolver, VerifiedACPEntrypoint, ACPVerificationDenied
 from .a2a_sse import A2ASSELedger, A2ASSEServer, A2ASSEClient, A2ASSEDenied
 from .central import CentralInteropAdapter, CentralAuditReceipt, CentralInteropBlocked
+from .provider_machine import InteropProviderMachine, INTEROP_CAPABILITIES
+from .channel_machine import ChannelProviderMachine
+from .registry_machine import RegistryProviderMachine
 
 __all__ = [
     "DispatchOutcome", "InteropGate", "OperationJournal",
@@ -35,4 +38,24 @@ __all__ = [
     "ACPVerificationDenied", "A2ASSELedger", "A2ASSEServer",
     "A2ASSEClient", "A2ASSEDenied",
     "CentralInteropAdapter", "CentralAuditReceipt", "CentralInteropBlocked",
+    "InteropProviderMachine", "INTEROP_CAPABILITIES",
+    "ChannelProviderMachine", "RegistryProviderMachine",
 ]
+
+from .workflow_runtime_host import RuntimeProviderHost
+from .workflow_runtime_machine import RuntimeProviderMachine, TerminalWriteMachine, configure_runtime_machine, aconfigure_runtime_machine, configure_terminal_machine
+from .workflow_shell import PulsoShellDispatch
+from .workflow_shell_host import PulsoMachineResolver
+__all__ += ["RuntimeProviderHost", "RuntimeProviderMachine", "TerminalWriteMachine", "configure_runtime_machine", "aconfigure_runtime_machine", "configure_terminal_machine", "PulsoShellDispatch", "PulsoMachineResolver"]
+
+# Keep the generic workflow subclass lazy: the existing runtime workflow module
+# imports this package while defining DocumentWorkflowMachine.
+__all__ += ["WorkflowProviderMachine", "configure_workflow_machine", "RepositoryJobMachine"]
+def __getattr__(name):
+    if name in {"WorkflowProviderMachine", "configure_workflow_machine"}:
+        from . import workflow_provider_machine
+        return getattr(workflow_provider_machine,name)
+    if name == "RepositoryJobMachine":
+        from .workflow_jobs import RepositoryJobMachine
+        return RepositoryJobMachine
+    raise AttributeError(name)

@@ -33,7 +33,7 @@ class InstalledPieceBundle:
 class OwnedPieceSDKBackend:
     def __init__(self,*,node_executable,install_root,bundles,artifact_root,project_id,
                  flow_id,flow_version,project_external_id=None,file_publisher=None,
-                 schedule_handler=None,webhook_url=None,server_context=None,timeout=120):
+                 schedule_handler=None,webhook_url=None,server_context=None,context_services=None,timeout=120):
         self.node=Path(node_executable)
         self.root=Path(install_root).resolve()
         self.artifact_root=Path(artifact_root).resolve()
@@ -47,6 +47,10 @@ class OwnedPieceSDKBackend:
         self.project_id,self.flow_id,self.flow_version=project_id,flow_id,flow_version
         self.project_external_id,self.file_publisher=project_external_id,file_publisher
         self.schedule_handler,self.webhook_url,self.server_context=schedule_handler,webhook_url,server_context
+        self.context_services=dict(context_services or {})
+        allowed={"app.createListeners","flows.list","run.stop","run.respond","run.createWaitpoint","run.waitForWaitpoint"}
+        if set(self.context_services)-allowed or any(not callable(value) for value in self.context_services.values()):
+            raise ValueError("trusted SDK context callbacks required")
         self.timeout=timeout
         self.runner=Path(__file__).with_name("activepieces_worker.mjs").resolve()
         self.active={}
@@ -58,6 +62,7 @@ class OwnedPieceSDKBackend:
             "project_external_id":self.project_external_id,"webhook_url":self.webhook_url,
             "server_origin":{k:self.server_context.get(k) for k in ("apiUrl","publicUrl")} if isinstance(self.server_context,dict) else None,
             "file_publisher_configured":callable(self.file_publisher),"schedule_configured":callable(self.schedule_handler),
+            "context_services":sorted(self.context_services),
             "bundles":[asdict(v) for k,v in sorted(self.bundles.items())],
             "runner_sha256":hashlib.sha256(self.runner.read_bytes()).hexdigest()})
 
@@ -89,8 +94,8 @@ class OwnedPieceSDKBackend:
             trigger=descriptor.member(member,hook)
             if trigger.get("type") in {"WEBHOOK","APP_WEBHOOK"} and not self.webhook_url:
                 return ActivityReceipt("FAILED","NOT_STARTED",failure_type="TRIGGER_CALLBACK_UNAVAILABLE")
-            if trigger.get("type")=="APP_WEBHOOK":
-                return ActivityReceipt("FAILED","NOT_STARTED",failure_type="APP_WEBHOOK_CONTEXT_UNSUPPORTED")
+            if trigger.get("type")=="APP_WEBHOOK" and "app.createListeners" not in self.context_services:
+                return ActivityReceipt("FAILED","NOT_STARTED",failure_type="APP_WEBHOOK_LISTENER_UNAVAILABLE")
             if hook=="onEnable" and trigger.get("type")=="POLLING" and not callable(self.schedule_handler):
                 return ActivityReceipt("FAILED","NOT_STARTED",failure_type="TRIGGER_SCHEDULER_UNAVAILABLE")
         return None
@@ -138,10 +143,14 @@ class OwnedPieceSDKBackend:
             if target.exists():
                 if hashlib.sha256(target.read_bytes()).hexdigest()!=hash_value: raise ValueError("piece artifact collision")
             else:
-                with target.open("xb") as output: output.write(data)
+                context.checkpoint()
+                with target.open("xb") as output:
+                    context.checkpoint()
+                    output.write(data)
             files.append({"path":str(target),"sha256":hash_value,"file_name":file_name,"size":len(data),"kind":"piece-file"})
             if method=="files.write": return str(target)
             if not callable(self.file_publisher): raise ValueError("files.upload needs a real host file publisher")
+            context.checkpoint()
             uploaded=self.file_publisher(request,target,file_name)
             if inspect.isawaitable(uploaded): uploaded=await uploaded
             if not isinstance(uploaded,dict) or not uploaded.get("id") or not str(uploaded.get("url","")).startswith("https://"):
@@ -151,7 +160,11 @@ class OwnedPieceSDKBackend:
             if not callable(self.schedule_handler): raise ValueError("trigger scheduling requires real host integration")
             result=self.schedule_handler(request,args)
             return await result if inspect.isawaitable(result) else result
-        raise PermissionError("SDK context service not implemented in this explicit profile")
+        if method in self.context_services:
+            context.checkpoint()
+            value=self.context_services[method](request,args)
+            return await value if inspect.isawaitable(value) else value
+        raise PermissionError("optional SDK context service unavailable; configure its real scoped host adapter")
 
     async def execute(self,request,descriptor,props,auth,store,heartbeat,*,trigger_payload=None):
         from sentra_runtime.effect_boundary import current_effect_context
@@ -170,11 +183,13 @@ class OwnedPieceSDKBackend:
             "piece_name":descriptor.name,"piece_version":descriptor.version,"member":request.arguments["member"],
             "hook":request.arguments["hook"],"auth":auth,"props":props,"project_id":self.project_id,
             "flow_id":self.flow_id,"flow_version":self.flow_version,"operation_id":request.operation_id,
-            "server":self.server_context,"webhook_url":self.webhook_url,"trigger_payload":trigger_payload}
+            "server":self.server_context,"webhook_url":self.webhook_url,"trigger_payload":trigger_payload,
+            "context_services":sorted(self.context_services)}
         async def write(value):
             context.checkpoint()
             raw=json.dumps(value,ensure_ascii=False,allow_nan=False,separators=(",",":")).encode()+b"\n"
             if len(raw)>32*1024*1024: raise ValueError("piece stdin exceeds frame bound")
+            context.checkpoint()
             process.stdin.write(raw); await process.stdin.drain()
         async def read():
             await write(payload)

@@ -1,0 +1,16 @@
+SENTRA Desktop — Third-party notice: Git
+==========================================
+
+Component: Git (optional provider "git")
+Pinned version: 2.47.1
+Source: winget package Git.Git (https://winget.run/pkg/Git/Git)
+License: GNU General Public License v2.0 only (GPL-2.0-only)
+Upstream: https://git-scm.com / https://github.com/git/git
+
+Notes for SENTRA distribution:
+- Git is OPTIONAL. SENTRA installs it only with explicit user approval via
+  the documented winget runner; Doctor reports it as installable otherwise.
+- This NOTICE covers the version pin tracked by
+  sentra_remote/optional_providers.py ("git"). The full license text ships
+  with the upstream installer and is not reproduced here.
+- SBOM entry: pkg:generic/git@2.47.1 (see release SBOM for the built media).

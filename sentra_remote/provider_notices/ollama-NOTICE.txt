@@ -1,0 +1,16 @@
+SENTRA Desktop — Third-party notice: Ollama
+============================================
+
+Component: Ollama local models (optional provider "ollama")
+Pinned version: 0.6.8
+Source: winget package Ollama.Ollama (https://ollama.com)
+License: MIT (Ollama source; model weights carry their own licenses)
+Upstream: https://github.com/ollama/ollama
+
+Notes for SENTRA distribution:
+- Ollama is OPTIONAL. SENTRA probes only the loopback API
+  (http://127.0.0.1:11434/api/tags); readiness requires at least one
+  downloaded model. The vetted starter model is documented in
+  sentra_remote/setup_assistant.py (STARTER_LOCAL_MODEL) and downloads
+  only with explicit consent.
+- SBOM entry: pkg:generic/ollama@0.6.8 (see release SBOM).

@@ -22,6 +22,48 @@ def native_peer_gate_patch(source_root: str) -> dict:
         'flutter/windows/runner/main.cpp': [
             ('  if (hwnd != NULL) {',
              '  // Owned SENTRA native session must never delegate to an unrelated stock GUI.\n  if (hwnd != NULL && GetEnvironmentVariableW(L"SENTRA_RUSTDESK_CONFIG", NULL, 0) == 0) {')],
+        'src/client/io_loop.rs': [
+            ('                loop {\n                    tokio::select! {',
+             '                let mut sentra_timer = crate::rustdesk_interval(time::interval(Duration::from_millis(50)));\n'
+             '                loop {\n                    tokio::select! {\n'
+             '                        _ = sentra_timer.tick(), if crate::sentra_peer_gate::enabled() => {\n'
+             '                            if let Some(input) = crate::sentra_peer_gate::take_input() {\n'
+             '                                let mut sent = false;\n'
+             '                                if input.action == "login" {\n'
+             '                                    self.handler.handle_login_from_ui(String::new(), String::new(), input.password.clone(), false, &mut peer).await;\n'
+             '                                    sent = true;\n'
+             '                                } else if self.is_connected {\n'
+             '                                    let mut message = Message::new();\n'
+             '                                    if input.action == "input.mouse" && input.x >= 0 && input.y >= 0 && input.x <= 8192 && input.y <= 8192 && input.mask >= 0 && input.mask <= 255 {\n'
+             '                                        message.set_mouse_event(MouseEvent {mask:input.mask,x:input.x,y:input.y,..Default::default()});\n'
+             '                                        sent = peer.send(&message).await.is_ok();\n'
+             '                                    } else if input.action == "input.key" && input.keycode <= 65535 {\n'
+             '                                        let mut key = KeyEvent {down:input.down,press:false,..Default::default()};\n'
+             '                                        key.set_chr(input.keycode); message.set_key_event(key);\n'
+             '                                        sent = peer.send(&message).await.is_ok();\n'
+             '                                    }\n'
+             '                                }\n'
+             '                                crate::sentra_peer_gate::input_receipt(&input.operation_id,&input.action,sent);\n'
+             '                            }\n'
+             '                        }'),
+            ('    async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {',
+             '    async fn handle_msg_from_ui(&mut self, data: Data, peer: &mut Stream) -> bool {\n'
+             '        if crate::sentra_peer_gate::enabled() && !matches!(&data, Data::Close) { return true; }'),
+            ('                            self.handle_local_clipboard_msg(&mut peer, _msg).await;',
+             '                            if !crate::sentra_peer_gate::enabled() { self.handle_local_clipboard_msg(&mut peer, _msg).await; }'),
+            ('        if let Ok(msg_in) = Message::parse_from_bytes(&data) {',
+             '        if let Ok(msg_in) = Message::parse_from_bytes(&data) {\n'
+             '            if crate::sentra_peer_gate::enabled() && matches!(msg_in.union.as_ref(),\n'
+             '                Some(message::Union::Clipboard(_)) | Some(message::Union::MultiClipboards(_)) |\n'
+             '                Some(message::Union::Cliprdr(_)) | Some(message::Union::FileResponse(_)) |\n'
+             '                Some(message::Union::FileAction(_)) | Some(message::Union::AudioFrame(_))) { return true; }'),
+            ('                        let peer_version = pi.version.clone();',
+             '                        crate::sentra_peer_gate::desktop_login();\n                        let peer_version = pi.version.clone();'),
+            ('                        _ = status_timer.tick() => {',
+             '                        _ = status_timer.tick() => {\n'
+             '                            if self.is_connected { crate::sentra_peer_gate::desktop_login(); }'),
+            ('                    handler.on_rgba(display, data);',
+             '                    crate::sentra_peer_gate::capture_frame(display, data);\n                    handler.on_rgba(display, data);')],
         'src/client.rs':[
             ('        let rs_pk = get_rs_pk(if key.is_empty() {',
              '        crate::sentra_peer_gate::check_root(peer_id, key)?;\n        let rs_pk = get_rs_pk(if key.is_empty() {'),
@@ -43,5 +85,6 @@ def native_peer_gate_patch(source_root: str) -> dict:
         patches.extend(difflib.unified_diff(old.splitlines(True),new.splitlines(True),fromfile='a/'+name,tofile='b/'+name))
     module=Path(__file__).with_name('remote_rustdesk_gate.rs').read_text(encoding='utf-8')
     patches.extend(difflib.unified_diff([],module.splitlines(True),fromfile='/dev/null',tofile='b/src/sentra_peer_gate.rs'))
-    return {'extension':'sentra-peer-gate-v1','patch':''.join(patches),'source_sha256':hashes,
+    return {'extension':'sentra-peer-gate-v1','control_extension':'sentra-desktop-control-v1',
+            'patch':''.join(patches),'source_sha256':hashes,
             'compiled':False,'operational':False,'requires':'pinned native flutter RustDesk build and RustDesk server'}

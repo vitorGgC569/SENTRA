@@ -22,7 +22,8 @@ function bootstrap() {
   const now = Date.now();
   if (!Number.isSafeInteger(value.expires_at) ||
       value.expires_at <= now || value.expires_at > now + 30000) throw Error('expired ticket');
-  return { address: envelope(value), port: value.port };
+  const surface = value.surface === 'shell-home' ? 'shell-home' : (value.surface === 'native' ? 'native' : 'desktop');
+  return { address: envelope({ ...value, surface }), port: value.port, surface };
 }
 let handoff;
 try { handoff = bootstrap(); }
@@ -48,7 +49,8 @@ if (handoff) app.whenReady().then(() => {
     if (!isAllowedResource(url, handoff.port)) event.preventDefault();
   });
   win.once('ready-to-show', () => win.show());
-  win.loadURL(handoff.address.replace('/desktop.html#', '/desktop.html?surface=electron#'))
+  const page = handoff.surface === 'shell-home' ? '/shell-home.html' : (handoff.surface === 'native' ? '/native.html' : '/desktop.html');
+  win.loadURL(handoff.address.replace('/desktop.html#', page + '#').replace('/shell-home.html#', page + '#').replace('/native.html#', page + '#') + (page === '/desktop.html' ? '?surface=electron' : '?surface=electron-shell'))
     .catch(() => app.quit());
 }).catch(() => app.exit(3));
 app.on('window-all-closed', () => app.quit());

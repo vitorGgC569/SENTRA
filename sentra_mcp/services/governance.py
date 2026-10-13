@@ -129,7 +129,12 @@ class GovernanceService:
         self.state_root = Path(state_root).resolve()
         self.root = self.state_root / "durable"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.store = store or SQLiteControlPlaneStore(self.state_root)
+        from .control_store import create_control_plane_store
+        self.store = store or getattr(durable, "store", None) or create_control_plane_store(self.state_root)
+        if self.store.backend == "postgres":
+            self.state_root = self.store.state_root
+            self.root = self.state_root / "durable"
+            self.root.mkdir(parents=True,exist_ok=True)
         self.path = self.store.path_for("governance")
         self.durable = durable
         self.clock = clock
@@ -617,6 +622,71 @@ class GovernanceService:
         return {"items": items, "page": {"offset": offset, "limit": limit, "returned": len(items),
                 "total": total, "next_offset": next_offset if next_offset < total else None}}
 
+    def complete_receipted_interaction(self, work_item_id: str, owner: str, *, operation_id: str) -> dict[str, Any]:
+        if self.durable is None:
+            raise RuntimeError("durable interaction receipt authority required")
+        operation = self.durable.operation_status(operation_id, owner)
+        if operation["state"] != "SUCCEEDED" or operation.get("progress", {}).get("work_item_id") != work_item_id:
+            raise PermissionError("confirmed bound optional interaction receipt required")
+        artifact_id = (operation.get("result") or {}).get("evidence_artifact_id")
+        artifact = self.durable.artifact_info(artifact_id, owner)
+        if artifact["operation_id"] != operation_id or artifact["run_id"] != operation["run_id"]:
+            raise PermissionError("optional interaction artifact scope mismatch")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM work_items WHERE work_item_id=? AND owner=?", (work_item_id, owner)).fetchone()
+            if row is None:
+                raise FileNotFoundError("work item not found")
+            metadata = _load(row["metadata_json"], {})
+            action = metadata.get("shell_action", "")
+            if (not action.startswith(("voice_", "attachment_")) or row["run_id"] != operation["run_id"]
+                    or row["state"] not in {"RUNNING", "COMPLETED"} or _load(row["execution_policy_json"], {}).get("require_quality_gate") is not False):
+                raise GovernanceConflict("receipt is not a signaling/storage interaction")
+            metadata.update(interaction_operation_id=operation_id, external_completion_claimed=False)
+            db.execute("UPDATE work_items SET state='COMPLETED',checkout_run_id=NULL,execution_run_id=NULL,metadata_json=?,updated_at=? WHERE work_item_id=? AND owner=?", (_json(metadata), self.clock(), work_item_id, owner))
+            self._append_work_event(db, owner, work_item_id, "OPTIONAL_INTERACTION_RECEIPTED", {"operation_id": operation_id, "external_completion_claimed": False})
+        return self.work_item_info(work_item_id, owner)
+
+    def complete_control_mutation(self, work_item_id: str, owner: str, *, receipt_id: str) -> dict[str, Any]:
+        with self.store.connect("shell") as receipts:
+            receipt = receipts.execute("SELECT * FROM shell_receipts WHERE receipt_id=? AND owner=? AND kind='control_mutation'", (receipt_id, owner)).fetchone()
+        if receipt is None:
+            raise PermissionError("durable control mutation receipt required")
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM work_items WHERE work_item_id=? AND owner=?", (work_item_id, owner)).fetchone()
+            if row is None:
+                raise FileNotFoundError("work item not found")
+            metadata = _load(row["metadata_json"], {})
+            if (metadata.get("shell_action") not in {"space_create", "dot_create", "dot_update", "conversation_create", "coordinate",
+                                                       "turn_permission_grant", "turn_permission_revoke"}
+                    or metadata.get("request_key") != receipt["request_key"] or metadata.get("workspace_id") != receipt["project_id"]
+                    or row["state"] not in {"PENDING", "COMPLETED"} or row["execution_run_id"] or row["checkout_run_id"]):
+                raise GovernanceConflict("receipt is not for a metadata control WorkItem")
+            metadata.update(control_receipt_id=receipt_id, external_completion_claimed=False)
+            db.execute("UPDATE work_items SET state='COMPLETED',metadata_json=?,updated_at=? WHERE work_item_id=? AND owner=?", (_json(metadata), self.clock(), work_item_id, owner))
+            self._append_work_event(db, owner, work_item_id, "CONTROL_MUTATION_COMMITTED", {"receipt_id": receipt_id, "external_completion_claimed": False})
+        return self.work_item_info(work_item_id, owner)
+
+    def reassign_work_item(self, work_item_id: str, owner: str, *, agent_id: str,
+                           expected_assignee_agent_id: str | None = None) -> dict[str, Any]:
+        agent_id = _text("agent_id", agent_id, 128, required=True)
+        with self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM work_items WHERE work_item_id=? AND owner=?", (work_item_id, owner)).fetchone()
+            if row is None:
+                raise FileNotFoundError("work item not found")
+            if row["state"] not in {"PENDING", "QUEUED", "BLOCKED"} or row["execution_run_id"] or row["checkout_run_id"]:
+                raise GovernanceConflict("active or checked-out work cannot be reassigned")
+            if expected_assignee_agent_id is not None and row["assignee_agent_id"] != expected_assignee_agent_id:
+                raise GovernanceConflict("work item assignee changed")
+            db.execute("UPDATE work_items SET assignee_agent_id=?,assignee_user_id=NULL,updated_at=? WHERE work_item_id=? AND owner=?",
+                       (agent_id, self.clock(), work_item_id, owner))
+            self._append_work_event(db, owner, work_item_id, "WORK_ITEM_REASSIGNED",
+                {"previous_agent_id": row["assignee_agent_id"], "agent_id": agent_id, "grant_created": False})
+        self.activity(owner, "work_item.reassign", "ok", work_item_id=work_item_id, run_id=row["run_id"], agent_id=agent_id)
+        return self.work_item_info(work_item_id, owner)
+
     def transition_work_item(
         self, work_item_id: str, owner: str, state: str, *,
         reason: str = "", metadata: dict[str, Any] | None = None,
@@ -742,13 +812,17 @@ class GovernanceService:
             if expected_state is not None:
                 if row["state"] != expected_state or _load(row["blockers_json"], []):
                     raise GovernanceConflict("work item admission state changed or is blocked")
-                for dependency in _load(row["dependencies_json"], []):
-                    dependency_row = db.execute(
-                        "SELECT state FROM work_items WHERE work_item_id=? AND owner=?",
-                        (dependency, owner),
-                    ).fetchone()
-                    if dependency_row is None or dependency_row["state"] != "COMPLETED":
-                        raise GovernanceConflict("work item dependency is not completed")
+            if row["run_id"] != run_id or row["state"] not in {"PENDING", "QUEUED", "RUNNING"} or _load(row["blockers_json"], []):
+                raise GovernanceConflict("work item cannot execute in this run/state")
+            if agent_id and row["assignee_agent_id"] not in {None, agent_id}:
+                raise GovernanceConflict("explicit transactional reassign required before execution")
+            for dependency in _load(row["dependencies_json"], []):
+                dependency_row = db.execute(
+                    "SELECT state FROM work_items WHERE work_item_id=? AND owner=?",
+                    (dependency, owner),
+                ).fetchone()
+                if dependency_row is None or dependency_row["state"] != "COMPLETED":
+                    raise GovernanceConflict("work item dependency is not completed")
             if str(row["state"]) == "RECOVERING":
                 raise GovernanceConflict(
                     "complete recovery handoff before normal execution resumes"

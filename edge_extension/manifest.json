@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "SENTRA Browser Bridge",
-  "version": "1.6.52",
-  "sentra_build_id": "sentra-edge-1.6.52-durable-r27",
+  "version": "1.7.0",
+  "sentra_build_id": "sentra-edge-1.7.0-durable-r28",
   "description": "Ponte opcional do SENTRA para operações autorizadas em abas existentes e comunicação com o relay local.",
   "permissions": [
     "tabs",
@@ -35,5 +35,5 @@
       "run_at": "document_idle"
     }
   ],
-  "sentra_source_hash": "d9bedb0f746e2249e3d56350899a4a25c936686ebc5625e8c238512870735c85"
+  "sentra_source_hash": "edfda4428a90710337317e26b2eba622b8b9f065460964f7adcf0f846fe4bc5f"
 }

@@ -1,0 +1,18 @@
+.sentra-smart-ui{border:1px solid var(--border,#404040);border-radius:12px;padding:12px;margin:12px 0;background:var(--surface,#1e1e1e);font-size:.9rem;max-width:100%;overflow:hidden}
+.sentra-smart-ui>header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:12px}
+.sentra-smart-ui>header>small{opacity:.7;font-size:.74em}
+.sentra-smart-ui-content{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px}
+.sentra-smart-ui-content>p,.sentra-smart-progress,.sentra-smart-choice,.sentra-smart-table-wrap{grid-column:1/-1}
+.sentra-smart-metric{display:flex;flex-direction:column;gap:5px;border:1px solid var(--border,#404040);border-radius:9px;padding:12px}
+.sentra-smart-metric>small,.sentra-smart-metric>span{opacity:.8}
+.sentra-smart-metric>strong{font-size:1.35em}
+.sentra-smart-progress>div{display:flex;justify-content:space-between;margin-bottom:5px}
+.sentra-smart-progress progress{width:100%;height:8px;accent-color:var(--accent,#769db9)}
+.sentra-smart-table-wrap{overflow-x:auto}
+.sentra-smart-table-wrap table{width:100%;border-collapse:collapse;text-align:left;font-size:.88em}
+.sentra-smart-table-wrap th,.sentra-smart-table-wrap td{padding:8px;border-bottom:1px solid var(--border,#404040);overflow-wrap:anywhere}
+.sentra-smart-choice{min-width:0;border:1px solid var(--border,#404040);border-radius:9px;padding:10px}
+.sentra-smart-choice legend{padding:0 4px;font-weight:600}
+.sentra-smart-choice>div{display:flex;flex-wrap:wrap;gap:10px}
+.sentra-smart-choice label{display:flex;align-items:center;gap:5px;cursor:pointer}
+.sentra-smart-choice input{accent-color:var(--accent,#769db9)}

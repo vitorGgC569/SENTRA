@@ -26,8 +26,8 @@ export function Modal({ open, onOpenChange, title, description, children, classN
     </Dialog.Portal>
   </Dialog.Root>;
 }
-export function ActionMenu({ label = 'Ações', items, trigger }) {
-  return <Menu.Root><Menu.Trigger asChild>{trigger ||
+export function ActionMenu({ label = 'Ações', items, trigger, open, onOpenChange }) {
+  return <Menu.Root open={open} onOpenChange={onOpenChange}><Menu.Trigger asChild>{trigger ||
     <button type="button" className="icon-button nodrag" aria-label={label} title={label}><MoreHorizontal size={15} /></button>}
   </Menu.Trigger><Menu.Portal><Menu.Content className="context-menu" sideOffset={6} align="end">
     {items.map((item, i) => item.separator ? <Menu.Separator key={i} className="menu-separator" /> :

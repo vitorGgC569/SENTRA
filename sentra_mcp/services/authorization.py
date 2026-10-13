@@ -11,6 +11,11 @@ import json
 import sqlite3
 import time
 import uuid
+import contextvars
+from contextlib import contextmanager
+from functools import wraps
+import re
+import math
 from pathlib import Path
 from typing import Any
 
@@ -23,8 +28,45 @@ PRINCIPAL_TYPES = {"user", "agent", "plugin", "device", "service"}
 GRANT_EFFECTS = {"allow"}
 
 
+def _guarded_authorization(method):
+    @wraps(method)
+    def guarded(self, *args, **kwargs):
+        with self._decision_guard():
+            return method(self, *args, **kwargs)
+    return guarded
+
+
+class _BorrowedNamespace:
+    """One PG transaction, explicit qualified schemas, no nested close/commit."""
+    def __init__(self, db, store, namespace):
+        from sentra_quality.protected_state import identifier
+        self.db, self.namespace = db, namespace
+        self.schema = identifier(store.schema(namespace))
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql, params=()):
+        if self.namespace == "authorization":
+            if re.match(r"SELECT \* FROM authorization_grants\b", sql, re.I):
+                sql += " FOR UPDATE"
+            return self.db.execute(sql, params)
+        allowed = {"governance": ("work_items",), "durable": ("agents", "goals", "runs", "chats")}
+        if not sql.lstrip().upper().startswith("SELECT"):
+            raise PermissionError("authorization ancestry guard is read-only")
+        for table in allowed[self.namespace]:
+            sql = re.sub(r"\b(FROM|JOIN)\s+" + table + r"\b",
+                         lambda m: m[1] + " " + self.schema + "." + table, sql, flags=re.I)
+        if not re.search(r"\bDISTINCT\b", sql, re.I):
+            sql += " FOR UPDATE"
+        return self.db._fetch(self.db.raw.execute(sql.replace("?", "%s"), params))
+
+
 def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, allow_nan=False, separators=(",", ":"))
 
 
 def _load(value: str | None, default: Any) -> Any:
@@ -49,6 +91,7 @@ class AuthorizationService:
         self.store = store or SQLiteControlPlaneStore(state_root)
         self.path = self.store.path_for("authorization")
         self.clock = clock
+        self._guard_connections = contextvars.ContextVar("selo_authorization_guard", default=None)
         with self._connect() as db:
             db.executescript(
                 """
@@ -90,7 +133,44 @@ class AuthorizationService:
             )
 
     def _connect(self) -> sqlite3.Connection:
-        return self.store.connect("authorization")
+        return self._namespace("authorization")
+
+    @contextmanager
+    def _namespace(self, namespace):
+        borrowed = self._guard_connections.get()
+        if borrowed:
+            yield borrowed[namespace]
+            return
+        db = self.store.connect(namespace)
+        try:
+            with db:
+                yield db
+        finally:
+            db.close()
+
+    @contextmanager
+    def _decision_guard(self):
+        if self.store.backend != "postgres" or self._guard_connections.get() is not None:
+            yield
+            return
+        db = self.store.connect("authorization")
+        token = None
+        try:
+            db._begin()
+            namespaces = sorted(("authorization", "durable", "governance"))
+            for namespace in namespaces:
+                db.raw.execute("SELECT pg_advisory_xact_lock(%s)", (self.store.lock_key(namespace),))
+            db._locked = True
+            token = self._guard_connections.set({ns: _BorrowedNamespace(db, self.store, ns) for ns in namespaces})
+            yield
+            db.commit()
+        except BaseException:
+            db.rollback()
+            raise
+        finally:
+            if token is not None:
+                self._guard_connections.reset(token)
+            db.close()
 
     @staticmethod
     def _text(name: str, value: Any, maximum: int = 256, required: bool = True) -> str:
@@ -124,7 +204,8 @@ class AuthorizationService:
         scope_id: str | None = None,
     ) -> None:
         db.execute(
-            "INSERT INTO authorization_events VALUES(NULL,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO authorization_events(event_id,owner,action,grant_id,principal_type,principal_id,"
+            "capability,scope_type,scope_id,outcome,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 "auth-" + uuid.uuid4().hex,
                 owner,
@@ -310,7 +391,7 @@ class AuthorizationService:
 
         try:
             if scope_type == "work_item":
-                with self.store.connect("governance") as db:
+                with self._namespace("governance") as db:
                     row = db.execute(
                         "SELECT run_id,goal_id,parent_work_item_id FROM work_items "
                         "WHERE work_item_id=? AND owner=?",
@@ -341,9 +422,7 @@ class AuthorizationService:
             elif scope_type == "goal":
                 goal_id = str(scope_id)
             elif scope_type == "agent":
-                durable_path = self.path.parent / "durable.sqlite3"
-                with sqlite3.connect(str(durable_path)) as db:
-                    db.row_factory = sqlite3.Row
+                with self._namespace("durable") as db:
                     row = db.execute(
                         "SELECT run_id,goal_id FROM agents WHERE agent_id=? AND owner=?",
                         (scope_id, owner),
@@ -355,9 +434,7 @@ class AuthorizationService:
             else:
                 return {}
 
-            durable_path = self.path.parent / "durable.sqlite3"
-            with sqlite3.connect(str(durable_path)) as db:
-                db.row_factory = sqlite3.Row
+            with self._namespace("durable") as db:
                 if goal_id:
                     goals: list[str] = []
                     seen_goals = {goal_id}
@@ -409,7 +486,7 @@ class AuthorizationService:
                     # case there is no unambiguous project ancestor to grant.
                     if len(projects) == 1:
                         result["project"] = list(projects)
-        except (OSError, sqlite3.Error, ValueError, TypeError):
+        except Exception:
             return {}
         return result
 
@@ -423,9 +500,11 @@ class AuthorizationService:
         max_cost = conditions.get("max_actual_cost")
         if max_cost is not None:
             try:
-                proposed = float(context.get("actual_cost", 0.0))
+                proposed = float(context.get("actual_cost", float("inf")))
                 limit = float(max_cost)
             except (TypeError, ValueError):
+                return False, "invalid actual_cost condition context"
+            if not math.isfinite(limit) or limit < 0 or math.isnan(proposed) or proposed < 0:
                 return False, "invalid actual_cost condition context"
             if proposed > limit:
                 return False, "actual cost exceeds grant condition"
@@ -442,6 +521,7 @@ class AuthorizationService:
             return False, "device health condition not satisfied"
         return True, "conditions satisfied"
 
+    @_guarded_authorization
     def authorize(
         self,
         owner: str,
@@ -462,12 +542,14 @@ class AuthorizationService:
             raise ValueError("invalid principal_type")
         if scope_type not in SCOPE_TYPES:
             raise ValueError("invalid scope_type")
-        if local_owner and principal_type == "user" and principal_id == owner:
+        if (local_owner and self.store.backend == "sqlite"
+                and principal_type == "user" and principal_id == owner):
             return {
                 "allowed": True,
                 "source": "local_owner",
                 "grant_id": None,
                 "reason": "local owner authority",
+                "constraints": {},
             }
 
         now = self.clock()
@@ -503,6 +585,7 @@ class AuthorizationService:
                         "source": "grant",
                         "grant_id": row["grant_id"],
                         "reason": reason,
+                        "constraints": _load(row["conditions_json"], {}),
                     }
                 rejected_reasons.append(reason)
             reason = (
@@ -519,6 +602,7 @@ class AuthorizationService:
             "source": "policy",
             "grant_id": None,
             "reason": reason,
+            "constraints": {},
         }
 
     def require(self, owner: str, **kwargs: Any) -> dict[str, Any]:
@@ -526,3 +610,47 @@ class AuthorizationService:
         if not decision["allowed"]:
             raise PermissionError("authorization denied: " + decision["reason"])
         return decision
+
+    def authorize_with_vetos(self, owner: str, vetos=None, **kwargs: Any) -> dict[str, Any]:
+        """Selo: CorePDP authorize followed by deny-only external vetos.
+
+        ``vetos`` is a PolicyVetoChain (or sequence of (name, callable)).
+        Without vetos this is identical to authorize(). Any veto doubt denies
+        while preserving the CorePDP grant constraints in the response.
+        """
+        decision = self.authorize(owner, **kwargs)
+        if not decision.get("allowed") or not vetos:
+            return {**decision, "vetos": []} if "vetos" not in decision else decision
+        try:
+            from sentra_quality.policy_veto_chain import (
+                PolicyVetoChain, build_veto_request,
+            )
+        except Exception as exc:
+            return {**decision, "allowed": False, "source": "veto:unavailable",
+                    "reason": "policy veto chain unavailable",
+                    "vetos": []}
+        chain = vetos if isinstance(vetos, PolicyVetoChain) else PolicyVetoChain(vetos)
+        context = kwargs.get("context") if isinstance(kwargs.get("context"), dict) else {}
+        request = build_veto_request(
+            owner,
+            principal_type=str(kwargs.get("principal_type", "agent")),
+            principal_id=str(kwargs.get("principal_id", "")),
+            capability=str(kwargs.get("capability", "")),
+            scope_type=str(kwargs.get("scope_type", "instance")),
+            scope_id=kwargs.get("scope_id"),
+            operation_id=context.get("operation_id"),
+            work_item_id=context.get("work_item_id"),
+            workspace_id=context.get("workspace_id"),
+            context=context,
+        )
+        chained = chain.evaluate(
+            request, core_allowed=True, core_reason=str(decision.get("reason", "")),
+            core_constraints=dict(decision.get("constraints") or {}),
+        )
+        if chained["allowed"]:
+            current = self.authorize(owner, **kwargs)
+            if (not current.get("allowed") or current.get("grant_id") != decision.get("grant_id")
+                    or current.get("constraints") != decision.get("constraints")):
+                return {**current, "allowed": False, "source": "core_pdp",
+                        "reason": "core grant changed during veto admission", "vetos": chained["vetos"]}
+        return {**decision, **chained}

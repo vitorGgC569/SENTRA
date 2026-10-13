@@ -65,6 +65,10 @@ def _canonical_upstream(value: str) -> str:
 
 
 def _git(repo: Path, *args: str) -> bytes:
+    from sentra_runtime.effect_boundary import current_effect_context
+    context = current_effect_context.get()
+    if context is not None:
+        context.checkpoint()
     env = os.environ.copy()
     # Do not allow Git's external pager or shell-like fsmonitor hooks.
     env["GIT_PAGER"] = "cat"
@@ -80,6 +84,8 @@ def _git(repo: Path, *args: str) -> bytes:
         raise GateFailure("Git source inspection unavailable") from exc
     if result.returncode != 0:
         raise GateFailure(f"Git inspection failed for {repo.name} ({args[0]})")
+    if context is not None:
+        context.checkpoint()
     return result.stdout.strip()
 
 

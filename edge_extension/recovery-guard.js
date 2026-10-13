@@ -2,7 +2,7 @@
   "use strict";
   if (window.location.hostname !== "chatgpt.com") return;
 
-  const VERSION = "1.6.52";
+  const VERSION = "1.7.0";
   const KEY = "__SENTRA_RECOVERY_GUARD__";
   const previous = globalThis[KEY];
   if (previous && previous.version === VERSION) return;

@@ -1,0 +1,25 @@
+.document-panel{display:flex;min-height:480px;height:100%;color:var(--text,#e5e7eb);background:var(--panel,#17191d);font-size:14px;overflow:hidden}
+.document-library{width:220px;flex-shrink:0;padding:12px;border-right:1px solid #ffffff16;overflow:auto}
+.document-library-heading,.document-actions,.document-format-bar,.document-options{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.document-library-heading{justify-content:space-between}.document-library>button{display:flex;width:100%;justify-content:space-between;margin:4px 0;text-align:left}.document-library small{opacity:.5;margin-left:8px}
+.document-panel button,.document-panel select,.document-panel input{font:inherit;color:inherit;background:#ffffff08;border:1px solid #ffffff20;border-radius:7px;padding:7px 10px}
+.document-panel button{cursor:pointer}.document-panel button:hover,.document-panel .selected{background:#ffffff15}.document-panel button:disabled{opacity:.4;cursor:default}
+.document-panel :focus-visible{outline:2px solid #86b7ff;outline-offset:2px}.document-workarea{flex:1;min-width:0;padding:24px 32px;overflow:auto}
+.document-title{font-size:25px!important;width:100%;margin:12px 0;border:0!important;background:transparent!important;padding-left:0!important}
+.document-status{font-size:12px;opacity:.75;min-height:18px}.document-error{color:#ffb5b5}.document-recovery{padding:12px;background:#dfb45015;border:1px solid #dfb45040;border-radius:8px;margin:12px 0}
+.document-actions,.document-options{margin:12px 0}.document-options{font-size:12px}.document-options label{display:flex;align-items:center;gap:6px}
+.document-format-bar{padding:10px 0;border-bottom:1px solid #ffffff18}.document-format-bar button{font-size:12px;padding:5px 7px}
+.document-rich .tiptap{min-height:300px;padding:16px 2px;outline:none;line-height:1.65;overflow-wrap:anywhere}.document-rich table{border-collapse:collapse;width:100%}.document-rich td,.document-rich th{border:1px solid #ffffff30;padding:8px;min-width:60px}.document-rich pre,.document-rich code{background:#0003;border-radius:4px}.document-rich pre{padding:12px;overflow:auto}.document-rich blockquote{border-left:3px solid #ffffff40;padding-left:16px;margin-left:0}
+.document-source{display:block;box-sizing:border-box;width:100%;min-height:340px;resize:vertical;background:#0002;color:inherit;border:1px solid #ffffff20;border-radius:8px;padding:16px;font:13px/1.6 Consolas,monospace;tab-size:4}
+.document-history{padding-left:20px}.document-history li{margin:8px 0}.document-history button{margin-left:8px}.document-diff{white-space:pre-wrap;overflow-wrap:anywhere;padding:16px;background:#0003;border:1px solid #ffffff20;border-radius:8px}.document-panel small{display:inline-block;margin:4px 8px}
+@media(max-width:800px){.document-library{width:150px}.document-workarea{padding:16px}.document-panel{font-size:13px}}
+.document-project-files{margin:16px 0;padding:12px;border:1px solid #ffffff20;border-radius:8px}.document-file-list{display:flex;flex-wrap:wrap;gap:6px;max-height:180px;overflow:auto}.document-pdf-page{display:block;max-width:100%;height:auto;background:#fff;margin:12px auto}.document-code{border:1px solid #ffffff20;border-radius:8px;overflow:hidden}
+.document-rich{position:relative}.document-slash-menu{display:flex;flex-direction:column;position:absolute;left:8px;bottom:8px;padding:8px;gap:4px;background:var(--panel,#23262d);border:1px solid #ffffff30;border-radius:8px;box-shadow:0 8px 24px #0003;z-index:2}
+.opendots-shell .document-panel{color:var(--shell-ink,#333641);background:#fff;--panel:#fff;color-scheme:light;border-radius:12px;border:1px solid var(--shell-line,#e9e8e6)}
+.opendots-shell .document-library,.opendots-shell .document-format-bar{border-color:var(--shell-line,#e9e8e6)}
+.opendots-shell .document-panel :is(button,select,input){background:#faf9f7;border-color:var(--shell-line,#e9e8e6)}
+.opendots-shell .document-panel button:hover,.opendots-shell .document-panel .selected{background:#ececf5}
+.opendots-shell .document-panel :is(.document-code,.document-project-files,.document-slash-menu,.document-diff,.document-source){border-color:var(--shell-line,#e9e8e6)}
+.opendots-shell .document-panel :is(.document-diff,.document-source){background:#faf9f7}
+.opendots-shell .document-rich :is(td,th){border-color:#dedee6}.opendots-shell .document-rich pre,.opendots-shell .document-rich code{background:#f2f1ee}
+.opendots-shell .document-rich blockquote{border-color:#c8cad6}.opendots-shell .document-error{color:#a53038}.opendots-shell .document-code .cm-gutters{border-color:#dedee6;color:#686b78}

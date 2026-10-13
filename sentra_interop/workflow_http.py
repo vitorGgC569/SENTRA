@@ -41,11 +41,13 @@ class WorkflowHTTPClient:
         if self._client is None:
             import httpx
             self._client=httpx.AsyncClient(trust_env=False,follow_redirects=False,timeout=self.timeout)
+        context.checkpoint()
         async with self._client.stream(method,self.base+path,json=body,params=params,
             headers={"Authorization":"Bearer "+self._token,"Accept":"application/json"},
             timeout=self.timeout,follow_redirects=False) as response:
             raw=bytearray()
             async for chunk in response.aiter_bytes():
+                context.checkpoint()
                 raw.extend(chunk)
                 if len(raw)>self.max_response: raise ValueError("workflow HTTP response exceeds bound")
             if not 200<=response.status_code<300: raise WorkflowHTTPStatus(response.status_code)

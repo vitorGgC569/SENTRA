@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { api, route } from './api';
+import { shellBridge } from './shell-bridge';
 import { Modal } from './primitives';
 import { MCPAccountSwitch } from './mcp-account-switch';
 
@@ -8,7 +8,7 @@ export function PluginStatusDialog({ ws, close }) {
   const [proof, setProof] = useState(null), [error, setError] = useState('');
   function refresh() {
     setError('');
-    api(route('/api/center/plugin-proof', { ws })).then(setProof).catch(e => setError(e.message));
+    shellBridge({ project_id: ws, action: 'plugin_connection_proof' }).then(setProof).catch(e => setError(e.message));
   }
   useEffect(refresh, [ws]);
   const item = (label, description, ready) => <div style={{
