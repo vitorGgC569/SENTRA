@@ -13,6 +13,9 @@ can verify provenance without trusting remote claims.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import hashlib
+import json
+from pathlib import Path
 from typing import Any, Callable
 
 SCHEMA = 1
@@ -179,14 +182,64 @@ def provider_recovery(name: str, *, approved: bool = False,
     return {"schema": SCHEMA, "provider": name, "action": "recovery", **result}
 
 
+def provider_effect_preview(name: str, action: str) -> dict[str, Any]:
+    """Describe a destructive provider effect. This does not run it."""
+    spec = _require_provider(name)
+    effects = {
+        "remove": "unregister the optional provider; user project files stay",
+        "install": f"install pinned {spec.get('pin_version')}",
+        "repair": "repair the pinned provider install",
+        "revoke": "revoke a pending provider operation",
+    }
+    if action not in effects:
+        raise ValueError("unknown provider action")
+    body = {
+        "schema": SCHEMA,
+        "provider": name,
+        "action": action,
+        "display": spec["display"],
+        "package": spec.get("package"),
+        "effect": effects[action],
+    }
+    encoded = json.dumps(body, sort_keys=True, separators=(",", ":"))
+    return {**body, "preview_sha256": hashlib.sha256(encoded.encode()).hexdigest()}
+
+
 def provider_remove(name: str, *, approved: bool = False,
-                    runner: Runner | None = None) -> dict[str, Any]:
-    """Remove an optional provider. Revokes its local registration; never touches user data."""
+                    runner: Runner | None = None,
+                    preview_sha256: str | None = None,
+                    journal: Path | str | None = None) -> dict[str, Any]:
+    """Remove an optional provider only after the current preview is repeated.
+
+    The same preview digest is an idempotent replay: the host runner is not
+    called again. Revokes local registration; never touches user data.
+    """
+    preview = provider_effect_preview(name, "remove")
+    if preview_sha256 != preview["preview_sha256"]:
+        raise PermissionError("destructive provider remove requires the current preview")
+    if journal is None:
+        raise ValueError("provider remove journal required")
+    path = Path(journal)
+    key = name + ":remove:" + preview["preview_sha256"]
+    rows: dict[str, Any] = {}
+    if path.is_file():
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
+            raise ValueError("provider remove journal is invalid")
+        rows = loaded
+        previous = rows.get(key)
+        if isinstance(previous, dict):
+            return {**previous, "replayed": True}
     run = _admit("remove", name, approved=approved, runner=runner)
-    result = run("remove", {"provider": name})
+    result = run("remove", {"provider": name, "preview_sha256": preview_sha256})
     if not isinstance(result, dict):
         raise ValueError("provider runner returned an invalid result")
-    return {"schema": SCHEMA, "provider": name, "action": "remove", **result}
+    record = {"schema": SCHEMA, "provider": name, "action": "remove",
+              "preview_sha256": preview["preview_sha256"], **result}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows[key] = record
+    path.write_text(json.dumps(rows, sort_keys=True), encoding="utf-8")
+    return {**record, "replayed": False}
 
 
 def provider_revoke(name: str, *, approved: bool = False,

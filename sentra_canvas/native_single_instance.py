@@ -1,11 +1,20 @@
 """One native SENTRA Dot window per Windows interactive session.
 
-A second launch focuses the existing SENTRA window instead of opening another
-one. The Canvas broker remains independently managed by connect_or_start.
+DOT_WINDOW_MUTEX is the Dot window identity. It is not an installation id
+and it is not a frontend code reload. A second launch focuses the existing
+SENTRA window instead of opening another one. The Canvas broker remains
+independently managed by connect_or_start.
 """
 from __future__ import annotations
 from contextlib import contextmanager
 import os
+
+DOT_WINDOW_MUTEX = "Local\\SENTRA.Dot.Native.Window"
+
+
+def dot_window_identity() -> dict:
+    return {"kind": "dot_identity", "mutex": DOT_WINDOW_MUTEX,
+            "installation_id": None, "code_reload": False}
 
 
 def focus_existing_window() -> bool:
@@ -70,7 +79,7 @@ def single_native_window():
     kernel.CreateMutexW.restype = ctypes.c_void_p
     kernel.GetLastError.restype = ctypes.c_ulong
     kernel.SetLastError(0)
-    mutex = kernel.CreateMutexW(None, True, "Local\\SENTRA.Dot.Native.Window")
+    mutex = kernel.CreateMutexW(None, True, DOT_WINDOW_MUTEX)
     if not mutex:
         raise OSError("Não foi possível reservar a janela nativa do SENTRA")
     if kernel.GetLastError() == 183:  # ERROR_ALREADY_EXISTS

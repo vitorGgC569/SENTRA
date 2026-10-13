@@ -29,6 +29,35 @@ def frontend_source_mtime(root: Path) -> int:
     return max((p.stat().st_mtime_ns for p in paths if p.is_file()), default=0)
 
 
+def code_reload_identity(root: Path) -> dict:
+    """Frontend bundle freshness. Never an installed-product update."""
+    status = version_status(root)
+    if "installation_id" in status:
+        raise RuntimeError("code reload must not carry an installation id")
+    return {"kind": "code_reload", "installation_id": None, "installed_update": False, **status}
+
+
+def installed_update_identity(marker: dict) -> dict:
+    """Installed Windows update identity. A frontend timestamp is a different operation."""
+    if not isinstance(marker, dict):
+        raise ValueError("installation marker required")
+    installation_id = marker.get("installation_id")
+    if (not isinstance(installation_id, str) or not installation_id
+            or "frontend_source_time_ns" in marker or "frontend_stale" in marker):
+        raise ValueError("installed update is not a code reload")
+    return {"kind": "installed_update", "installation_id": installation_id,
+            "code_reload": False, "frontend_stale": None}
+
+
+def assert_distinct_maintenance(code: dict, installed: dict, dot: dict) -> None:
+    if code.get("kind") == installed.get("kind") or code.get("kind") == dot.get("kind"):
+        raise RuntimeError("code reload, installed update, and Dot window collapsed")
+    if code.get("installation_id") or installed.get("code_reload") or dot.get("installation_id"):
+        raise RuntimeError("maintenance identities crossed")
+    if code.get("kind") != "code_reload" or installed.get("kind") != "installed_update" or dot.get("kind") != "dot_identity":
+        raise RuntimeError("maintenance identity mismatch")
+
+
 def version_status(root: Path) -> dict:
     root = Path(root).resolve(strict=True)
     bundle = root / "sentra_canvas" / "static" / "desktop-assets" / "desktop.js"
