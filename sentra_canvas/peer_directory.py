@@ -138,10 +138,25 @@ class SignedPeerDirectory:
     def status(self):
         with self.lock:
             now=self.clock()
+            peers=[]
+            for value in self.peers.values():
+                row=dict(value)
+                if row["expires_at"]<=now:
+                    row["state"]="disconnected"
+                row["automatic_resend"]=False
+                peers.append(row)
             return {"running":self.thread is not None and self.thread.is_alive(),"node_id":self.identity.node_id,
                 "address":self.address,"port":self.port,"mesh_id":self.mesh_id,
-                "peers":[dict(v) for v in self.peers.values() if v["expires_at"]>now],
+                "peers":peers,
                 "rejected":self.rejected,"send_errors":self.send_errors,"presence_grants_execution":False}
+
+    def work_resend(self, node_id, packet):
+        """Presence never resends work. A disconnected peer stays disconnected."""
+        del packet
+        with self.lock:
+            peer=self.peers.get(node_id)
+            state="absent" if peer is None else ("disconnected" if peer["expires_at"]<=self.clock() else peer.get("state"))
+        raise PermissionError(f"peer {state} does not resend work; reconcile before any new send")
 
     def start(self):
         if self.thread is not None:raise RuntimeError("peer directory already started")
