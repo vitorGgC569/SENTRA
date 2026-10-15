@@ -36,15 +36,15 @@ Capturas reais feitas em 13/10/2026. A janela de instalação abaixo é uma **pr
 visual executada a partir do código**, sem instalar arquivos ou configurar contas.
 Ela não comprova uma instalação concluída.
 
-![SENTRA Setup em tema escuro com o Dot](docs/media/2026-10-13/sentra-setup-dark.png)
+![SENTRA Setup em tema escuro com o Dot](docs/media/2026-10-13/sentra-setup-dark.jpg)
 
 Home do aplicativo em execução, com os Dots deste ambiente de desenvolvimento:
 
-![Home do SENTRA com Dots](docs/media/2026-10-13/sentra-home.png)
+![Home do SENTRA com Dots](docs/media/2026-10-13/sentra-home.jpg)
 
 Canvas do aplicativo em execução, com janela de terminal e conexão visual:
 
-![Canvas do SENTRA com terminal](docs/media/2026-10-13/sentra-canvas.png)
+![Canvas do SENTRA com terminal](docs/media/2026-10-13/sentra-canvas.jpg)
 
 ### Preparação para modelos WEB
 
