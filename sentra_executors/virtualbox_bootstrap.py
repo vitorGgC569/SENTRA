@@ -381,3 +381,87 @@ def reconcile_failed_attempt(client, binding, cfg, *, evidence=None, detach_stor
     (target_dir / 'reconciliation.json').write_text(json.dumps(receipt, indent=2))
     return receipt
 
+
+def _reservation(cfg):
+    family = cfg.get('os_family')
+    cpus, memory, disk = cfg.get('cpus'), cfg.get('memory_mb'), cfg.get('disk_gb')
+    minimum_cpu = 2 if family == 'windows' else 1
+    minimum_memory = 4096 if family == 'windows' else 1024
+    minimum_disk = 64 if family == 'windows' else 16
+    if (family not in {'linux', 'windows'} or type(cpus) is not int or type(memory) is not int
+            or type(disk) is not int or cpus < minimum_cpu or memory < minimum_memory
+            or not minimum_disk <= disk <= 256):
+        return {'reserved': False}
+    return {'reserved': True, 'cpus': cpus, 'memory_mb': memory, 'disk_gb': disk}
+
+
+def _observed(status, **extra):
+    extra.pop('status', None)
+    extra.pop('interface_action', None)
+    result = {'physical_effects_performed': False, 'automatic_retry': False,
+        'installed_os_verified': False, 'desktop_ready_verified': False, 'windows_usable': False,
+        'activation_claimed': False, 'product_key_stored': False, 'created': False, **extra}
+    result['status'] = status
+    result['interface_action'] = 'installation.advance'
+    return result
+
+
+def advance(client, binding, cfg, *, confirm_launch=False):
+    """One interface step toward a desktop. Never replays a recorded attempt.
+
+    Creating the VM stays on provision. This admits the Debian user and desktop
+    seed, or reports a Windows license, without a separate QA script.
+    """
+    from .virtualbox_installation import assess_windows_license, installation_plan, observational_install, verify_guest
+    reservation = _reservation(cfg)
+    if not reservation['reserved']:
+        return _observed('resource_reservation_required', vm_id=binding.vm_id)
+    if cfg.get('os_family') == 'windows':
+        license_info = assess_windows_license(cfg)
+        if not license_info['install_admitted']:
+            return _observed('windows_license_not_admitted', vm_id=binding.vm_id, **license_info)
+    if 'base_folder' not in cfg or 'name' not in cfg:
+        raise ValueError('owned VM configuration required')
+    bootstrap_dir = Path(cfg['base_folder']) / cfg['name'] / 'bootstrap'
+    if (bootstrap_dir / 'launch-intent.json').is_file():
+        observed = observational_install(cfg, binding.vm_id)
+        if observed:
+            return _observed('installed_guest_observed', **observed)
+        return _observed('prior_attempt_not_replayed', vm_id=binding.vm_id)
+    plan = installation_plan(client, binding, cfg)
+    partitioned = bool((plan.get('disk') or {}).get('partition_table_observed'))
+    if partitioned and plan.get('vm_state') == 'running':
+        verified = verify_guest(client, binding, cfg)
+        if cfg.get('os_family') == 'linux' and verified.get('desktop_ready_verified'):
+            result = _observed('desktop_already_verified', **verified, resource_reservation=reservation)
+            result['windows_usable'] = False
+            return result
+        if cfg.get('os_family') == 'windows':
+            result = _observed(verified.get('status') or 'windows_guest_observed', **verified,
+                resource_reservation=reservation)
+            result['activation_claimed'] = False
+            return result
+    if (cfg.get('os_family') == 'linux' and (plan.get('disk') or {}).get('empty_observed')
+            and plan.get('vm_state') == 'poweroff' and not bootstrap_dir.exists()):
+        prepared = prepare(client, binding, cfg)
+        return {**prepared, 'user_and_desktop_scripted': True, 'interface_action': 'installation.advance',
+            'physical_effects_performed': True, 'automatic_retry': False, 'resource_reservation': reservation,
+            'windows_usable': False, 'activation_claimed': False}
+    if (bootstrap_dir / 'admission.json').is_file():
+        if not confirm_launch:
+            return _observed('launch_requires_distinct_admission', vm_id=binding.vm_id,
+                resource_reservation=reservation)
+        if plan.get('vm_state') == 'running' and (plan.get('disk') or {}).get('empty_observed'):
+            launched = launch(client, binding, cfg)
+            result = _observed(launched.get('status') or 'installation_launch_sent', **launched,
+                resource_reservation=reservation)
+            result['physical_effects_performed'] = True
+            result['windows_usable'] = False
+            return result
+        return _observed('launch_preconditions_absent', vm_id=binding.vm_id, resource_reservation=reservation)
+    if cfg.get('os_family') == 'windows':
+        return _observed('windows_provision_required', vm_id=binding.vm_id, resource_reservation=reservation,
+            license_posture=assess_windows_license(cfg)['posture'])
+    return _observed('no_safe_interface_step', vm_id=binding.vm_id, plan_status=plan.get('status'),
+        resource_reservation=reservation)
+

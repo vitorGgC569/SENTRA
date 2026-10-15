@@ -60,6 +60,10 @@ def install_grant(app, ws, *, principal="agent-1"):
     run = runtime.run(ws)
     if run["state"] != "RUNNING":
         runtime.durable.transition_run(run["run_id"], runtime.owner, "RUNNING")
+    # The production policy requires a live, Run-bound agent in addition to
+    # the WorkItem and its grant. A string assignee alone is not an actor.
+    runtime.control.ensure_agent(run["run_id"], runtime.owner, agent_id=principal,
+        role="worker", metadata={"workspace_id": ws})
     runtime.governance.create_work_item(
         run["run_id"], runtime.owner,
         work_item_id="WI-INTEGRATED",

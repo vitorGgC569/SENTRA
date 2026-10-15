@@ -133,7 +133,24 @@ def build_staging(dist: Path, staging: Path, tunnel_archive: Path) -> Path:
     legal_record = json.loads((staging / 'artwork-provenance.json').read_text(encoding='utf-8'))
     if not {'opendots','guacamole'} <= legal_record.keys():
         raise ValueError('integral release requires OpenDots MIT and Guacamole 1.5.0 Apache provenance')
+    _stage_package_contract(staging)
     return staging
+
+
+def _stage_package_contract(staging: Path) -> None:
+    """Copy license, user docs and the audit modules into the Setup tree.
+
+    A clean Windows install can read them without a developer checkout.
+    This does not add a paywall and does not block local use.
+    """
+    from sentra_quality.distribution_diagnosis import PACKAGE_FILES
+    for relative in PACKAGE_FILES:
+        source = ROOT / relative
+        if not source.is_file():
+            raise FileNotFoundError(f"installer package file missing: {relative}")
+        target = staging / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
 
 
 def _write_staged_artwork_record(staging: Path) -> None:

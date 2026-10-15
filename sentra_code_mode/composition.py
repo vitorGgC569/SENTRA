@@ -37,8 +37,8 @@ def build_code_mode(control, *, engine: str = "quickjs-wasm",
     """Instantiate the dispatcher on the central control (no second authority)."""
     from .dispatcher import CodeModeDispatcher
     if engine == "quickjs-wasm" and artifact is None:
-        from .artifact_config import load_artifact_from_env
-        artifact = load_artifact_from_env()  # explicit UNAVAILABLE when unpinned
+        from .artifact_config import load_artifact
+        artifact = load_artifact()  # explicit UNAVAILABLE when unpinned
     return CodeModeDispatcher(control, limits=limits, engine=engine, artifact=artifact)
 
 
@@ -66,7 +66,7 @@ def approve_artifact(*, wasm_path: str, sbom_path: str,
                            sbom_sha256=sbom_sha256.strip().lower())
 
 
-def build_fenced_tool_map(tool_handlers) -> dict[str, Any]:
+def build_fenced_tool_map(tool_handlers, *, exposure=None) -> dict[str, Any]:
     """Validate the host-selected tool map for fenced inner Operations.
 
     Keys are allowlisted names, values are HOST-SELECTED callables (never
@@ -74,13 +74,27 @@ def build_fenced_tool_map(tool_handlers) -> dict[str, Any]:
     inside the sandbox. Each inner call becomes its OWN OperationRequest
     through the central gate (see ``_FencedToolBridge``) — the map itself
     creates no grants.
+
+    ``exposure`` is the optional-surface policy. Deny-only raises
+    ``OptionalSurfaceRefused`` and does not pretend the surface is closed.
+    An allow policy keeps only the named tools.
     """
     handlers = dict(tool_handlers or {})
     if len(handlers) > 32:
         raise ValueError("fenced tool map exceeds 32 entries")
+    if exposure is not None:
+        from .optional_surface import resolve_optional_tools
+        decision = resolve_optional_tools(exposure, handlers)
+        handlers = {name: handlers[name] for name in decision["enabled"]}
     for name, handler in handlers.items():
         if not isinstance(name, str) or not _Machine_TOOL_NAME.fullmatch(name):
             raise ValueError("tool name outside allowlist charset: " + str(name)[:80])
+        if getattr(handler, "self_grant", False):
+            from .optional_surface import OptionalSurfaceRefused
+            raise OptionalSurfaceRefused("PLUGIN_SELF_GRANT", {
+                "reason": "PLUGIN_SELF_GRANT", "capability_closed": False,
+                "tool": name, "grants_created": False, "homologated": False,
+            })
         if not callable(handler):
             raise ValueError("host tool handler required for: " + name)
     return handlers
@@ -123,8 +137,8 @@ def compose_quickjs_dispatcher(control, *, artifact=None,
     """
     from .dispatcher import CodeModeDispatcher
     if artifact is None:
-        from .artifact_config import load_artifact_from_env
-        artifact = load_artifact_from_env()
+        from .artifact_config import load_artifact
+        artifact = load_artifact()
     return CodeModeDispatcher(control, limits=limits,
                               engine="quickjs-wasm", artifact=artifact)
 

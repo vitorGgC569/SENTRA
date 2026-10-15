@@ -84,6 +84,21 @@ _EVENT_RE = re.compile(
     re.IGNORECASE,
 )
 _UNCERTAIN_KEYS = {"uncertain_content", "in_flight_content", "unconfirmed_payload"}
+_DOT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+def _is_filesystem_link(path: Path) -> bool:
+    return path.is_symlink() or (
+        hasattr(path, "is_junction") and path.is_junction()
+    )
+
+
+def _validate_dot_id(dot_id: Optional[str]) -> Optional[str]:
+    if dot_id is None:
+        return None
+    if not isinstance(dot_id, str) or not _DOT_ID_RE.fullmatch(dot_id):
+        raise ValueError("invalid dot_id")
+    return dot_id
 
 
 def _utcnow() -> str:
@@ -177,21 +192,43 @@ def _fit_lines(lines: List[str], max_chars: int) -> str:
 class ProgramMemory:
     """Persistent program-level memory rooted at a workspace directory.
 
-    :param workspace: workspace root; files live in ``<workspace>/memory/``.
+    :param workspace: workspace root. Without ``dot_id``, files live in
+        ``<workspace>/memory/`` and are not read from ``memory/dots/``.
+    :param dot_id: when set, files live in ``<workspace>/memory/dots/<dot_id>/``.
+        That store is invisible to other Dots and to the workspace-level store.
     """
 
-    def __init__(self, workspace: Union[str, Path]):
+    def __init__(self, workspace: Union[str, Path], *, dot_id: Optional[str] = None):
         self.workspace = Path(workspace)
-        self.memory_dir = self.workspace / MEMORY_DIRNAME
-        if self.memory_dir.is_symlink() or (
-            hasattr(self.memory_dir, "is_junction") and self.memory_dir.is_junction()
-        ):
+        self.dot_id = _validate_dot_id(dot_id)
+        base = self.workspace / MEMORY_DIRNAME
+        if _is_filesystem_link(base):
+            raise ValueError("memory directory cannot be a filesystem link")
+        if self.dot_id is None:
+            self.memory_dir = base
+        else:
+            dots = base / "dots"
+            if _is_filesystem_link(dots):
+                raise ValueError("memory directory cannot be a filesystem link")
+            self.memory_dir = dots / self.dot_id
+            if _is_filesystem_link(self.memory_dir):
+                raise ValueError("memory directory cannot be a filesystem link")
+        if _is_filesystem_link(self.memory_dir):
             raise ValueError("memory directory cannot be a filesystem link")
         self.memory_dir.mkdir(parents=True, exist_ok=True)
+        if self.dot_id is not None:
+            resolved = self.memory_dir.resolve()
+            root = (base / "dots").resolve()
+            if not resolved.is_relative_to(root):
+                raise ValueError("dot memory path escapes the workspace")
         self.adrs_file = self.memory_dir / ADRS_FILENAME
         self.lessons_file = self.memory_dir / LESSONS_FILENAME
         self.candidates_file = self.memory_dir / CANDIDATES_FILENAME
         self.lock_file = self.memory_dir / ".memory.lock"
+
+    def for_dot(self, dot_id: str) -> "ProgramMemory":
+        """Open this workspace scoped to one Dot. Does not copy records."""
+        return ProgramMemory(self.workspace, dot_id=dot_id)
 
     # -- atomic IO ------------------------------------------------------
     def _atomic_write_json(self, path: Path, payload: Any) -> None:

@@ -62,18 +62,28 @@ def test_frozen_mcp_launcher_selects_canvas_sibling_not_the_mcp_binary(tmp_path,
 
 
 def test_native_window_can_detach_without_owning_broker_lifecycle(monkeypatch):
+    from contextlib import nullcontext
+    from sentra_canvas import native_single_instance
     from sentra_canvas.native_app import launch_native, WindowControls
+    # This is a mocked window lifecycle test, not a test of the already-open
+    # SENTRA HWND on the authorized workstation.
+    monkeypatch.setattr(native_single_instance, "single_native_window", lambda: nullcontext(True))
     assert {name for name in dir(WindowControls()) if not name.startswith("_")} == {
-        "minimize", "toggle_maximize", "close"}
+        "minimize", "toggle_maximize", "close",
+        "check_full_updates", "apply_full_updates",
+        "check_code_updates", "apply_code_updates",
+        "reauthorize", "select_iso"}
     controls = []
     class ShownEvent:
-        on_shown = None
+        def __init__(self):
+            self.handlers = []
         def __iadd__(self, callback):
-            self.on_shown = callback
+            self.handlers.append(callback)
             return self
     shown = ShownEvent()
+    closing = ShownEvent()
     window = SimpleNamespace(destroy=lambda: controls.append("closed"),
-                             events=SimpleNamespace(shown=shown))
+                             events=SimpleNamespace(shown=shown, closing=closing))
     def create_window(*args, **kwargs):
         controls.append(kwargs["js_api"])
         return window
@@ -83,7 +93,9 @@ def test_native_window_can_detach_without_owning_broker_lifecycle(monkeypatch):
     # Endpoint intentionally has no serve_forever or shutdown methods.
     launch_native(Endpoint(1234, "local-token", "a" * 32, 1234), serve=False)
     from sentra_canvas.native_brand import apply_native_icon
-    assert shown.on_shown is apply_native_icon
+    assert shown.handlers[0] is apply_native_icon
+    assert len(shown.handlers) == 2
+    assert len(closing.handlers) == 1
     assert controls[-1] == "closed"
 
 

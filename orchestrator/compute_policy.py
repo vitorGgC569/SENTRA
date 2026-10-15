@@ -124,3 +124,56 @@ def from_config(data: Optional[Dict[str, Any]]) -> Optional[ComputePolicy]:
         critical_add=_escalation_roles(escalation.get("critical_task"), "critical_task"),
         max_agents=max_agents,
     )
+
+
+@dataclass(frozen=True)
+class HostPressure:
+    """One host sample used to decide whether validator escalation may grow."""
+
+    ram_percent: float
+    available_mb: int
+    cpu_percent: float | None = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.ram_percent, bool) or not isinstance(self.ram_percent, (int, float)):
+            raise ValueError("ram_percent must be a number")
+        if not 0 <= float(self.ram_percent) <= 100:
+            raise ValueError("ram_percent out of range")
+        if type(self.available_mb) is not int or self.available_mb < 0:
+            raise ValueError("available_mb must be a non-negative int")
+        if self.cpu_percent is None:
+            return
+        if isinstance(self.cpu_percent, bool) or not isinstance(self.cpu_percent, (int, float)):
+            raise ValueError("cpu_percent must be a number or None")
+        if not 0 <= float(self.cpu_percent) <= 100:
+            raise ValueError("cpu_percent out of range")
+
+
+def clamp_for_pressure(policy: ComputePolicy, pressure: HostPressure) -> ComputePolicy:
+    """Freeze validator growth while the host is hot.
+
+    The returned policy keeps the initial roles. It does not add standby
+    validators and it does not lower ``max_agents`` below the initial crew.
+    The input policy is left unchanged. A cool sample returns that same object.
+    """
+    if not isinstance(policy, ComputePolicy):
+        raise TypeError("policy must be a ComputePolicy")
+    if not isinstance(pressure, HostPressure):
+        raise TypeError("pressure must be a HostPressure")
+    ram_hot = pressure.ram_percent >= 85 or pressure.available_mb < 1024
+    cpu_hot = pressure.cpu_percent is not None and pressure.cpu_percent >= 85
+    if not ram_hot and not cpu_hot:
+        return policy
+    initial_agents = policy.agent_count(list(policy.initial_roles))
+    if initial_agents >= 5:
+        capped = initial_agents
+    else:
+        capped = min(policy.max_agents, 5)
+    capped = min(policy.max_agents, max(5, capped))
+    return ComputePolicy(
+        initial_roles=list(policy.initial_roles),
+        disagreement_add=[],
+        low_confidence_add=[],
+        critical_add=[],
+        max_agents=capped,
+    )

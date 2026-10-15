@@ -14,6 +14,7 @@ export async function completeMessage(message, bridge, scope, isActive = () => t
     if (!isActive()) throw Error('Leitura interrompida ao sair da conversa.');
     const value = await bridge({ ...scope, action: 'message_content', message_id: message.message_id,
       revision: ref.revision, offset, limit: 65536 });
+    if (!isActive()) throw Error('Leitura interrompida ao sair da conversa.');
     if (value.revision !== ref.revision || value.sha256 !== ref.sha256 || value.total_chars !== ref.total_chars ||
         value.offset !== offset || typeof value.content !== 'string') throw Error('O original mudou durante a leitura. Consulte novamente a mensagem.');
     bytes += new TextEncoder().encode(value.content).length;
@@ -27,6 +28,7 @@ export async function completeMessage(message, bridge, scope, isActive = () => t
   const content = parts.join('');
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(content));
   const sha = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+  if (!isActive()) throw Error('Leitura interrompida ao sair da conversa.');
   if (sha !== ref.sha256) throw Error('SHA do original não confirmado.');
   return { ...message, content, content_truncated: false };
 }

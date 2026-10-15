@@ -43,7 +43,7 @@ class CanvasBridge:
                 raise ValueError('VM frame read takes no arguments')
             if action == 'vm_create':
                 spec = json.loads(value)
-                if (not isinstance(spec, dict) or set(spec) - {'os_family', 'cpus', 'memory_mb', 'disk_gb', 'iso_path'}
+                if (not isinstance(spec, dict) or set(spec) - {'os_family', 'cpus', 'memory_mb', 'disk_gb', 'iso_path', 'username'}
                         or not isinstance(request_key, str) or not 1 <= len(request_key) <= 128 or len(value) > 4000):
                     raise ValueError('bounded persistent VM configuration required')
                 body.update(value=value, request_key=request_key)

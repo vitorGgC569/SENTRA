@@ -6,14 +6,16 @@ import time
 
 from sentra_core.conversations import _decode, _encode
 from .shell_dot_canvas import canvas_root, dot_graph
-from .shell_dot_retirement import DotRetirement
+from .shell_dot_retirement import DotRetirement, remote_archive_projection
 from .shell_dot_authority_retirement import DotAuthorityRetirement
 from .shell_dot_vm_retirement import DotVmRetirementInspector
 from .store import Denied
 
 DOT_LIFECYCLE_ACTIONS = frozenset({
     "dot_preferences_get", "dot_preference_set", "dot_order_move", "dot_order_place", "dot_remove_preflight",
-    "dot_archive_local", "dot_restore_local", "dot_retire_authority_close",
+    "dot_archive_local", "dot_restore_local", "dot_pause_family", "dot_resume_family",
+    "dot_reconcile_family", "dot_incident_reconcile", "dot_delete_request",
+    "dot_retire_authority_close",
     "dot_retire_authority_status", "dot_retire_authority_reconcile", "dot_vm_retire_preflight",
 })
 
@@ -68,12 +70,13 @@ class DotLifecycleServices:
                 (self.owner, project_id, space_id)).fetchall()
         saved = {row["dot_id"]: row for row in rows}
         archived = self.retirement.archived(project_id, space_id)
+        remote = remote_archive_projection()
         items = []
         for index, dot in enumerate(roots):
             row = saved.get(dot["dot_id"])
             items.append({"dot_id": dot["dot_id"], "favorite": bool(row["favorite"]) if row else False,
                 "position": int(row["position"]) if row else index,
-                "archived_local": archived.get(dot["dot_id"], False)})
+                "archived_local": archived.get(dot["dot_id"], False), **remote})
         return sorted(items, key=lambda item: (item["archived_local"], not item["favorite"], item["position"], item["dot_id"]))
 
     def _persist(self, project_id, space_id, items, db):
@@ -84,6 +87,90 @@ class DotLifecycleServices:
                 "favorite=excluded.favorite,position=excluded.position,updated_at=excluded.updated_at",
                 (self.owner, project_id, space_id, item["dot_id"], int(item["favorite"]), item["position"], now))
 
+    def _incident_plan(self, project_id, space_id, dot, incident):
+        """Read the owner run, conversations, Grants and relay jobs. Does not resend."""
+        from sentra_runtime.uncertain_recovery import INCIDENTS, UncertainRecovery
+        if not isinstance(incident, str) or incident not in INCIDENTS:
+            raise ValueError("incident must be crash, canvas_closed, relay_down or reboot")
+        run_id = dot.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            raise Denied("Dot has no durable run to observe")
+        plan = UncertainRecovery(incident).reconcile_durable(
+            self.control, self.owner, run_id,
+            conversations=self._owner_conversations(project_id, space_id, dot),
+            grants=self._owner_grants(project_id, space_id, dot),
+            relay_jobs=self._owner_relay_jobs())
+        if plan.get("effects_executed") != 0 or plan.get("may_resend") is not False:
+            raise RuntimeError("incident plan must not execute or resend")
+        return plan
+
+    def _owner_conversations(self, project_id, space_id, dot):
+        family = {member["dot_id"] for member in self.retirement._family(project_id, space_id, dot)}
+        with closing(self.control.store.connect("shell")) as db:
+            rows = db.execute("SELECT body FROM shell_entities WHERE owner=? AND project_id=? "
+                "AND space_id=? AND kind='conversation'", (self.owner, project_id, space_id)).fetchall()
+            queue = db.execute("SELECT conversation_id,state,created_at FROM canvas_shell_queue "
+                "WHERE owner=? AND project_id=? ORDER BY created_at",
+                (self.owner, project_id)).fetchall()
+        state_by_id = {}
+        for row in queue:
+            state_by_id[row["conversation_id"]] = row["state"]
+        found = []
+        for item in (_decode(row["body"]) for row in rows):
+            if item.get("dot_id") not in family:
+                continue
+            ident = item.get("conversation_id")
+            if not isinstance(ident, str) or not ident:
+                continue
+            found.append({"id": ident, "state": state_by_id.get(ident) or "confirmed"})
+        found.sort(key=lambda item: item["id"])
+        return found
+
+    def _owner_relay_jobs(self):
+        """Read relay jobs already stored for this owner. Does not create the table."""
+        with closing(self.control.store.connect("execution_workspace")) as db:
+            exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='jobs'").fetchone()
+            if not exists:
+                return []
+            rows = db.execute(
+                "SELECT id, state, updated FROM jobs WHERE owner=? ORDER BY id",
+                (self.owner,)).fetchall()
+        found = []
+        for row in rows:
+            ident, state = row["id"], row["state"]
+            if not isinstance(ident, str) or not ident or not isinstance(state, str) or not state:
+                continue
+            found.append({"id": ident, "state": state})
+        return found
+
+    def _owner_grants(self, project_id, space_id, dot):
+        agents = {member["agent_id"] for member in self.retirement._family(project_id, space_id, dot)}
+        grants = self.control.authorization.list_grants(self.owner, include_revoked=True)["items"]
+        uncertain = set()
+        with closing(self.control.store.connect("authorization")) as db:
+            rows = db.execute("SELECT grant_id,outcome FROM authorization_events WHERE owner=? ORDER BY seq",
+                (self.owner,)).fetchall()
+        for row in rows:
+            if row["grant_id"] and str(row["outcome"]).upper() == "UNCERTAIN":
+                uncertain.add(row["grant_id"])
+        found = []
+        for grant in grants:
+            if grant.get("principal_type") == "agent" and grant.get("principal_id") not in agents:
+                continue
+            ident = grant.get("grant_id")
+            if not isinstance(ident, str) or not ident:
+                continue
+            if ident in uncertain:
+                state = "UNCERTAIN"
+            elif grant.get("revoked"):
+                state = "revoked"
+            else:
+                state = "active"
+            found.append({"id": ident, "state": state})
+        found.sort(key=lambda item: item["id"])
+        return found
+
     def dispatch(self, project_id, action, params, request_key=None):
         allowed = {
             "dot_preferences_get": {"space_id"},
@@ -93,6 +180,11 @@ class DotLifecycleServices:
             "dot_remove_preflight": {"space_id", "dot_id"},
             "dot_archive_local": {"space_id", "dot_id", "confirm_name", "snapshot"},
             "dot_restore_local": {"space_id", "dot_id"},
+            "dot_pause_family": {"space_id", "dot_id", "confirm_name"},
+            "dot_resume_family": {"space_id", "dot_id", "confirm_name"},
+            "dot_reconcile_family": {"space_id", "dot_id"},
+            "dot_incident_reconcile": {"space_id", "dot_id", "incident"},
+            "dot_delete_request": {"space_id", "dot_id", "confirm_name", "confirm_phrase"},
             "dot_retire_authority_close": {"space_id", "dot_id", "confirm_name", "confirm_phrase", "snapshot"},
             "dot_retire_authority_status": {"space_id", "dot_id", "retirement_key"},
             "dot_retire_authority_reconcile": {"space_id", "dot_id", "retirement_key"},
@@ -110,6 +202,16 @@ class DotLifecycleServices:
             return self.vm_retirement.preview(project_id, dot)
         if action in {"dot_archive_local", "dot_restore_local"}:
             return self.retirement.mutate(project_id, space_id, dot, action, params, request_key)
+        if action == "dot_pause_family":
+            return self.retirement.pause_family(project_id, space_id, dot, params, request_key)
+        if action == "dot_resume_family":
+            return self.retirement.resume_family(project_id, space_id, dot, params, request_key)
+        if action == "dot_reconcile_family":
+            return self.retirement.reconcile_family(project_id, space_id, dot, request_key)
+        if action == "dot_incident_reconcile":
+            return self._incident_plan(project_id, space_id, dot, params.get("incident"))
+        if action == "dot_delete_request":
+            return self.retirement.request_deletion(project_id, space_id, dot, params, request_key)
         if action == "dot_retire_authority_close":
             return self.authority_retirement.close(project_id, space_id, dot, params, request_key)
         if action == "dot_retire_authority_status":

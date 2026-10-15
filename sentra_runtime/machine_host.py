@@ -519,6 +519,16 @@ class MachineHost:
                 from .native_bundle import pinned_rustdesk_bundle
                 if set(config)&{"capability_id","paths","runtime_root","host_runtime_paths","manifest_paths"}:
                     raise ValueError("host owns native runtime/build/output path authority")
+                runtime = config.pop('runtime', None)
+                native_fields = {'executable', 'executable_sha256', 'build_manifest', 'source_revision'}
+                if runtime is not None and runtime != 'installed':
+                    raise ValueError('unknown RustDesk runtime selection')
+                if runtime == 'installed' and native_fields & set(config):
+                    raise ValueError('installed RustDesk selection cannot override native build pins')
+                if runtime == 'installed' or not native_fields & set(config):
+                    from sentra_remote.runtime_payload import installed_rustdesk_configuration
+                    selected = await asyncio.to_thread(installed_rustdesk_configuration)
+                    config.update(selected); persisted.pop('runtime', None); persisted.update(selected)
                 source_revision=config.pop("source_revision")
                 builds=private/"builds";builds.mkdir(mode=0o700,exist_ok=True)
                 native=await asyncio.to_thread(pinned_rustdesk_bundle,executable=config["executable"],
@@ -667,11 +677,12 @@ class MachineHost:
 
     def dispatch(self, *, workspace_id: str, work_item_id: str, machine_id: str,
                  capability_id: str, operation_id: str, arguments: dict,
-                 idempotency_key: str | None = None) -> dict:
+                 idempotency_key: str | None = None, effect_authorize=None) -> dict:
         return self._call(self._dispatch(workspace_id, work_item_id, machine_id,
-                                         capability_id, operation_id, arguments, idempotency_key))
+                                         capability_id, operation_id, arguments, idempotency_key, effect_authorize))
 
-    async def _dispatch(self, workspace_id, work_item_id, machine_id, cap, oid, arguments, key):
+    async def _dispatch(self, workspace_id, work_item_id, machine_id, cap, oid, arguments, key,
+                        effect_authorize=None):
         started=time.monotonic()
         item = self.control.work_item_info(work_item_id, self.owner)
         config = self._inventory.get(machine_id)
@@ -684,7 +695,13 @@ class MachineHost:
         request = factory.dispatch_request(run_id=item["run_id"], work_item_id=work_item_id,
             machine_id=machine_id, capability_id=cap, operation_id=oid,
             arguments=arguments, idempotency_key=key)
-        result = await factory.submit(run_id=item["run_id"], request=request)
+        if effect_authorize is None:
+            result = await factory.submit(run_id=item["run_id"], request=request)
+        else:
+            from sentra_executors.central_integration import CentralExecutorFactory
+            if not isinstance(factory, CentralExecutorFactory):
+                raise AuthorizationRequired("machine does not support additional host effect authority")
+            result = await factory.submit(run_id=item["run_id"], request=request, effect_authorize=effect_authorize)
         if self._telemetry is not None:
             try:
                 from .otlp_sink import SafeTelemetryEvent
@@ -701,7 +718,7 @@ class MachineHost:
                 self._experiences.record(request,workspace_id=workspace_id,configuration=config)
             except Exception as exc:
                 # Experience indexing cannot turn a committed effect into a retry.
-                self.memory_errors=(self.memory_errors+[{"operation_id":operation_id,
+                self.memory_errors=(self.memory_errors+[{"operation_id":oid,
                                                        "error":type(exc).__name__}])[-20:]
         return asdict(result)
 

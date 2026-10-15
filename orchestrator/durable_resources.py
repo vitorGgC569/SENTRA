@@ -134,5 +134,41 @@ class DurableResourceLeaseManager:
             self.durable_run_id, self.owner, states=states
         )
 
+    def admit_after_incident(
+        self,
+        task: Any,
+        resources: Iterable[str],
+        *,
+        incident: str,
+        operation_state: str | None = None,
+    ) -> dict[str, Any]:
+        """Decide whether a later admission could acquire. This method never does.
+
+        After crash, canvas close, relay loss or reboot, QUEUED is not proof
+        that the effect is unstarted. Only an explicit NOT_STARTED or ABSENT
+        state, with no may_have_started flag, is eligible. Eligibility is not
+        an acquire.
+        """
+        if incident not in {"crash", "canvas_closed", "relay_down", "reboot"}:
+            raise ValueError("incident must be crash, canvas_closed, relay_down or reboot")
+        logical = sorted({str(item) for item in resources if str(item)})
+        meta = getattr(task, "metadata", None)
+        if not isinstance(meta, dict):
+            meta = {}
+        state = operation_state if operation_state is not None else meta.get("effect_state")
+        unstarted = state in {None, "", "NOT_STARTED", "ABSENT"} and meta.get("may_have_started") is not True
+        settled = state in {"SUCCEEDED", "FAILED", "CANCELLED"}
+        return {
+            "incident": incident,
+            "operation_state": state,
+            "may_acquire": bool(unstarted and not settled),
+            "may_release": False,
+            "acquired": False,
+            "released": False,
+            "automatic_retry": False,
+            "effects_executed": 0,
+            "resource_count": len(logical),
+        }
+
     def close(self) -> None:
         self.durable.close()

@@ -8,6 +8,67 @@ from sentra_core.conversations import _decode
 from sentra_runtime.effect_boundary import current_effect_context
 from .store import Denied
 
+_GUEST_SECRET_KEYS = frozenset({"password", "guest_password"})
+
+
+def _redact_guest_secret(value, secret):
+    """Drop a Dot VM password from a dispatch result. Never log the secret."""
+    if not isinstance(secret, str) or secret == "":
+        return value
+    if isinstance(value, str):
+        return value.replace(secret, "")
+    if isinstance(value, dict):
+        return {
+            key: _redact_guest_secret(item, secret)
+            for key, item in value.items()
+            if key not in _GUEST_SECRET_KEYS
+        }
+    if isinstance(value, list):
+        return [_redact_guest_secret(item, secret) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_guest_secret(item, secret) for item in value)
+    return value
+
+
+def _vm_input_identity(arguments):
+    """Identity of one VM click or key chord. A different chord is a different effect."""
+    action = arguments.get("action") if isinstance(arguments, dict) else None
+    if action == "input.mouse":
+        x, y, buttons = arguments.get("x"), arguments.get("y"), arguments.get("buttons")
+        wheel = arguments.get("wheel", 0)
+        if type(x) is not int or type(y) is not int or type(buttons) is not int or type(wheel) is not int:
+            return None
+        selector = f"mouse:{x}:{y}:{buttons}:{wheel}"
+        if len(selector) > 200:
+            return None
+        return "mouse", selector, None
+    if action == "input.bios_dvd":
+        if set(arguments) != {"action"}:
+            return None
+        return "keyboard", "vm-bios-dvd-shortcut", "ctrl-alt-del-then-space"
+    if action == "input.key":
+        scans = arguments.get("scancodes")
+        if (not isinstance(scans, list) or not scans or len(scans) > 32
+                or any(type(item) is not int or not 0 <= item <= 255 for item in scans)):
+            return None
+        return "keyboard", "vm-scancodes", json.dumps(scans, separators=(",", ":"))
+    return None
+
+
+def _scrub_guest_secret(exc, secret):
+    if not isinstance(secret, str) or secret == "":
+        return
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if current.args:
+            current.args = tuple(
+                arg.replace(secret, "") if isinstance(arg, str) else arg
+                for arg in current.args
+            )
+        current = current.__cause__ or current.__context__
+
 
 class ShellActorService:
     def __init__(self, runtime):
@@ -165,6 +226,111 @@ class ShellActorService:
             raise Denied("coordinator composition requires an active central fence")
         context.checkpoint()
 
+    def _dot_vm_record(self, intent, authority):
+        """Read the target Dot's VM row. Missing rows stay empty; no hypervisor call."""
+        from .shell_dot_canvas import canvas_root
+        from .shell_dot_vm import VmStore
+        project_id = authority.get("project_id")
+        dot_id = intent.get("target_dot_id") if isinstance(intent, dict) else None
+        if not isinstance(project_id, str) or not project_id or not isinstance(dot_id, str) or not dot_id:
+            return None
+        space_id = authority.get("space_id")
+        with closing(self.control.store.connect("shell")) as db:
+            dot = self.control.shell._entity(
+                db, self.owner, project_id, "dot", dot_id,
+                space_id=space_id if isinstance(space_id, str) else None,
+            )
+        if not isinstance(dot, dict):
+            return None
+        root = canvas_root(dot)
+        if not isinstance(root, str) or not root:
+            return None
+        return VmStore(self.control, self.owner).get(project_id, root)
+
+    def _targets_another_canvas(self, intent, authority):
+        """True only when both Dots load and they do not share a canvas root."""
+        from .shell_dot_canvas import canvas_root
+        project_id = authority.get("project_id") if isinstance(authority, dict) else None
+        target_id = intent.get("target_dot_id") if isinstance(intent, dict) else None
+        conversation_id = authority.get("conversation_id") if isinstance(authority, dict) else None
+        if not all(isinstance(value, str) and value for value in (project_id, target_id, conversation_id)):
+            return False
+        space_id = authority.get("space_id") if isinstance(authority.get("space_id"), str) else None
+        try:
+            with closing(self.control.store.connect("shell")) as db:
+                target = self.control.shell._entity(
+                    db, self.owner, project_id, "dot", target_id, space_id=space_id)
+                conversation = self.control.shell._entity(
+                    db, self.owner, project_id, "conversation", conversation_id, space_id=space_id)
+                owner_dot = self.control.shell._entity(
+                    db, self.owner, project_id, "dot", conversation["dot_id"], space_id=space_id)
+            return canvas_root(target) != canvas_root(owner_dot)
+        except Exception:
+            return False
+
+    def _authority_with_dot_vm(self, intent, authority):
+        """Place a Canvas tool on the Dot VM when the caller did not force the host.
+
+        The model cannot choose placement. An explicit host authority stays on
+        the host. A registered VM id selects the guest and blocks the turn when
+        the registry is incomplete, instead of substituting a host process.
+        """
+        specified = authority.get("placement")
+        if specified == "host":
+            return authority
+        if specified not in {None, "", "guest"}:
+            return authority
+        if self._targets_another_canvas(intent, authority):
+            blocked = dict(authority)
+            blocked["placement"] = "guest"
+            for key in ("vm_id", "username", "password", "guest_password", "guest_executor",
+                        "guest_workspace", "guest_process"):
+                blocked.pop(key, None)
+            return blocked
+        record = self._dot_vm_record(intent, authority)
+        vm_id = record.get("vm_id") if isinstance(record, dict) else None
+        has_vm = isinstance(vm_id, str) and bool(vm_id.strip()) and "\0" not in vm_id and len(vm_id.strip()) <= 128
+        if specified in {None, ""} and not has_vm:
+            return authority
+        enriched = dict(authority)
+        enriched["placement"] = "guest"
+        if not has_vm:
+            return enriched
+        vm_id = vm_id.strip()
+        enriched["guest_process"] = {
+            "vm_registry_bound": True,
+            "vm_id": vm_id,
+            "verified": False,
+        }
+        username = record.get("username")
+        if not isinstance(username, str) or not username.strip() or "\0" in username:
+            username = record.get("guest_username")
+        password = record.get("password")
+        if not isinstance(password, str) or password == "" or "\0" in password or "\n" in password or "\r" in password:
+            password = record.get("guest_password")
+        # An incomplete row cannot build a guest executor. Leave the three
+        # absent so the dispatch stays blocked and the password is not forwarded.
+        if not (isinstance(username, str) and username.strip() and "\0" not in username
+                and isinstance(password, str) and password and "\0" not in password
+                and "\n" not in password and "\r" not in password):
+            enriched.pop("vm_id", None)
+            enriched.pop("username", None)
+            enriched.pop("password", None)
+            enriched.pop("guest_password", None)
+            enriched.pop("guest_executor", None)
+            return enriched
+        enriched["vm_id"] = vm_id
+        enriched["username"] = username
+        enriched["password"] = password
+        family = record.get("os_family")
+        if isinstance(family, str) and family.strip().lower() in {"linux", "windows"}:
+            enriched["os_family"] = family.strip().lower()
+        from .shell_dot_canvas import _imported_guest_workspace
+        imported = _imported_guest_workspace(record, enriched.get("os_family") or "linux")
+        if imported:
+            enriched["guest_workspace"] = imported
+        return enriched
+
     def compose(self, intent, authority):
         self._checkpoint()
         pid, sid, oid = authority["project_id"], authority["space_id"], authority["operation_id"]
@@ -200,8 +366,37 @@ class ShellActorService:
             value = self.control.reassign_work_item(intent["work_item_id"], self.owner, agent_id=intent["agent_id"])
             return {"status": "applied", "result": value}
         if kind == "dot_tool_dispatch":
-            from sentra_runtime.dot_tool_dispatch import compose_dot_tool_dispatch
-            return compose_dot_tool_dispatch(self.control, self.owner, intent, authority)
+            from sentra_runtime.dot_tool_dispatch import compose_dot_tool_dispatch, retain_coordinator_turn
+            from orchestrator.providers.fleet_admission import prepare_live_trio
+            # Guest credentials come from the Dot VM registry, not from model intent.
+            # The password is forwarded only to the dispatch and then stripped from
+            # anything this turn returns or raises.
+            dispatch_authority = self._authority_with_dot_vm(intent, authority)
+            secret = None
+            if dispatch_authority.get("placement") == "guest":
+                candidate = dispatch_authority.get("password")
+                if isinstance(candidate, str) and candidate:
+                    secret = candidate
+            guest_process = dispatch_authority.get("guest_process")
+            if not isinstance(guest_process, dict):
+                guest_process = authority.get("guest_process")
+            try:
+                dispatched = compose_dot_tool_dispatch(self.control, self.owner, intent, dispatch_authority)
+                dispatched["trio_preparation"] = prepare_live_trio(
+                    placement=dispatch_authority.get("placement") or "host",
+                    guest_process=guest_process if isinstance(guest_process, dict) else None,
+                    operation_id=authority.get("parent_operation_id"),
+                )
+                dispatched["retention"] = retain_coordinator_turn(
+                    self.control, self.owner, project_id=pid,
+                    coordinator_work_item_id=authority["work_item_id"],
+                    journal_receipt=authority.get("journal_receipt"),
+                    reviewer_agent_id=authority.get("agent_id"),
+                )
+            except Exception as exc:
+                _scrub_guest_secret(exc, secret)
+                raise
+            return _redact_guest_secret(dispatched, secret)
         if kind in {"consolidate_dispatches", "consolidate_tool_dispatches"}:
             from sentra_runtime.dot_tool_dispatch import consolidate_tool_dispatches
             return consolidate_tool_dispatches(
@@ -314,6 +509,24 @@ class ShellActorService:
                 raise ValueError('only keyboard/mouse actions can be submitted to this Dot VM')
             import hashlib
             identity = hashlib.sha256((message['operation_id'] + '\x00' + key).encode()).hexdigest()
+            fence_key = _vm_input_identity(arguments)
+            from sentra_executors.input_control import InputControl
+            vm_input = InputControl(self.control, owner=self.owner)
+            if fence_key is None:
+                return {
+                    "state": "BLOCKED", "dispatched": False, "automatic_resend": False,
+                    "reason": "VM input cannot be fenced, so it was not sent",
+                }
+            if fence_key is not None:
+                kind, selector, text = fence_key
+                prior = vm_input.uncertain_effect(
+                    work_item_id=work, kind=kind, selector_key=selector, text=text)
+                if prior is not None:
+                    return {
+                        "state": "UNCERTAIN", "dispatched": False, "automatic_resend": False,
+                        "reason": "uncertain VM input is not sent again",
+                        "fenced_by": prior["operation_id"],
+                    }
             possession = service.host.input_status(workspace_id=message['project_id'],
                 machine_id=configured['machine_id'], work_item_id=work, capability_id='vm:input')
             if possession.get('grant_status') != 'granted':
@@ -334,10 +547,19 @@ class ShellActorService:
                         arguments=arguments, only_if_available=True)
                 except (AuthorizationRequired, ValueError):
                     return {'state': 'BLOCKED', 'reason': 'VM control changed or permission was revoked; no input was sent'}
-            return service.host.dispatch(workspace_id=message['project_id'],
+            result = service.host.dispatch(workspace_id=message['project_id'],
                 machine_id=configured['machine_id'], work_item_id=work,
                 capability_id='vm:input', operation_id='vm-input-' + identity[:40],
                 idempotency_key='vm-input-' + identity, arguments=arguments)
+            if isinstance(result, dict) and result.get("state") == "UNCERTAIN" and fence_key is not None:
+                kind, selector, text = fence_key
+                operation_id = result.get("operation_id")
+                if isinstance(operation_id, str) and operation_id:
+                    vm_input.note_uncertain(
+                        work_item_id=work, kind=kind, selector_key=selector,
+                        operation_id=operation_id, text=text)
+                result = {**result, "automatic_resend": False}
+            return result
         profile = AccessStore(self.control, self.owner).profile(message['conversation_id'])
         if profile.get('scope') != 'computer' or profile.get('approval') != 'never':
             raise Denied('select full access before asking the Dot to create its VM')
@@ -351,7 +573,7 @@ class ShellActorService:
         if not isinstance(value, str) or len(value) > 4000:
             raise ValueError('bounded VM configuration JSON required')
         spec = json.loads(value)
-        if not isinstance(spec, dict) or set(spec) - {'os_family', 'cpus', 'memory_mb', 'disk_gb', 'iso_path'}:
+        if not isinstance(spec, dict) or set(spec) - {'os_family', 'cpus', 'memory_mb', 'disk_gb', 'iso_path', 'username'}:
             raise ValueError('VM configuration may select only OS, CPU, RAM, disk and local ISO')
         key = payload.get('request_key')
         if not isinstance(key, str) or not 1 <= len(key) <= 128:

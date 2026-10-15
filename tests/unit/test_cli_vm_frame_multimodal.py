@@ -48,6 +48,33 @@ def test_only_successful_authorized_virtualbox_frame_becomes_ephemeral_image():
     assert ENCODED not in safe
     assert '"frame_available": true' in safe
     assert "[SENTRA_VM_FRAME call_id=call-1]" in safe
+    assert '"desktop_verified": false' in safe
+    assert '"installed_os_verified": false' in safe
+
+
+def test_framebuffer_proof_accepts_setup_image_without_claiming_installed_desktop():
+    value = _receipt()
+    value['evidence'].update(framebuffer_verified=True, desktop_verified=False, installed_os_verified=False)
+    safe, frame = SentraAgent._model_machine_result('CANVAS', _frame_request(), json.dumps(value), 'call-setup')
+    assert frame is not None
+    assert '"framebuffer_verified": true' in safe
+    assert '"desktop_verified": false' in safe
+    value['evidence'].update(framebuffer_verified=False, desktop_verified=True)
+    assert SentraAgent._model_machine_result('CANVAS', _frame_request(), json.dumps(value), 'call-invalid')[1] is None
+
+
+def test_virtualbox_capture_proves_framebuffer_only_even_with_valid_png():
+    from contextlib import contextmanager
+    from sentra_executors.virtualbox_vm import VirtualBoxClient, VirtualBoxBinding
+    display = SimpleNamespace(GetScreenResolution=lambda _: (1024, 768), TakeScreenShotToArray=lambda *_: PNG)
+    @contextmanager
+    def console(_):
+        yield SimpleNamespace(Display=display)
+    client = VirtualBoxClient(path='synthetic-no-execution')
+    client.console = console
+    evidence = client.frame(VirtualBoxBinding('owned-vm', 'owned-marker', lambda: {}))
+    assert evidence['framebuffer_verified'] is True
+    assert evidence['desktop_verified'] is evidence['installed_os_verified'] is False
 
 
 @pytest.mark.parametrize("result,request_args", [

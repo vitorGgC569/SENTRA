@@ -14,7 +14,7 @@ def test_denies_all_untrusted_execution_without_native_or_node_fallback(tmp_path
     request=OperationRequest("op-wasm-123","agent-123","machine-123",
                              "code:execute","work-item-123","wasm-key-123",{})
     source="throw new Error('no I/O');"
-    with pytest.raises(CodeModeDisabled,match="disabled"):
+    with pytest.raises(CodeModeDisabled,match="CodeModeDispatcher"):
         asyncio.run(mode.execute(request=request,source=source))
     # A hostile JS source is never evaluated; even a host-side side effect
     # expression embedded in the source stays an inert Python string.

@@ -201,7 +201,7 @@ def test_tunnel_license_payload_is_owned_and_cleaned_up(tmp_path, monkeypatch):
     saved = json.loads(marker.read_text(encoding="utf-8"))
     assert set(owned).issubset(set(saved["owned_files"]))
     # Ensure the actual installation path records the extracted notices.
-    assert "tunnel_license_files" in inspect.getsource(installer.install)
+    assert "tunnel_license_files" in inspect.getsource(installer._install_product)
     monkeypatch.setattr(update_helper, "_wait_pid", lambda *args, **kwargs: None)
     monkeypatch.setattr(installer, "_stop_installed_processes", lambda *args: None)
     assert update_helper.cleanup_install(install_dir, parent_pid=0) == 0

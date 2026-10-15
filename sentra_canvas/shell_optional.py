@@ -8,6 +8,12 @@ import threading
 from .store import Denied
 from sentra_core.conversations import _decode
 
+# The Canvas selector already reads these ids from /api/models. Offering one
+# is not a credential and not a completed provider turn.
+UNVERIFIED_TURN_MODEL = "sentra/grok/grok-4.7"
+UNVERIFIED_TURN_REASON = "sentra/grok/grok-4.7 is listed and access is unverified"
+CATALOG_SELECTABLE_MODELS = (UNVERIFIED_TURN_MODEL,)
+
 
 def load_shell_configuration(configuration=None, root=None):
     if configuration is not None:
@@ -47,6 +53,7 @@ def load_shell_configuration(configuration=None, root=None):
                     "sentra/chatgpt-web/gpt-6",
                     "sentra/chatgpt-web/high",
                     "sentra/chatgpt-web/gpt-5.6-sol",
+                    *CATALOG_SELECTABLE_MODELS,
                     "sentra/codex/current",
                     "chatgpt",
                     "gpt-4o",

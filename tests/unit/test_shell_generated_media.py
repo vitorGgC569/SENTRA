@@ -64,6 +64,32 @@ def test_binary_is_encrypted_and_pending_provider_cannot_publish(shell,monkeypat
     with pytest.raises(PermissionError): store.read('another-conversation',asset_id)
 
 
+def test_native_image_stays_hidden_when_the_fence_lookup_fails(shell, monkeypatch):
+    from sentra_core.conversations import _encode
+    app, server, scope, call, actor, cid, runtime, turn, native, store, asset_id, message, payload, raw = prepare(shell, monkeypatch)
+    publisher = ShellGeneratedMedia(runtime)
+    native_manifest = {"asset_id": "web-native-uncertain", "filename": "x.png",
+                       "mime_type": "image/png", "byte_length": 1, "sha256": "ab"}
+    cli_manifest = {"asset_id": "cli-asset", "filename": "y.png",
+                    "mime_type": "image/png", "byte_length": 1, "sha256": "cd"}
+    with runtime.control.store.connect("shell") as db, db:
+        db.execute("INSERT INTO canvas_shell_generated_media VALUES(?,?,?,?,?,?,?)",
+                   (runtime.owner, scope["project_id"], cid, "assistant-1",
+                    "web-native-uncertain", message["operation_id"], _encode(native_manifest)))
+        db.execute("INSERT INTO canvas_shell_generated_media VALUES(?,?,?,?,?,?,?)",
+                   (runtime.owner, scope["project_id"], cid, "assistant-1",
+                    "cli-asset", message["operation_id"], _encode(cli_manifest)))
+
+    def boom(self, owner, asset_ids):
+        raise RuntimeError("fence store unavailable")
+
+    monkeypatch.setattr(
+        "native_bridge.web_generated_assets.WebGeneratedAssets.fenced_asset_ids", boom)
+    listed = publisher.messages(scope["project_id"], cid, [{"message_id": "assistant-1", "role": "assistant"}])
+    assets = listed[0].get("generated_assets") or []
+    assert [item["asset_id"] for item in assets] == ["cli-asset"]
+
+
 def test_http_returns_bytes_only_for_the_confirmed_original_assistant_message(shell,monkeypatch):
     app,server,scope,call,actor,cid,runtime,turn,native,store,asset_id,message,payload,raw = prepare(shell,monkeypatch)
     runtime.conversations.provider_state(cid,turn,'gateway',native,'completed')

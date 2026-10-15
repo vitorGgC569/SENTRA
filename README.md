@@ -1,21 +1,13 @@
 # SENTRA
 
-> **Estado em 09/10/2026 — checkpoint de desenvolvimento, não release estável.**
-> O Canvas React Flow/Radix/Lucide/xterm está incorporado ao aplicativo Windows;
-> o SENTRA CLI dispõe de `/model` com menu numerado e `/effort` para Codex.
-> O caminho do Setup/Quick Start inclui Canvas, CLI, MCP, Secure Tunnel,
-> Web Models e orientação para conectar o app/plugin SENTRA ao ChatGPT.
-> **O app MCP não pode ser instalado/autorizado automaticamente dentro da conta
-> ChatGPT do usuário**: essa aprovação é uma etapa explícita no ChatGPT.
-> A suíte Python unitária completa **passou novamente na rodada de 09/10/2026**
-> (1.991 passed, 37 skipped, 0 failed, 0 errors, 14 subtests passed);
-> falhas/integração 183 passed, 10 skipped; colaboração Node 54/54. A instalação limpa/Setup/MSI/Authenticode e 37 projetos externos
-> ainda exigem aceite por requisito.
-> [Guia de primeira instalação e checklist real](docs/SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md) ·
-> [Checkpoint e pendências](docs/SENTRA_CHECKPOINT_IMPLEMENTACAO_E_PENDENCIAS_2026-10-09.md) ·
-> [Matriz de incorporação do Chat On Steroids](docs/SENTRA_ANALISE_INCORPORACAO_CHAT_ON_STEROIDS_2026-10-09.md) ·
-> [Implementação, testes e lacunas restantes](docs/SENTRA_COS_INCORPORACAO_EXECUCAO_2026-10-09.md).
-
+> **Estado em 13/10/2026 — versão em desenvolvimento.**
+> Interface Windows com Dots, conversas e canvas de terminais. O Setup prepara
+> MCP, integração Codex, Secure Tunnel e Web Models; o fluxo GPT6-WEB exige
+> conexão, catálogo disponível e autorização na conta.
+> **Ainda não há um novo instalador completo validado em Windows limpo.**
+> Faltam componentes nativos e evidências de build para fechar a distribuição.
+> [Estado do instalador e validação](docs/INSTALADOR_AUTOMATICO_20261013.md) ·
+> [Auditoria independente das 18 frentes](docs/frentes-18/Auditoria-independente-20261013.md).
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)
@@ -35,19 +27,79 @@ Consenso entre modelos não é prova de correção — teste verde + quorum é.
 
 ## SENTRA Desktop v1
 
-O caminho recomendado para usuários Windows é o **SENTRA Desktop**. Releases
-estáveis publicam um Setup `.exe` e um MSI per-user, ambos Authenticode-signed,
-além de SHA-256, CycloneDX SBOM e pacote de atualização verificável.
+O SENTRA Desktop reúne Dots, conversas, canvas e acesso às áreas do computador
+em uma interface Windows. O tema inicial é escuro, com opção explícita de tema claro.
 
-A aplicação fornece tray + painel operacional para MCP, Secure Tunnel, Edge,
-Docker, Git e Remote Agent; profiles Safe/Developer/Full; workspaces com
-permissões read/write/execute; jobs/fila OMA; auditoria, diff, snapshots e
-rollback; Quick Start do Secure MCP Tunnel sem PowerShell.
+### Aplicativo e instalação
 
-**Novo por aqui? Comece em [`docs/ZERO_CONFIG_SETUP.md`](docs/ZERO_CONFIG_SETUP.md).** Instale e use os recursos locais imediatamente; OpenAI, Codex, Edge, Git e Docker são integrações opcionais e configuráveis sob demanda. Veja também [`docs/START_HERE.md`](docs/START_HERE.md). O guia mostra Desktop, terminal, ChatGPT/MCP, Codex/Web Models, Edge e Maestri sem misturar os papéis.\n\nQuick Start: [`docs/QUICKSTART.md`](docs/QUICKSTART.md). Arquitetura:
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Segurança:
-[`SECURITY.md`](SECURITY.md). Processo de publicação:
-[`docs/RELEASE.md`](docs/RELEASE.md).
+Capturas reais feitas em 13/10/2026. A janela de instalação abaixo é uma **prévia
+visual executada a partir do código**, sem instalar arquivos ou configurar contas.
+Ela não comprova uma instalação concluída.
+
+![SENTRA Setup em tema escuro com o Dot](docs/media/2026-10-13/sentra-setup-dark.png)
+
+Home do aplicativo em execução, com os Dots deste ambiente de desenvolvimento:
+
+![Home do SENTRA com Dots](docs/media/2026-10-13/sentra-home.png)
+
+Canvas do aplicativo em execução, com janela de terminal e conexão visual:
+
+![Canvas do SENTRA com terminal](docs/media/2026-10-13/sentra-canvas.png)
+
+### Preparação para modelos WEB
+
+1. O Setup copia os componentes, prepara os atalhos e configura a integração local do Codex/MCP.
+2. Para o fluxo GPT6-WEB, conclua a conexão obrigatória do Secure Tunnel. O formulário oferece configuração assistida pelo Edge e campos manuais recolhidos.
+3. Abra **Web Models · entrar na conta** para o login necessário. O Desktop inicia o runtime instalado quando o autostart está habilitado.
+4. A instalação só é considerada pronta com MCP, túnel e catálogo/recepção de turnos WEB disponíveis, além das autorizações exigidas. Login e verificações da conta continuam com o usuário.
+
+Os modelos vêm do catálogo do runtime e da disponibilidade da conta. A consulta
+local desta rodada mostrou GPT-6 WEB, GPT-6 Instant WEB e outros modelos ChatGPT/Gemini.
+Catálogo acessível não comprova uma resposta real de cada modelo nem maior tempo
+de trabalho garantido. O papel de coordenador/chefe é uma configuração de agente;
+não é um modelo adicional que o instalador possa liberar na conta.
+
+### Streaming e recuperação
+
+O código atual amplia a espera do modelo para 30 minutos, preserva fragmentos
+longos/Unicode e mantém texto visível enquanto uma rodada seguinte aguarda o modelo.
+Uma frase que já apareceu continua sendo enviada quando volta mais adiante; só um
+retrato acumulado deixa de repetir o prefixo já mostrado.
+Respostas parciais recebem checkpoints protegidos. Se o stream termina sem confirmação,
+a conversa mantém esse rascunho na tela, com o aviso de entrega incerta, em vez de
+voltar para “Aguardando modelo” e apagar o texto. Esse rascunho não entra no histórico
+confirmado, não é sucesso e não autoriza reenvio nem ferramentas.
+Um fechamento incompleto do stream não é tratado como sucesso nem provoca reenvio automático.
+O gateway agora encaminha o evento final inteiro antes de fechar a conexão, inclusive
+quando uma confirmação grande chega fragmentada pela rede. A interface publicada em
+`sentra_canvas/static/desktop-assets` foi reconstruída com esse comportamento.
+
+A rodada de regressão direcionada passou com **193 testes** de instalação, streaming,
+persistência e recuperação. Nesta continuação, mais **78** testes de gateway, streaming
+e instalação e **17** testes da prévia visual passaram; há sobreposição com os 193,
+então os totais não devem ser somados. São testes controlados; não equivalem a
+homologação de cada conta/modelo, VM ou instalação limpa. A tentativa real preservou
+uma resposta longa, mas expôs a falha de conclusão do gateway; a correção está no
+código e no bundle. A confirmação no runtime WEB ativo continua pendente: a repetição
+isolada foi recusada com HTTP 409 da concessão do navegador e não foi forçada.
+Detalhes e lacunas:
+[relatório do instalador](docs/INSTALADOR_AUTOMATICO_20261013.md).
+
+### Vídeo de apresentação
+
+Vídeo local, sem narração e sem marca d’água. O texto entra em movimento em cada
+ponto, com uma música original. As capturas ficam no tamanho nativo, sem ampliar
+a interface. No fim, o perfil do GitHub aparece ao lado de `vitorGgC569/SENTRA`,
+com o convite para contribuir.
+
+Arquivo: [`docs/media/2026-10-13/sentra-apresentacao.mp4`](docs/media/2026-10-13/sentra-apresentacao.mp4)
+(cópia na área de trabalho: `SENTRA-apresentacao.mp4`). Dura 48 segundos, em 1920×1080.
+A janela de instalação é a prévia visual, não uma instalação concluída.
+
+Documentação: [primeiros passos](docs/START_HERE.md) · [Quick Start](docs/QUICKSTART.md) ·
+[arquitetura](docs/ARCHITECTURE.md) · [segurança](SECURITY.md) · [publicação](docs/RELEASE.md).
+Os guias históricos podem descrever fluxos anteriores; o estado desta revisão está
+no relatório de 13/10/2026 acima.
 
 O fluxo CLI abaixo continua suportado para desenvolvimento do próprio SENTRA.
 
@@ -58,7 +110,7 @@ Você não precisa configurar tudo para começar. Escolha **uma** superfície, v
 **Primeiros passos recomendados:**
 
 1. Instale/abra o SENTRA e confirme **MCP Ready**.
-2. Se quiser usar o ChatGPT como cliente das tools locais, conecte o **Secure MCP Tunnel**.
+2. Para o fluxo GPT6-WEB do instalador, conecte o **Secure MCP Tunnel** e autorize o plugin na conta.
 3. Se quiser usar ChatGPT/Gemini Web dentro do Codex, abra **Web Models** e conecte o Codex ao Gateway local.
 4. Instale a extensão **Edge** apenas quando quiser que o SENTRA opere uma aba web já aberta.
 

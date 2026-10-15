@@ -41,3 +41,8 @@ node_modules/
 
 /dist.payload-staging-*/
 /dist.payload-backup-*/
+
+# Local installation media, generated agent roles and visual rollback copies.
+/Isos/
+/.maestri/roles/
+/sentra_canvas/static/desktop-assets/visual-rollback-*/

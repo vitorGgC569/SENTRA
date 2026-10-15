@@ -157,6 +157,11 @@ def test_two_independent_web_cli_peers_exchange_replies_and_persist(tmp_path, mo
                     app.terminal_output(ws, agents["web_a"]["terminal_id"])["text"])
         history = ConversationStore(app.state_dir.parent)
         for name, expected in (("web_b", "B_REPLIED_"), ("web_a", "A_REPLIED_")):
+            # Streaming deliberately exposes prose before the canonical response
+            # transaction commits. A terminal fragment is not its delivery receipt.
+            await_until(lambda name=name, expected=expected: any(
+                expected + tag in item["content"] and item["role"] == "assistant"
+                for item in history.history_window(agents[name]["conversation_id"])["messages"]))
             conversation = history.history_window(agents[name]["conversation_id"])
             assert any(expected + tag in item["content"] and item["role"] == "assistant"
                        for item in conversation["messages"])
@@ -346,12 +351,101 @@ def test_canvas_model_catalog_not_a_model_access_verdict(tmp_path, monkeypatch):
         ])
         models=app.model_catalog()
         assert models["model_access_verified"] is False
+        assert models["inference_executed"] is False
+        assert models["receipt"] == "access unverified"
         assert "unsupported/surprise" not in models["models"]
         assert "sentra/chatgpt-web/gpt-6" in models["models"]
+        assert "sentra/grok/grok-4.7" in models["models"]
         def unavailable(self):
             raise ProviderHTTPError("gateway",503,"offline")
         monkeypatch.setattr(ModelClient,"list_models",unavailable)
         missing=app.model_catalog()
-        assert missing == {"models":[],"source":"unavailable","model_access_verified":False}
+        assert missing["model_access_verified"] is False
+        assert missing["inference_executed"] is False
+        assert missing["receipt"] == "access unverified"
+        assert missing["source"] == "unavailable"
+        assert missing["models"] == ["sentra/grok/grok-4.7"]
     finally:
+        app.shutdown()
+
+
+def test_grok_catalog_id_is_selectable_and_access_stays_unverified(tmp_path, monkeypatch):
+    """The selector reads /api/models. Choosing the listed id is not a Grok turn."""
+    from sentra_canvas.__main__ import CanvasServer
+    from sentra_canvas.shell_optional import load_shell_configuration
+    from sentra_cli.client import ModelClient
+    from urllib.request import Request, build_opener, ProxyHandler
+
+    calls = []
+    monkeypatch.setattr(ModelClient, "list_models", lambda self: ["sentra/chatgpt-web/gpt-6"])
+    def refuse_inference(*_args, **_kwargs):
+        calls.append("chat")
+        raise AssertionError("catalog selection must not run inference")
+    monkeypatch.setattr(ModelClient, "chat_stream", refuse_inference)
+
+    app = Canvas(tmp_path)
+    server = CanvasServer(app)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    opener = build_opener(ProxyHandler({}))
+    try:
+        url = f"http://127.0.0.1:{server.server_port}/api/models"
+        with opener.open(Request(url, headers={"Authorization": "Bearer " + server.secret}), timeout=5) as resp:
+            listed = json.loads(resp.read())
+        assert listed["model_access_verified"] is False
+        assert listed["inference_executed"] is False
+        assert listed["receipt"] == "access unverified"
+        assert "sentra/grok/grok-4.7" in listed["models"]
+
+        selected = app.select_listed_model("sentra/grok/grok-4.7")
+        assert selected["selectable"] is True
+        assert selected["selected"] is True
+        assert selected["model_access_verified"] is False
+        assert selected["inference_executed"] is False
+        assert selected["credential_present"] is False
+        assert selected["turn_executed"] is False
+        assert selected["receipt"] == "access unverified"
+        with pytest.raises(ValueError, match="not in the catalog"):
+            app.select_listed_model("sentra/not-listed")
+
+        ws = app.create_workspace("GrokSelect")["id"]
+        agent = app.create_agent(ws, "GrokDot", "sentra/grok/grok-4.7", start=False)
+        assert agent["model"] == "sentra/grok/grok-4.7"
+        assert agent["model_selection"]["receipt"] == "access unverified"
+        assert agent["model_selection"]["inference_executed"] is False
+        assert app.store.resource("agents", agent["id"], ws)["model"] == "sentra/grok/grok-4.7"
+
+        runtime = app._runtime()
+        run = runtime.run(ws)
+        if run["state"] != "RUNNING":
+            runtime.durable.transition_run(run["run_id"], runtime.owner, "RUNNING")
+        home = app.shell_bridge({"action": "home", "project_id": ws, "request_key": "grok-home"})["value"]
+        created = app.shell_bridge({
+            "action": "dot_create", "project_id": ws, "space_id": home["space"]["space_id"],
+            "name": "GrokShell", "role": "specialist", "model": "sentra/chatgpt-web/gpt-6",
+            "request_key": "grok-dot-create",
+        })
+        assert created["ok"] is True
+        changed = app.shell_bridge({
+            "action": "dot_update", "project_id": ws, "space_id": home["space"]["space_id"],
+            "dot_id": created["value"]["dot_id"], "expected_revision": created["value"]["revision"],
+            "model": "sentra/grok/grok-4.7", "request_key": "grok-dot-select",
+        })
+        choice = changed["value"]["model_selection"]
+        assert changed["value"]["model"] == "sentra/grok/grok-4.7"
+        assert choice["selectable"] is True and choice["selected"] is True
+        assert choice["receipt"] == "access unverified"
+        assert choice["model_access_verified"] is False
+        assert choice["inference_executed"] is False
+        assert choice["credential_present"] is False
+        assert choice["turn_executed"] is False
+        assert calls == []
+
+        (tmp_path / ".sentra").mkdir(exist_ok=True)
+        relay = load_shell_configuration(root=tmp_path)["web_relay"]["models"]
+        assert "sentra/grok/grok-4.7" in relay
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
         app.shutdown()

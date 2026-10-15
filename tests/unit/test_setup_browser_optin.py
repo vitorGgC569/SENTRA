@@ -33,48 +33,11 @@ def test_deep_link_allowlist_exposes_only_local_browser_onboarding():
     ) is None
 
 
-def test_existing_install_opens_browser_handoff_with_user_opt_in(
-    tmp_path, monkeypatch
-):
-    install_dir = tmp_path / "sentra"
-    install_dir.mkdir()
-    (install_dir / "sentra-desktop.exe").write_bytes(b"stub")
-    monkeypatch.setattr(
-        installer, "_validate_sentra_install", lambda _: None
-    )
-    commands = []
-    approvals = []
-    monkeypatch.setattr(installer, "authorize_installer_enrollment", lambda paths: approvals.append(paths))
-    monkeypatch.setattr(
-        installer.subprocess, "Popen",
-        lambda cmd, **kwargs: commands.append((cmd, kwargs)),
-    )
+def test_existing_install_reuses_verification_without_stopping_sessions(tmp_path):
     wizard = object.__new__(installer.InstallerWizard)
-    wizard.browser_setup_var = Mock()
-    wizard.browser_setup_var.get.return_value = True
-    wizard.profile = Mock()
-    wizard.profile.get.return_value = "Full"
-    wizard.access_scope = Mock()
-    wizard.access_scope.get.return_value = "computer"
-    from sentra_remote.product import ProductPaths, ProductSettings
-    paths = ProductPaths(install_dir, tmp_path / "state")
-    monkeypatch.setattr(installer.ProductPaths, "default", lambda *_: paths)
-    managed = Mock()
-    monkeypatch.setattr(installer, "LocalRuntime", lambda *_: managed)
-    wizard.root = Mock()
-    wizard._open_existing_install(install_dir)
-    assert len(commands) == 1
-    assert len(approvals) == 1
-    assert approvals[0].install_dir == install_dir.resolve()
-    saved = ProductSettings.load(paths.settings)
-    assert saved.profile == "Full" and saved.access_scope == "computer"
-    assert saved.policy()["surfaces"] == ("all",)
-    assert not saved.tool_allowlist
-    managed.stop_all.assert_called_once()
-    assert commands[0][0][-2:] == [
-        "--open-url", "sentra://openai-enroll"
-    ]
-    wizard.root.destroy.assert_called_once_with()
+    wizard._install = Mock()
+    wizard._open_existing_install(tmp_path)
+    wizard._install.assert_called_once_with(require_openai=False, verify_only=True)
 
 
 def test_fresh_installer_first_install_then_opens_consent_wizard(
@@ -104,6 +67,7 @@ def test_fresh_installer_first_install_then_opens_consent_wizard(
     wizard.root = Mock()
     wizard.root.after.side_effect = lambda _delay, callback: callback()
     wizard._installed = False
+    wizard._schedule_connection_check = Mock()
 
     provided = []
     approvals = []
@@ -138,4 +102,7 @@ def test_fresh_installer_first_install_then_opens_consent_wizard(
         "--open-url", "sentra://openai-enroll"
     ]
     assert wizard._installed is True
-    assert "consent" in wizard.connect_hint.configure.call_args.kwargs["text"].lower()
+    assert "Edge" in wizard.connect_hint.configure.call_args.kwargs["text"]
+    wizard._schedule_connection_check.assert_called_once()
+    wizard.root.destroy.assert_not_called()
+    assert 100 not in [call.args[0] for call in wizard.progress_value.set.call_args_list]

@@ -1,9 +1,12 @@
 'use strict';
 // Electron is a display of the authoritative Canvas broker, never a tool host.
-const { app, BrowserWindow } = require('electron');
-const { envelope, isAllowedResource } = require('./policy.cjs');
+const { app, BrowserWindow, screen } = require('electron');
 const fs = require('node:fs'), os = require('node:os'), path = require('node:path');
-app.setAppUserModelId('SENTRA.Desktop.Electron');
+const {
+  envelope, displayAddress, isAllowedResource, recoverBounds, instanceRole, readWindowState,
+  dotIconCandidates, APP_USER_MODEL_ID,
+} = require('./policy.cjs');
+app.setAppUserModelId(APP_USER_MODEL_ID);
 app.on('web-contents-created', (_event, contents) => {
   contents.setWindowOpenHandler(() => ({ action: 'deny' }));
   contents.on('will-attach-webview', event => event.preventDefault());
@@ -25,32 +28,59 @@ function bootstrap() {
   const surface = value.surface === 'shell-home' ? 'shell-home' : (value.surface === 'native' ? 'native' : 'desktop');
   return { address: envelope({ ...value, surface }), port: value.port, surface };
 }
+function dotIcon() {
+  for (const name of dotIconCandidates()) {
+    const file = path.join(__dirname, name);
+    if (fs.existsSync(file)) return file;
+  }
+  return undefined;
+}
 let handoff;
 try { handoff = bootstrap(); }
 catch { app.exit(2); }
-if (handoff) app.whenReady().then(() => {
-  const win = new BrowserWindow({
-    title: 'SENTRA — Electron', width: 1440, height: 900,
-    minWidth: 1024, minHeight: 650, backgroundColor: '#18181a',
-    icon: fs.existsSync(path.join(__dirname, 'SENTRA.ico')) ? path.join(__dirname, 'SENTRA.ico') : undefined,
-    autoHideMenuBar: true, show: false,
-    webPreferences: { nodeIntegration: false, contextIsolation: true,
-      sandbox: true, webSecurity: true, devTools: false,
-      partition: 'sentra-display-' + require('node:crypto').randomBytes(16).toString('hex'),
-      allowRunningInsecureContent: false },
+const primary = Boolean(handoff) && instanceRole(app.requestSingleInstanceLock()) === 'primary';
+if (handoff && !primary) app.exit(0);
+if (handoff && primary) {
+  let windowRef = null;
+  const stateFile = () => path.join(app.getPath('userData'), 'sentra-window.json');
+  app.on('second-instance', () => {
+    const win = windowRef;
+    if (!win || win.isDestroyed()) return;
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
   });
-  const ses = win.webContents.session;
-  ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  ses.setPermissionCheckHandler(() => false);
-  ses.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (request, done) => {
-    done({ cancel: !isAllowedResource(request.url, handoff.port) });
-  });
-  win.webContents.on('will-navigate', (event, url) => {
-    if (!isAllowedResource(url, handoff.port)) event.preventDefault();
-  });
-  win.once('ready-to-show', () => win.show());
-  const page = handoff.surface === 'shell-home' ? '/shell-home.html' : (handoff.surface === 'native' ? '/native.html' : '/desktop.html');
-  win.loadURL(handoff.address.replace('/desktop.html#', page + '#').replace('/shell-home.html#', page + '#').replace('/native.html#', page + '#') + (page === '/desktop.html' ? '?surface=electron' : '?surface=electron-shell'))
-    .catch(() => app.quit());
-}).catch(() => app.exit(3));
+  app.whenReady().then(() => {
+    const bounds = recoverBounds(readWindowState(stateFile()), screen.getPrimaryDisplay().workArea);
+    const win = new BrowserWindow({
+      title: 'SENTRA — Electron', x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height,
+      minWidth: 1024, minHeight: 650, backgroundColor: '#18181a',
+      icon: dotIcon(),
+      autoHideMenuBar: true, show: false,
+      webPreferences: { nodeIntegration: false, contextIsolation: true,
+        sandbox: true, webSecurity: true, devTools: false,
+        partition: 'sentra-display-' + require('node:crypto').randomBytes(16).toString('hex'),
+        allowRunningInsecureContent: false },
+    });
+    windowRef = win;
+    win.on('close', () => {
+      try {
+        const current = win.getBounds();
+        fs.writeFileSync(stateFile(), JSON.stringify({ ...current, isMinimized: win.isMinimized() }));
+      } catch { /* Display memory is optional and never holds user work. */ }
+    });
+    const ses = win.webContents.session;
+    ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    ses.setPermissionCheckHandler(() => false);
+    ses.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (request, done) => {
+      done({ cancel: !isAllowedResource(request.url, handoff.port) });
+    });
+    win.webContents.on('will-navigate', (event, url) => {
+      if (!isAllowedResource(url, handoff.port)) event.preventDefault();
+    });
+    win.once('ready-to-show', () => { win.show(); if (bounds.restored) win.focus(); });
+    win.loadURL(displayAddress(handoff.address))
+      .catch(() => app.quit());
+  }).catch(() => app.exit(3));
+}
 app.on('window-all-closed', () => app.quit());

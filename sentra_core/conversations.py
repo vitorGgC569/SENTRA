@@ -157,6 +157,10 @@ class ConversationStore:
                 CREATE TABLE IF NOT EXISTS conversation_web_delivery_views(
                     conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
                     protected_view TEXT NOT NULL,updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS response_drafts(
+                    turn_id TEXT PRIMARY KEY REFERENCES turns(id),
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    protected_text TEXT NOT NULL, updated REAL NOT NULL);
             """)
             columns={row[1] for row in db.execute("PRAGMA table_info(provider_context)")}
             upgraded=False
@@ -557,10 +561,33 @@ class ConversationStore:
         with self._tx() as db:
             self._owned(db, ident)
             message = self._append(db, ident, "assistant", text, "assistant_response")
+            db.execute("DELETE FROM response_drafts WHERE turn_id=? AND conversation_id=?", (turn, ident))
             db.execute("UPDATE calls SET state='completed',updated=? WHERE conversation_id=? AND turn_id=? AND kind='provider' AND state='received'",
                        (time.time(), ident, turn))
             self._event(db,ident,"provider.response.committed","completed",{"characters":len(text)},turn=turn)
             return message
+
+    def checkpoint_response(self, ident, turn, text):
+        """Encrypted partial only; never prompt history, receipt or tool authority."""
+        if not isinstance(text, str):
+            raise TypeError("response draft must be text")
+        with self._tx() as db:
+            self._owned(db, ident)
+            if not db.execute("SELECT 1 FROM turns WHERE id=? AND conversation_id=? AND state='running'", (turn, ident)).fetchone():
+                raise PermissionError("draft requires an active owned turn")
+            db.execute("INSERT INTO response_drafts VALUES(?,?,?,?) ON CONFLICT(turn_id) DO UPDATE SET "
+                       "protected_text=excluded.protected_text,updated=excluded.updated",
+                       (turn, ident, _encode(text), time.time()))
+
+    def response_draft(self, ident):
+        with self._connect() as db:
+            self._owned(db, ident)
+            row = db.execute("SELECT d.protected_text,t.state FROM turns t LEFT JOIN response_drafts d "
+                             "ON d.turn_id=t.id WHERE t.conversation_id=? ORDER BY t.created DESC LIMIT 1", (ident,)).fetchone()
+            if row is None or row['protected_text'] is None or row['state'] == 'completed':
+                return None
+            return {"content": _decode(row['protected_text']), "partial": True,
+                    "authoritative": False, "turn_state": row['state']}
 
     @staticmethod
     def fingerprint(operation, args):

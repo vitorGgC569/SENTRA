@@ -35,7 +35,7 @@ class UIASelector:
     name:str|None=None
     actions:tuple[str,...]=('read',)
     def __post_init__(self):
-        if not self.key or not self.automation_id or not self.control_type or not set(self.actions)<={'read','invoke','set_value','toggle','select'}:
+        if not self.key or not self.automation_id or not self.control_type or not set(self.actions)<={'read','invoke','set_value','toggle','select','input.mouse','input.key'}:
             raise ValueError('exact_semantic_selector_required')
 
 
@@ -54,7 +54,7 @@ class SemanticUIABinding:
     def __post_init__(self):
         if not self.capability_id or not self.window_title or not self.selectors or len(self.selectors)>256 or len({s.key for s in self.selectors})!=len(self.selectors):
             raise ValueError('invalid_semantic_uia_binding')
-        if not set(self.actions)<={'observe','observe.hybrid','wait','read','invoke','set_value','toggle','select','screenshot'} or not 2<=self.timeout_seconds<=120 or not 1<=self.max_text_chars<=65536 or type(self.require_foreground_for_mutation) is not bool:
+        if not set(self.actions)<={'observe','observe.hybrid','wait','read','invoke','set_value','toggle','select','screenshot','input.mouse','input.key'} or not 2<=self.timeout_seconds<=120 or not 1<=self.max_text_chars<=65536 or type(self.require_foreground_for_mutation) is not bool:
             raise ValueError('invalid_semantic_uia_limits')
 
 
@@ -115,6 +115,172 @@ def desktop_input_lock(desktop):
         kernel.CloseHandle(handle)
 
 
+def _rect_tuple(value):
+    if hasattr(value, 'left'):
+        return (int(value.left), int(value.top), int(value.right), int(value.bottom))
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ExecutorFailure('uia_rectangle_required')
+    return tuple(int(item) for item in value)
+
+
+def pointer_target(element_rect, window_rect):
+    """Center of the element, refused when it falls outside the bound window."""
+    left, top, right, bottom = _rect_tuple(element_rect)
+    if right - left < 1 or bottom - top < 1:
+        raise ExecutorFailure('uia_element_rectangle_empty')
+    x, y = (left + right) // 2, (top + bottom) // 2
+    wl, wt, wr, wb = _rect_tuple(window_rect)
+    if not (wl <= x < wr and wt <= y < wb):
+        raise ExecutorFailure('uia_click_outside_window')
+    return x, y
+
+
+def keyboard_post_state(sent_units, expected, observed):
+    if type(sent_units) is not int or sent_units < 1:
+        return 'not_sent'
+    if observed == expected:
+        return 'verified'
+    return 'uncertain'
+
+
+def _input_struct():
+    from ctypes import wintypes
+    class MOUSEINPUT(ctypes.Structure):
+        _fields_ = (('dx', wintypes.LONG), ('dy', wintypes.LONG), ('mouseData', wintypes.DWORD),
+                    ('dwFlags', wintypes.DWORD), ('time', wintypes.DWORD),
+                    ('dwExtraInfo', ctypes.c_void_p))
+    class KEYBDINPUT(ctypes.Structure):
+        _fields_ = (('wVk', wintypes.WORD), ('wScan', wintypes.WORD), ('dwFlags', wintypes.DWORD),
+                    ('time', wintypes.DWORD), ('dwExtraInfo', ctypes.c_void_p))
+    class INPUTUNION(ctypes.Union):
+        _fields_ = (('mi', MOUSEINPUT), ('ki', KEYBDINPUT))
+    fields = [('type', wintypes.DWORD), ('union', INPUTUNION)]
+    if ctypes.sizeof(ctypes.c_void_p) == 8:
+        fields = [('type', wintypes.DWORD), ('padding', wintypes.DWORD), ('union', INPUTUNION)]
+    class INPUT(ctypes.Structure):
+        _fields_ = fields
+    return INPUT, MOUSEINPUT, KEYBDINPUT
+
+
+def send_mouse_click(x, y):
+    """One left click at a point already checked against the bound window."""
+    if sys.platform != 'win32':
+        raise ExecutorFailure('windows_interactive_uia_required')
+    if type(x) is not int or type(y) is not int:
+        raise ExecutorFailure('uia_pointer_not_integral')
+    user = ctypes.WinDLL('user32', use_last_error=True)
+    user.GetSystemMetrics.argtypes = (ctypes.c_int,)
+    user.GetSystemMetrics.restype = ctypes.c_int
+    origin_x, origin_y = user.GetSystemMetrics(76), user.GetSystemMetrics(77)
+    width, height = user.GetSystemMetrics(78), user.GetSystemMetrics(79)
+    if width <= 1 or height <= 1:
+        raise ExecutorFailure('uia_virtual_screen_unavailable')
+    absolute_x = int(round((x - origin_x) * 65535 / (width - 1)))
+    absolute_y = int(round((y - origin_y) * 65535 / (height - 1)))
+    INPUT, MOUSEINPUT, _ = _input_struct()
+    move = 0x0001
+    down = 0x0002
+    up = 0x0004
+    absolute = 0x8000
+    virtual_desk = 0x4000
+    def packet(flags):
+        item = INPUT()
+        item.type = 0
+        item.union.mi = MOUSEINPUT(absolute_x, absolute_y, 0, flags, 0, None)
+        return item
+    user.SendInput.argtypes = (ctypes.c_uint, ctypes.POINTER(INPUT), ctypes.c_int)
+    user.SendInput.restype = ctypes.c_uint
+    pressed = packet(move | absolute | virtual_desk | down)
+    released = packet(move | absolute | virtual_desk | up)
+    sent = user.SendInput(2, (INPUT * 2)(pressed, released), ctypes.sizeof(INPUT))
+    if sent != 2:
+        if sent == 1:
+            user.SendInput(1, ctypes.byref(released), ctypes.sizeof(INPUT))
+        raise ExecutorFailure('uia_mouse_dispatch_failed', uncertain=sent > 0)
+    return {'x': x, 'y': y, 'events': 2}
+
+
+def focused_child(window_hwnd):
+    """Focus of the window's UI thread. Null when that thread has no focus."""
+    if sys.platform != 'win32':
+        raise ExecutorFailure('windows_interactive_uia_required')
+    from ctypes import wintypes
+    user = ctypes.WinDLL('user32', use_last_error=True)
+    user.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+    user.GetWindowThreadProcessId.restype = wintypes.DWORD
+    thread = user.GetWindowThreadProcessId(window_hwnd, None)
+    class GUITHREADINFO(ctypes.Structure):
+        _fields_ = (('cbSize', wintypes.DWORD), ('flags', wintypes.DWORD),
+                    ('hwndActive', wintypes.HWND), ('hwndFocus', wintypes.HWND),
+                    ('hwndCapture', wintypes.HWND), ('hwndMenuOwner', wintypes.HWND),
+                    ('hwndMoveSize', wintypes.HWND), ('hwndCaret', wintypes.HWND),
+                    ('rcCaret', wintypes.RECT))
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(GUITHREADINFO)
+    user.GetGUIThreadInfo.argtypes = (wintypes.DWORD, ctypes.POINTER(GUITHREADINFO))
+    if not user.GetGUIThreadInfo(thread, ctypes.byref(info)):
+        return 0
+    return int(info.hwndFocus or 0)
+
+
+def send_chars_to_control(handle, text):
+    """Key messages to one already focused control. No global keyboard replay."""
+    if sys.platform != 'win32':
+        raise ExecutorFailure('windows_interactive_uia_required')
+    if (not isinstance(text, str) or not text or len(text) > 65536 or
+            any(ord(ch) == 0 or ord(ch) > 0xFFFF for ch in text)):
+        raise ExecutorFailure('uia_keyboard_text_rejected')
+    from ctypes import wintypes
+    user = ctypes.WinDLL('user32', use_last_error=True)
+    user.SendMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    user.SendMessageW.restype = ctypes.c_ssize_t
+    for ch in text:
+        user.SendMessageW(handle, 0x0102, ord(ch), 1)
+    return len(text)
+
+
+def control_window_text(handle):
+    if sys.platform != 'win32':
+        raise ExecutorFailure('windows_interactive_uia_required')
+    from ctypes import wintypes
+    user = ctypes.WinDLL('user32', use_last_error=True)
+    user.SendMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPWSTR)
+    user.SendMessageW.restype = ctypes.c_ssize_t
+    buffer = ctypes.create_unicode_buffer(4096)
+    user.SendMessageW(handle, 0x000D, 4096, buffer)
+    return buffer.value
+
+
+def send_unicode_text(text):
+    """Type BMP characters. A partial send is uncertain and is not retried here."""
+    if sys.platform != 'win32':
+        raise ExecutorFailure('windows_interactive_uia_required')
+    if (not isinstance(text, str) or not text or len(text) > 65536 or
+            any(ord(ch) == 0 or ord(ch) > 0xFFFF for ch in text)):
+        raise ExecutorFailure('uia_keyboard_text_rejected')
+    user = ctypes.WinDLL('user32', use_last_error=True)
+    INPUT, _, KEYBDINPUT = _input_struct()
+    unicode_flag = 0x0004
+    key_up = 0x0002
+    user.SendInput.argtypes = (ctypes.c_uint, ctypes.POINTER(INPUT), ctypes.c_int)
+    user.SendInput.restype = ctypes.c_uint
+    sent_units = 0
+    for ch in text:
+        def packet(flags, scan=ord(ch)):
+            item = INPUT()
+            item.type = 1
+            item.union.ki = KEYBDINPUT(0, scan, flags, 0, None)
+            return item
+        down, up = packet(unicode_flag), packet(unicode_flag | key_up)
+        sent = user.SendInput(2, (INPUT * 2)(down, up), ctypes.sizeof(INPUT))
+        sent_units += sent
+        if sent != 2:
+            if sent == 1:
+                user.SendInput(1, ctypes.byref(up), ctypes.sizeof(INPUT))
+            raise ExecutorFailure('uia_keyboard_dispatch_failed', uncertain=True)
+    return sent_units
+
+
 class UIAProbeEngine:
     """One process/COM apartment per request. No keyboard/mouse fallback."""
     def perform(self,profile,args,checkpoint):
@@ -132,14 +298,15 @@ class UIAProbeEngine:
             if not ctypes.windll.kernel32.ProcessIdToSessionId(expected.pid,ctypes.byref(sid)) or sid.value!=desktop.session_id:
                 raise ExecutorFailure('uia_target_outside_interactive_session')
         check();app=Application(backend='uia').connect(process=expected.pid,timeout=1)
-        window=app.window(handle=expected.hwnd).wrapper_object()
+        spec=app.window(handle=expected.hwnd)
+        window=spec.wrapper_object()
         if window.window_text()!=profile['window_title']:raise ExecutorFailure('uia_window_title_changed')
         def locate(selector):
             check()
             if window.window_text()!=profile['window_title']:raise ExecutorFailure('uia_window_title_changed')
             search=dict(auto_id=selector['automation_id'],control_type=selector['control_type'])
             if selector.get('name') is not None:search['title']=selector['name']
-            control=window.child_window(**search).wrapper_object();info=control.element_info
+            control=spec.child_window(**search).wrapper_object();info=control.element_info
             info.set_cache_strategy(cached=False)
             if int(info.process_id)!=expected.pid or int(control.top_level_parent().handle)!=expected.hwnd:
                 raise ExecutorFailure('uia_control_outside_bound_window')
@@ -152,11 +319,12 @@ class UIAProbeEngine:
             try:
                 try:is_password=bool(info.element.CurrentIsPassword)
                 except Exception:is_password=True  # Unknown privacy property cannot expose a value.
-                text='' if is_password else control.window_text();limit=profile['max_text_chars']
+                text='' if is_password else (control.window_text() or '');limit=profile['max_text_chars']
                 try:value=None if is_password else control.iface_value.CurrentValue
                 except Exception:value=None
+                name=info.name or ''
                 return {'selector_key':selector['key'],'runtime_id':runtime,'automation_id':info.automation_id,
-                    'control_type':info.control_type,'name':info.name[:limit],
+                    'control_type':info.control_type,'name':name[:limit],
                     'text':text[:limit],'text_truncated':len(text)>limit,'text_sha256':hashlib.sha256(text.encode()).hexdigest(),
                     'value':value[:limit] if isinstance(value,str) else None,
                     'value_truncated':isinstance(value,str) and len(value)>limit,
@@ -170,7 +338,7 @@ class UIAProbeEngine:
             for selector in selectors:
                 try:control,runtime=locate(selector);observations.append(record(selector,control,runtime))
                 except ExecutorFailure:raise
-                except Exception:observations.append({'selector_key':selector['key'],'available':False})
+                except Exception as exc:observations.append({'selector_key':selector['key'],'available':False,'error':type(exc).__name__})
             check();return {'elements':observations,'process_identity':asdict(expected),'desktop':native_desktop_identity(desktop),
                             'pywinauto_version':version,'os_isolation_attested':False}
         if action=='screenshot':
@@ -209,9 +377,37 @@ class UIAProbeEngine:
                     elif action=='set_value':control.iface_value.SetValue(args['value'])
                     elif action=='toggle':control.iface_toggle.Toggle()
                     elif action=='select':control.iface_selection_item.Select()
+                    elif action=='input.mouse':
+                        target=pointer_target(control.rectangle(), window.rectangle())
+                        send_mouse_click(*target)
+                        if list(control.element_info.runtime_id)!=runtime:
+                            raise ExecutorFailure('uia_element_changed_after_mouse',uncertain=True)
+                    elif action=='input.key':
+                        try:
+                            control.element_info.element.SetFocus()
+                        except Exception as exc:
+                            raise ExecutorFailure('uia_keyboard_focus_failed') from exc
+                        target=int(control.handle)
+                        if focused_child(expected.hwnd)!=target:
+                            raise ExecutorFailure('uia_keyboard_focus_failed')
+                        sent=send_chars_to_control(target, args['text'])
+                        observed=control_window_text(target)
+                        if observed!=args['text']:
+                            try:
+                                observed=control.iface_value.CurrentValue
+                            except Exception:
+                                observed=''
+                        if keyboard_post_state(sent, args['text'], observed)!='verified':
+                            raise ExecutorFailure('uia_keyboard_effect_unverified',uncertain=True)
+                    else:
+                        raise ExecutorFailure('uia_selector_action_denied')
+                except ExecutorFailure:
+                    raise
                 except Exception as exc:raise ExecutorFailure('uia_pattern_action_failed',uncertain=True) from exc
-        check();return {'element':record(selector,control,runtime),'action':action,'coordinate_input_used':False,
-                        'effect_semantically_verified':action=='set_value' and control.iface_value.CurrentValue==args.get('value')}
+        verified=(action=='set_value' and control.iface_value.CurrentValue==args.get('value')) or action=='input.key'
+        check();return {'element':record(selector,control,runtime),'action':action,
+                        'coordinate_input_used':action=='input.mouse',
+                        'effect_semantically_verified':verified}
 
 
 class SemanticUIABackend:
@@ -260,8 +456,8 @@ class SemanticUIABackend:
                 return dict(metadata,artifact=artifact)
             try:result=invoke(worker_args)
             finally:
-                if action in {'invoke','set_value','toggle','select'}:refs.clear()
-            if action in {'observe','wait','invoke','set_value','toggle','select'}:
+                if action in {'invoke','set_value','toggle','select','input.mouse','input.key'}:refs.clear()
+            if action in {'observe','wait','invoke','set_value','toggle','select','input.mouse','input.key'}:
                 refs.clear();revision=uuid.uuid4().hex
                 for element in result.get('elements',[result.get('element')]):
                     if element and 'runtime_id' in element:
@@ -274,13 +470,18 @@ class SemanticUIABackend:
 
 class SemanticUIAExecutor(SessionExecutor):
     kind='windows_uia_semantic'
-    def __init__(self,*,machine_id,owner_principal_id,bindings,policy=None,backend=None):
+    def __init__(self,*,machine_id,owner_principal_id,bindings,policy=None,backend=None,uncertain=None,
+                 placement='host',guest_executor=None):
+        if placement not in {'host','guest'}:raise ValueError('placement must be host or guest')
         if len({b.capability_id for b in bindings})!=len(bindings):raise ValueError('duplicate_uia_capability')
         super().__init__(machine_id=machine_id,owner_principal_id=owner_principal_id,bindings={b.capability_id:b for b in bindings},policy=policy)
         self.backend=backend or SemanticUIABackend()
+        self.uncertain=uncertain
+        self.placement=placement
+        self.guest_executor=guest_executor
     def _validate(self,request,b):
         a=dict(request.arguments);action=a.get('action')
-        fields={'observe':set(),'observe.hybrid':{'output'},'wait':{'selector_key','expected','wait_seconds'},'screenshot':{'output'},'set_value':{'reference','value'}}.get(action,{'reference'})
+        fields={'observe':set(),'observe.hybrid':{'output'},'wait':{'selector_key','expected','wait_seconds'},'screenshot':{'output'},'set_value':{'reference','value'},'input.mouse':{'reference'},'input.key':{'reference','text'}}.get(action,{'reference'})
         if action not in b.actions or set(a)-({'action'}|fields):raise ValueError('uia_action_or_fields_denied')
         if action=='wait':
             if a.get('selector_key') not in {s.key for s in b.selectors} or not isinstance(a.get('expected'),dict) or not a['expected'] or set(a['expected'])-{'text','value','enabled','visible'}:
@@ -292,9 +493,65 @@ class SemanticUIAExecutor(SessionExecutor):
             a['output']=str(path)
         elif action!='observe' and (type(a.get('reference')) is not str or not a['reference']):raise ValueError('uia_reference_required')
         if action=='set_value' and (type(a.get('value')) is not str or len(a['value'])>b.max_text_chars):raise ValueError('uia_value_limit')
+        if action=='input.key' and (type(a.get('text')) is not str or not a['text'] or len(a['text'])>b.max_text_chars or any(ord(ch)==0 or ord(ch)>0xFFFF for ch in a['text'])):
+            raise ValueError('uia_keyboard_text_rejected')
         a['_scope']=SessionScope.from_request(request).key;a['_operation_id']=request.operation_id
+        a['_work_item_id']=request.work_item_id
         return json.loads(json.dumps(a,allow_nan=False))
-    def _run(self,b,a):return self.backend.run(b,a)
+    def _blocked(self,a):
+        if self.uncertain is None or a.get('action') not in {'input.mouse','input.key'}:
+            return False
+        reference=str(a.get('reference') or '')
+        selector=reference.split(':',1)[1] if ':' in reference else ''
+        work_item=a.get('_work_item_id')
+        if not selector or not work_item:
+            raise ExecutorFailure('uia_input_fence_identity_required')
+        kind='mouse' if a['action']=='input.mouse' else 'keyboard'
+        text=a.get('text') if kind=='keyboard' else None
+        return self.uncertain.uncertain_effect(work_item_id=work_item, kind=kind,
+                                              selector_key=selector, text=text) is not None
+    def _run(self,b,a):
+        if self._blocked(a):
+            raise ExecutorFailure('uncertain_input_not_repeated',uncertain=True)
+        pid=b.identity.pid
+        if type(pid) is not int or pid<=0:
+            raise ExecutorFailure('guest_process_id_required')
+        if a.get('action') in {'input.mouse','input.key'}:
+            claimed=a.get('_process_id')
+            if claimed is not None and claimed!=pid:
+                raise ExecutorFailure('guest_process_id_required')
+            a['_process_id']=pid
+        if self.placement=='guest':
+            from sentra_executors.guest_execution import is_proven_guest_executor
+            if not is_proven_guest_executor(self.guest_executor):
+                raise ExecutorFailure('guest_executor_unproven',uncertain=True)
+            produced=self.guest_executor.execute({
+                'action':a.get('action'),'arguments':dict(a),'pid':pid,'placement':'guest'})
+            if not isinstance(produced,dict):
+                raise ExecutorFailure('guest_executor_result_invalid',uncertain=True)
+            exit_code=produced.get('exit_code')
+            if (produced.get('execution_uncertain') is True
+                    or produced.get('host_subprocess') is True
+                    or produced.get('claims_guest_execution') is False
+                    or ('exit_code' in produced and (type(exit_code) is not int or exit_code != 0))):
+                raise ExecutorFailure('guest_executor_result_invalid',uncertain=True)
+            produced=dict(produced)
+            produced['execution_surface']='guest'
+            produced['host_subprocess']=False
+            produced['claims_guest_execution']=True
+            return produced
+        result=self.backend.run(b,a)
+        if isinstance(result,dict):
+            result=dict(result)
+            if result.get('isolation_boundary'):
+                result.setdefault('execution_surface','guest_transport')
+                result.setdefault('claims_guest_execution',False)
+                result.setdefault('host_subprocess',False)
+            else:
+                result.setdefault('execution_surface','host')
+                result.setdefault('claims_guest_execution',False)
+                result.setdefault('host_subprocess',True)
+        return result
 
 
 def declare_semantic_windows_machine(*,machine_id,owner_principal_id,bindings,policy=None,backend=None):

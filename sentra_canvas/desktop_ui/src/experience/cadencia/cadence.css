@@ -1,0 +1,124 @@
+/* Compact home rows. Imported by Lumen after desktop.css. Does not touch the mascot. */
+
+.opendots-shell .shell-home-board .shell-home-list {
+  height: max-content;
+  align-content: start;
+  align-items: start;
+  justify-content: start;
+  grid-auto-rows: max-content;
+}
+
+.opendots-shell .shell-home-board .shell-home-list > button {
+  height: max-content;
+  max-height: 56px;
+  align-self: start;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+
+.cadence-activity[data-stop="true"] {
+  animation: none;
+  transition: none;
+}
+
+.cadence-root :focus-visible {
+  outline: 3px solid #e2b657;
+  outline-offset: 3px;
+}
+
+.cadence-root button {
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1), opacity 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cadence-root button:active {
+  transform: translateY(1px);
+}
+
+.cadence-read-error {
+  display: grid;
+  gap: 8px;
+  max-width: 40rem;
+  padding: 14px 16px;
+  border: 1px solid #9b394c;
+  border-radius: 12px;
+  background: #24181b;
+}
+
+.cadence-loading {
+  min-height: 44px;
+}
+
+.opendots-shell .shell-home-pending .shell-failure-sum,
+.opendots-shell .shell-home-pending .shell-failure-group-sum {
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  column-gap: 16px;
+}
+
+.opendots-shell .shell-home-pending .cadence-set-chevron {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  color: #6f7480;
+  justify-self: end;
+  transform: rotate(0deg);
+  transition: transform 200ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.opendots-shell .shell-home-pending .shell-failure-sum[aria-expanded="true"] .cadence-set-chevron,
+.opendots-shell .shell-home-pending .shell-failure-group-sum[aria-expanded="true"] .cadence-set-chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cadence-surface[data-motion="on"][data-dir="forward"] {
+    animation: cadence-enter-forward 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .cadence-surface[data-motion="on"][data-dir="back"] {
+    animation: cadence-enter-back 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .cadence-activity[data-animate="true"] {
+    animation: cadence-enter-forward 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+}
+
+@keyframes cadence-enter-forward {
+  from { opacity: 0; transform: translateX(18px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes cadence-enter-back {
+  from { opacity: 0; transform: translateX(-18px); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cadence-surface,
+  .cadence-activity,
+  .cadence-root,
+  .cadence-root *,
+  .cadence-root *::before,
+  .cadence-root *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .cadence-root button:active {
+    transform: none;
+  }
+}
+
+.cadence-root[data-reduced="true"],
+.cadence-root[data-reduced="true"] *,
+.cadence-root[data-reduced="true"] *::before,
+.cadence-root[data-reduced="true"] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+.cadence-root[data-reduced="true"] button:active {
+  transform: none;
+}

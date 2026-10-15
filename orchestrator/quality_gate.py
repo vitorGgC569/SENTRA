@@ -5,6 +5,12 @@ import hashlib
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
+from .failure_summary import (
+    GateAuditRefusal,
+    accepted_evidence_ids,
+    accepted_identifier,
+    accepted_status,
+)
 from .models import (
     Candidate,
     CandidatePackage,
@@ -12,6 +18,7 @@ from .models import (
     Task,
     ValidationReport,
 )
+from .observability import DecisionEffectRegistry
 
 
 @dataclass
@@ -29,6 +36,9 @@ class QuorumPolicy:
     require_explicit_scores: bool = False
 
 
+_WITHHELD_EVIDENCE = "Quality gate withheld: no accepted evidence"
+
+
 class QualityGate:
     """
     Deterministic Quality Gate evaluating formal candidate readiness as specified
@@ -36,8 +46,49 @@ class QualityGate:
     'Uma mensagem READY produzida pelo modelo não significa automaticamente que a tarefa está pronta.'
     """
 
-    def __init__(self, policy: Optional[QuorumPolicy] = None):
+    def __init__(
+        self,
+        policy: Optional[QuorumPolicy] = None,
+        *,
+        registry: Optional[DecisionEffectRegistry] = None,
+    ):
         self.policy = policy or QuorumPolicy()
+        self.registry = registry if registry is not None else DecisionEffectRegistry()
+
+    def _close(
+        self,
+        passed: bool,
+        reason: str,
+        package: Optional[CandidatePackage],
+    ) -> Tuple[bool, str, Optional[CandidatePackage]]:
+        """Record the decision. A pass without evidence is not emitted as approval."""
+        try:
+            observation = gate_decision_observation(passed, reason, package)
+        except GateAuditRefusal as refusal:
+            if refusal.code != "evidence":
+                raise
+            candidate_id = getattr(package, "candidate_id", None) if package is not None else None
+            self.registry.record_withheld(candidate_id)
+            return False, _WITHHELD_EVIDENCE, None
+        self.registry.record_decision(observation)
+        return passed, reason, package
+
+    @staticmethod
+    def _accepted_evidence_ids(task: Task, test_results: Optional[Dict[str, Any]]) -> List[str]:
+        """Keep identifier-shaped ids. A path, secret, or blank is not proof."""
+        raw: List[Any] = []
+        supplied = (getattr(task, "metadata", None) or {}).get("evidence_ids")
+        if isinstance(supplied, (list, tuple)):
+            raw.extend(supplied)
+        visual = dict((test_results or {}).get("visual_evidence") or {})
+        if visual.get("integrity_passed"):
+            raw.append("visual")
+            for item in visual.get("files") or []:
+                evidence_id = str((item or {}).get("evidence_id") or "").strip()
+                integrity = dict((item or {}).get("integrity") or {})
+                if evidence_id and integrity.get("passed") is True:
+                    raw.append(evidence_id)
+        return accepted_evidence_ids(raw)
 
     @staticmethod
     def _report_score(report) -> float:
@@ -120,12 +171,12 @@ class QualityGate:
         """
         if any((r.task_id and r.task_id != task.id) or
                (r.candidate_id and r.candidate_id != candidate.candidate_id) for r in reports):
-            return False, "Report belongs to a different task/candidate", None
+            return self._close(False, "Report belongs to a different task/candidate", None)
         identities = [r.validator_id or r.validator_role for r in reports]
         if any(not identity for identity in identities) or len(set(identities)) != len(identities):
-            return False, "Duplicate or missing validator identity", None
+            return self._close(False, "Duplicate or missing validator identity", None)
         if len({r.report_id for r in reports}) != len(reports):
-            return False, "Duplicate validation report", None
+            return self._close(False, "Duplicate validation report", None)
         invalid_report = False
         for report in reports:
             confidence = report.confidence
@@ -138,7 +189,7 @@ class QualityGate:
                 invalid_report = True
                 break
         if invalid_report:
-            return False, "Invalid validation report status/confidence", None
+            return self._close(False, "Invalid validation report status/confidence", None)
         # Relatórios com ran=False não são evidência (validador não executou:
         # budget, timeout, transporte). Excluídos do quorum — jamais contam
         # como voto contra o candidato.
@@ -157,14 +208,14 @@ class QualityGate:
                     invalid_explicit_score = True
                     break
         if invalid_explicit_score:
-            return False, "INSUFFICIENT_VALIDATION: missing/invalid explicit quality score", None
+            return self._close(False, "INSUFFICIENT_VALIDATION: missing/invalid explicit quality score", None)
         if self.policy.require_explicit_scores and any(
             r.score is None or r.score < self.policy.min_release_score
             for r in effective
         ):
-            return False, "Below release threshold: explicit score below required bar", None
+            return self._close(False, "Below release threshold: explicit score below required bar", None)
         if abstained and not effective:
-            return (
+            return self._close(
                 False,
                 f"INSUFFICIENT_VALIDATION: 0/{len(reports)} validators ran "
                 f"(abstained: {sorted(set(abstained))}).",
@@ -179,13 +230,13 @@ class QualityGate:
             suffix = (f" Abstained: {sorted(set(abstained))}."
                       if abstained else "")
             if abstained:
-                return (
+                return self._close(
                     False,
                     f"INSUFFICIENT_VALIDATION: {total_validators}/{self.policy.validators_required} "
                     f"ran.{suffix}",
                     None,
                 )
-            return (
+            return self._close(
                 False,
                 f"Quorum not met: received {total_validators}/{self.policy.validators_required} reports.",
                 None,
@@ -193,7 +244,7 @@ class QualityGate:
 
         # 2. Minimum approvals
         if approvals < self.policy.minimum_approvals:
-            return (
+            return self._close(
                 False,
                 f"Insufficient approvals: {approvals}/{self.policy.minimum_approvals} approvals.",
                 None,
@@ -205,7 +256,7 @@ class QualityGate:
         ]
         if self.policy.critical_rejection_blocks and critical_findings:
             issues = [f.description for f in critical_findings]
-            return (
+            return self._close(
                 False,
                 f"Blocked by {len(critical_findings)} critical findings: {issues}",
                 None,
@@ -217,35 +268,35 @@ class QualityGate:
             if (test_results and "checks_ran" in test_results
                     and not [r for r in test_results.get("results", []) if not r.get("refused")]):
                 refused = test_results.get("refused_commands", [])
-                return (
+                return self._close(
                     False,
                     f"INSUFFICIENT_VALIDATION: no deterministic checks ran (refused: {refused})",
                     None,
                 )
             if not test_results or test_results.get("all_passed") is not True:
                 failed = (test_results or {}).get("failed_commands", [])
-                return (
+                return self._close(
                     False,
                     f"Objective verification tests failed: {failed}",
                     None,
                 )
             results = [r for r in test_results.get("results", []) if not r.get("refused")]
             if not results or any(r.get("passed") is not True for r in results):
-                return False, "Objective verification requires nonempty passing evidence", None
+                return self._close(False, "Objective verification requires nonempty passing evidence", None)
         if test_results:
             if test_results.get("candidate_id", candidate.candidate_id) != candidate.candidate_id:
-                return False, "Tests belong to a different candidate", None
+                return self._close(False, "Tests belong to a different candidate", None)
             expected_patch = hashlib.sha256(candidate.patch.encode("utf-8")).hexdigest()
             if test_results.get("patch_hash", expected_patch) != expected_patch:
-                return False, "Tests belong to a different patch version", None
+                return self._close(False, "Tests belong to a different patch version", None)
             if test_results.get("source_unchanged") is False:
-                return False, "Source changed during verification", None
+                return self._close(False, "Source changed during verification", None)
         critical = str(task.risk).upper() in {"HIGH", "CRITICAL"} or str(
             getattr(task.priority, "value", task.priority)).upper() == "CRITICAL"
         if critical and self.policy.security_validator_required_for_critical:
             approved_roles = {r.validator_role for r in effective if r.status == "APPROVED"}
             if not {"validator.security", "validator.adversarial"} <= approved_roles:
-                return False, "Critical work requires approved security and adversarial validators", None
+                return self._close(False, "Critical work requires approved security and adversarial validators", None)
         required = set(task.metadata.get("acceptance_criteria", []))
         checked = {item for r in effective if r.status == "APPROVED" for item in r.requirements_checked}
         coverage = len(required & checked) / len(required) if required else 1.0
@@ -253,7 +304,7 @@ class QualityGate:
         # 5. Calculated confidence check
         confidence = self.calculate_confidence(effective, test_results, requirements_coverage=coverage)
         if confidence < self.policy.minimum_confidence_threshold:
-            return (
+            return self._close(
                 False,
                 f"Confidence below threshold: {confidence:.2f} < {self.policy.minimum_confidence_threshold:.2f}",
                 None,
@@ -264,14 +315,20 @@ class QualityGate:
         scores = [self._report_score(r) for r in effective]
         min_score = min(scores) if scores else 0.0
         if min_score < self.policy.min_release_score:
-            return (
+            return self._close(
                 False,
                 f"Below release threshold: min critic score {min_score:.2f} < "
                 f"{self.policy.min_release_score:.2f}",
                 None,
             )
 
-        # Passed all gate criteria! Build CandidatePackage for Master Model (Section 22)
+        # Criteria can be met and still carry no proof. That is not a package
+        # and it does not record READY_FOR_MASTER.
+        evidence_ids = self._accepted_evidence_ids(task, test_results)
+        if not evidence_ids:
+            return self._close(False, _WITHHELD_EVIDENCE, None)
+
+        # Passed all gate criteria. Build CandidatePackage for Master Model (Section 22).
         tests_list = ([r for r in test_results.get("results", []) if not r.get("refused")]
                       if test_results else [])
         passed_tests = sum(1 for t in tests_list if t.get("passed", False))
@@ -285,20 +342,6 @@ class QualityGate:
         ]
 
         mean_score = round(sum(scores) / len(scores), 2) if scores else 0.0
-        evidence_ids = [
-            str(item)
-            for item in (task.metadata.get("evidence_ids") or [])
-            if str(item).strip()
-        ]
-        visual = dict((test_results or {}).get("visual_evidence") or {})
-        if visual.get("integrity_passed"):
-            evidence_ids.append("visual")
-            for item in visual.get("files") or []:
-                evidence_id = str((item or {}).get("evidence_id") or "").strip()
-                integrity = dict((item or {}).get("integrity") or {})
-                if evidence_id and integrity.get("passed") is True:
-                    evidence_ids.append(evidence_id)
-        evidence_ids = list(dict.fromkeys(evidence_ids))
 
         package = CandidatePackage(
             candidate_id=candidate.candidate_id,
@@ -325,7 +368,7 @@ class QualityGate:
             status="READY_FOR_MASTER",
         )
 
-        return True, "Passed Quality Gate! READY_FOR_MASTER.", package
+        return self._close(True, "Passed Quality Gate! READY_FOR_MASTER.", package)
 
 
 # ---------------------------------------------------------------------------
@@ -360,3 +403,38 @@ def check_milestone_budgets(work_dir, budgets=None, test_command=None, timeout=N
 def evaluate_visual_integrity(evidence, work_dir):
     """Delegate to milestones.evaluate_visual_evidence (integrity only)."""
     return _evaluate_visual_evidence(evidence, work_dir)
+
+
+def gate_decision_observation(passed: bool, reason: str, package=None) -> dict:
+    """Advisory record of a quality-gate result.
+
+    The gate stays authoritative for READY_FOR_MASTER. This record does not
+    carry a Grant and does not admit an effect. Approval without evidence
+    is refused: missing proof is not an emitted pass.
+    """
+    if type(passed) is not bool:
+        raise ValueError("passed must be a boolean")
+    text = "".join(
+        ch for ch in str(reason or "").replace("\r", " ").replace("\n", " ")
+        if ch.isprintable()
+    )[:500]
+    candidate_id = None
+    status = None
+    raw_ids: List[Any] = []
+    if package is not None:
+        candidate_id = accepted_identifier(getattr(package, "candidate_id", None))
+        status = accepted_status(getattr(package, "status", None))
+        raw_ids = list(getattr(package, "evidence_ids", None) or [])
+    evidence_ids = accepted_evidence_ids(raw_ids)
+    if passed and not evidence_ids:
+        raise GateAuditRefusal("approved gate requires evidence", code="evidence")
+    return {
+        "stage": "quality_gate",
+        "authorizes_effect": False,
+        "passed": passed,
+        "reason": text,
+        "candidate_id": candidate_id,
+        "status": status,
+        "grant_id": None,
+        "evidence_ids": evidence_ids,
+    }

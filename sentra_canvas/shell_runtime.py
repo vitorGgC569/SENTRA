@@ -3,12 +3,14 @@
 The protected queue is an execution journal, not a new Run/WorkItem authority.
 Only work whose central operation is still QUEUED can be recovered for execution.
 Interrupted model submissions remain uncertain until their journal is reconciled.
+Reading an UNCERTAIN turn again leaves it UNCERTAIN and does not send it again.
 """
 from __future__ import annotations
 
 import hashlib
 import os
 import queue
+from pathlib import Path
 import re
 import subprocess
 import threading
@@ -18,12 +20,19 @@ from contextlib import closing
 
 from sentra_core.conversations import ConversationStore, _encode, _decode
 from .owned_process import TaskProcess
+from .shell_optional import UNVERIFIED_TURN_MODEL, UNVERIFIED_TURN_REASON
+from .shell_web import UnverifiedTurn
 from .store import Denied, MODEL_RE
 
 # GPT-6 reasoning and subsequent tool rounds can exceed the former 120/180s
 # pair. These are finite wait ceilings, never automatic retries or new sends.
-SHELL_PROVIDER_TIMEOUT_SECONDS = 300
-SHELL_EXECUTION_TIMEOUT_SECONDS = 900
+SHELL_PROVIDER_TIMEOUT_SECONDS = 1800
+SHELL_EXECUTION_TIMEOUT_SECONDS = 3600
+# Attested finals may still be adopted for turns that are in flight or already
+# succeeded. UNCERTAIN is not in this set: a later read must not publish it.
+_OBSERVABLE_FINAL_STATES = frozenset({
+    "RUNNING", "WAITING_EXTERNAL", "CANCEL_REQUESTED", "SUCCEEDED",
+})
 
 
 class CanvasShellRuntime:
@@ -37,8 +46,13 @@ class CanvasShellRuntime:
         self._processes = {}
         self._queue = queue.Queue(maxsize=canvas.max_pending_tasks)
         self._conversation_locks = {}
+        self._executing_operations = set()
+        from .shell_stream import ShellStreamJournal
+        self.stream = ShellStreamJournal(control.store, owner, bind_queue=True)
+        self.stream_error = None
+        self._stream_closed_operations = set()
         from .shell_live import ShellLivePreviews
-        self.live = ShellLivePreviews(canvas.state_dir)
+        self.live = ShellLivePreviews(canvas.state_dir, on_change=self._stream_preview, on_batch=self._stream_previews)
         from .shell_web import ShellWebRuntime
         self.web = ShellWebRuntime(self)
         from .shell_actor import ShellActorService
@@ -69,6 +83,78 @@ class CanvasShellRuntime:
             name="sentra-shell-worker-" + str(i)) for i in range(canvas.max_task_workers)]
         for thread in self._threads:
             thread.start()
+        self._stream_thread = threading.Thread(target=self._collect_stream, daemon=True,
+                                               name="sentra-shell-stream-ingest")
+        self._stream_thread.start()
+
+    def _stream_preview(self, record, preview, *, retain_reference=False):
+        import sqlite3
+        try:
+            return self.stream.publish(record["project_id"], record["space_id"], record["conversation_id"], preview,
+                                       _retain_reference=retain_reference) is not None
+        except (OSError, RuntimeError, ValueError, PermissionError, sqlite3.Error) as exc:
+            self.stream_error = type(exc).__name__
+            return False
+
+    def _stream_previews(self, observations):
+        import sqlite3
+        try:
+            results = self.stream.publish_many([
+                (record["project_id"], record["space_id"], record["conversation_id"], preview)
+                for record, preview in observations
+            ])
+            return [result is not None for result in results]
+        except (OSError, RuntimeError, ValueError, PermissionError, sqlite3.Error) as exc:
+            self.stream_error = type(exc).__name__
+            return [False] * len(observations)
+
+    def _collect_stream(self):
+        """One ingestion loop per runtime, independent of windows/subscribers."""
+        from .shell_web_preview import web_preview
+        import sqlite3
+        while not self._stop.is_set():
+            try:
+                self.stream_error = None
+                self.live.pump()
+                with closing(self.control.store.connect("shell")) as db:
+                    rows = db.execute("SELECT project_id,conversation_id,operation_id,protected_input FROM canvas_shell_queue "
+                        "WHERE owner=? AND state='running' ORDER BY created_at DESC", (self.owner,)).fetchall()
+                seen_conversations = set()
+                for row in rows:
+                    if self._stop.is_set():
+                        break
+                    key = (row["project_id"], row["conversation_id"])
+                    if key in seen_conversations:
+                        continue
+                    seen_conversations.add(key)
+                    if row["operation_id"] in self._stream_closed_operations:
+                        continue
+                    # Native callbacks already persist and fan out their observations.
+                    if self.live.has_active(row["project_id"], row["conversation_id"]):
+                        continue
+                    message = _decode(row["protected_input"])["message"]
+                    state = self.control.durable.operation_status(row["operation_id"], self.owner)["state"]
+                    if state in {"UNCERTAIN", "FAILED", "CANCELLED"}:
+                        prior = self.stream.head(row["project_id"], row["conversation_id"])
+                        if prior and prior.get("operation_id") != row["operation_id"]:
+                            self._stream_closed_operations.add(row["operation_id"])
+                            continue
+                        observed = prior or {"content": ""}
+                        observed = {**observed, "status": "interrupted", "operation_id": row["operation_id"],
+                                    "activity": "Entrega incerta. Não reenvie."}
+                        if self._stream_preview(message, observed, retain_reference=bool(prior and prior.get("content_ref"))):
+                            self._stream_closed_operations.add(row["operation_id"])
+                        continue
+                    observed = web_preview(self, row["project_id"], row["conversation_id"], include_full=True)
+                    if observed.get("operation_id") not in {None, row["operation_id"]}:
+                        continue
+                    if observed.get("status") != "idle":
+                        self.stream.publish(row["project_id"], message["space_id"], row["conversation_id"], observed)
+            except (OSError, RuntimeError, ValueError, PermissionError, sqlite3.Error) as exc:
+                # A broken presentation feed must not resend or cancel a producer.
+                # Only the class enters diagnostics; content/credentials stay private.
+                self.stream_error = type(exc).__name__
+            self._stop.wait(.05 if self._processes or self.live.has_active() else .2)
 
     def _project(self, project_id, owner):
         if owner != self.owner or owner != self.canvas._runtime().owner:
@@ -84,6 +170,45 @@ class CanvasShellRuntime:
                 "WHERE conversation_id=? ORDER BY seq", (conversation_id,)).fetchall()
         return [{"seq": row["seq"], "role": row["role"], "kind": row["kind"],
                  "content": _decode(row["protected_content"])} for row in rows]
+
+    def _journal_calls(self, conversation_id):
+        with self.conversations._connect() as db:
+            self.conversations._owned(db, conversation_id)
+            rows = db.execute("SELECT id,kind,operation,state FROM calls "
+                "WHERE conversation_id=? ORDER BY created", (conversation_id,)).fetchall()
+        return [{"id": row["id"], "kind": row["kind"], "operation": row["operation"],
+                 "state": row["state"]} for row in rows]
+
+    def _remember_turn(self, message, dot_id, content):
+        from orchestrator.memory import LiveDotSession, build_turn_memory
+        journal, calls = [], []
+        try:
+            journal = self._journal_messages(message["conversation_id"])
+            calls = self._journal_calls(message["conversation_id"])
+        except Exception:
+            journal, calls = [], []
+        memory = build_turn_memory(content=content, conversation_id=message["conversation_id"],
+            journal=journal, calls=calls)
+        root = Path(self._project(message["project_id"], self.owner)["path"]) / ".sentra"
+        LiveDotSession(root, self.owner, dot_id, message["conversation_id"]).save_dot(
+            plan=memory["plan"], context=memory["context"],
+            run_id=message["run_id"], work_item_id=message["work_item_id"],
+            operation_id=message["operation_id"])
+        return memory
+
+    def _dot_session_view(self, project_id, owner, dot, conversation_id):
+        from orchestrator.memory import LiveDotSession
+        view = {"present": False, "authorizes_effects": False, "provider_handoff": False, "steps": []}
+        root = Path(self._project(project_id, owner)["path"]) / ".sentra"
+        try:
+            loaded = LiveDotSession(root, owner, dot["dot_id"], conversation_id).load_dot()
+        except FileNotFoundError:
+            return view
+        body = loaded["plan"]["body"]
+        view["present"] = True
+        view["objective"] = body.get("objective")
+        view["steps"] = list(body.get("steps") or [])
+        return view
 
     def _delivery_problem(self, message):
         # Project only known provider errors, never CLI output, tokens or paths.
@@ -156,6 +281,32 @@ class CanvasShellRuntime:
         return bool(context is not None and context.receipt.owner == owner
             and context.request.capability_id in {"canvas.coordinator.delegate", "canvas.coordinator.handoff"}
             and context.request.arguments.get("project_id") == project_id)
+
+    def _turn_uses_web(self, project_id, message):
+        return bool(message.get("attachments")) or message.get("native_generation") == "image" or self.web.owns_conversation(project_id, message["conversation_id"])
+
+    def _not_submitted_delivery(self, operation_id, work_item_id):
+        op = self.control.durable.operation_status(operation_id, self.owner)
+        if op["state"] in {"QUEUED", "STARTING", "RUNNING"}:
+            self.control.durable.update_operation(operation_id, self.owner, state="FAILED",
+                event_type="SHELL_MODEL_NOT_SUBMITTED",
+                error={"code": "model_access_unverified", "message": UNVERIFIED_TURN_REASON},
+                progress={"automatic_retry": False, "delivery": "not_submitted",
+                    "receipt": "access unverified", "model_access_verified": False,
+                    "inference_executed": False},
+                result={"delivery": "not_submitted", "receipt": "access unverified",
+                    "model_access_verified": False, "inference_executed": False, "resent": False})
+        return {"status": "not_submitted", "operation_id": operation_id,
+            "work_item_id": work_item_id, "receipt_id": None, "receipt": "access unverified",
+            "delivery": "not_submitted", "reason": UNVERIFIED_TURN_REASON, "resent": False,
+            "automatic_retry": False, "model_access_verified": False, "inference_executed": False}
+
+    def _stop_unverified_web_turn(self, oid, message):
+        """Listed Grok access was not submitted. Leave no queued row to rediscover."""
+        receipt = self._not_submitted_delivery(oid, message.get("work_item_id"))
+        with closing(self.control.store.connect("shell")) as db, db:
+            db.execute("UPDATE canvas_shell_queue SET state='not_submitted' WHERE operation_id=? AND state IN ('queued','running')", (oid,))
+        return receipt
 
     def _model_grant(self, message, dot):
         item = self.control.work_item_info(message["work_item_id"], self.owner)
@@ -237,15 +388,23 @@ class CanvasShellRuntime:
         message = dict(message)
         if self._coordinator_child(project_id, owner):
             message["coordinator_child"] = True  # Server-only marker, persisted in protected queue.
-        workspace = self._project(project_id, owner)
+        self._project(project_id, owner)
         agent = self.canvas.store.resource("agents", dot["agent_id"], project_id)
         operation = self.control.durable.operation_status(message["operation_id"], owner)
         item = self.control.work_item_info(message["work_item_id"], owner)
         if operation["run_id"] != message["run_id"] or item["run_id"] != message["run_id"] or item["assignee_agent_id"] != agent["id"]:
             raise Denied("conversation authority mismatch")
+        if operation["state"] == "UNCERTAIN":
+            consulted = self.reconcile_message(project_id, owner, message)
+            consulted["resent"] = False
+            return consulted
+        message["live_dot_session"] = self._dot_session_view(
+            project_id, owner, dot, message["conversation_id"])
         if not MODEL_RE.fullmatch(agent["model"]):
             raise ValueError("invalid admitted model")
-        uses_web = bool(message.get("attachments")) or message.get('native_generation') == 'image' or self.web.owns_conversation(project_id, message["conversation_id"])
+        uses_web = self._turn_uses_web(project_id, message)
+        if uses_web and dot.get("model") == UNVERIFIED_TURN_MODEL:
+            return self._not_submitted_delivery(operation["operation_id"], item["work_item_id"])
         waiting_approval = False
         required = []
         try:
@@ -293,6 +452,12 @@ class CanvasShellRuntime:
                 continue
             try:
                 self._execute(oid)
+            except UnverifiedTurn:
+                with closing(self.control.store.connect("shell")) as db:
+                    row = db.execute("SELECT protected_input FROM canvas_shell_queue WHERE operation_id=? AND owner=?",
+                        (oid, self.owner)).fetchone()
+                if row is not None:
+                    self._stop_unverified_web_turn(oid, _decode(row["protected_input"])["message"])
             except Exception:
                 # Preserve authoritative failure/uncertainty; never submit again.
                 try:
@@ -306,6 +471,20 @@ class CanvasShellRuntime:
                 self._queue.task_done()
 
     def _execute(self, oid):
+        # Idle discovery may enqueue the same durable queued row while its
+        # first worker is still checking admission. Duplicates must not occupy
+        # every worker waiting for that conversation's long-running turn.
+        with self._lock:
+            if oid in self._executing_operations:
+                return
+            self._executing_operations.add(oid)
+        try:
+            self._execute_reserved(oid)
+        finally:
+            with self._lock:
+                self._executing_operations.discard(oid)
+
+    def _execute_reserved(self, oid):
         with closing(self.control.store.connect("shell")) as db:
             row = db.execute("SELECT * FROM canvas_shell_queue WHERE operation_id=? AND owner=?",
                              (oid, self.owner)).fetchone()
@@ -315,12 +494,19 @@ class CanvasShellRuntime:
         message, dot = data["message"], data["dot"]
         with self._lock:
             lock = self._conversation_locks.setdefault(message["conversation_id"], threading.Lock())
-        with lock:
+        # A distinct queued turn in the same conversation also must not hold a
+        # worker slot while its predecessor generates. Its row stays queued;
+        # the existing idle discovery will revisit it after the lock is free.
+        if not lock.acquire(blocking=False):
+            return
+        try:
             with closing(self.control.store.connect("shell")) as db:
                 current = db.execute("SELECT state FROM canvas_shell_queue WHERE operation_id=?", (oid,)).fetchone()
             if current is None or current["state"] != "queued":
                 return
             self._execute_locked(oid, message, dot)
+        finally:
+            lock.release()
 
     def _execute_locked(self, oid, message, dot):
         current_operation = self.control.durable.operation_status(oid, self.owner)
@@ -339,7 +525,10 @@ class CanvasShellRuntime:
             with closing(self.control.store.connect("shell")) as db, db:
                 db.execute("UPDATE canvas_shell_queue SET state='cancelled' WHERE operation_id=?", (oid,))
             return
-        uses_web = bool(message.get("attachments")) or message.get('native_generation') == 'image' or self.web.owns_conversation(message["project_id"], message["conversation_id"])
+        uses_web = self._turn_uses_web(message["project_id"], message)
+        if uses_web and dot.get("model") == UNVERIFIED_TURN_MODEL:
+            self._stop_unverified_web_turn(oid, message)
+            return
         try:
             self._model_grant(message, dot)
         except PermissionError:
@@ -372,6 +561,9 @@ class CanvasShellRuntime:
         sid = message["conversation_id"]
         self.conversations.open(workspace["path"], session_id=sid)
         if uses_web:
+            if dot.get("model") == UNVERIFIED_TURN_MODEL:
+                self._stop_unverified_web_turn(oid, message)
+                return
             result = self.web.execute(message, dot)
             if result is None:
                 self.control.durable.update_operation(oid, self.owner, state="UNCERTAIN",
@@ -379,6 +571,9 @@ class CanvasShellRuntime:
                 return
             self._publish_answer(message, result["content"], result["receipt_id"],
                 evidence={key: value for key, value in result.items() if key != "content"})
+            return
+        if self._coordinator_uses_dot_vm(message, dot):
+            self._execute_coordinator_in_guest(oid, message, dot)
             return
         previous_sequence = max((m["seq"] for m in self._journal_messages(sid)), default=0)
         self.conversations.set_model_preferences(sid, dot["model"], dot.get("effort"), workspace=workspace["path"])
@@ -395,7 +590,7 @@ class CanvasShellRuntime:
             work_item_id=message["work_item_id"], operation_id=oid)
         environment.update(binding["environment"])
         live_record = self.live.begin(project_id=message["project_id"],
-            conversation_id=message["conversation_id"], operation_id=oid)
+            conversation_id=message["conversation_id"], operation_id=oid, space_id=message["space_id"])
         environment.update(self.live.environment(live_record))
         deadline = time.monotonic() + SHELL_EXECUTION_TIMEOUT_SECONDS
         actor_token = None
@@ -465,6 +660,128 @@ class CanvasShellRuntime:
             with self._lock:
                 self._processes.pop(oid, None)
 
+    def _coordinator_vm_record(self, message, dot):
+        """VM row for this Dot's family. No row keeps the native host CLI, including Codex."""
+        from .shell_dot_canvas import canvas_root, _root_vm_record
+        if not isinstance(message, dict) or not isinstance(dot, dict):
+            return None
+        project_id = message.get("project_id")
+        dot_id = dot.get("dot_id")
+        if not isinstance(project_id, str) or not isinstance(dot_id, str):
+            return None
+        entity = dot
+        space_id = message.get("space_id") if isinstance(message.get("space_id"), str) else None
+        try:
+            with closing(self.control.store.connect("shell")) as db:
+                loaded = self.control.shell._entity(
+                    db, self.owner, project_id, "dot", dot_id, space_id=space_id)
+            if isinstance(loaded, dict):
+                entity = loaded
+        except Exception:
+            entity = dot
+        try:
+            root = canvas_root(entity)
+        except Exception:
+            return None
+        if not isinstance(root, str) or not root:
+            return None
+        return _root_vm_record(self.canvas, project_id, root)
+
+    def _coordinator_uses_dot_vm(self, message, dot):
+        from .shell_dot_canvas import _vm_id
+        return _vm_id(self._coordinator_vm_record(message, dot)) is not None
+
+    def _execute_coordinator_in_guest(self, oid, message, dot):
+        """Run the coordinator inside the Dot VM. Never start it on the host."""
+        from sentra_executors.guest_execution import is_proven_guest_executor
+        from .shell_dot_canvas import (
+            _dot_home, _guest_terminal_executor, _imported_guest_workspace, _vm_id,
+        )
+        record = self._coordinator_vm_record(message, dot) or {}
+        vm_id = _vm_id(record)
+        username = record.get("username") if isinstance(record.get("username"), str) else record.get("guest_username")
+        password = record.get("password") if isinstance(record.get("password"), str) else record.get("guest_password")
+
+        def uncertain(reason):
+            if isinstance(password, str) and password and password in reason:
+                reason = "coordinator guest did not confirm a result"
+            self.control.durable.update_operation(oid, self.owner, state="UNCERTAIN",
+                event_type="SHELL_COORDINATOR_GUEST_UNCONFIRMED",
+                progress={"automatic_retry": False, "execution_surface": "blocked",
+                    "host_subprocess": False, "vm_id": vm_id},
+                error={"code": "coordinator_not_in_guest", "message": reason})
+
+        family = record.get("os_family") if isinstance(record.get("os_family"), str) else "linux"
+        family = family.strip().lower() if family.strip().lower() in {"linux", "windows"} else "linux"
+        model = dot.get("model") if isinstance(dot, dict) else None
+        effort = dot.get("effort") if isinstance(dot, dict) else None
+        prompt = message.get("content") if isinstance(message, dict) else None
+        if model not in {"sentra/chatgpt-web/gpt-6", "sentra/grok/grok-4.7"}:
+            uncertain("coordinator model is not admitted inside the Dot VM")
+            return
+        if effort not in {None, "high"}:
+            uncertain("coordinator effort is not admitted inside the Dot VM")
+            return
+        if not isinstance(prompt, str) or not prompt.strip() or "\0" in prompt:
+            uncertain("coordinator prompt is not usable inside the Dot VM")
+            return
+        if not (isinstance(vm_id, str) and isinstance(username, str) and username.strip()
+                and "\0" not in username and isinstance(password, str) and password
+                and "\0" not in password and "\n" not in password and "\r" not in password):
+            uncertain("Dot VM registry cannot prove the coordinator guest")
+            return
+        try:
+            executor = _guest_terminal_executor(record)
+        except Exception:
+            uncertain("Dot VM registry cannot prove the coordinator guest")
+            return
+        if not is_proven_guest_executor(executor):
+            uncertain("Dot VM registry cannot prove the coordinator guest")
+            return
+        guest_workspace = _imported_guest_workspace(record, family) or _dot_home(record, family)
+        request = {
+            "placement": "guest",
+            "tool": "sentra-cli",
+            "prompt": prompt,
+            "guest_workspace": guest_workspace,
+            "model": model,
+            "effort": "high",
+            "timeout_s": 120,
+            "vm_id": vm_id,
+        }
+        try:
+            produced = executor.execute(request)
+        except Exception:
+            uncertain("coordinator guest did not confirm a result")
+            return
+        stdout = produced.get("stdout") if isinstance(produced, dict) else None
+        exit_code = produced.get("exit_code") if isinstance(produced, dict) else None
+        proven = (
+            isinstance(produced, dict)
+            and produced.get("execution_surface") == "guest"
+            and produced.get("host_subprocess") is not True
+            and produced.get("claims_guest_execution") is True
+            and produced.get("execution_uncertain") is not True
+            and type(exit_code) is int and exit_code == 0
+            and isinstance(stdout, str)
+            and bool(stdout.strip())
+            and "\0" not in stdout
+            and password not in stdout
+        )
+        if not proven:
+            uncertain("coordinator guest did not confirm a result")
+            return
+        receipt = "guest:" + vm_id + ":" + oid
+        self.control.durable.update_operation(oid, self.owner, state="RUNNING",
+            event_type="SHELL_COORDINATOR_GUEST_RUNNING")
+        self._publish_answer(message, stdout, receipt, evidence={
+            "execution_surface": "guest",
+            "host_subprocess": False,
+            "protected_journal": False,
+            "vm_id": vm_id,
+            "claims_guest_execution": True,
+        })
+
     def _publish_answer(self, message, content, receipt, *, evidence):
         oid = message["operation_id"]
         assistant_id = 'assistant-' + hashlib.sha256(oid.encode()).hexdigest()[:32]
@@ -477,6 +794,8 @@ class CanvasShellRuntime:
         self.control.durable.update_operation(oid, self.owner, state="SUCCEEDED",
             event_type="SHELL_MODEL_VERIFIED_FINAL", result={**evidence, "receipt_id": receipt, 'generated_assets': assets,
                 "content_sha256": hashlib.sha256(content.encode()).hexdigest()})
+        if original and isinstance(content, str) and content.strip():
+            self._remember_turn(message, original["dot"]["dot_id"], content)
         self.control.shell.record_runtime_message(self.owner, project_id=message["project_id"],
             space_id=message["space_id"], conversation_id=message["conversation_id"],
             message_id=assistant_id, content=content,
@@ -484,10 +803,25 @@ class CanvasShellRuntime:
         with closing(self.control.store.connect("shell")) as db, db:
             db.execute("UPDATE canvas_shell_queue SET state='completed',receipt_id=? WHERE operation_id=?", (receipt, oid))
         self.control.shell.reconcile_message(self.owner, project_id=message["project_id"], message_id=message["message_id"])
+        self._stream_preview(message, {
+            "status": "committed", "activity": "Salvo", "content": content,
+            "operation_id": oid,
+            "message_id": assistant_id, "receipt_id": receipt,
+        })
+        from sentra_runtime.dot_tool_dispatch import retain_coordinator_turn
+        retain_coordinator_turn(
+            self.control, self.owner, project_id=message["project_id"],
+            coordinator_work_item_id=message["work_item_id"], journal_receipt=receipt,
+            reviewer_agent_id=message.get("agent_id"),
+        )
 
     def reconcile_message(self, project_id, owner, message):
         self._project(project_id, owner)
         op = self.control.durable.operation_status(message["operation_id"], owner)
+        if (op.get("progress") or {}).get("delivery") == "not_submitted":
+            receipt = self._not_submitted_delivery(op["operation_id"], message.get("work_item_id"))
+            receipt["resent"] = False
+            return receipt
         with closing(self.control.store.connect("shell")) as db:
             row = db.execute("SELECT protected_input,state FROM canvas_shell_queue WHERE owner=? AND operation_id=?",
                 (owner, message["operation_id"])).fetchone()
@@ -508,7 +842,7 @@ class CanvasShellRuntime:
                     except PermissionError:
                         return {"status": "waiting_approval", "operation_id": op["operation_id"], "receipt_id": None,
                             "work_item_id": original["work_item_id"], "grant_created": False}
-                elif op["state"] in {"RUNNING", "WAITING_EXTERNAL", "CANCEL_REQUESTED", "UNCERTAIN", "SUCCEEDED"} and self.web.availability()["model_delivery_available"]:
+                elif op["state"] in _OBSERVABLE_FINAL_STATES and self.web.availability()["model_delivery_available"]:
                     final = self.web.observe(original, dot)
                     if final is not None:
                         self._publish_answer(original, final["content"], final["receipt_id"],
@@ -522,8 +856,11 @@ class CanvasShellRuntime:
         reason = (op.get("error") or {}).get("message")
         if state == "uncertain" and row:
             reason = self._delivery_problem(_decode(row["protected_input"])["message"]) or reason
-        return {"status": state, "operation_id": op["operation_id"], "receipt_id": receipt,
+        result = {"status": state, "operation_id": op["operation_id"], "receipt_id": receipt,
                 **({"reason": reason} if state == "uncertain" and reason else {})}
+        if state == "uncertain":
+            result["resent"] = False
+        return result
 
     def recover_completed(self):
         """Publish already committed journal receipts after a crash; never call a model."""
@@ -536,7 +873,7 @@ class CanvasShellRuntime:
             data = _decode(row["protected_input"])
             message = data["message"]
             if (message.get("attachments") or message.get('native_generation') == 'image' or result.get("web_attested_final")) and self.web.availability()["model_delivery_available"]:
-                if op["state"] in {"RUNNING", "WAITING_EXTERNAL", "CANCEL_REQUESTED", "UNCERTAIN", "SUCCEEDED"}:
+                if op["state"] in _OBSERVABLE_FINAL_STATES:
                     final = self.web.observe(message, data["dot"])
                     if final is not None:
                         self._publish_answer(message, final["content"], final["receipt_id"],
@@ -595,6 +932,8 @@ class CanvasShellRuntime:
 
     def close(self):
         self._stop.set()
+        self.stream.close()
+        self._stream_thread.join(timeout=5)
         with self._lock:
             processes = list(self._processes.values())
         for process in processes:
@@ -605,4 +944,5 @@ class CanvasShellRuntime:
             thread.join(timeout=max(0, deadline - time.monotonic()))
         if any(thread.is_alive() for thread in self._threads):
             raise RuntimeError("conversation workers still own runtime resources")
+        self.live.close_all()
         self.web.close()

@@ -18,6 +18,7 @@ from typing import Any, Callable
 from sentra_version import PRODUCT_VERSION
 
 from .local_runtime import LocalRuntime
+from .codex_setup import configure_codex
 from .onboarding import OPENAI_API_KEYS_URL, OPENAI_TUNNELS_URL
 from .openai_auto_setup import authorize_installer_enrollment
 from .windows_paths import filesystem_path as _filesystem_path
@@ -42,14 +43,21 @@ INSTALL_MARKER = ".sentra-install.json"
 ProgressCallback = Callable[[str, int], None]
 
 
-def _installation_ready(verification: dict[str, Any], *, openai_required: bool) -> bool:
+def _installation_ready(verification: dict[str, Any], *, openai_required: bool = True) -> bool:
+    """Setup requires the GPT-WEB tunnel; local health alone is not completion."""
     local_ready = bool(verification.get("core_ready") and not verification.get("onboarding_required"))
     if not openai_required:
         return local_ready
     status = verification.get("status") or {}
+    web = status.get('web_models') or {}
+    if verification.get('web_models_required') and not all(web.get(key) is True for key in ('payload_complete', 'ready', 'catalog_ready', 'turn_ready')):
+        return False
     return bool(local_ready and (verification.get("chatgpt_onboarding") or {}).get("ready")
                 and (status.get("mcp") or {}).get("ok")
-                and (status.get("tunnel") or {}).get("ok"))
+                and (status.get("tunnel") or {}).get("ok")
+                and not (status.get("tunnel") or {}).get("reauth_required")
+                and ("codex_plugin" not in verification or
+                     (verification.get("codex_plugin") or {}).get("ready") is True))
 
 
 def _friendly_install_error(exc: BaseException) -> str:
@@ -57,23 +65,26 @@ def _friendly_install_error(exc: BaseException) -> str:
     detail = str(exc).strip() or exc.__class__.__name__
     lowered = detail.lower()
     if "sha-256" in lowered or "checksum" in lowered:
-        action = "Re-download the official Setup release; the tunnel-client archive failed integrity validation."
+        action = "Baixe novamente o instalador oficial. A verificação de integridade falhou; nenhum arquivo não verificado será instalado."
     elif "payload" in lowered and ("missing" in lowered or "stale" in lowered):
-        action = "Re-download the current SENTRA Setup release. This installer payload is incomplete or stale."
+        action = "Este pacote está incompleto ou desatualizado. Use uma versão completa do SENTRA Setup. A instalação anterior foi preservada."
+    elif "installed process" in lowered or "another installation" in lowered:
+        action = "O SENTRA ou outro instalador ainda está em uso. Conclua a atividade e tente novamente; suas sessões não foram encerradas."
     elif "tunnel" in lowered and ("runtime" in lowered or "api key" in lowered):
-        action = "Open OpenAI Platform, create/select a tunnel and a Runtime API key with All permissions, then try again."
+        action = "Use Conectar minha conta automaticamente pelo Edge para configurar e verificar a conexão."
     elif "workspace" in lowered and "exist" in lowered:
-        action = "Choose an existing project folder, or leave Initial workspace empty and add it later in Advanced settings."
+        action = "Deixe Workspace inicial vazio para criar um projeto automaticamente, ou selecione uma pasta existente."
     elif "permission" in lowered or "access is denied" in lowered:
-        action = "Close running SENTRA components and retry. If Windows blocked the install folder, choose a folder under your user profile."
+        action = "O Windows impediu o acesso à pasta. Use o destino sugerido no seu perfil e tente novamente."
     elif "url" in lowered or "network" in lowered or "timed out" in lowered:
-        action = "Check internet access and retry. Setup needs to download the pinned OpenAI tunnel client."
+        action = "Verifique a conexão e tente novamente. Downloads completos e verificados são reutilizados automaticamente."
     else:
-        action = "Retry Setup. If it fails again, open SENTRA Desktop → Status → Doctor and copy the visible error detail."
-    return f"{detail}\n\nWhat to do: {action}"
+        action = "Abra novamente o Setup para reparar. O progresso fica salvo e seus projetos são preservados."
+    return f"{detail}\n\nComo continuar: {action}"
 
 
 PRODUCTS = (
+    "sentra-launcher.exe",
     "sentra-mcp.exe", "sentra-browser-relay.exe", "sentra-desktop.exe",
     "sentra-human.exe", "sentra-human-worker.exe", "sentra.exe",
     "sentra-agent.exe", "sentra-diagnostics.exe", "sentra-admin.exe",
@@ -136,15 +147,51 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def prepare_tunnel_archive(cache: Path, archive: Path | None = None) -> Path:
+    """Reuse verified bundled/cached bytes; retry only a download, never enrollment."""
+    bundled = payload_root() / "prerequisites" / "tunnel-client.zip"
+    selected = Path(archive).resolve() if archive else bundled if bundled.is_file() else None
+    if selected is not None:
+        if _sha256(selected) != TUNNEL_SHA256:
+            raise ValueError("tunnel-client archive SHA-256 mismatch")
+        return selected
+    cache.mkdir(parents=True, exist_ok=True)
+    target = cache / ("tunnel-client-" + TUNNEL_SHA256 + ".zip")
+    if target.is_file() and _sha256(target) == TUNNEL_SHA256:
+        return target
+    import urllib.error
+    for attempt in range(3):
+        fd, name = tempfile.mkstemp(prefix="tunnel-", suffix=".part", dir=cache)
+        pending = Path(name)
+        try:
+            with os.fdopen(fd, "wb") as out:
+                req = urllib.request.Request(TUNNEL_URL, headers={"User-Agent": "SENTRA-Installer/1.0"})
+                with urllib.request.urlopen(req, timeout=60) as response:
+                    total = 0
+                    while chunk := response.read(1024 * 1024):
+                        total += len(chunk)
+                        if total > 128 * 1024 * 1024:
+                            raise ValueError("tunnel-client archive exceeds size limit")
+                        out.write(chunk)
+            if _sha256(pending) != TUNNEL_SHA256:
+                raise ValueError("tunnel-client archive SHA-256 mismatch")
+            pending.replace(target)
+            return target
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == 2:
+                raise
+            time.sleep(attempt + 1)
+        finally:
+            pending.unlink(missing_ok=True)
+    raise RuntimeError("tunnel download did not finish")
+
+
 def download_tunnel_client(destination: Path, archive: Path | None = None) -> dict[str, Any]:
     destination.mkdir(parents=True, exist_ok=True)
     temp_root = Path(tempfile.mkdtemp(prefix="sentra-tunnel-"))
     try:
-        source = Path(archive).resolve() if archive else temp_root / "tunnel-client.zip"
-        if archive is None:
-            req = urllib.request.Request(TUNNEL_URL, headers={"User-Agent": "SENTRA-Installer/1.0"})
-            with urllib.request.urlopen(req, timeout=60) as response, source.open("wb") as out:
-                shutil.copyfileobj(response, out, length=1024 * 1024)
+        cache = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "SENTRA" / "Downloads"
+        source = prepare_tunnel_archive(cache, archive)
         actual = _sha256(source)
         if actual != TUNNEL_SHA256:
             raise ValueError("tunnel-client archive SHA-256 mismatch")
@@ -251,6 +298,13 @@ def _copy_product_files(install_dir: Path) -> list[str]:
     if getattr(sys, "frozen", False):
         owned.append("sentra-installer.exe")
     return owned
+
+
+def check_install_payload(install_dir: Path | None = None) -> dict[str, Any]:
+    from .installer_preflight import inspect_payload
+    return inspect_payload(payload_root(), extension_source(), docs_source(), PRODUCTS,
+                           version=PRODUCT_VERSION, require_manifest=bool(getattr(sys, "frozen", False)),
+                           destination=install_dir)
 
 
 def _write_install_marker(install_dir: Path, owned_files: list[str] | None = None) -> Path:
@@ -552,7 +606,57 @@ def _enable_web_models_autostart(paths: ProductPaths, install_dir: Path) -> dict
     }
 
 
-def install(
+def install(**options) -> dict[str, Any]:
+    """Validate/download before touching an existing installation, serialize, then apply."""
+    from contextlib import nullcontext
+    from .installation_lock import installation_lock
+    install_dir = Path(options["install_dir"]).expanduser().resolve()
+    # The coordinated update helper owns this same OS lock across its child.
+    lock = nullcontext() if options.get("offline_handoff") is not None else installation_lock(install_dir)
+    with lock:
+        if (install_dir / INSTALL_MARKER).is_file():
+            _validate_sentra_install(install_dir)
+        elif install_dir.exists() and any(install_dir.iterdir()):
+            raise ValueError("choose an empty install directory; destination contains files without SENTRA ownership")
+        progress = options.get("progress")
+        if progress:
+            progress("Verificando os arquivos da instalação…", 2)
+        preflight = check_install_payload(install_dir)
+        if not preflight["ok"]:
+            raise FileNotFoundError("installer payload missing: " + ", ".join(preflight["missing"]))
+        state = (Path(options["state_dir"]).expanduser().resolve() if options.get("state_dir")
+                 else ProductPaths.default(install_dir).state_dir)
+        if progress:
+            progress("Preparando a conexão segura…", 4)
+        options["tunnel_archive"] = prepare_tunnel_archive(state / "downloads", options.get("tunnel_archive"))
+        state.mkdir(parents=True, exist_ok=True)
+        journal = state / "installer-progress.json"
+
+        def record(label, percent, *, status="running"):
+            # Only fixed stage labels: credentials and provider output never enter this file.
+            document = {"version": PRODUCT_VERSION, "stage": label, "percent": percent,
+                        "status": status, "updated_at": time.time()}
+            pending = journal.with_suffix(".tmp")
+            pending.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+            pending.replace(journal)
+            if progress:
+                progress(label, percent)
+
+        options["progress"] = record
+        try:
+            result = _install_product(**options)
+        except Exception:
+            record("Instalação interrompida. Abra o instalador para reparar.", 0, status="failed")
+            raise
+        result["preflight"] = preflight
+        ready = _installation_ready(result.get("connect_verify") or {})
+        deferred = bool(options.get("offline_handoff"))
+        record("Atualização preparada" if deferred else "Túnel verificado; autorize o plugin no ChatGPT" if ready else "Conexão obrigatória precisa de atenção",
+               95 if ready else 85, status="deferred" if deferred else "account_authorization_pending" if ready else "needs_attention")
+        return result
+
+
+def _install_product(
     *,
     install_dir: Path,
     workspace: Path | None = None,
@@ -602,7 +706,11 @@ def install(
             if not offline_handoff.with_suffix('.claimed').is_file():
                 raise PermissionError('offline Setup requires the helper single-use claim')
         else:
-            _stop_installed_processes(install_dir)
+            # Re-running Setup must not kill a broker, terminal or VM session.
+            # Live upgrades use the existing coordinated application-exit path.
+            if os.name == "nt":
+                from .app_exit_update import assert_installation_offline
+                assert_installation_offline(install_dir)
     elif install_dir.exists() and any(install_dir.iterdir()):
         raise ValueError("choose an empty install directory; destination contains files without SENTRA ownership")
     if install_git and not command_exists("git"):
@@ -675,7 +783,8 @@ def install(
         _register_url_protocol(install_dir)
         _register_uninstall(install_dir)
         from .windows_integration import shortcuts
-        result["shortcuts"]=shortcuts(install_dir)
+        result["shortcuts"]=shortcuts(install_dir, desktop_executable=True)
+        _write_install_marker(install_dir, ["desktop-launcher.json"])
 
     notify("Connect & Verify" if offline_handoff is None else "Service verification deferred until restart", 88)
     runtime = None
@@ -688,6 +797,10 @@ def install(
         verification = {'started': {}, 'status': {}, 'next_url': None,
                         'deferred': 'post_update_restart', 'external_completion_claimed': False}
     result["startup"] = verification["started"]
+    verification['web_models_required'] = True
+    if register_system and offline_handoff is None:
+        notify("Registrando o plugin SENTRA no Codex…", 90)
+        verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port)
     result["connect_verify"] = verification
     result["doctor"] = verification["status"]
     # The native Canvas and CLI are shipped regardless of OpenAI login.
@@ -702,20 +815,27 @@ def install(
     result["chatgpt_plugin"] = chatgpt_plugin_install_plan(
         verification.get("status") or {}, tunnel_id=tunnel_id,
     )
-    ready = _installation_ready(verification, openai_required=bool(tunnel_id))
-    notify("Ready" if ready else "Installed — local services need attention", 100 if ready else 90)
+    ready = _installation_ready(verification)
+    result["tunnel_required"] = True
+    result["external_completion_claimed"] = False
+    notify("Túnel verificado; autorize o plugin no ChatGPT" if ready else "Conexão obrigatória precisa de atenção", 95 if ready else 85)
 
     if stop_after_doctor and runtime is not None:
         runtime.stop_all()
 
     human = install_dir / "sentra-human.exe"
     control = install_dir / "sentra-desktop.exe"
-    if launch and not stop_after_doctor:
+    if launch and not stop_after_doctor and offline_handoff is None:
         launch_result: dict[str, Any] = {
             "requested": True,
             "deep_link": verification.get("next_url"),
         }
-        if control.is_file():
+        canvas = install_dir / "sentra-canvas.exe"
+        if ready and not tunnel_id and canvas.is_file():
+            proc = subprocess.Popen([str(canvas)], cwd=install_dir,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            launch_result.update({"canvas_pid": proc.pid, "launched": True})
+        elif control.is_file():
             if not ready or not tunnel_id:
                 command = [str(control), "--open-url", "sentra://onboarding"]
             else:
@@ -741,6 +861,26 @@ def install(
             launch_result.update({"requested": True, "launched": False})
         result["launch"] = launch_result
     return result
+
+
+def verify_installed_local(*, install_dir: Path, launch: bool = True,
+                           progress: ProgressCallback | None = None) -> dict[str, Any]:
+    """Retry required tunnel/plugin readiness without reinstalling or stopping work."""
+    install_dir = install_dir.expanduser().resolve()
+    _validate_sentra_install(install_dir)
+    paths = ProductPaths.default(install_dir)
+    if progress:
+        progress("Verificando os serviços do SENTRA…", 88)
+    settings = ProductSettings.load(paths.settings)
+    verification = LocalRuntime(paths, settings).connect_and_verify(timeout_s=30.0)
+    verification['web_models_required'] = True
+    verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port)
+    ready = _installation_ready(verification)
+    if ready and launch:
+        subprocess.Popen([str(install_dir / "sentra-canvas.exe")], cwd=install_dir,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return {"version": PRODUCT_VERSION, "install_dir": str(install_dir),
+            "connect_verify": verification, "reused_install": True}
 
 
 def connect_installed_openai(
@@ -777,8 +917,10 @@ def connect_installed_openai(
     notify("Connecting OpenAI secure tunnel", 72)
     runtime = LocalRuntime(paths, settings)
     verification = runtime.connect_and_verify(timeout_s=12.0)
+    verification['web_models_required'] = True
+    verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port)
     ready = _installation_ready(verification, openai_required=True)
-    notify("Ready" if ready else "Connection needs attention", 100 if ready else 85)
+    notify("Túnel verificado; autorize o plugin no ChatGPT" if ready else "Connection needs attention", 95 if ready else 85)
 
     result: dict[str, Any] = {
         "version": PRODUCT_VERSION,
@@ -842,7 +984,7 @@ def uninstall(
         _unregister_url_protocol(install_dir)
         _unregister_uninstall(install_dir)
         from .windows_integration import shortcuts
-        shortcuts(install_dir,remove=True)
+        shortcuts(install_dir,remove=True,desktop_executable=True)
     # State can be shared by installations and contain pre-existing credentials.
     # A program-tree marker does not establish exclusive ownership of that state.
     keep_config = True
@@ -888,6 +1030,8 @@ class InstallerWizard:
         import tkinter as tk
         from tkinter import ttk
 
+        from .installer_appearance import enable_native_dpi
+        enable_native_dpi()
         self.tk, self.ttk = tk, ttk
         self.root = tk.Tk()
         self.root.withdraw()
@@ -900,10 +1044,10 @@ class InstallerWizard:
         self.access_scope = tk.StringVar(value="computer")
         self.tunnel_id = tk.StringVar()
         self.runtime_key = tk.StringVar()
-        self.browser_setup_var = tk.BooleanVar(value=False)
+        self.browser_setup_var = tk.BooleanVar(value=True)
         self.git_var = tk.BooleanVar(value=False)
         self.docker_var = tk.BooleanVar(value=False)
-        self.status = tk.StringVar(value="Install SENTRA — local use works without OpenAI")
+        self.status = tk.StringVar(value="Tudo pronto. O instalador prepara o ambiente e abre o SENTRA automaticamente.")
         self.progress_value = tk.IntVar(value=0)
         self.advanced_visible = False
         self._installed = False
@@ -953,7 +1097,7 @@ class InstallerWizard:
             else:
                 widget.pack_forget()
         self.openai_toggle.configure(
-            text="Recolher  ⌃" if self.openai_expanded else "Configurar  ⌄"
+            text="Recolher  ⌃" if self.openai_expanded else "Configuração manual  ⌄"
         )
 
     def _browse(self) -> None:
@@ -981,50 +1125,11 @@ class InstallerWizard:
         self.root.after(0, apply)
 
     def _open_existing_install(self, install_dir: Path) -> None:
-        """Resume already-installed SENTRA without reinstalling the payload."""
-        from tkinter import messagebox
-        try:
-            _validate_sentra_install(install_dir)
-            launcher = install_dir / "sentra-desktop.exe"
-            if not launcher.is_file():
-                raise FileNotFoundError("SENTRA Desktop launcher is missing; repair Setup first")
-            target_view = (
-                "sentra://openai-enroll"
-                if self.browser_setup_var.get() else "sentra://onboarding"
-            )
-            if self.browser_setup_var.get():
-                paths = ProductPaths.default(install_dir)
-                settings = ProductSettings.load(paths.settings)
-                selected_profile = self.profile.get()
-                selected_scope = self.access_scope.get()
-                changed = (settings.profile != selected_profile or settings.access_scope != selected_scope)
-                settings.profile = selected_profile
-                settings.access_scope = selected_scope
-                if selected_profile == "Full":
-                    changed = changed or bool(settings.tool_allowlist)
-                    changed = changed or any(
-                        set(settings.workspace_permissions.get(root) or ()) != {"read", "write", "execute"}
-                        for root in settings.allowed_roots
-                    )
-                    settings.tool_allowlist = []
-                    settings.workspace_permissions = {
-                        root: ["read", "write", "execute"] for root in settings.allowed_roots
-                    }
-                settings.autostart_mcp = settings.autostart_relay = settings.autostart_tunnel = True
-                settings.save(paths.settings)
-                if changed:
-                    LocalRuntime(paths, settings).stop_all()
-                authorize_installer_enrollment(ProductPaths.default(install_dir))
-            subprocess.Popen(
-                [str(launcher), "--open-url", target_view],
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            self.root.destroy()
-        except (OSError, ValueError, RuntimeError) as exc:
-            messagebox.showerror("SENTRA Setup", _friendly_install_error(exc))
+        """Verify the installed services without copying files or stopping sessions."""
+        self._install(require_openai=False, verify_only=True)
 
     def _primary_action(self) -> None:
-        """Reuse installed artifacts; local use never demands an OpenAI key."""
+        """Install locally first, then require the tunnel before setup completion."""
         has_tunnel = bool(self.tunnel_id.get().strip())
         has_key = bool(self.runtime_key.get().strip())
         if has_tunnel != has_key:
@@ -1033,7 +1138,7 @@ class InstallerWizard:
             messagebox.showerror(
                 "SENTRA Setup",
                 "Tunnel ID and Runtime API key are a pair. Fill both values to install and connect now, "
-                "or clear both to install SENTRA first and connect later.",
+                "or clear both to configure the required tunnel using Edge after installation.",
             )
             self.status.set("ChatGPT setup: complete both fields or leave both empty")
             self.progress_value.set(10)
@@ -1049,12 +1154,12 @@ class InstallerWizard:
         self._installed = False
         if (install_dir / INSTALL_MARKER).is_file():
             try:
-                _validate_sentra_install(install_dir)
+                marker = _validate_sentra_install(install_dir)
             except (OSError, ValueError, RuntimeError) as exc:
                 from tkinter import messagebox
                 messagebox.showerror("SENTRA Setup", _friendly_install_error(exc))
                 return
-            self._installed = all(
+            self._installed = marker.get("version") == PRODUCT_VERSION and all(
                 (install_dir / name).is_file()
                 for name in (*PRODUCTS, "tunnel-client.exe")
             )
@@ -1063,7 +1168,7 @@ class InstallerWizard:
         else:
             self._install(require_openai=has_tunnel and has_key)
 
-    def _install(self, require_openai: bool = True) -> None:
+    def _install(self, require_openai: bool = True, *, verify_only: bool = False, enroll: bool = True) -> None:
         from tkinter import messagebox
 
         tunnel_id = self.tunnel_id.get().strip()
@@ -1090,19 +1195,33 @@ class InstallerWizard:
             self.progress_value.set(5)
         self.root.update_idletasks()
 
+        # Tk variables must be read on the UI thread, not by the worker.
+        selected = {"install_dir": Path(self.install_dir.get()),
+                    "workspace": Path(self.workspace.get()) if self.workspace.get().strip() else None,
+                    "profile": self.profile.get(), "access_scope": self.access_scope.get(),
+                    "install_git": self.git_var.get(), "install_docker": self.docker_var.get()}
+        browser_setup = bool(self.browser_setup_var.get())
+
         def worker() -> None:
             try:
-                if require_openai and self._installed:
+                if verify_only:
+                    result = verify_installed_local(
+                        install_dir=selected["install_dir"], launch=not browser_setup,
+                        progress=self._progress_callback,
+                    )
+                    verification = result["connect_verify"]
+                elif require_openai and self._installed:
                     result = connect_installed_openai(
-                        install_dir=Path(self.install_dir.get()),
+                        install_dir=selected["install_dir"],
                         tunnel_id=tunnel_id,
                         runtime_key=runtime_key,
                         launch=False,
                         progress=self._progress_callback,
                     )
                     self.root.after(0, lambda: self.runtime_key.set(""))
+                    self.root.after(0, lambda: self.tunnel_id.set(""))
                     verification = result["connect_verify"]
-                    install_dir = Path(self.install_dir.get()).expanduser().resolve()
+                    install_dir = selected["install_dir"].expanduser().resolve()
                     control = install_dir / "sentra-desktop.exe"
                     if control.is_file():
                         ready = _installation_ready(verification, openai_required=True)
@@ -1115,19 +1234,14 @@ class InstallerWizard:
                         )
                 else:
                     result = install(
-                        install_dir=Path(self.install_dir.get()),
-                        workspace=Path(self.workspace.get()) if self.workspace.get().strip() else None,
-                        profile=self.profile.get(),
-                        access_scope=self.access_scope.get(),
+                        **selected,
                         tunnel_id=tunnel_id,
                         runtime_key=runtime_key,
-                        install_git=self.git_var.get(),
-                        install_docker=self.docker_var.get(),
                         # If the user opted into browser enrollment, the
                         # installer launches that one deep link after local
                         # installation instead of opening a duplicate Desktop.
                         launch=not (
-                            bool(self.browser_setup_var.get()) and not require_openai
+                            browser_setup and not require_openai
                         ),
                         progress=self._progress_callback,
                     )
@@ -1135,11 +1249,19 @@ class InstallerWizard:
                 if not require_openai:
                     def installed() -> None:
                         self._installed = True
-                        self.status.set(
-                            "SENTRA installed. Local tools are available; connect ChatGPT later if desired."
-                        )
-                        self.progress_value.set(100 if verification.get("core_ready") else 80)
-                        if self.browser_setup_var.get():
+                        if not _installation_ready(verification, openai_required=False):
+                            self.status.set("Instalado. A verificação dos serviços ainda precisa de atenção.")
+                            self.progress_value.set(90)
+                            self.connect_hint.configure(text="Seus arquivos foram preservados. Tente verificar novamente.")
+                            self.install_button.configure(state="normal", text="Verificar novamente  →",
+                                                          command=lambda: self._install(require_openai=False, verify_only=True))
+                            return
+                        if _installation_ready(verification):
+                            self._show_tunnel_verified(verification)
+                            return
+                        self.status.set("Etapa 2 de 3 — configure o túnel obrigatório para GPT6-WEB.")
+                        self.progress_value.set(85)
+                        if browser_setup and enroll:
                             desktop = Path(self.install_dir.get()).expanduser().resolve() / "sentra-desktop.exe"
                             try:
                                 if not desktop.is_file():
@@ -1149,6 +1271,7 @@ class InstallerWizard:
                                     [str(desktop), "--open-url", "sentra://openai-enroll"],
                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                                 )
+                                self._connection_deadline = time.monotonic() + 600
                             except (OSError, ValueError, RuntimeError) as exc:
                                 error = _friendly_install_error(exc)
                                 self.status.set("SENTRA local instalado. A configuração automática precisa de atenção.")
@@ -1162,15 +1285,18 @@ class InstallerWizard:
                                 messagebox.showerror("SENTRA Setup", error)
                                 return
                             self.connect_hint.configure(
-                                text="Installer consent saved. SENTRA Desktop will create the key with All permissions and verify the connection after login."
+                                text="Abrindo o Edge para configurar e verificar a conexão. Entre na sua conta quando solicitado."
                             )
                         else:
                             self.connect_hint.configure(
-                                text="Local setup finished. To enable ChatGPT, open SENTRA Desktop → Quick Start."
+                                text="Conecte o túnel e entre nos modelos WEB em Abrir Web Models. Depois, verifique novamente. "
+                                     + str((verification.get("codex_plugin") or {}).get("reason") or "")
                             )
                         self.install_button.configure(
-                            state="normal", text="Finish", command=self.root.destroy,
+                            state="normal", text="Verificar conexão  →",
+                            command=lambda: self._install(require_openai=False, verify_only=True, enroll=False),
                         )
+                        self._schedule_connection_check()
 
                     self.root.after(0, installed)
                     return
@@ -1178,13 +1304,11 @@ class InstallerWizard:
                 ready = _installation_ready(verification, openai_required=True)
                 if ready:
                     text = (
-                        "Local MCP and the secure OpenAI tunnel are verified. Complete or verify the ChatGPT plugin connection. "
-                        "The optional Edge browser plugin can be enabled later from Advanced."
+                        "MCP e túnel verificados. Falta autorizar o plugin no ChatGPT e confirmar uma chamada de ferramenta pela conta."
                     )
                 elif verification.get("core_ready"):
                     text = (
-                        "SENTRA local is ready. ChatGPT connection can be repaired later "
-                        "without blocking local work."
+                        "SENTRA local instalado. A conexão obrigatória para GPT6-WEB ainda precisa de atenção."
                     )
                 elif tunnel_id:
                     text = (
@@ -1198,21 +1322,16 @@ class InstallerWizard:
                     )
 
                 def complete() -> None:
+                    self._installed = True
                     if ready:
-                        self.progress_value.set(100)
-                        self.status.set(f"Step 3 of 3 — Ready. {text}")
-                        self.install_button.configure(
-                            state="normal",
-                            text="Finish",
-                            command=self.root.destroy,
-                        )
+                        self._show_tunnel_verified(verification)
                     else:
                         self.progress_value.set(75)
                         self.status.set(f"Step 2 of 3 — Connection needs attention. {text}")
                         self.install_button.configure(
                             state="normal",
                             text="Retry Connect OpenAI",
-                            command=lambda: self._install(require_openai=True),
+                            command=lambda: self._install(require_openai=False, verify_only=True, enroll=False),
                         )
                     messagebox.showinfo("SENTRA Setup", text) if ready else messagebox.showerror("SENTRA Setup", text)
 
@@ -1230,6 +1349,47 @@ class InstallerWizard:
                 self.root.after(0, failed)
 
         __import__("threading").Thread(target=worker, daemon=True).start()
+
+    def _show_tunnel_verified(self, verification: dict) -> None:
+        self._connection_deadline = 0
+        self.progress_value.set(95)
+        self.status.set("Etapa 3 de 3 — túnel verificado; autorização no ChatGPT pendente.")
+        self.connect_hint.configure(text="O plugin local foi verificado. No ChatGPT, conecte o túnel SENTRA, "
+                                        "autorize o plugin e confirme uma chamada. A instalação na conta ainda não foi comprovada.")
+        self.install_button.configure(state="normal", text="Conectar plugin no ChatGPT  →",
+                                      command=self._open_chatgpt_plugin)
+
+    def _schedule_connection_check(self) -> None:
+        """Observe Edge enrollment for ten minutes without duplicate enrollment."""
+        if time.monotonic() >= getattr(self, "_connection_deadline", 0):
+            return
+        if getattr(self, "_connection_timer", None) is not None:
+            return
+
+        def check():
+            self._connection_timer = None
+            if time.monotonic() >= getattr(self, "_connection_deadline", 0):
+                return
+            if str(self.install_button.cget("state")) == "disabled":
+                self._schedule_connection_check()
+            else:
+                self._install(require_openai=False, verify_only=True, enroll=False)
+
+        self._connection_timer = self.root.after(10000, check)
+
+    def _open_chatgpt_plugin(self) -> None:
+        desktop = Path(self.install_dir.get()).expanduser().resolve() / "sentra-desktop.exe"
+        subprocess.Popen([str(desktop), "--open-url", "sentra://chatgpt-plugin"],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+    def _open_web_models(self) -> None:
+        from tkinter import messagebox
+        desktop = Path(self.install_dir.get()).expanduser().resolve() / "sentra-desktop.exe"
+        if not desktop.is_file():
+            messagebox.showinfo("SENTRA Setup", "Instale os componentes primeiro para abrir os modelos WEB.")
+            return
+        subprocess.Popen([str(desktop), "--open-url", "sentra://web-models"],
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     def run(self) -> int:
         self.root.mainloop()
@@ -1259,6 +1419,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--tunnel-archive")
     parser.add_argument("--silent", action="store_true")
+    parser.add_argument("--browser-setup", action="store_true",
+                        help="Enable Edge automation in a profile with no signed-in account.")
+    parser.add_argument("--check", action="store_true", help="Verify this Setup payload without installing or starting services.")
     parser.add_argument("--install-git", action="store_true")
     parser.add_argument("--install-docker", action="store_true")
     parser.add_argument(
@@ -1274,6 +1437,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upgrade", action="store_true")
     parser.add_argument("--offline-handoff", type=Path)
     args = parser.parse_args(argv)
+    if args.check:
+        try:
+            result = check_install_payload(Path(args.install_dir))
+        except (OSError, ValueError) as exc:
+            result = {"ok": False, "error_type": type(exc).__name__, "message": str(exc)}
+        if sys.stdout is not None:
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0 if result.get("ok") else 2
     if args.uninstall:
         print(json.dumps(uninstall(
             Path(args.install_dir),
@@ -1317,16 +1488,21 @@ def main(argv: list[str] | None = None) -> int:
         except OSError:
             pass
         return 2
+    if args.browser_setup:
+        from .openai_auto_setup import authorize_installer_enrollment, edge_automation_profile
+        enrolled = ProductPaths(
+            Path(args.install_dir),
+            Path(args.state_dir) if args.state_dir else ProductPaths.default(Path(args.install_dir)).state_dir,
+        )
+        edge_automation_profile(enrolled.state_dir)
+        authorize_installer_enrollment(enrolled)
+        result["browser_automation"] = {"enabled": True, "signed_in_edge_profile": False}
     print(json.dumps(result, indent=2))
     verification = result.get("connect_verify") or {}
-    if verification:
-        core_ready = bool(verification.get("core_ready"))
-    else:
-        doctor = result.get("doctor") or {}
-        core_ready = bool(doctor.get("mcp", {}).get("ok")) and bool(
-            doctor.get("relay", {}).get("ok")
-        )
-    return 0 if core_ready else 2
+    if args.offline_handoff and verification.get("deferred") == "post_update_restart":
+        return 0  # The authenticated update helper verifies after restart.
+    return 0 if _installation_ready(verification) else 2
+
 
 
 if __name__ == "__main__":

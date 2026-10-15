@@ -7,9 +7,10 @@ from contextlib import closing
 import json
 
 from sentra_core.conversations import _decode
+from sentra_core.model_prose import prose_prefix
 
 
-def web_preview(runtime, project_id, conversation_id):
+def web_preview(runtime, project_id, conversation_id, *, include_full=False):
     control, owner = runtime.control, runtime.owner
     with closing(control.store.connect('shell')) as db:
         row = db.execute('SELECT * FROM canvas_shell_queue WHERE owner=? AND project_id=? '
@@ -95,8 +96,11 @@ def web_preview(runtime, project_id, conversation_id):
                     body = observed_body
     # Tool intent bytes are retained for the authoritative CLI dispatcher,
     # never executed or presented as partial prose by this endpoint.
-    body = body.split('[[', 1)[0]
-    return {**result, 'content': body[:32768], 'message_id': mid, 'revision': revision,
+    body = prose_prefix(body)
+    from .shell_stream import content_window
+    content = body if include_full else content_window(body)
+    return {**result, 'content': content, 'truncated': content != body,
+        'message_id': mid, 'revision': revision,
         'status': 'confirming' if frame['state'] == 'complete' else 'generating',
         'activity': 'Confirmando entrega' if frame['state'] == 'complete' else 'Recebendo resposta',
         'observed_at': frame['observed_at']}

@@ -1,13 +1,39 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { api, route } from './api';
+import { shouldPollTerminalOutput, terminalReconcileAction } from './shell-terminal-gate.js';
 
 // Owns terminal VIEWs, never starts, closes or reconnects a backend PTY.
 // A stable (workspace, terminal ID) has exactly one xterm and input writer.
+// Output stays off until the Canvas surface is active. Suspension keeps entries.
 export class TerminalPool {
   entries = new Map();
   activeWorkspace = null;
+  outputEnabled = false;
+  heldWorkspace = null;
+  heldResources = null;
   constructor(report, changed) { this.report = report; this.changed = changed; }
+  setOutputEnabled(enabled) {
+    const next = enabled === true;
+    this.outputEnabled = next;
+    if (!next) {
+      for (const entry of this.entries.values()) {
+        clearTimeout(entry.timer);
+        clearTimeout(entry.resizeTimer);
+        entry.timer = null;
+      }
+      return;
+    }
+    if (this.heldResources && this.heldWorkspace) {
+      const ws = this.heldWorkspace;
+      const resources = this.heldResources;
+      this.heldResources = null;
+      this.reconcile(ws, resources);
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.alive && !entry.polling && !entry.timer) this.poll(entry);
+    }
+  }
   key(ws, id) { return ws + ':' + id; }
   ensure(ws, resource) {
     const key = this.key(ws, resource.id);
@@ -35,7 +61,7 @@ export class TerminalPool {
     term.onData(data => this.send(entry, data));
     entry.observer = new ResizeObserver(() => this.scheduleFit(entry));
     entry.observer.observe(host);
-    this.poll(entry);
+    if (this.outputEnabled) this.poll(entry);
     return entry;
   }
   attach(ws, resource, slot, priority = 1) {
@@ -93,6 +119,13 @@ export class TerminalPool {
   }
   reconcile(ws, resources) {
     this.activeWorkspace = ws;
+    if (terminalReconcileAction(this.outputEnabled) === 'hold') {
+      this.heldWorkspace = ws;
+      this.heldResources = resources;
+      return;
+    }
+    this.heldResources = null;
+    this.heldWorkspace = ws;
     const present = new Set(resources.map(r => r.id));
     for (const r of resources) this.ensure(ws, r);
     for (const [key, e] of this.entries) {
@@ -100,10 +133,18 @@ export class TerminalPool {
     }
   }
   async poll(entry) {
-    if (!entry.alive) return;
-    if (entry.ws !== this.activeWorkspace || document.hidden) {
+    if (!entry.alive || entry.polling) return;
+    const allowed = shouldPollTerminalOutput({
+      outputEnabled: this.outputEnabled, alive: entry.alive, workspace: entry.ws,
+      activeWorkspace: this.activeWorkspace, hidden: document.hidden,
+    });
+    if (!allowed) {
+      if (!this.outputEnabled) return;
       entry.timer = setTimeout(() => this.poll(entry), 900); return;
     }
+    entry.polling = true;
+    clearTimeout(entry.timer);
+    entry.timer = null;
     try {
       const value = await api(route('/api/terminal/output', {
         ws: entry.ws, id: entry.id, cursor: String(entry.cursor),
@@ -125,13 +166,15 @@ export class TerminalPool {
       }
       if (change) this.changed();
     } catch (e) {
+      if (!entry.alive || !this.outputEnabled) return;
       entry.retry++;
       if (entry.retry === 1) this.report(e.message, 'error');
       if (!entry.transportUnavailable) { entry.transportUnavailable = true; this.changed(); }
       entry.term.options.disableStdin = true;
       // Loss of transport is not a successful or ready process state.
     } finally {
-      if (entry.alive) entry.timer = setTimeout(() => this.poll(entry),
+      entry.polling = false;
+      if (entry.alive && this.outputEnabled) entry.timer = setTimeout(() => this.poll(entry),
         entry.retry ? Math.min(8000, 700 * 2 ** Math.min(entry.retry, 4)) : 220);
     }
   }

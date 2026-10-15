@@ -5,6 +5,10 @@
  * já aberta e restaura sua URL original ao liberar o controller. */
 "use strict";
 
+importScripts("native-image-guard.js");
+const NATIVE_IMAGE_GUARD_SHA256 = "c7fce2a8353170b251f5a1b032ad457602345649edcbb1607a2724cf021e5562";
+if (!/^[a-f0-9]{64}$/.test(NATIVE_IMAGE_GUARD_SHA256)) throw Error("NATIVE_IMAGE_GUARD_UNPINNED");
+
 const OMA_RELAY = "http://127.0.0.1:8765";
 const OMA_POOL = { minTabs: 1, maxTabs: 1 };
 const OMA_POLL_MS = 2000;
@@ -30,7 +34,7 @@ const omaIdRoute = url => /^https:\/\/chatgpt\.com\/c\/([A-Za-z0-9_-]{8,160})(?:
 // for V2 conversation proof on a Gemini route fails closed with
 // identity_unknown instead of fabricating attribution. No DOM, route or
 // model label is ever treated as account proof on either provider.
-const omaIdRouteDenied = url => /^https:\/\/gemini\.google\.com\/app\/([A-Za-z0-9_-]{1,256})(?:\/|\?|$)/.test(String(url || ""));
+const omaIdRouteDenied = url => /^https:\/\/gemini\.google\.com\/(?:u\/\d{1,3}\/)?app\/([A-Za-z0-9_-]{1,256})(?:\/|\?|$)/.test(String(url || ""));
 const omaIdDocumentKey = id => OMA_ID_DOC_PREFIX + id;
 const omaIdRevokeKey = id => OMA_ID_REVOKE_PREFIX + id;
 function omaIdProfileEpoch() {
@@ -209,6 +213,7 @@ async function omaIdReconcileTabs() {
 // Only an already committed, parent-bound assistant image_asset_pointer may
 // initiate this read-only download. Never follow a page-provided URL or a
 // redirect. Extension credentials go ONLY to the fixed ChatGPT first-party API.
+const nativeImageLedger = Object.create(null);
 async function omaUploadNativeAssets(tabId, identity, tracked, frame, requestId) {
   if (!frame.complete || !Array.isArray(frame.assets) || !frame.assets.length) return;
   if (frame.assets.length > 4 || new Set(frame.assets).size !== frame.assets.length) throw Error('NATIVE_IMAGE_SET_INVALID');
@@ -231,6 +236,7 @@ async function omaUploadNativeAssets(tabId, identity, tracked, frame, requestId)
   for (const fileId of frame.assets) {
     if (!/^file-[A-Za-z0-9_-]{8,160}$/.test(fileId)) throw Error('NATIVE_IMAGE_POINTER_INVALID');
     await verifyScope();
+    if (!mayTransferNativeImage(nativeImageLedger, fileId)) throw Error('NATIVE_IMAGE_UNCERTAIN_NO_RESEND');
     const path = new URL('https://chatgpt.com/backend-api/estuary/content');
     path.searchParams.set('id', fileId);
     const response = await fetch(path.href, { method:'GET', credentials:'include',
@@ -265,6 +271,24 @@ async function omaUploadNativeAssets(tabId, identity, tracked, frame, requestId)
       (mime === 'image/png' ? '.png' : '.jpg');
     const manifest = { ...base, file_id:fileId, mime_type:mime, filename,
       byte_length:bytes.length, sha256 };
+    const verdict = nativeImageVerdict({
+      mime_type: mime, byte_length: bytes.length, sha256, bytes_present: true,
+    });
+    if (verdict.status !== 'VERIFIED' || verdict.success !== true || verdict.automatic_resend !== false
+        || verdict.generated_asset_verified !== true || verdict.sha256 !== sha256
+        || verdict.byte_length !== bytes.length || verdict.mime_type !== mime) {
+      noteUncertainNativeImage(nativeImageLedger, fileId);
+      throw Error('NATIVE_IMAGE_VERDICT_REFUSED');
+    }
+    const proof = await confirmNativeImageBytes(bytes, {
+      mime_type: mime, byte_length: bytes.length, sha256,
+    });
+    if (proof.paint !== true || proof.generated_asset_verified !== true
+        || proof.sha256 !== sha256 || proof.byte_length !== bytes.length
+        || proof.mime_type !== mime) {
+      noteUncertainNativeImage(nativeImageLedger, fileId);
+      throw Error('NATIVE_IMAGE_BYTES_REFUSED');
+    }
     for (let part = 0; part * 65536 < bytes.length; part++) {
       await verifyScope();
       const chunk = bytes.subarray(part*65536, Math.min(bytes.length,(part+1)*65536));
@@ -803,17 +827,35 @@ async function omaHeartbeatWorkers() {
   }
 }
 
+let omaOutboxFlushTask = null;
+let omaResultWrites = Promise.resolve();
+function omaMutateResults(action) {
+  const task = omaResultWrites.catch(() => {}).then(action);
+  omaResultWrites = task.catch(() => {});
+  return task;
+}
+
 async function omaFlushOutbox() {
-  const stored = await chrome.storage.local.get(null);
-  for (const [id, payload] of Object.entries(stored).filter(([key]) => key.startsWith("oma_result_"))) {
-    try {
-      await omaRelay("/jobs/result", { method: "POST", body: JSON.stringify(payload) });
-    } catch (error) {
-      if (!String(error).includes("RELAY_HTTP_400")) continue;
-      await omaNoteError("expired_result");
+  if (omaOutboxFlushTask) return omaOutboxFlushTask;
+  omaOutboxFlushTask = (async () => {
+    const stored = await chrome.storage.local.get(null);
+    for (const [id, payload] of Object.entries(stored).filter(([key]) => key.startsWith("oma_result_"))) {
+      const serialized = JSON.stringify(payload);
+      try {
+        await omaRelay("/jobs/result", { method: "POST", body: serialized });
+      } catch (error) {
+        if (!String(error).includes("RELAY_HTTP_400")) continue;
+        await omaNoteError("expired_result");
+      }
+      // An ACK for an older value cannot erase a newer durable outbox value.
+      await omaMutateResults(async () => {
+        const current = await chrome.storage.local.get(id);
+        if (JSON.stringify(current[id]) === serialized) await chrome.storage.local.remove(id);
+      });
     }
-    await chrome.storage.local.remove(id);
-  }
+  })();
+  try { await omaOutboxFlushTask; }
+  finally { omaOutboxFlushTask = null; }
 }
 
 async function omaCheckForUpdates() {
@@ -915,15 +957,28 @@ async function omaForgetOwned(tabId) {
 
 function omaActiveKey(tabId) { return `${OMA_ACTIVE_PREFIX}${tabId}`; }
 
-async function omaSaveActive(tabId, patch) {
+const omaActiveWrites = new Map();
+function omaMutateActive(tabId, action) {
+  const previous = omaActiveWrites.get(tabId) || Promise.resolve();
+  const task = previous.catch(() => {}).then(action);
+  omaActiveWrites.set(tabId, task);
+  task.finally(() => { if (omaActiveWrites.get(tabId) === task) omaActiveWrites.delete(tabId); }).catch(() => {});
+  return task;
+}
+
+async function omaSaveActive(tabId, patch, expectedJobId = null) {
   // Job em voo TEM que sobreviver a restart do SW (s├│ mem├│ria = amn├®sia =
   // resultado ├│rf├úo). NUNCA persiste prompt/imagens (quota do storage; o
   // resume jamais reenvia ÔÇö s├│ renova, espera e posta).
   try {
-    const key = omaActiveKey(tabId);
-    const stored = await chrome.storage.local.get({ [key]: null });
-    const prev = stored[key] || {};
-    await chrome.storage.local.set({ [key]: { ...prev, ...patch, tabId, updated: Date.now() } });
+    return await omaMutateActive(tabId, async () => {
+      const key = omaActiveKey(tabId);
+      const stored = await chrome.storage.local.get({ [key]: null });
+      const prev = stored[key] || {};
+      if (expectedJobId !== null && prev.job_id !== expectedJobId) return false;
+      await chrome.storage.local.set({ [key]: { ...prev, ...patch, tabId, updated: Date.now() } });
+      return true;
+    });
   } catch (error) {
     await omaNoteError("active_save", error);
     throw error; // metadata must be durable before a physical Send fence
@@ -953,7 +1008,7 @@ async function omaLoadAllActive() {
 
 async function omaClearActive(tabId) {
   try {
-    await chrome.storage.local.remove(omaActiveKey(tabId));
+    await omaMutateActive(tabId, () => chrome.storage.local.remove(omaActiveKey(tabId)));
   } catch (error) {
     await omaNoteError("active_clear", error);
   }
@@ -1026,7 +1081,7 @@ async function omaRenewActive(tabId) {
   active.hb_sw = (active.hb_sw || 0) + 1;
   active.updated = Date.now();
   try {
-    await chrome.storage.local.set({ [omaActiveKey(tabId)]: active });
+    await omaSaveActive(tabId, { hb_sw: active.hb_sw, updated: active.updated }, active.job_id);
   } catch (error) {
     await omaNoteError("active_renew_persist", error);
   }
@@ -1077,7 +1132,7 @@ async function omaPostResult(identity, jobRef, payload) {
     await omaRelay('/jobs/result',{method:'POST',body:JSON.stringify(merged)});
     return; // never persist model bodies/errors in plaintext browser outbox
   }
-  await chrome.storage.local.set({ [`oma_result_${jobRef.job_id}`]: merged });
+  await omaMutateResults(() => chrome.storage.local.set({ [`oma_result_${jobRef.job_id}`]: merged }));
   await omaFlushOutbox();
 }
 
@@ -1114,7 +1169,7 @@ function omaProviderForUrl(value) {
 function omaConversationIdFromUrl(value, provider) {
   const text = String(value || "");
   if (provider === "gemini") {
-    const match = text.match(/^https:\/\/gemini\.google\.com\/app\/([A-Za-z0-9_-]{1,256})(?:\/|\?|$)/);
+    const match = text.match(/^https:\/\/gemini\.google\.com\/(?:u\/\d{1,3}\/)?app\/([A-Za-z0-9_-]{1,256})(?:\/|\?|$)/);
     return match ? match[1] : null;
   }
   const match = text.match(/^https:\/\/chatgpt\.com\/c\/([A-Za-z0-9-]{1,128})(?:\/|\?|$)/);
@@ -1409,6 +1464,22 @@ async function omaOpenFreshControllerChat(tabId, job) {
   const provider = omaJobProvider(job);
   let fresh = false;
   let targetUrl = omaProviderHome(provider);
+  if (provider === "gemini") {
+    // Preserve the signed-in Google account when opening a fresh chat.
+    // Navigating /u/7/app to the unscoped /app changed Pro/Argon to Edu.
+    const current = await chrome.tabs.get(tabId);
+    const activeUrl = new URL(String(current.url || ""));
+    if (activeUrl.protocol === "https:" && activeUrl.hostname === "gemini.google.com") {
+      const match = activeUrl.pathname.match(/^\/u\/(\d{1,3})\/app(?:\/|$)/);
+      if (match) targetUrl = `https://gemini.google.com/u/${match[1]}/app`;
+      else {
+        const index = activeUrl.searchParams.get("authuser");
+        if (index && /^\d{1,3}$/.test(index)) {
+          targetUrl = `https://gemini.google.com/app?authuser=${index}`;
+        }
+      }
+    }
+  }
   const projectUrl = omaProjectTargetUrl(job);
   if (projectUrl) {
     const parsed = new URL(String(projectUrl));
@@ -2535,16 +2606,28 @@ async function omaTick() {
 console.log(`[OMA Bridge] service worker ${OMA_SW_VERSION} ativo`);
 
 async function omaStartupCleanup() {
-  // Principal-Edge-only: never close browser tabs. Deregister + restore any
-  // adopted tab left behind by a previous SW lifecycle, then clear stale SENTRA
-  // bookkeeping. release_worker is best-effort if the relay is still offline.
-  try { await omaReleaseControllerReferences(); } catch (_) {}
-  try { omaWorkers.clear(); } catch (_) {}
+  // Keep original job/lease/digest metadata across browser restart. Browser
+  // identity is still revoked separately: retained metadata never proves an
+  // account, authorizes Send, or extends an expired lease.
+  let active;
   try {
     const stored = await chrome.storage.local.get(null);
-    const actives = Object.keys(stored || {}).filter((k) => k.startsWith(OMA_ACTIVE_PREFIX));
-    if (actives.length) await chrome.storage.local.remove(actives);
-  } catch (_) {}
+    active = Object.entries(stored).filter(([key]) => key.startsWith(OMA_ACTIVE_PREFIX))
+      .map(([key, value]) => [key.slice(OMA_ACTIVE_PREFIX.length), value]);
+  } catch (error) {
+    await omaNoteError('startup_active_load', error);
+    return; // Unknown durable state cannot justify restoring/navigating a tab.
+  }
+  if (!active.length) {
+    try { await omaReleaseControllerReferences(); } catch (_) {}
+  } else {
+    for (const [suffix, job] of active) {
+      if (String(job?.job_id || '').startsWith('websend_')) {
+        await omaSaveActive(Number(suffix), { observe_only: true }, job.job_id);
+      }
+    }
+  }
+  try { omaWorkers.clear(); } catch (_) {}
   try { omaResumeBusy.clear(); } catch (_) {}
 }
 
@@ -2583,6 +2666,9 @@ async function omaEnsureRecoveryGuardOnExistingTabs() {
 chrome.runtime.onInstalled.addListener(async () => {
   // Updating/reinstalling a build invalidates all previous browser proofs.
   await omaIdInvalidateAll("identity_unknown");
+  // Unpacked reloads and updates can deliver onInstalled without onStartup.
+  // Preserve active metadata/outbox and fence existing Web work to observation.
+  await omaStartupCleanup();
   await chrome.storage.local.set({ oma_state: "PAIR_IN_OPTIONS" });
   await omaEnsureRecoveryGuardOnExistingTabs();
   try {

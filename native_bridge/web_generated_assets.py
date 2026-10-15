@@ -11,6 +11,7 @@ import base64
 import hashlib
 import json
 import re
+import time
 from contextlib import closing
 
 from native_bridge.job_store import JobStore
@@ -22,6 +23,10 @@ _SHA = re.compile(r"^[a-f0-9]{64}$")
 _MIMES = {"image/png": ".png", "image/jpeg": ".jpg"}
 _CHUNK = 65536
 _MAX = 8 * 1024 * 1024
+ADMITTED = "ADMITTED"
+UNCERTAIN_NO_RESEND = "UNCERTAIN_NO_RESEND"
+VERIFIED = "VERIFIED"
+_FENCE_REASONS = {"transfer_failed", "integrity_mismatch", "observation_timeout"}
 
 
 def _asset_id(job_id, message_id, file_id):
@@ -46,6 +51,10 @@ class WebGeneratedAssets:
                 job_id TEXT PRIMARY KEY, owner TEXT NOT NULL,
                 conversation_id TEXT NOT NULL, message_id TEXT NOT NULL,
                 protected_file_ids TEXT NOT NULL)""")
+            db.execute("""CREATE TABLE IF NOT EXISTS web_native_generated_uncertain(
+                owner TEXT NOT NULL, job_id TEXT NOT NULL, operation_id TEXT NOT NULL,
+                reason TEXT NOT NULL, created REAL NOT NULL,
+                PRIMARY KEY(owner, job_id))""")
 
     def declare(self, *, owner, job_id, conversation_id, message_id, file_ids):
         if (not isinstance(file_ids,list) or len(file_ids)>4
@@ -123,6 +132,8 @@ class WebGeneratedAssets:
             extension_id=extension_id, source_sha256=source_sha256, request_id=request_id,
             document_id=document_id, identity_epoch=identity_epoch,
             conversation_id=conversation_id, message_id=message_id)
+        if self._fence(bound["owner"], job_id) is not None:
+            raise PermissionError("UNCERTAIN_NO_RESEND")
         if (not _FILE.fullmatch(str(file_id)) or mime_type not in _MIMES
             or filename != "chatgpt-native-" + hashlib.sha256(file_id.encode()).hexdigest()[:16] + _MIMES[mime_type]
             or type(byte_length) is not int or not 1 <= byte_length <= _MAX
@@ -203,6 +214,8 @@ class WebGeneratedAssets:
     def finalize(self, **scope):
         file_id = scope.pop("file_id")
         bound = self._scope(**scope)
+        if self._fence(bound["owner"], scope["job_id"]) is not None:
+            raise PermissionError("UNCERTAIN_NO_RESEND")
         aid = _asset_id(scope["job_id"],scope["message_id"],file_id)
         with closing(self.store.connect("session_checkpoint")) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -223,6 +236,8 @@ class WebGeneratedAssets:
 
     def for_job(self, *, owner, run_id, work_item_id, operation_id, job_id,
                 conversation_id, message_id):
+        if self._fence(owner, job_id) is not None:
+            return []
         with closing(self.store.connect("session_checkpoint")) as db:
             rows = db.execute("SELECT asset_id,protected_manifest FROM web_native_generated_assets "
                 "WHERE owner=? AND run_id=? AND work_item_id=? AND operation_id=? AND job_id=? "
@@ -238,6 +253,108 @@ class WebGeneratedAssets:
                 "AND operation_id=? AND asset_id=? AND finalized=1",(owner,operation_id,asset_id)).fetchone()
             if not row:
                 raise PermissionError("native image is not finalized for this operation")
+            fence = db.execute(
+                "SELECT operation_id FROM web_native_generated_uncertain WHERE owner=? AND job_id=?",
+                (owner, row["job_id"])).fetchone()
+            if fence is not None:
+                raise PermissionError("UNCERTAIN_NO_RESEND")
             manifest = JobStore._unseal(row["protected_manifest"],asset_id,"native_manifest")
             raw = self._bytes(db,asset_id,manifest)
         return manifest,raw
+
+    def fenced_asset_ids(self, owner, asset_ids):
+        """Asset ids whose job is fenced. Those bytes must not be offered."""
+        chosen = [asset_id for asset_id in asset_ids
+                  if isinstance(asset_id, str) and asset_id.startswith("web-native-")]
+        if not chosen:
+            return set()
+        placeholders = ",".join("?" for _ in chosen)
+        with closing(self.store.connect("session_checkpoint")) as db:
+            rows = db.execute(
+                "SELECT a.asset_id FROM web_native_generated_assets a "
+                "JOIN web_native_generated_uncertain u ON u.owner=a.owner AND u.job_id=a.job_id "
+                "WHERE a.owner=? AND a.asset_id IN (" + placeholders + ")",
+                (owner, *chosen)).fetchall()
+        return {row["asset_id"] for row in rows}
+
+    def _fence(self, owner, job_id):
+        with closing(self.store.connect("session_checkpoint")) as db:
+            return db.execute("SELECT * FROM web_native_generated_uncertain WHERE owner=? AND job_id=?",
+                              (owner, job_id)).fetchone()
+
+    def _write_fence(self, *, owner, job_id, operation_id, reason, allow_finalized):
+        if reason not in _FENCE_REASONS:
+            raise ValueError("bounded uncertain reason required")
+        if self.relay is None or self.relay.web_send is None:
+            raise PermissionError("uncertain fence requires the original relay binding")
+        bound = self.relay.web_send.binding(job_id)
+        if not bound or bound.get("owner") != owner or bound.get("operation_id") != operation_id:
+            raise PermissionError("uncertain fence outside original operation")
+        with closing(self.store.connect("session_checkpoint")) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            finalized = db.execute("SELECT COUNT(*) FROM web_native_generated_assets "
+                                   "WHERE owner=? AND job_id=? AND finalized=1", (owner, job_id)).fetchone()[0]
+            if finalized and not allow_finalized:
+                raise PermissionError("verified native image cannot be reclassified uncertain")
+            prior = db.execute("SELECT * FROM web_native_generated_uncertain WHERE owner=? AND job_id=?",
+                               (owner, job_id)).fetchone()
+            if prior is not None:
+                if prior["operation_id"] != operation_id or prior["reason"] != reason:
+                    raise ValueError("uncertain native image fence changed")
+                return {"status": UNCERTAIN_NO_RESEND, "reason": reason,
+                        "operation_id": operation_id, "automatic_resend": False, "already_fenced": True}
+            db.execute("INSERT INTO web_native_generated_uncertain VALUES(?,?,?,?,?)",
+                       (owner, job_id, operation_id, reason, time.time()))
+        return {"status": UNCERTAIN_NO_RESEND, "reason": reason, "operation_id": operation_id,
+                "automatic_resend": False, "already_fenced": False}
+
+    def mark_uncertain(self, *, owner, job_id, operation_id, reason):
+        """Remember a failed native transfer. Does not fetch or resend bytes."""
+        return self._write_fence(owner=owner, job_id=job_id, operation_id=operation_id,
+                                 reason=reason, allow_finalized=False)
+
+    def verdict(self, *, owner, run_id, work_item_id, operation_id, job_id,
+                conversation_id, message_id):
+        """ADMITTED without bytes is not success. UNCERTAIN_NO_RESEND stays put."""
+        fence = self._fence(owner, job_id)
+        if fence is not None:
+            if fence["operation_id"] != operation_id:
+                raise PermissionError("uncertain native image belongs to another operation")
+            return {"status": UNCERTAIN_NO_RESEND, "generated_asset_verified": False,
+                    "automatic_resend": False, "success": False, "reason": fence["reason"],
+                    "run_id": run_id, "work_item_id": work_item_id, "operation_id": operation_id,
+                    "job_id": job_id, "assets": []}
+        rows = self.for_job(owner=owner, run_id=run_id, work_item_id=work_item_id,
+                            operation_id=operation_id, job_id=job_id,
+                            conversation_id=conversation_id, message_id=message_id)
+        if not rows:
+            return {"status": ADMITTED, "generated_asset_verified": False,
+                    "automatic_resend": False, "success": False,
+                    "run_id": run_id, "work_item_id": work_item_id, "operation_id": operation_id,
+                    "job_id": job_id, "assets": []}
+        assets = []
+        for row in rows:
+            try:
+                manifest, raw = self.read(owner=owner, operation_id=operation_id, asset_id=row["asset_id"])
+            except (ValueError, PermissionError):
+                self._write_fence(owner=owner, job_id=job_id, operation_id=operation_id,
+                                  reason="integrity_mismatch", allow_finalized=True)
+                return {"status": UNCERTAIN_NO_RESEND, "generated_asset_verified": False,
+                        "automatic_resend": False, "success": False, "reason": "integrity_mismatch",
+                        "run_id": run_id, "work_item_id": work_item_id, "operation_id": operation_id,
+                        "job_id": job_id, "assets": []}
+            digest = hashlib.sha256(raw).hexdigest()
+            if (manifest.get("mime_type") != row["mime_type"] or manifest.get("byte_length") != len(raw)
+                    or manifest.get("sha256") != digest or row["byte_length"] != len(raw)
+                    or row["sha256"] != digest or manifest.get("mime_type") not in _MIMES):
+                self._write_fence(owner=owner, job_id=job_id, operation_id=operation_id,
+                                  reason="integrity_mismatch", allow_finalized=True)
+                return {"status": UNCERTAIN_NO_RESEND, "generated_asset_verified": False,
+                        "automatic_resend": False, "success": False, "reason": "integrity_mismatch",
+                        "run_id": run_id, "work_item_id": work_item_id, "operation_id": operation_id,
+                        "job_id": job_id, "assets": []}
+            assets.append({"asset_id": row["asset_id"], "mime_type": manifest["mime_type"],
+                           "byte_length": len(raw), "sha256": digest})
+        return {"status": VERIFIED, "generated_asset_verified": True, "automatic_resend": False,
+                "success": True, "run_id": run_id, "work_item_id": work_item_id,
+                "operation_id": operation_id, "job_id": job_id, "assets": assets}

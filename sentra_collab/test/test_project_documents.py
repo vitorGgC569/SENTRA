@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from sentra_canvas.project_documents import ProjectDocuments
-from sentra_canvas.project_review import ProjectWatchRegistry
+from sentra_canvas.project_review import ProjectWatchRegistry, _rename_identity
 from sentra_collab.authority import CollaborationDenied, SnapshotConflict
 from sentra_mcp.services.context import ContextBusService
 from sentra_mcp.services.control_plane import ControlPlaneService
@@ -112,9 +112,12 @@ def test_watcher_same_directory_rename_and_project_isolation(tmp_path):
     source.write_text("print('passive')\n", encoding="utf-8")
     registry = ProjectWatchRegistry()
     handle = registry.start("project", tmp_path, "old.py")
-    source.rename(tmp_path / "new.py")
+    renamed_path = tmp_path / "new.py"
+    source.rename(renamed_path)
     renamed = registry.poll("project", handle["watch_id"])
     assert renamed["state"] == "renamed" and renamed["path"] == "new.py"
+    assert renamed.get("previous_path") == "old.py"
+    assert _rename_identity(renamed_path, renamed_path.stat(follow_symlinks=False)) is not None
     with pytest.raises(PermissionError):
         registry.poll("other", handle["watch_id"])
     registry.close("project", handle["watch_id"])

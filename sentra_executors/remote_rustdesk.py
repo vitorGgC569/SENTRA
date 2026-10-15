@@ -15,6 +15,7 @@ import threading
 import time
 from dataclasses import dataclass,field
 from pathlib import Path
+from sentra_remote.windows_paths import filesystem_path
 
 from .identity_sessions import SessionExecutor,SessionScope,SessionJournal,declare_session_machine
 from .rpa import ExecutorFailure,effect_checkpoint,AuthorizedPaths,digest,OwnedProcessHandle,_WindowsJob
@@ -113,13 +114,13 @@ class RustDeskNativeBackend:
 
     def _build(self,b):
         executable=Path(b.executable)
-        if not executable.is_file():raise ExecutorFailure('rustdesk_native_client_missing')
+        if not Path(filesystem_path(executable)).is_file():raise ExecutorFailure('rustdesk_native_client_missing')
         try:executable=b.build_paths.resolve(str(executable))
         except (ValueError,OSError) as exc:raise ExecutorFailure('rustdesk_host_build_asset_path_denied') from exc
         if digest(executable)!=b.executable_sha256:raise ExecutorFailure('rustdesk_native_executable_pin_mismatch')
         manifest_path=b.build_paths.resolve(b.build_manifest)
-        if manifest_path.stat().st_size>65536:raise ExecutorFailure('rustdesk_native_manifest_limit')
-        manifest=json.loads(manifest_path.read_text(encoding='utf-8'))
+        if Path(filesystem_path(manifest_path)).stat().st_size>65536:raise ExecutorFailure('rustdesk_native_manifest_limit')
+        manifest=json.loads(Path(filesystem_path(manifest_path)).read_text(encoding='utf-8'))
         if (manifest.get('extension')!='sentra-peer-gate-v1' or
                 manifest.get('executable_sha256')!=b.executable_sha256 or
                 manifest.get('stock_cli_supported') is not False or not manifest.get('source_revision')):
@@ -140,10 +141,11 @@ class RustDeskNativeBackend:
                 raise ExecutorFailure('rustdesk_native_bundle_manifest_invalid')
             relative=Path(name)
             if relative.is_absolute() or '..' in relative.parts:raise ExecutorFailure('rustdesk_native_bundle_path_denied')
-            path=(root/relative).resolve(strict=True)
+            from sentra_remote.windows_paths import resolved_path
+            path=resolved_path(root/relative,strict=True)
             try:path=b.build_paths.resolve(str(path))
             except (ValueError,OSError) as exc:raise ExecutorFailure('rustdesk_host_build_asset_path_denied') from exc
-            if not path.is_relative_to(root) or not path.is_file() or digest(path)!=expected:
+            if not path.is_relative_to(root) or not Path(filesystem_path(path)).is_file() or digest(path)!=expected:
                 raise ExecutorFailure('rustdesk_native_bundle_pin_mismatch',evidence={'file':name})
         return manifest
 

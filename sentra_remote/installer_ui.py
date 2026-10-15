@@ -43,17 +43,8 @@ def build(wizard):
     y = max(0, (root.winfo_screenheight() - height) // 2 - 20)
     root.geometry(f"{width}x{height}+{x}+{y}")
     root.minsize(880, 640)
-    # Match the light installer surface instead of inheriting a colored caption.
-    if root.tk.call("tk", "windowingsystem") == "win32":
-        try:
-            import ctypes
-            root.update_idletasks()
-            hwnd = ctypes.windll.user32.GetParent(root.winfo_id())
-            for attribute, value in ((35, 0x00FAF7F5), (36, 0x00321B10)):
-                color = ctypes.c_int(value)
-                ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(color), ctypes.sizeof(color))
-        except (OSError, AttributeError):
-            pass  # Older Windows versions retain their native caption.
+    from .installer_appearance import apply_window_identity, dot_image, theme_controller
+    apply_window_identity(root)
     root.option_add("*Font", "{Segoe UI} 10")
     style = ttk.Style(root)
     style.theme_use("clam")
@@ -88,7 +79,7 @@ def build(wizard):
     wizard._step_numbers = []
     for index, (title, subtitle) in enumerate((
         ("Instalar", "Configure o SENTRA local"),
-        ("Conectar OpenAI", "Opcional · sua conta"),
+        ("Conectar OpenAI", "Obrigatório · GPT6-WEB"),
         ("Pronto", "Conclua a configuração"),
     )):
         y = 132 + index * 94
@@ -117,7 +108,7 @@ def build(wizard):
         else:
             root.destroy()
 
-    wizard.install_button = ttk.Button(footer, text="Continuar  →", style="Primary.TButton", command=wizard._primary_action)
+    wizard.install_button = ttk.Button(footer, text="Instalar e configurar  →", style="Primary.TButton", command=wizard._primary_action)
     wizard.install_button.pack(side="right")
     ttk.Button(footer, text="Cancelar", style="Setup.TButton", command=cancel).pack(side="right", padx=(0, 10))
     root.protocol("WM_DELETE_WINDOW", cancel)
@@ -158,15 +149,20 @@ def build(wizard):
 
     header = tk.Frame(content, background=BG)
     header.pack(fill="x", pady=(0, 22))
-    brand = tk.Canvas(header, width=60, height=60, background=BG, highlightthickness=0)
-    brand.pack(side="right", padx=(14, 0))
-    brand.create_oval(1, 1, 59, 59, fill="#e7f3ff", outline="")
-    brand.create_polygon(20, 45, 19, 30, 25, 17, 39, 12, 40, 22, 34, 34,
-                         24, 39, fill="#073c62", outline="", smooth=True)
-    brand.create_line(18, 48, 25, 34, 35, 21, fill="#073c62", width=3, smooth=True)
-    brand.create_line(25, 34, 29, 26, 35, 21, fill="#62d5ec", width=2, smooth=True)
+    wizard._theme = "dark"
+    def toggle_theme():
+        wizard._theme = "light" if wizard._theme == "dark" else "dark"
+        wizard._theme_color = wizard._apply_theme(wizard._theme)
+        theme_button.configure(text="Tema claro" if wizard._theme == "dark" else "Tema escuro")
+        refresh()
+
+    theme_button = ttk.Button(header, text="Tema claro", style="Setup.TButton", command=toggle_theme)
+    theme_button.pack(side="right", anchor="n", padx=(12, 0))
+    wizard._dot_artwork = dot_image(root)
+    brand = tk.Label(header, image=wizard._dot_artwork, background=BG, borderwidth=0)
+    brand.pack(side="right", padx=(16, 14))
     label(header, "SENTRA Setup", size=25, bold=True).pack(anchor="w")
-    label(header, "Instale localmente e conecte o ChatGPT quando desejar.", size=11, muted=True).pack(anchor="w", pady=(4, 0))
+    label(header, "Um clique para preparar seu ambiente de trabalho.", size=11, muted=True).pack(anchor="w", pady=(4, 0))
 
     local = Card(content)
     local.pack(fill="x", pady=(0, 14))
@@ -177,7 +173,9 @@ def build(wizard):
     def summarize(*_args):
         scope = {"computer": "computador", "user": "usuário", "workspace": "workspace"}.get(wizard.access_scope.get(), wizard.access_scope.get())
         tools = " Todas as ferramentas habilitadas." if wizard.profile.get() == "Full" else " Ferramentas conforme o perfil selecionado."
-        local_summary.set(f"Perfil {wizard.profile.get()} e acesso ao {scope}.{tools}\nVocê pode ajustar essas opções em Avançado.")
+        local_summary.set("Verificamos os arquivos, preparamos os componentes, criamos os atalhos e abrimos o SENTRA. "
+                          "Não é necessário instalar Python ou Node.\n"
+                          f"Perfil {wizard.profile.get()} e acesso ao {scope}.{tools}")
 
     wizard.profile.trace_add("write", summarize)
     wizard.access_scope.trace_add("write", summarize)
@@ -188,12 +186,11 @@ def build(wizard):
     connection_header = tk.Frame(connection.body, background=BG)
     connection_header.pack(fill="x")
     label(connection_header, "Conectar à OpenAI", size=12, bold=True).pack(side="left")
-    label(connection_header, "OPCIONAL", size=8, muted=True).pack(side="left", padx=12)
-    wizard.openai_toggle = ttk.Button(connection_header, text="Recolher  ⌃", style="Setup.TButton", command=wizard._toggle_openai)
+    label(connection_header, "OBRIGATÓRIO", size=8, muted=True).pack(side="left", padx=12)
+    wizard.openai_toggle = ttk.Button(connection_header, text="Configuração manual  ⌄", style="Setup.TButton", command=wizard._toggle_openai)
     wizard.openai_toggle.pack(side="right")
-    label(connection.body, "Use a sua conta para conectar o SENTRA ao ChatGPT.", muted=True, wrap=True).pack(anchor="w", pady=(4, 0))
+    label(connection.body, "O GPT6-WEB precisa do túnel conectado. Autorize a configuração pelo Edge ou informe suas chaves. Login e autorização do plugin são feitos na sua conta.", muted=True, wrap=True).pack(anchor="w", pady=(4, 0))
     details = tk.Frame(connection.body, background=BG)
-    details.pack(fill="x", pady=(14, 0))
     fields = tk.Frame(details, background=BG)
     fields.pack(fill="x")
     fields.columnconfigure(1, weight=1)
@@ -218,21 +215,27 @@ def build(wizard):
     from sentra_remote.onboarding import OPENAI_TUNNELS_URL, OPENAI_API_KEYS_URL
     ttk.Button(links, text="↗  OpenAI Tunnels", style="Setup.TButton", command=lambda: webbrowser.open(OPENAI_TUNNELS_URL)).pack(side="left", padx=(0, 8))
     ttk.Button(links, text="↗  Runtime API Keys", style="Setup.TButton", command=lambda: webbrowser.open(OPENAI_API_KEYS_URL)).pack(side="left")
-    consent = ttk.Checkbutton(details, text="Autorizo a configuração automática completa no Edge", variable=wizard.browser_setup_var)
+    consent = ttk.Checkbutton(connection.body, text="Conectar minha conta automaticamente pelo Edge", variable=wizard.browser_setup_var)
     consent.pack(anchor="w")
-    label(details, "Cria ou seleciona o túnel, cria uma chave com todas as permissões e sem expiração, captura e protege com DPAPI, e configura MCP e túnel. Faça login no Edge para concluir.", muted=True, wrap=True).pack(anchor="w", pady=(4, 0))
+    connect_button = ttk.Button(connection.body, text="Configurar / verificar conexão", style="Setup.TButton",
+                                command=wizard._primary_action)
+    connect_button.pack(anchor="w", pady=(6, 0))
+    models_button = ttk.Button(connection.body, text="Abrir Web Models · entrar na conta", style="Setup.TButton",
+                               command=wizard._open_web_models)
+    models_button.pack(anchor="w", pady=(6, 0))
+    label(connection.body, "Ao marcar, você autoriza criar ou selecionar o túnel e criar uma chave com todas as permissões, sem expiração. A chave é protegida neste Windows. Login e verificações da conta permanecem com você.", muted=True, wrap=True, size=9).pack(anchor="w", pady=(4, 0))
     wizard.openai_fields = [details]
-    wizard.openai_expanded = True
+    wizard.openai_expanded = False
 
     ready = Card(content, padding=16)
     ready.pack(fill="x", pady=(0, 14))
     wizard._ready_heading = label(ready.body, "Pronto para instalar", size=11, bold=True)
     wizard._ready_heading.pack(anchor="w")
-    display_status = tk.StringVar(value="Clique em Continuar para aplicar a configuração.")
+    display_status = tk.StringVar(value="Instale o aplicativo e conclua a conexão obrigatória com a OpenAI.")
     label(ready.body, textvariable=display_status, muted=True, wrap=True).pack(anchor="w", pady=(4, 8))
     wizard.progress_bar = ttk.Progressbar(ready.body, variable=wizard.progress_value, maximum=100, style="Setup.Horizontal.TProgressbar")
     wizard.progress_bar.pack(fill="x")
-    wizard.connect_hint = label(ready.body, "Os campos são aplicados ao continuar. A conexão OpenAI é opcional.", muted=True, wrap=True, size=9)
+    wizard.connect_hint = label(ready.body, "A conexão só será considerada pronta após verificar MCP e túnel. Seus projetos são preservados.", muted=True, wrap=True, size=9)
     wizard.connect_hint.pack(anchor="w", pady=(8, 0))
 
     advanced = Card(content, padding=16)
@@ -242,7 +245,7 @@ def build(wizard):
     wizard.advanced_frame = tk.Frame(advanced.body, background=BG)
     form = wizard.advanced_frame
     form.columnconfigure(1, weight=1)
-    controls = [tunnel_entry, key_entry, show_key, consent]
+    controls = [tunnel_entry, key_entry, show_key, consent, connect_button, models_button]
 
     def browse(variable):
         chosen = filedialog.askdirectory(parent=root, title="Escolher pasta", initialdir=variable.get() or None)
@@ -273,15 +276,15 @@ def build(wizard):
         connecting = wizard._installed or state_text.startswith(("Connecting OpenAI", "Step 2 of 3"))
         active = 2 if percent == 100 else (1 if busy and connecting else 0)
         for i, shape in enumerate(wizard._step_shapes):
-            sidebar.itemconfigure(shape, fill=BLUE if i == active else "#dfe7f2")
-            sidebar.itemconfigure(wizard._step_numbers[i], fill=BG if i == active else INK)
+            sidebar.itemconfigure(shape, fill=wizard._theme_color(BLUE if i == active else "#dfe7f2"))
+            sidebar.itemconfigure(wizard._step_numbers[i], fill="#ffffff" if i == active else wizard._theme_color(INK))
         for control in controls:
             control.state(["disabled"] if busy else ["!disabled"])
         if busy:
             key_entry.configure(show="•")
             show_key.configure(text="Mostrar")
         translations = {
-            "Install SENTRA — local use works without OpenAI": "Clique em Continuar para instalar. A conexão OpenAI é opcional.",
+            "Install SENTRA — local use works without OpenAI": "Instale e configure a conexão obrigatória com a OpenAI.",
             "Preparing installation": "Preparando a instalação…",
             "Installing SENTRA components": "Instalando os componentes do SENTRA…",
             "Installing secure tunnel client": "Instalando o cliente de conexão segura…",
@@ -304,6 +307,8 @@ def build(wizard):
     def schedule(*_args):
         root.after_idle(refresh)
 
+    wizard._apply_theme = theme_controller(root, style)
+    wizard._theme_color = wizard._apply_theme("dark")
     wizard.status.trace_add("write", schedule)
     wizard.progress_value.trace_add("write", schedule)
     refresh()

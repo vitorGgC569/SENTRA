@@ -42,6 +42,13 @@ class WorkspaceFilesExecutor(GuardedExecutor):
         super().__init__(machine_id=machine_id, owner_principal_id=owner_principal_id,
                          bindings={binding.capability_id: binding for binding in bindings}, policy=policy)
 
+    def resolve_requested_output(self, request):
+        """Host-only capture binding; never accept an arbitrary output root."""
+        binding, args = self._check_request(request)
+        if args["action"] not in {"write", "edit"}:
+            raise ValueError("workspace_file_request_does_not_publish_output")
+        return self._path(binding, args["path"], write=True)
+
     @staticmethod
     def _path(binding, raw, *, write):
         if not isinstance(raw, str) or not 1 <= len(raw) <= 512 or chr(0) in raw or ":" in raw:

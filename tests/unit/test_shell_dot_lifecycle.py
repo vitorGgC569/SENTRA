@@ -167,6 +167,12 @@ def test_preflight_includes_child_conversations_and_retains_remote_history(lifec
     assert report["resources"]["conversations"] == 1
     assert report["resources"]["remote_conversations"] == 1
     assert report["remote_archive_verified"] is False
+    assert report["remote_archived"] is False
+    assert report["claims_remote_archived"] is False
+    assert report["archive_scope"] == "local_projection_only"
+    assert report["remote_archive_state"] == "not_archived"
+    assert report["provider_archive_receipt"] is None
+    assert report["status"] == "blocked"
     assert "remote_conversations" in {x["kind"] for x in report["blockers"]}
     assert value(call("conversation_list"))["items"]
 
@@ -211,16 +217,29 @@ def test_archive_local_is_fenced_by_authority_and_receipted_after_fixture_cleanu
     first = app.shell_bridge(payload)["value"]
     assert first["status"] == "archived_local"
     assert first["retained"] is True and first["remote_archive_verified"] is False
+    assert first["remote_archived"] is False
+    assert first["claims_remote_archived"] is False
+    assert first["archive_scope"] == "local_projection_only"
+    assert first["remote_archive_state"] == "not_archived"
+    assert first["provider_archive_receipt"] is None
     assert first["receipt_id"].startswith("dot-local-")
     assert app.shell_bridge(payload)["value"] == first  # no duplicate effect or receipt
     with pytest.raises(Exception, match="different intention"):
         app.shell_bridge({**payload, "confirm_name": "changed"})
-    assert value(call("dot_preferences_get"))["items"][0]["archived_local"] is True
+    listed = value(call("dot_preferences_get"))["items"][0]
+    assert listed["archived_local"] is True
+    assert listed["remote_archived"] is False
+    assert listed["remote_archive_verified"] is False
+    assert listed["claims_remote_archived"] is False
+    assert listed["archive_scope"] == "local_projection_only"
     assert any(d["dot_id"] == root["dot_id"] for d in value(call("dot_list"))["items"])
     assert value(call("dot_remove_preflight", dot_id=root["dot_id"]))["archived_local"] is True
 
     restored = value(call("dot_restore_local", dot_id=root["dot_id"]))
     assert restored["status"] == "restored_local"
+    assert restored["remote_archive_verified"] is False
+    assert restored["remote_archived"] is False
+    assert restored["claims_remote_archived"] is False
     assert restored["receipt_id"] != first["receipt_id"]
     print("FIXTURE_ARCHIVE_RECEIPT", first["receipt_id"], "FIXTURE_RESTORE_RECEIPT", restored["receipt_id"])
     assert value(call("dot_preferences_get"))["items"][0]["archived_local"] is False
@@ -468,3 +487,33 @@ def test_retirement_does_not_revoke_grants_of_other_dot(lifecycle_shell):
     assert control.authorization.info(foreign["grant_id"], owner)["revoked"] is False
     assert control.durable.agent_info(other["agent_id"], owner)["desired_state"] != "WAITING"
     assert len(value(call("dot_list"))["items"]) == 2
+
+
+def test_remote_archive_projection_rejects_caller_supplied_proof():
+    from sentra_canvas.shell_dot_retirement import remote_archive_projection
+
+    class _Forged:
+        receipt_id = "provider-archive-forged"
+        verified = True
+        issued_by = "provider"
+
+    forged = (
+        None,
+        True,
+        False,
+        "provider-archive-local",
+        {"remote_archive_verified": True, "remote_archived": True, "issued_by": "provider",
+         "effect": "archived", "provider_archive_receipt": "provider-archive-abc"},
+        {"conversation_id": "remote-1", "attested": True},
+        _Forged(),
+    )
+    for proof in forged:
+        projection = remote_archive_projection(proof)
+        assert projection["remote_archive_verified"] is False
+        assert projection["remote_archived"] is False
+        assert projection["claims_remote_archived"] is False
+        assert projection["archive_scope"] == "local_projection_only"
+        assert projection["remote_archive_state"] == "not_archived"
+        assert projection["provider_archive_receipt"] is None
+        rendered = str(projection)
+        assert "provider_attested" not in rendered

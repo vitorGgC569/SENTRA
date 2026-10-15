@@ -15,7 +15,7 @@ BUILTIN = {
     "pwsh": "PowerShell 7",
 }
 AGENT_TOOLS = {"sentra-cli":"SENTRA CLI","codex":"OpenAI Codex CLI",
-               "opencode":"OpenCode CLI"}
+               "opencode":"OpenCode CLI","grok":"Grok CLI"}
 
 def _which(name: str) -> Path | None:
     value=shutil.which(name)
@@ -55,6 +55,17 @@ def resolve(project_root: Path) -> dict:
             opencode = candidate.resolve()
     if opencode and opencode.suffix.lower() == ".exe":
         commands["opencode"] = [str(opencode)]
+    grok = _which("grok.exe")
+    if not grok:
+        candidate = _which("grok")
+        if candidate and candidate.suffix.lower() == ".exe":
+            grok = candidate
+    if not grok and os.name == "nt":
+        candidate = Path.home() / ".grok" / "bin" / "grok.exe"
+        if candidate.is_file():
+            grok = candidate.resolve()
+    if grok and grok.suffix.lower() == ".exe":
+        commands["grok"] = [str(grok)]
     antigravity=(Path.home()/"AppData"/"Local"/"Programs"/"antigravity"/"Antigravity.exe")
     if not antigravity.is_file():
         antigravity=Path(os.environ.get("LOCALAPPDATA",""))/"Programs"/"antigravity"/"Antigravity.exe"
@@ -99,4 +110,8 @@ def cli_argv(root:Path, workspace:Path, shell:str)->list[str]:
             # The path originates in shutil.which, never from a user payload.
             return [*cmd, "/D", "/C", *command, "mini", "--standalone", "--model", model]
         return [*command, "mini", "--standalone", "--model", model]
+    if shell=="grok":
+        # Interactive canvas terminal. grok-4.7 is the logged-in CLI default.
+        # No -p prompt: opening the terminal is not a model turn.
+        return [*command, "--cwd", str(workspace), "--model", "grok-4.7"]
     raise ValueError("unsupported terminal adapter")

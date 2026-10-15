@@ -1,10 +1,10 @@
 import hashlib
 import json
+from pathlib import Path
 import pytest
 from scripts.commander import build_windows as build
 
 def test_installer_rejects_payload_without_current_proof(tmp_path, monkeypatch):
-    monkeypatch.setattr(build, "stamp_extension_identity", lambda *_: None)
     monkeypatch.setattr(build, "PAYLOAD_NAMES", ("sentra-mcp.exe",))
     monkeypatch.setattr(build, "_source_fingerprint", lambda: {"product.py": "current"})
     binary = tmp_path / "sentra-mcp.exe"; binary.write_bytes(b"actual")
@@ -22,6 +22,35 @@ def test_installer_rejects_payload_without_current_proof(tmp_path, monkeypatch):
     binary.write_bytes(b"actual")
     with pytest.raises(RuntimeError, match="Electron Web Models payload"):
         build.build_installer(tmp_path, tmp_path / "work", tmp_path / "spec")
+    assert not (tmp_path / "work").exists()
+
+def test_launcher_provenance_does_not_certify_the_remaining_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "PAYLOAD_NAMES", ("sentra-launcher.exe", "sentra-canvas.exe"))
+    monkeypatch.setattr(build, "_source_fingerprint", lambda: {"desktop_launcher.cs": "current"})
+    launcher = tmp_path / "sentra-launcher.exe"
+    canvas = tmp_path / "sentra-canvas.exe"
+    launcher.write_bytes(b"launcher-bytes")
+    canvas.write_bytes(b"canvas-bytes")
+    proof = {"sources": {"desktop_launcher.cs": "current"}, "executables": {
+        "sentra-launcher.exe": {"sha256": hashlib.sha256(b"launcher-bytes").hexdigest(), "bytes": len(b"launcher-bytes")}}}
+    (tmp_path / "build-provenance-launcher.json").write_text(json.dumps(proof), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="stale or unverified installer payload: sentra-canvas.exe"):
+        build.build_installer(tmp_path, tmp_path / "work", tmp_path / "spec")
+
+
+def test_launcher_phase_compiles_release_binary_without_checkout_binding(tmp_path, monkeypatch):
+    calls = []
+
+    def fake(destination, **kwargs):
+        calls.append((Path(destination), kwargs))
+        Path(destination).write_bytes(b"MZ")
+        return destination
+
+    monkeypatch.setattr("scripts.commander.build_desktop_launcher.build_desktop_launcher", fake)
+    build.build_launcher(tmp_path)
+    assert calls == [(tmp_path / "sentra-launcher.exe", {})]
+    assert not (tmp_path / "sentra-canvas.exe").exists()
+
 
 def test_full_build_never_certifies_sources_changed_during_payload(tmp_path, monkeypatch):
     sources={"product.py":"initial"}

@@ -16,6 +16,21 @@ def test_owned_log_identifies_hyperv_without_asserting_live_os_is_installed(tmp_
     assert not result['desktop_ready_verified'] and not result['automatic_reboot']
     assert str(tmp_path) not in str(result)
 
+def test_diagnostics_does_not_follow_a_path_vm_name(tmp_path, monkeypatch):
+    foreign = tmp_path / 'foreign-vm'
+    (foreign / 'Logs').mkdir(parents=True)
+    (foreign / 'Logs' / 'VBox.log').write_text('WHvCapabilityCodeHypervisorPresent is TRUE\n')
+    client = VirtualBoxClient('owned.exe')
+    monkeypatch.setattr(client, 'status', lambda _: {
+        'CfgFile': str(foreign / 'foreign.vbox'), 'VMState': 'running',
+    })
+    result = client.diagnostics(VirtualBoxBinding('owned', 'owned-marker', None),
+        {'base_folder': str(tmp_path), 'name': '../foreign-vm'})
+    assert result['execution_backend'] == 'unknown'
+    assert result['log_identity_verified'] is False
+    assert result['installed_os_verified'] is False
+
+
 def test_foreign_vm_log_path_is_not_read(tmp_path, monkeypatch):
     own = tmp_path / 'owned-vm'
     other = tmp_path / 'foreign-vm'
@@ -76,6 +91,43 @@ def test_debian_nem_boot_uses_confirmed_editor_bounded_keys_and_one_enter(monkey
     assert sum(batch==[28,156] for batch in events)==1 and all(len(batch)<=32 for batch in events)
     assert result['boot_compatibility']=='debian_hyperv_nem' and not result['desktop_ready_verified']
     assert result['kernel_parameters']=='tsc=unstable clocksource=acpi_pm nohz=off maxcpus=1'
+
+def test_boot_fence_stays_inside_the_dot_folder(tmp_path):
+    executor = VirtualBoxExecutor(machine_id='m', owner_principal_id='a', bindings={'vm:manage': None}, client=object())
+    cfg = {'base_folder': str(tmp_path), 'name': 'owned'}
+    fence = executor._boot_input_fence(cfg, 'vm-owned')
+    assert fence is not None and fence.is_relative_to(tmp_path / 'owned')
+    assert executor._boot_input_fence(cfg, '../other') is None
+    assert executor._boot_input_fence({**cfg, 'name': '../owned'}, 'vm-owned') is None
+    assert executor._boot_input_fence({**cfg, 'base_folder': 'owned'}, 'vm-owned') is None
+
+
+def test_boot_keys_are_not_sent_again_after_an_uncertain_attempt(monkeypatch, tmp_path):
+    events = []
+
+    class Client:
+        def frame(self, binding):
+            return {'image_base64': _menu_image()}
+        def diagnostics(self, binding, cfg):
+            return {'execution_backend': 'hyperv_nem'}
+        def input(self, binding, args):
+            events.append(args['scancodes'])
+
+    monkeypatch.setattr('sentra_executors.virtualbox_vm.effect_checkpoint', lambda: None)
+    cfg = {'os_family': 'linux', 'iso_path': 'debian-live-13.7.0-amd64-xfce.iso',
+           'name': 'owned', 'base_folder': str(tmp_path)}
+    executor = VirtualBoxExecutor(machine_id='m', owner_principal_id='a',
+                                  bindings={'vm:manage': None}, client=Client())
+    binding = VirtualBoxBinding('vm-owned', 'marker', lambda: cfg)
+    first = executor._advance_debian_live(binding, cfg, attempts=1)
+    assert first['live_boot'] == 'editor_not_confirmed'
+    assert events == [[15, 143]]
+    again = executor._advance_debian_live(binding, cfg, attempts=1)
+    assert again['live_boot'] == 'input_already_sent'
+    assert again['automatic_retry'] is False
+    assert again['keys_resent'] is False
+    assert events == [[15, 143]]
+
 
 def test_boot_editor_must_be_confirmed_before_any_parameters_or_enter(monkeypatch):
     events=[]

@@ -86,8 +86,33 @@ def main(argv: list[str] | None = None) -> int:
     pipe = sub.add_parser("selo-pipeline-stats", help="OTel pipeline stats with loss accounting")
     pipe.add_argument("--state-root", type=Path, required=True)
     pipe.add_argument("--owner", required=True)
+    sub.add_parser("local-use", help="print the open local-use policy; it never blocks local use")
+    sub.add_parser("support-bundle", help="print a redacted support bundle with no secrets")
+    sub.add_parser("production-contract", help="print the Flint audit contract; it admits no effect")
+    diagnose = sub.add_parser("diagnose-installer", help="report license and docs missing from an installer script")
+    diagnose.add_argument("--installer", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
+        if args.action == "local-use":
+            from .local_use_policy import LocalUsePolicy
+            print(json.dumps(LocalUsePolicy().to_dict(), sort_keys=True, ensure_ascii=False))
+            return 0
+        if args.action == "support-bundle":
+            from .local_use_policy import support_bundle
+            print(json.dumps(support_bundle(), sort_keys=True, ensure_ascii=False))
+            return 0
+        if args.action == "production-contract":
+            from .production_audit import production_contract
+            print(json.dumps(production_contract(), sort_keys=True, ensure_ascii=False))
+            return 0
+        if args.action == "diagnose-installer":
+            from sentra_version import PRODUCT_VERSION
+            from .distribution_diagnosis import diagnose_installer
+            print(json.dumps(
+                diagnose_installer(args.installer, product_version=PRODUCT_VERSION),
+                sort_keys=True, ensure_ascii=False,
+            ))
+            return 0
         if args.action == "selo-diagnostics":
             from .diagnostics import DiagnosticsReport
             print(json.dumps(DiagnosticsReport(args.state_root).build(args.owner),

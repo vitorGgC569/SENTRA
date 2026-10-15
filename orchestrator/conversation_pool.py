@@ -300,6 +300,8 @@ class FixedConversationRouter:
                     # o operador continua vendo todos via inspect_conversations.
                     mine = self._map.get(seat, {}).get("state")
                     if mine in _BLOCKING:
+                        if mine == "UNCERTAIN":
+                            return self._blocked(f"{seat} is UNCERTAIN; delivery reconciliation required, no replay", "UNCERTAIN")
                         return self._blocked(f"{seat} requires delivery reconciliation; no replay")
                     if seat not in self._map and len(self._map) >= self._max_seats:
                         return self._blocked("fixed conversation seat cap reached")

@@ -5,6 +5,7 @@ export default defineConfig({
   plugins: [react()],
   base: '/desktop-assets/',
   build: {
+    manifest: true,
     outDir: '../static/desktop-assets',
     emptyOutDir: false,
     assetsDir: '',

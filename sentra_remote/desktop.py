@@ -189,6 +189,7 @@ def _internal_deep_link_target(value: str) -> str | None:
         "sentra://onboarding": "onboarding",
         "sentra://web-models": "web_models",
         "sentra://openai-enroll": "openai_enroll",
+        "sentra://chatgpt-plugin": "chatgpt_plugin",
     }.get(normalized)
 
 
@@ -243,6 +244,11 @@ class SentraDesktop:
             self.tabs.select(self.onboarding_tab)
             # Consume installer authorization; deep links alone grant nothing.
             self.root.after(900, self.start_openai_browser_enrollment)
+        if initial_view == "chatgpt_plugin":
+            self.tabs.select(self.onboarding_tab)
+            self.root.after(900, self.finish_chatgpt_plugin_setup)
+        if initial_view == "web_models":
+            self.root.after(900, self.open_web_models_setup)
         self._start_tray()
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
         if start_hidden and initial_view is None:
@@ -480,6 +486,12 @@ class SentraDesktop:
                         else f"Gateway ready · upstream {version} · catálogo Web vazio"
                     )
                 )
+                inference = health.get('inference_health') or {}
+                if inference.get('state') == 'DEGRADED':
+                    status_text += (f" · Inferência DEGRADADA: {inference.get('upstream_5xx_count', 0)}"
+                                    f" falhas upstream em {inference.get('sample_count', 0)} requisições recentes")
+                elif inference.get('state') == 'OBSERVING':
+                    status_text += ' · aguardando amostras reais de inferência'
                 route_text = "Codex: rota não verificada"
                 try:
                     route = self._web_gateway_admin_json("/sentra/codex/status")
@@ -578,6 +590,8 @@ class SentraDesktop:
                     self.web_gateway_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
                     self.web_gateway_thread.start()
                 self.web_gateway.launcher.start(hidden=hidden)
+                # A UI-owned gateway must supervise health as well as a CLI-owned gateway.
+                self.web_gateway.start_upstream_watchdog()
                 if not hidden:
                     (self.paths.state_dir / "web-models-enabled").write_text("enabled\n", encoding="utf-8")
                 self.root.after(0, lambda: self._set_web_models_status("Launcher iniciado; aguardando login/runtime…"))
@@ -604,6 +618,7 @@ class SentraDesktop:
             notes.append("rota Codex restaurada")
         elif detail:
             notes.append(f"rollback da rota falhou: {detail}")
+        gateway.stop_upstream_watchdog()
         try:
             gateway.launcher.stop()
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as stop_exc:
@@ -644,6 +659,7 @@ class SentraDesktop:
                         + (f" · {detail}" if detail else "")
                     ))
                     return
+                self.web_gateway.stop_upstream_watchdog()
                 self.web_gateway.launcher.stop()
                 self.web_gateway.shutdown()
                 self.web_gateway.server_close()
@@ -1419,6 +1435,8 @@ class SentraDesktop:
 
     def _autostart(self) -> None:
         threading.Thread(target=self.runtime.start_all, daemon=True).start()
+        if (self.paths.state_dir / "web-models-enabled").is_file():
+            self.start_web_models(hidden=True)
 
     def _refresh_workspaces(self) -> None:
         self.workspace_list.delete(0, "end")
@@ -1921,7 +1939,7 @@ class SentraDesktop:
         except ImportError:
             return
         from sentra_canvas.native_brand import icon_path
-        approved = icon_path().with_name("SENTRA-LOGO.png")
+        approved = icon_path()
         if approved.is_file():
             with Image.open(approved) as source:
                 image = source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
@@ -1991,7 +2009,7 @@ def main(argv: list[str] | None = None) -> int:
         if initial_view is None:
             parser.error(
                 "--open-url accepts only SENTRA home, status, onboarding, "
-                "web-models or openai-enroll links"
+                "web-models, openai-enroll or chatgpt-plugin links"
             )
     return SentraDesktop(
         start_hidden=args.hidden and initial_view is None,

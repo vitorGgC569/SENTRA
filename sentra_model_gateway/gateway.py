@@ -21,6 +21,7 @@ import sqlite3
 import subprocess
 import threading
 import time
+from collections import deque
 import zstandard as zstd
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -110,6 +111,21 @@ def _web_model_route(model: str) -> tuple[str, str, bool] | None:
         if model.startswith(upstream):
             return canonical, upstream, False
     return None
+
+
+def fleet_status_payload() -> dict[str, Any]:
+    """Catalog of the single provider/CLI admission. It does not send a prompt."""
+    try:
+        from orchestrator.providers.fleet_admission import describe_local_fleet
+        return describe_local_fleet()
+    except (OSError, ValueError, RuntimeError, ImportError) as exc:
+        return {
+            "admitted": False,
+            "inference_executed": False,
+            "availability": "unavailable",
+            "reason": type(exc).__name__,
+            "lanes": [],
+        }
 
 
 def _canonical_web_model_name(value: str) -> str:
@@ -762,6 +778,9 @@ class LauncherSupervisor:
 
 class GatewayServer(ThreadingHTTPServer):
     daemon_threads = True
+    # The product admission target is 10 simultaneous model streams per host.
+    # Backlog is not a concurrency limit; keep enough room for connection bursts.
+    request_queue_size = 64
     # On Windows, SO_REUSEADDR permits multiple listeners on the same port and can
     # split Codex traffic across different Gateway/Launcher owners. Keep fast
     # restarts on POSIX, but require an exclusive loopback owner on Windows.
@@ -834,6 +853,34 @@ class GatewayServer(ThreadingHTTPServer):
         self._upstream_supervision: dict[str, Any] = {
             "state": "IDLE",
             "restart_attempts": 0,
+        }
+        self._inference_metrics_lock = threading.RLock()
+        self._inference_outcomes = deque(maxlen=512)
+
+    def record_inference_outcome(self, status: int | None) -> None:
+        # Observe responses only; a failure is NEVER consent to replay POST.
+        with self._inference_metrics_lock:
+            self._inference_outcomes.append((time.monotonic(), status))
+
+    def inference_health(self, window_s: float = 300.0) -> dict[str, Any]:
+        stamp = time.monotonic()
+        with self._inference_metrics_lock:
+            entries = [(at, status) for at, status in self._inference_outcomes
+                       if stamp - at <= window_s]
+        total = len(entries)
+        upstream_5xx = sum(isinstance(status, int) and status >= 500
+                           for _, status in entries)
+        transport_unknown = sum(status is None for _, status in entries)
+        degraded = total >= 5 and upstream_5xx + transport_unknown >= 3 and (
+            upstream_5xx + transport_unknown) / total >= 0.5
+        return {
+            "state": "DEGRADED" if degraded else "OBSERVING" if total < 5 else "HEALTHY",
+            "window_seconds": window_s,
+            "sample_count": total,
+            "upstream_5xx_count": upstream_5xx,
+            "transport_unknown_count": transport_unknown,
+            "failure_rate_percent": round(100 * (upstream_5xx + transport_unknown) / total, 1) if total else None,
+            "automatic_retry": False,
         }
 
     def web_transport_mode(self) -> str:
@@ -1316,10 +1363,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
     # HTTP Responses. The handshake itself requires an HTTP/1.1 response; replying
     # with HTTP/1.0 makes Codex treat the route as a broken WebSocket endpoint
     # instead of honoring the 426 fallback response.
+    # Stream small SSE frames without Nagle/delayed-ACK latency on loopback.
+    # No changes to authorization, delivery receipts, or retry semantics.
+    disable_nagle_algorithm = True
     protocol_version = "HTTP/1.1"
 
     def log_message(self, fmt: str, *args: object) -> None:
         pass
+
+    def _audit_route(self, action: str, outcome: str, details: dict) -> None:
+        # No prompt, payload or authorization values may enter diagnostics.
+        # Audit failures must not alter HTTP delivery or retry semantics.
+        try:
+            self.server.audit.emit(action, outcome, details)
+        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+            pass
 
     def _json(self, status: int, value: dict) -> None:
         body = json.dumps(value, ensure_ascii=False).encode("utf-8")
@@ -1400,11 +1458,24 @@ class GatewayHandler(BaseHTTPRequestHandler):
         body_reencoded: bool = False,
         rewrite_web_model_namespace: bool = False,
         delivery_capability: str | None = None,
+        request_correlation_id: str | None = None,
     ) -> int | None:
         response = None
+        phase = 'upstream_connect'
         try:
             response = self._upstream(method, path, body, headers, body_reencoded=body_reencoded)
+            phase = 'upstream_headers'
             response_headers = response.getheaders()
+            if response.status >= 500:
+                # Provider CF-Ray is a diagnostic identifier, never a credential.
+                cf_ray = next((value for name, value in response_headers
+                               if name.lower() == 'cf-ray'), '')
+                diagnostic = {'correlation_id': request_correlation_id,
+                              'path': urlsplit(path).path,
+                              'upstream_http_status': response.status}
+                if re.fullmatch(r'[0-9a-fA-F]{8,32}-[A-Za-z]{3}', cf_ray.strip()):
+                    diagnostic['cf_ray'] = cf_ray.strip()
+                self._audit_route('model.gateway.upstream_5xx', 'error', diagnostic)
             content_type = next(
                 (value for name, value in response_headers if name.lower() == "content-type"),
                 "",
@@ -1446,7 +1517,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self.send_header("Transfer-Encoding", "chunked")
             elif not body_allowed and not has_length:
                 self.send_header("Content-Length", "0")
+            if request_correlation_id:
+                self.send_header('X-SENTRA-Request-ID', request_correlation_id)
             self.end_headers()
+            phase = 'stream_or_downstream_delivery'
             if body_allowed:
                 if is_sse and delivery_capability:
                     view = self.server.web_transport.delivery_view(delivery_capability)
@@ -1456,9 +1530,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     else:
                         self.wfile.write(event)
                     self.wfile.flush()
-                sse_tail = bytearray()
                 sse_terminal_detected = False
-                for data in _upstream_chunks(response, framed_sse=is_sse and bool(delivery_capability)):
+                # A terminal event may span many TCP reads (its final text can
+                # be large). Never stop at its header before forwarding data.
+                # Frame all SSE, including CLI turns without delivery injection.
+                for data in _upstream_chunks(response, framed_sse=is_sse):
                     if rewrite_web_model_namespace:
                         for canonical, upstream in WEB_MODEL_PREFIXES:
                             data = data.replace(
@@ -1483,10 +1559,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                             flush=True,
                         )
                     if is_sse:
-                        sse_tail.extend(data)
-                        if len(sse_tail) > 8192:
-                            del sse_tail[:-8192]
-                        terminal = _sse_terminal_seen(data if delivery_capability else bytes(sse_tail))
+                        terminal = _sse_terminal_seen(data)
                         sse_terminal_detected = sse_terminal_detected or terminal
                         if terminal and delivery_capability:
                             view = self.server.web_transport.delivery_view(delivery_capability)
@@ -1516,6 +1589,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     self.wfile.flush()
             return response.status
         except (OSError, http.client.HTTPException, sqlite3.Error, RuntimeError, PermissionError) as exc:
+            self._audit_route("model.gateway.transport_error", "error", {
+                "path": urlsplit(path).path,
+                "failure_phase": getattr(exc, "phase", phase),
+                "correlation_id": request_correlation_id,
+                "exception_class": type(exc).__name__,
+                "upstream_headers_received": response is not None,
+                "automatic_retry": False,
+            })
             if response is None:
                 phase = getattr(exc, "phase", "unknown")
                 self._json(503, {"error": {
@@ -1710,6 +1791,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     "upstream": upstream,
                     "launcher": launcher_status,
                     "supervisor": dict(self.server._upstream_supervision),
+                    "inference_health": self.server.inference_health(),
                 },
             )
             return
@@ -1745,7 +1827,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not self._authorized_admin():
                 self._json(401, {"error": "unauthorized"})
                 return
-            self._json(200, {"launcher": self.server.launcher.status(), "upstream": self.server.config.upstream})
+            self._json(200, {
+                "launcher": self.server.launcher.status(),
+                "upstream": self.server.config.upstream,
+                "fleet": fleet_status_payload(),
+            })
             return
         if path == "/sentra/model-catalog":
             if not (self._authorized_admin() or self._authorized_internal()):
@@ -1985,7 +2071,23 @@ class GatewayHandler(BaseHTTPRequestHandler):
         value = self._body()
         if value is None:
             return
+        gateway_request_id = secrets.token_hex(8)
+        gateway_started = time.monotonic()
+        self._audit_route("model.gateway.received", "ok", {
+            "correlation_id": gateway_request_id, "path": path,
+        })
         model = value.get("model")
+        if model == "sentra/grok/grok-4.7":
+            self._json(409, {
+                "error": {
+                    "type": "model_access_unverified",
+                    "message": "sentra/grok/grok-4.7 is listed and access is unverified",
+                },
+                "model": model,
+                "model_access_verified": False,
+                "inference_executed": False,
+            })
+            return
         web_route = _web_model_route(model) if isinstance(model, str) else None
         canonical_web_model = bool(web_route and web_route[2])
         legacy_web_model = bool(web_route and not web_route[2])
@@ -2069,6 +2171,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         else:
             capability = None
         body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        proxy_status = None
         proxy_failed = True
         try:
             proxy_status = self._proxy(
@@ -2078,9 +2181,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 body_reencoded=True,
                 rewrite_web_model_namespace=managed_web_model,
                 delivery_capability=capability if capability and metadata.get("sentra_durable_web") is True else None,
+                request_correlation_id=gateway_request_id,
             )
             proxy_failed = proxy_status is None or proxy_status >= 400
         finally:
+            recorder = getattr(self.server, 'record_inference_outcome', None)
+            if callable(recorder):
+                recorder(proxy_status)
+            self._audit_route("model.gateway.forwarded", "error" if proxy_failed else "ok", {
+                "correlation_id": gateway_request_id,
+                "path": path,
+                "upstream_http_status": proxy_status,
+                "elapsed_ms": round((time.monotonic() - gateway_started) * 1000),
+                "automatic_retry": False,
+            })
             if capability:
                 try:
                     evidence = self.server.turn_authority.telemetry_metadata(capability)
@@ -2112,7 +2226,9 @@ def main() -> None:
     try:
         if args.launch_upstream:
             server.launcher.start()
-            server.start_upstream_watchdog()
+        # Observe/recover the upstream even when launched by the desktop app.
+        # Adopted/stale processes still cannot be terminated by this watchdog.
+        server.start_upstream_watchdog()
         print(f"SENTRA Model Gateway listening on http://127.0.0.1:{server.server_port}/v1", flush=True)
         server.serve_forever()
     except KeyboardInterrupt:

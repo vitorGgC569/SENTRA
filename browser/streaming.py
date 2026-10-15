@@ -80,8 +80,6 @@ class StreamingLedger:
                         "grants_created": False}
             if latest["rev"] is not None and revision < int(latest["rev"]):
                 raise ValueError("stream revision must increase per message")
-            if int(latest["n"]) >= MAX_FRAMES_PER_MESSAGE:
-                raise ValueError("stream frame budget exceeded for message")
             now = time.time()
             db.execute("INSERT INTO browser_stream_frames VALUES(?,?,?,?,?,?,?,?,?)",
                        (principal, conversation_id, message_id, revision, digest,
@@ -90,6 +88,16 @@ class StreamingLedger:
             db.execute("INSERT INTO browser_stream_content VALUES(?,?,?,?,?,?)",
                        (principal, conversation_id, message_id, revision, _encode(text),
                         hashlib.sha256(text.encode()).hexdigest()))
+            # Keep a bounded rolling observation history without imposing a
+            # lifetime limit on a long generation. The newest full protected
+            # snapshot remains reconstructible; old revisions never alias it.
+            if int(latest["n"]) >= MAX_FRAMES_PER_MESSAGE:
+                cutoff = db.execute("SELECT revision FROM browser_stream_frames WHERE principal=? "
+                    "AND conversation_id=? AND message_id=? ORDER BY revision DESC LIMIT 1 OFFSET ?",
+                    (principal, conversation_id, message_id, MAX_FRAMES_PER_MESSAGE - 1)).fetchone()
+                for table in ("browser_stream_frames", "browser_stream_content"):
+                    db.execute("DELETE FROM " + table + " WHERE principal=? AND conversation_id=? AND message_id=? AND revision<?",
+                        (principal, conversation_id, message_id, cutoff["revision"]))
             db.commit()
             return {"revision": revision, "prefix_chars": len(prefix),
                     "prefix_sha256": digest, "truncated": truncated,

@@ -66,8 +66,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--timeout",
         type=float,
-        default=120.0,
-        help="Provider timeout in seconds",
+        default=1800.0,
+        help="Maximum provider turn duration in seconds (default: 30 minutes)",
     )
     parser.add_argument(
         "--max-tool-rounds",
@@ -223,6 +223,95 @@ def _run_gateway_service(argv: list[str]) -> int:
             headless_client._stop_headless_upstream()
 
 
+def stream_turn(
+    chunk_source,
+    *,
+    receipts=(),
+    required=("coordinator",),
+    write=None,
+    on_delta=None,
+    on_phase=None,
+    announce=True,
+) -> dict:
+    """Print one turn by iterating the orchestrated generator.
+
+    Coordinating is written before any delta. Each new delta is written
+    before the next chunk is pulled. Text already shown is not written
+    again. ``unit_gate`` is only the named receipt check. It is not
+    ``reconcile_coordinator_trio`` and it is not an exit code.
+    """
+    from .orchestrated_stream import orchestrate_stream
+
+    def emit(text: str) -> None:
+        if write is None:
+            sys.stdout.write(text)
+            sys.stdout.flush()
+            return
+        write(text)
+
+    shown = ""
+    unit_gate = False
+    for event in orchestrate_stream(
+        chunk_source, receipts=receipts, required=required,
+    ):
+        kind = event.get("kind")
+        if kind == "progress" and event.get("phase") == "coordinating":
+            if announce:
+                emit("coordinating\n")
+                if on_phase is not None:
+                    on_phase("coordinating")
+            continue
+        if kind == "delta":
+            text = event.get("text")
+            if not isinstance(text, str) or text == "":
+                continue
+            # A cumulative snapshot only adds its new tail. The same phrase
+            # later in a long answer is still a new fragment and must be kept.
+            if shown and text.startswith(shown):
+                text = text[len(shown):]
+            if not text:
+                continue
+            emit(text)
+            shown += text
+            if on_delta is not None:
+                on_delta(text)
+            continue
+        if kind == "result":
+            unit_gate = event.get("success") is True
+    if shown and not shown.endswith("\n"):
+        emit("\n")
+    return {
+        "shown": shown,
+        "unit_gate": unit_gate,
+        "delivery": "not_submitted",
+    }
+
+
+def process_exit(visible, client=None) -> int:
+    """Map a finished print to a process status.
+
+    UNCERTAIN stays 3 and is never rewritten to 0. A missing unit receipt
+    is not 0. A 0 means the printer finished with that receipt and the
+    delivery was not UNCERTAIN. It does not close the coordinator trio.
+    """
+    states: list[str] = []
+    if isinstance(visible, dict):
+        mark = visible.get("delivery")
+        if isinstance(mark, str) and mark:
+            states.append(mark)
+    if client is not None:
+        mark = getattr(client, "last_delivery_state", None)
+        if isinstance(mark, str) and mark:
+            states.append(mark)
+    if "uncertain" in states:
+        return 3
+    if client is not None and getattr(client, "last_error", None):
+        return 1
+    if isinstance(visible, dict):
+        return 0 if visible.get("unit_gate") is True else 1
+    return 0 if visible == 0 else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     _configure_stdio()
     effective_argv = list(sys.argv[1:] if argv is None else argv)
@@ -309,11 +398,9 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError("attachment refs require --shell-turn; attachments never silently fall back to text")
         repl = SentraREPL(config)
         if args.continue_previous:
-            repl.continue_previous()
-            return 1 if repl.agent.client.last_error else 0
+            return process_exit(repl.continue_previous(), repl.agent.client)
         if args.prompt is not None:
-            repl.run_one_shot(args.prompt)
-            return 1 if repl.agent.client.last_error else 0
+            return process_exit(repl.run_one_shot(args.prompt), repl.agent.client)
         repl.run_interactive()
         return 0
     except KeyboardInterrupt:

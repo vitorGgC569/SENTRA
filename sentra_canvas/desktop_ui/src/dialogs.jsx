@@ -25,7 +25,7 @@ export function EntryDialog({ request, close }) {
       if (!n) return false;
       const resource = n.kind === 'terminal' ? detail.terminals?.find(t => t.id === n.resource_id) :
         detail.terminals?.find(t => t.id === agents.find(a => a.id === n.resource_id)?.terminal_id);
-      return resource?.status === 'running' && ['sentra-cli', 'codex'].includes(resource.shell);
+      return resource?.status === 'running' && ['sentra-cli', 'codex', 'grok'].includes(resource.shell);
     });
   useEffect(() => {
     if (kind !== 'task' || !team) return;

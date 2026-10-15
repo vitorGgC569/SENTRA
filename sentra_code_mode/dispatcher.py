@@ -448,13 +448,13 @@ class CodeModeDispatcher:
         engine = proposal.get("engine") or self.engine
         loop = asyncio.get_running_loop()
         if engine == "quickjs-wasm":
-            from .artifact_config import load_artifact_from_env
+            from .artifact_config import load_artifact
             from .quickjs_runtime import QuickJSWasmRunner
             artifact = self.artifact
             if artifact is None:
                 # Optional stays unavailable-if-unconfigured (explicit), and
                 # distribution MUST ship the real guest (see guest/build.sh).
-                artifact = load_artifact_from_env()
+                artifact = load_artifact()
             runner = QuickJSWasmRunner(artifact, self.limits, cancel_event=flag)
             if flag.is_set():
                 runner.cancel()

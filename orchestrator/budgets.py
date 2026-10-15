@@ -1,8 +1,17 @@
 """Concurrent admission budgets with persistent reservations and honest accounting."""
 from __future__ import annotations
 
+import json
+import os
+import re
+import tempfile
+import threading
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
+from pathlib import Path
+
+from .process_lock import exclusive_file_lock
 
 
 class BudgetExceeded(RuntimeError):
@@ -130,3 +139,235 @@ class TokenBudget:
     def _save(self):
         if self.save:
             self.save(self.to_dict())
+
+
+_SURFACES = ("canvas", "terminal", "vm")
+_DOT_BUDGET_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}")
+
+
+@dataclass
+class ResourceReservation:
+    id: str
+    dot_id: str
+    surface: str
+    ram_mb: int
+    cpu_percent: float
+
+
+class HostResourceBudget:
+    """Admission budget for host RAM and CPU. It does not kill or renice.
+
+    Reservations survive a new instance on the same ``state_path``. They count
+    until ``release``, including after a crash, so a restart cannot admit the
+    same RAM twice. The snapshot for one Dot omits every other Dot's id.
+    """
+
+    SCHEMA_VERSION = 1
+
+    def __init__(
+        self,
+        *,
+        total_mb: int,
+        reserve_mb: int = 2048,
+        max_cpu_percent: float = 85.0,
+        surface_ram_mb: dict | None = None,
+        save=None,
+        state=None,
+        state_path: Path | str | None = None,
+    ):
+        if type(total_mb) is not int or type(reserve_mb) is not int:
+            raise ValueError("memory totals must be ints")
+        if reserve_mb < 512 or reserve_mb >= total_mb:
+            raise ValueError("reserve must leave the host usable room")
+        if isinstance(max_cpu_percent, bool) or not isinstance(max_cpu_percent, (int, float)):
+            raise ValueError("max_cpu_percent must be a number")
+        if not 1 <= float(max_cpu_percent) <= 95:
+            raise ValueError("cpu ceiling must stay inside 1..95 so the host keeps headroom")
+        if state is not None and state_path is not None:
+            raise ValueError("pass state or state_path, not both")
+        caps = {"canvas": 2048, "terminal": 1024, "vm": 8192}
+        if surface_ram_mb is not None:
+            if not isinstance(surface_ram_mb, dict):
+                raise TypeError("surface_ram_mb must be an object")
+            unknown = set(surface_ram_mb) - set(caps)
+            if unknown:
+                raise ValueError("unknown surface: " + ", ".join(sorted(unknown)))
+            for key, value in surface_ram_mb.items():
+                if type(value) is not int or value < 128:
+                    raise ValueError(f"{key} ram ceiling must be an int >= 128")
+                caps[key] = value
+        self.total_mb = total_mb
+        self.reserve_mb = reserve_mb
+        self.max_cpu_percent = float(max_cpu_percent)
+        self.surface_ram_mb = caps
+        self.save = save
+        self.state_path = Path(state_path).resolve() if state_path else None
+        self.reservations: dict[str, ResourceReservation] = {}
+        self._lock = threading.RLock()
+        if state is not None:
+            self._apply_reservations(state)
+        elif self.state_path is not None and self.state_path.is_file():
+            self._apply_reservations(self._read_file())
+
+    def _guard(self):
+        if self.state_path is None:
+            return nullcontext()
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        return exclusive_file_lock(self.state_path.with_name(self.state_path.name + ".lock"))
+
+    @staticmethod
+    def _check_identity(dot_id: str, surface: str) -> None:
+        if not isinstance(dot_id, str) or not _DOT_BUDGET_ID.fullmatch(dot_id):
+            raise ValueError("invalid dot_id")
+        if surface not in _SURFACES:
+            raise ValueError("unknown surface")
+
+    def _apply_reservations(self, data: dict) -> None:
+        if not isinstance(data, dict) or data.get("schema_version") != self.SCHEMA_VERSION:
+            raise ValueError("invalid host resource budget state")
+        raw = data.get("reservations")
+        if not isinstance(raw, dict):
+            raise ValueError("invalid host resource reservations")
+        loaded: dict[str, ResourceReservation] = {}
+        for key, entry in raw.items():
+            if not isinstance(entry, dict):
+                raise ValueError("invalid reservation")
+            dot_id = entry.get("dot_id")
+            surface = entry.get("surface")
+            self._check_identity(str(dot_id or ""), str(surface or ""))
+            ram = entry.get("ram_mb")
+            cpu = entry.get("cpu_percent")
+            if type(ram) is not int or ram < 0:
+                raise ValueError("invalid reserved ram")
+            if isinstance(cpu, bool) or not isinstance(cpu, (int, float)) or float(cpu) < 0:
+                raise ValueError("invalid reserved cpu")
+            reservation_id = str(entry.get("id") or key)
+            if reservation_id != str(key):
+                raise ValueError("reservation id mismatch")
+            loaded[reservation_id] = ResourceReservation(
+                reservation_id, str(dot_id), str(surface), ram, float(cpu)
+            )
+        self.reservations = loaded
+
+    def _read_file(self) -> dict:
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid host resource budget state") from exc
+        if not isinstance(data, dict):
+            raise ValueError("invalid host resource budget state")
+        return data
+
+    def _ram_used(self, surface: str | None = None) -> int:
+        return sum(
+            item.ram_mb for item in self.reservations.values()
+            if surface is None or item.surface == surface
+        )
+
+    def _cpu_used(self) -> float:
+        return sum(item.cpu_percent for item in self.reservations.values())
+
+    def remaining_ram(self) -> int:
+        return max(0, self.total_mb - self.reserve_mb - self._ram_used())
+
+    def overcommitted(self) -> bool:
+        if self._ram_used() + self.reserve_mb > self.total_mb:
+            return True
+        if self._cpu_used() > self.max_cpu_percent + 1e-9:
+            return True
+        return any(
+            self._ram_used(surface) > cap
+            for surface, cap in self.surface_ram_mb.items()
+        )
+
+    def reserve(self, dot_id: str, surface: str, ram_mb: int, cpu_percent: float) -> ResourceReservation:
+        self._check_identity(dot_id, surface)
+        if type(ram_mb) is not int or ram_mb < 0:
+            raise ValueError("ram_mb must be a non-negative int")
+        if isinstance(cpu_percent, bool) or not isinstance(cpu_percent, (int, float)):
+            raise ValueError("cpu_percent must be a number")
+        cpu_percent = float(cpu_percent)
+        if cpu_percent < 0 or cpu_percent > self.max_cpu_percent:
+            raise ValueError("cpu_percent exceeds the host ceiling")
+        if ram_mb == 0 and cpu_percent == 0:
+            raise ValueError("reservation must ask for ram or cpu")
+        with self._lock:
+            with self._guard():
+                if self.state_path is not None and self.state_path.is_file():
+                    self._apply_reservations(self._read_file())
+                if self._ram_used() + ram_mb + self.reserve_mb > self.total_mb:
+                    raise BudgetExceeded("host RAM reserve would be exhausted")
+                if self._ram_used(surface) + ram_mb > self.surface_ram_mb[surface]:
+                    raise BudgetExceeded(f"{surface} RAM ceiling reached")
+                if self._cpu_used() + cpu_percent > self.max_cpu_percent + 1e-9:
+                    raise BudgetExceeded("host CPU ceiling reached")
+                reservation = ResourceReservation(
+                    uuid.uuid4().hex, dot_id, surface, ram_mb, cpu_percent
+                )
+                self.reservations[reservation.id] = reservation
+                try:
+                    self._save()
+                except Exception:
+                    self.reservations.pop(reservation.id, None)
+                    raise
+                return reservation
+
+    def release(self, reservation_id: str) -> None:
+        with self._lock:
+            with self._guard():
+                if self.state_path is not None and self.state_path.is_file():
+                    self._apply_reservations(self._read_file())
+                previous = self.reservations.pop(str(reservation_id), None)
+                if previous is None:
+                    raise ValueError("reservation already released")
+                try:
+                    self._save()
+                except Exception:
+                    self.reservations[previous.id] = previous
+                    raise
+
+    def snapshot_for_dot(self, dot_id: str) -> dict:
+        self._check_identity(dot_id, "canvas")
+        with self._lock:
+            own = [item for item in self.reservations.values() if item.dot_id == dot_id]
+        return {
+            "dot_id": dot_id,
+            "reservations": [vars(item) for item in own],
+            "host_ram_reserved_mb": self._ram_used(),
+            "host_ram_remaining_mb": self.remaining_ram(),
+            "host_cpu_reserved_percent": self._cpu_used(),
+            "authorizes_effects": False,
+            "kills_processes": False,
+            "changes_priority": False,
+        }
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.SCHEMA_VERSION,
+            "reservations": {key: vars(value) for key, value in self.reservations.items()},
+            "ram_reserved_mb": self._ram_used(),
+            "cpu_reserved_percent": self._cpu_used(),
+            "authorizes_effects": False,
+            "kills_processes": False,
+            "changes_priority": False,
+        }
+
+    def _save(self) -> None:
+        payload = self.to_dict()
+        if self.save:
+            self.save(payload)
+        if self.state_path is None:
+            return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp = tempfile.mkstemp(
+            prefix=".host-budget-", suffix=".tmp", dir=str(self.state_path.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, self.state_path)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)

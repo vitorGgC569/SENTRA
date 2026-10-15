@@ -1,0 +1,39 @@
+{
+  "wasi_sdk": {
+    "version": "34.0\nwasi-libc: 2e6fb9d8ee0c\nllvm: 895aa2c896ad\nllvm-version: 23.1.0\nconfig: f992bcc08219",
+    "release": "wasi-sdk-34",
+    "archive_sha256": "cccb5c323a9b34f0349a9b09e8804a0a7632c68c3310f4b5f437ed57d7e71d8f"
+  },
+  "files": [
+    {
+      "path": "LICENSE-wasi-libc",
+      "sha256": "2711a8b5a5cdfef0e639f96c1aca12ae23d7d64a02d0507f1bdf14d2b27bbc3a",
+      "upstream": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13/LICENSE",
+      "git_blob": "d3e737899d93ea0794d8dd67eac9f6020bb105bf"
+    },
+    {
+      "path": "LICENSE-wasi-libc-APACHE",
+      "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+      "upstream": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13/LICENSE-APACHE",
+      "git_blob": "16fe87b06e802f094b3fbb0894b137bca2b16ef1"
+    },
+    {
+      "path": "LICENSE-wasi-libc-APACHE-LLVM",
+      "sha256": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5",
+      "upstream": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13/LICENSE-APACHE-LLVM",
+      "git_blob": "f9d81955f4bcb8f96a025e2ecc46f39ec536d465"
+    },
+    {
+      "path": "LICENSE-wasi-libc-MIT",
+      "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+      "upstream": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/2e6fb9d8ee0cdf9e431fbcabe8af3115de000a13/LICENSE-MIT",
+      "git_blob": "31aa79387f27e730e33d871925e152e35e428031"
+    },
+    {
+      "path": "LICENSE-compiler-rt",
+      "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d",
+      "upstream": "https://raw.githubusercontent.com/llvm/llvm-project/895aa2c896ada719451be2e3673c83da8ddf1141/compiler-rt/LICENSE.TXT",
+      "git_blob": "5a79a1b9d5cb0af9a779751f07033e44ca3b14d8"
+    }
+  ]
+}

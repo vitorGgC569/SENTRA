@@ -41,7 +41,8 @@ def test_gate_abstained_critical_finding_does_not_block():
     gate = QualityGate(QuorumPolicy(validators_required=2, minimum_approvals=2,
                                     objective_test_required=False,
                                     minimum_confidence_threshold=0.5))
-    task = Task(id="T-1", run_id="r", objective="x")
+    task = Task(id="T-1", run_id="r", objective="x",
+                metadata={"evidence_ids": ["artifact:unit"]})
     cand = Candidate(candidate_id="C-1", task_id="T-1", summary="s")
     reports = [_report("v1", "APPROVED", score=9.6), _report("v2", "APPROVED", score=9.8),
                _report("v3", "REJECTED", ran=False,

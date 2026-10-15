@@ -184,8 +184,22 @@ def test_provider_reply_is_committed_with_its_call_state(tmp_path):
 
 def test_closing_consumer_after_final_reply_does_not_downgrade_recorded_completion(tmp_path):
     agent = SentraAgent(config(tmp_path))
-    agent.client.chat_stream = Mock(return_value=iter(["Complete answer without tools."]))
+    # The trailing bracket is withheld until the provider iterator completes.
+    # Closing after the first delta would instead interrupt an unconfirmed reply.
+    agent.client.chat_stream = Mock(return_value=iter(["Complete answer ["]))
     stream = agent.step_stream("question")
-    assert next(stream) == "Complete answer without tools."
+    assert next(stream) == "Complete answer "
+    assert next(stream) == "["
     stream.close()
     assert agent.store.status(agent.session_id)["state"] == "completed"
+
+
+def test_closing_consumer_during_delta_preserves_partial_without_completing(tmp_path):
+    agent = SentraAgent(config(tmp_path))
+    agent.client.chat_stream = Mock(return_value=iter(["Small partial", " unseen text"]))
+    stream = agent.step_stream("question")
+    assert next(stream) == "Small partial"
+    stream.close()
+    assert agent.store.status(agent.session_id)["state"] == "interrupted"
+    assert agent.store.response_draft(agent.session_id)["content"] == "Small partial"
+    assert all(m['role'] != 'assistant' for m in agent.store.messages(agent.session_id))

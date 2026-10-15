@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {rowsInSpace,canvasNavigation,confirmedConversation} from '../src/shell-navigation.js';
+import {rowsInSpace,canvasNavigation,confirmedConversation,workSurface,rememberWorkSurface,restoreWorkSurface} from '../src/shell-navigation.js';
 
 test('a Space change never displays old Dots or conversations',()=>{
   const rows=[{project_id:'project-a',space_id:'space-a',dot_id:'root-a'},
@@ -21,4 +21,22 @@ test('uncertain or mismatched creation replies cannot open an empty/foreign chat
   assert.equal(confirmedConversation(value,request),true);
   for(const reply of [{status:'uncertain',operation_id:'op'}, {}, {...value,space_id:'foreign'}, {...value,dot_id:'foreign'}])
     assert.equal(confirmedConversation(reply,request),false);
+});
+
+test('home is not stored as the last work surface',()=>{
+  assert.equal(workSurface({view:'home',project_id:'p',space_id:'s'}),null);
+  assert.deepEqual(workSurface({view:'canvas',project_id:'p',space_id:'s',dot_id:'d',conversation_id:''}),
+    {view:'canvas',project_id:'p',space_id:'s',dot_id:'d',conversation_id:null});
+});
+
+test('the last work surface is restored without blocking navigation',()=>{
+  const saved={};
+  const storage={setItem(key,value){saved[key]=value;},getItem(key){return saved[key]??null;}};
+  const surface={view:'chat',project_id:'p',space_id:'s',dot_id:'d',conversation_id:'c'};
+  assert.deepEqual(rememberWorkSurface(surface,storage),surface);
+  assert.deepEqual(restoreWorkSurface(storage),surface);
+  assert.equal(rememberWorkSurface({view:'home'},storage),null);
+  assert.deepEqual(restoreWorkSurface(storage),surface);
+  assert.equal(restoreWorkSurface({getItem(){throw Error('blocked');}}),null);
+  assert.equal(rememberWorkSurface(surface,{setItem(){throw Error('blocked');}}).view,'chat');
 });

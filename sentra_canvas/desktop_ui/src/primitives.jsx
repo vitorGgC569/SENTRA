@@ -26,10 +26,11 @@ export function Modal({ open, onOpenChange, title, description, children, classN
     </Dialog.Portal>
   </Dialog.Root>;
 }
-export function ActionMenu({ label = 'Ações', items, trigger, open, onOpenChange }) {
+export function ActionMenu({ label = 'Ações', items, trigger, open, onOpenChange, side = 'bottom', align = 'end', sideOffset = 10, className = '', heading }) {
   return <Menu.Root open={open} onOpenChange={onOpenChange}><Menu.Trigger asChild>{trigger ||
     <button type="button" className="icon-button nodrag" aria-label={label} title={label}><MoreHorizontal size={15} /></button>}
-  </Menu.Trigger><Menu.Portal><Menu.Content className="context-menu" sideOffset={6} align="end">
+  </Menu.Trigger><Menu.Portal><Menu.Content className={'context-menu ' + className} side={side} sideOffset={sideOffset} align={align} collisionPadding={16} sticky="always">
+    {heading && <Menu.Label className="context-menu-heading">{heading}</Menu.Label>}
     {items.map((item, i) => item.separator ? <Menu.Separator key={i} className="menu-separator" /> :
       <Menu.Item key={item.label} className={'menu-item ' + (item.danger ? 'danger' : '')}
         disabled={item.disabled} onSelect={item.action}>{item.icon}{item.label}</Menu.Item>)}

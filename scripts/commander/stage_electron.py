@@ -11,7 +11,7 @@ import shutil
 from pathlib import Path
 
 BROWSER_RUNTIME_REQUIRED = ("electron.exe", "resources", "locales", "LICENSE", "LICENSES.chromium.html")
-SURFACE_REQUIRED = ("main.cjs", "policy.cjs", "SENTRA.ico", "THIRD_PARTY_NOTICES.md")
+SURFACE_REQUIRED = ("main.cjs", "policy.cjs", "SENTRA.ico", "SENTRA-DOT.ico", "THIRD_PARTY_NOTICES.md")
 
 
 def _inventory(root: Path) -> dict[str, str]:
@@ -87,7 +87,7 @@ def validate_electron_payload(root: Path) -> dict:
             or not isinstance(payload.get("source_version"), str)):
         raise ValueError("invalid Electron display identity")
     hashes = payload.get("files")
-    required = {"electron.exe", "main.cjs", "policy.cjs", "SENTRA.ico",
+    required = {"electron.exe", "main.cjs", "policy.cjs", "SENTRA.ico", "SENTRA-DOT.ico",
                 "LICENSE", "LICENSES.chromium.html", "THIRD_PARTY_NOTICES.md"}
     if not isinstance(hashes, dict) or not required.issubset(hashes):
         raise ValueError("incomplete Electron build evidence")

@@ -102,6 +102,10 @@ class InputControl:
                 db.execute('CREATE TABLE IF NOT EXISTS machine_input_handoffs('
                     'owner TEXT NOT NULL, request_key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL,'
                     'created REAL NOT NULL, PRIMARY KEY(owner,request_key))')
+                db.execute('CREATE TABLE IF NOT EXISTS machine_input_uncertain('
+                    'owner TEXT NOT NULL, digest TEXT NOT NULL, work_item TEXT NOT NULL,'
+                    'kind TEXT NOT NULL, selector_key TEXT NOT NULL, operation_id TEXT NOT NULL,'
+                    'created REAL NOT NULL, PRIMARY KEY(owner,digest))')
         finally:
             db.close()
 
@@ -219,6 +223,61 @@ class InputControl:
                 status.get('machine_id') != request.machine_id or status['epoch'] != scope.expected_epoch):
             raise AuthorizationRequired('human input possession expired or handed off')
         return status['epoch']
+
+    def effect_digest(self, *, work_item_id, kind, selector_key, text=None):
+        """Identity of one mouse click or one keyboard payload. The text is not stored."""
+        if kind not in {'mouse', 'keyboard'}:
+            raise ValueError('uncertain_input_kind_required')
+        if not isinstance(work_item_id, str) or not 1 <= len(work_item_id) <= 128:
+            raise ValueError('bounded_work_item_required')
+        if not isinstance(selector_key, str) or not 1 <= len(selector_key) <= 200:
+            raise ValueError('bounded_selector_required')
+        material = [work_item_id, kind, selector_key]
+        if kind == 'keyboard':
+            if not isinstance(text, str) or not text or len(text) > 65536:
+                raise ValueError('keyboard_fence_requires_text')
+            material.append(hashlib.sha256(text.encode()).hexdigest())
+        elif text is not None:
+            raise ValueError('mouse_fence_has_no_text')
+        return hashlib.sha256(json.dumps(material, separators=(',', ':')).encode()).hexdigest()
+
+    def note_uncertain(self, *, work_item_id, kind, selector_key, operation_id, text=None):
+        """Record an input effect whose outcome cannot be retried. Does not send input."""
+        if not isinstance(operation_id, str) or not 1 <= len(operation_id) <= 128:
+            raise ValueError('bounded_operation_required')
+        digest = self.effect_digest(work_item_id=work_item_id, kind=kind,
+                                    selector_key=selector_key, text=text)
+        db = self.control.store.connect('machine_input_control')
+        try:
+            with db:
+                db.execute('BEGIN IMMEDIATE')
+                prior = db.execute('SELECT operation_id FROM machine_input_uncertain '
+                                   'WHERE owner=? AND digest=?', (self.owner, digest)).fetchone()
+                if prior is not None:
+                    return {'digest': digest, 'operation_id': prior['operation_id'],
+                            'already_fenced': True, 'automatic_resend': False}
+                db.execute('INSERT INTO machine_input_uncertain VALUES(?,?,?,?,?,?,?)',
+                           (self.owner, digest, work_item_id, kind, selector_key,
+                            operation_id, self.clock()))
+        finally:
+            db.close()
+        return {'digest': digest, 'operation_id': operation_id,
+                'already_fenced': False, 'automatic_resend': False}
+
+    def uncertain_effect(self, *, work_item_id, kind, selector_key, text=None):
+        digest = self.effect_digest(work_item_id=work_item_id, kind=kind,
+                                    selector_key=selector_key, text=text)
+        db = self.control.store.connect('machine_input_control')
+        try:
+            row = db.execute('SELECT operation_id,kind,selector_key,work_item FROM machine_input_uncertain '
+                             'WHERE owner=? AND digest=?', (self.owner, digest)).fetchone()
+        finally:
+            db.close()
+        if row is None:
+            return None
+        return {'digest': digest, 'operation_id': row['operation_id'], 'kind': row['kind'],
+                'selector_key': row['selector_key'], 'work_item_id': row['work_item'],
+                'automatic_resend': False}
 
 
 class InputBoundPolicy:

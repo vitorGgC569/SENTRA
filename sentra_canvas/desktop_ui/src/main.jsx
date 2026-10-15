@@ -8,6 +8,7 @@ import { MousePointer2, TerminalSquare, Bot, Users, StickyNote, Cable, Hand, Men
   Folder, Search, Plus, Minus, Layers, Map as MapIcon, Scan, Settings2, Activity,
   PanelRight, X, Copy, Monitor, Undo2, Redo2, RefreshCw, Workflow, ChevronDown, Globe } from 'lucide-react';
 import { api, route } from './api';
+import { canvasMaintenanceActive } from './shell-maintenance.js';
 import { TerminalPool } from './terminal-pool';
 import { IconButton, ActionMenu, Modal } from './primitives';
 import { DesktopContext } from './context';
@@ -27,6 +28,7 @@ import { OpenDotsShell } from './shell-app';
 import '@xyflow/react/dist/style.css';
 import '@xterm/xterm/css/xterm.css';
 import './desktop.css';
+import './shell-polish.css';
 
 function WorkspaceDesktop() {
   const flow = useReactFlow(), viewport = useViewport();
@@ -58,7 +60,7 @@ function WorkspaceDesktop() {
   const activeNode = useRef(null), mounted = useRef(true), fetching = useRef(false);
   const entryRef = useRef(entry); entryRef.current = entry;
   const notify = useCallback((message, tone = 'info') => {
-    if (!mounted.current) return;
+    if (!mounted.current || canvasMaintenanceActive() || message === 'Reconectando à sessão local.') return;
     const id = crypto.randomUUID();
     setToasts(old => old.some(t => t.message === message) ? old : [{ id, message, tone }, ...old].slice(0, 4));
     setTimeout(() => { if (mounted.current) setToasts(old => old.filter(t => t.id !== id)); }, tone === 'error' ? 9000 : 4500);
@@ -66,6 +68,7 @@ function WorkspaceDesktop() {
   const poolRef = useRef(null);
   if (!poolRef.current) poolRef.current = new TerminalPool(notify, () => { if (mounted.current) terminalChanged(n => n + 1); });
   const pool = poolRef.current;
+  useEffect(() => { pool.setOutputEnabled(canvasActive); }, [canvasActive, pool]);
   function resourceData(graph) {
     const detail = bridge.current.detail || {};
     const lists = { terminal: 'terminals', agent: 'agents', team: 'teams' };

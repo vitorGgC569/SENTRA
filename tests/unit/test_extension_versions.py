@@ -18,13 +18,26 @@ def test_manifest_source_hash_matches_extension_files():
     assert manifest["sentra_source_hash"] == identity["source_hash"]
 
 
+def test_loaded_image_guard_and_settings_are_bound_to_extension_identity(tmp_path):
+    import shutil
+    from scripts.commander.extension_identity import EXTENSION_IDENTITY_FILES
+    for name in EXTENSION_IDENTITY_FILES:
+        shutil.copy2(EXT / name, tmp_path / name)
+    before = extension_source_identity(tmp_path)
+    for name in ('native-image-guard.js', 'options.js', 'options.html'):
+        original = (tmp_path / name).read_bytes()
+        (tmp_path / name).write_bytes(original + b'\nchanged')
+        assert extension_source_identity(tmp_path)['source_hash'] != before['source_hash']
+        (tmp_path / name).write_bytes(original)
+
+
 def test_versions_in_lockstep():
     manifest = json.loads(_read("manifest.json"))
     sw = re.search(r'OMA_SW_VERSION = "([^"]+)"', _read("service-worker.js")).group(1)
     cs = re.search(r'OMA_CS_VERSION = "([^"]+)"', _read("content-script.js")).group(1)
     guard = re.search(r'const VERSION = "([^"]+)"', _read("recovery-guard.js")).group(1)
     assert manifest["version"] == sw == cs == guard, (manifest["version"], sw, cs, guard)
-    assert manifest["sentra_build_id"] == "sentra-edge-1.6.52-durable-r27"
+    assert manifest["sentra_build_id"] == "sentra-edge-1.7.0-durable-r28"
 
 
 def test_node_syntax_if_available():
@@ -65,7 +78,7 @@ def test_additional_checks_recovery_contract_present():
     assert "mais algumas verificacoes" in guard
     assert "SENTRA_RECOVERY_GUARD_STATUS" in guard
     worker = _read("service-worker.js")
-    assert 'files: ["recovery-guard.js"]' in worker
+    assert 'files: ["recovery-guard.js", "selectors.js", "observer.js", "content-script.js"]' in worker
     assert "omaHeartbeatExtension" in worker
     assert 'omaRelay("/extension/heartbeat"' in worker
     assert "if (settings.oma_relay_token)" in worker

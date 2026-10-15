@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bancada — composição Orbe</title>
+<style>
+  :root {
+    --ink: #f3f3f5;
+    --muted: #9b9ba3;
+    --faint: #6f7480;
+    --stage: #101114;
+    --rail: #14161a;
+    --sheet: #17191e;
+    --hover: #22262e;
+    --line: #2c3038;
+    --alive: #c5c8ce;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --dur: 200ms;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: #0b0c0e; color: #c8c8ce; font: 15px/1.45 "Segoe UI", system-ui, sans-serif; }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  img { display: block; }
+  svg { display: block; }
+  .chrome { max-width: 920px; margin: 0 auto; padding: 28px 24px 12px; }
+  .chrome h1 { margin: 0 0 8px; font-size: 22px; letter-spacing: -0.03em; font-weight: 640; color: #f4f4f5; }
+  .chrome p { margin: 0 0 14px; color: #a4a4ac; }
+  .tools { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .tools button { border: 0; background: #1a1c21; color: #e8e8ec; border-radius: 999px; padding: 7px 12px; }
+  .tools button[aria-pressed="true"] { background: #f4f4f5; color: #141416; }
+  .meta { display: flex; flex-wrap: wrap; gap: 12px 18px; margin: 0 0 18px; color: #8d8d96; font-size: 13px; }
+  .stage-wrap { overflow: auto; padding: 0 24px 48px; }
+  .frame { width: 1440px; height: 920px; display: flex; overflow: hidden; background: var(--stage); color: var(--ink); position: relative; }
+  .frame[data-w="768"] { width: 768px; height: 1024px; }
+  .frame[data-w="390"] { width: 390px; height: 844px; }
+  .rail { width: 256px; flex: 0 0 256px; background: var(--rail); display: flex; flex-direction: column; min-height: 0; overflow: auto; padding: 22px 16px 20px; }
+  .frame[data-w="390"] .rail { display: none; }
+  .frame[data-w="390"].rail-open .rail { display: flex; position: absolute; z-index: 4; inset: 0 auto 0 0; width: 256px; box-shadow: 16px 0 40px rgba(0,0,0,.45); }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 680; letter-spacing: -0.02em; margin: 0 8px 18px; font-size: 15px; }
+  .brand i { width: 26px; height: 26px; border-radius: 8px; background: #f4f4f5; color: #141416; display: grid; place-items: center; font-style: normal; font-size: 14px; }
+  .rail label { display: grid; gap: 6px; margin: 0 8px 16px; color: var(--faint); font-size: 12px; }
+  .rail select { background: var(--stage); color: var(--ink); border: 0; border-radius: 10px; padding: 10px 12px; }
+  .navbtn, .rail-dot { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; background: transparent; border: 0; border-radius: 10px; color: #c6c6cc; padding: 8px 10px; transition: background-color var(--dur) var(--ease); }
+  .navbtn svg, .iconbtn svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+  .navbtn[aria-current="page"] { background: var(--hover); color: var(--ink); }
+  .navbtn:hover, .rail-dot:hover { background: #1c1f26; }
+  .rail h2 { margin: 18px 10px 6px; font-size: 12px; font-weight: 600; color: var(--faint); }
+  .rail-dot img, .mono, .node img { width: 28px; height: 28px; object-fit: contain; }
+  .mono { display: grid; place-items: center; border-radius: 50%; background: #2a2e36; color: var(--muted); font-size: 12px; font-weight: 650; }
+  .space { margin: 2px 8px; padding: 8px 10px; border-radius: 10px; background: var(--hover); }
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 20px 36px 32px; overflow: auto; }
+  .frame[data-w="768"] .main { padding: 16px 24px 28px; }
+  .frame[data-w="390"] .main { padding: 14px 20px 24px; }
+  .column { width: 100%; min-width: 0; }
+  .capsule { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 10px 0 14px; margin-bottom: 28px; border-radius: 999px; background: #1a1c22; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+  .crumb { display: flex; gap: 8px; min-width: 0; color: var(--muted); }
+  .crumb b { color: var(--ink); font-weight: 620; white-space: nowrap; }
+  .grow { flex: 1; }
+  .run { flex: 0 0 auto; white-space: nowrap; color: var(--muted); font-size: 13px; }
+  .frame[data-w="390"] .run { font-size: 12px; }
+  .ghost { border: 0; background: transparent; border-radius: 999px; padding: 6px 10px; color: var(--ink); }
+  .primary { border: 0; background: #f4f4f5; color: #141416; border-radius: 999px; padding: 10px 16px; font-weight: 620; }
+  .iconbtn { width: 32px; height: 32px; border: 0; border-radius: 50%; background: transparent; color: var(--ink); display: grid; place-items: center; }
+  .win { display: flex; }
+  .frame[data-w="390"] .win, .frame[data-w="390"] .crumb .pre { display: none; }
+  .focus { display: block; margin: 0 0 16px; }
+  .focus h2 { margin: 0; font-size: 40px; line-height: 1.05; letter-spacing: -0.035em; font-weight: 640; }
+  .frame[data-w="390"] .focus h2 { font-size: 32px; }
+  .factline { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-top: 8px; }
+  .factline p { margin: 0; color: var(--muted); font-size: 16px; }
+  .factline button { margin: 0; padding: 0; border: 0; background: none; color: var(--ink); }
+  .workfirst { margin: 0 0 16px; }
+  .settled .quiet-empty { display: none; }
+  .section-row { display: flex; justify-content: space-between; align-items: baseline; }
+  .conv { width: 100%; max-height: 56px; display: grid; grid-template-columns: minmax(0,1fr) 16px; gap: 12px; align-items: center; padding: 6px 12px; text-align: left; background: transparent; border: 0; color: var(--ink); }
+  .conv .copy, .frame[data-w="390"] .dot .copy { min-width: 0; display: flex; flex-direction: column; }
+  .conv strong, .conv small, .frame[data-w="390"] .dot .copy strong, .frame[data-w="390"] .dot .copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conv small, .dot small { color: var(--muted); font-size: 13px; }
+  .frame:not([data-w="390"]) .dot .copy { display: contents; }
+  .frame:not([data-w="390"]) .dot { grid-template-columns: 28px minmax(0,1fr) minmax(0,1.4fr) auto 16px; }
+  .lede { margin: 0 0 22px; color: var(--faint); font-size: 14px; }
+  .continue { display: inline-flex; margin: 0 0 18px; padding: 0; background: none; border: 0; color: var(--ink); }
+  .update { position: relative; flex: 0 0 auto; }
+  .update summary { list-style: none; cursor: pointer; border-radius: 999px; padding: 6px 10px; }
+  .update summary::-webkit-details-marker { display: none; }
+  .update-panel { display: none; position: absolute; top: calc(100% + 8px); right: 0; z-index: 6; width: 220px; max-width: min(220px, calc(100% + 80px)); padding: 6px; border-radius: 14px; background: #1a1c22; box-shadow: 0 16px 40px rgba(0,0,0,.45); }
+  .update[open] .update-panel { display: grid; gap: 2px; }
+  .update-panel button { border: 0; background: transparent; text-align: left; color: var(--ink); border-radius: 10px; padding: 8px 10px; }
+  .update-panel button:hover { background: var(--hover); }
+  .pending { display: none; margin: 0 0 22px; }
+  .frame[data-home="pending"] .pending { display: block; }
+  .frame[data-home="pending"] button.continue { display: inline-flex; }
+  .frame[data-home="pending"] .quiet-empty { display: none; }
+  .pending .tally { margin: 0 0 10px; color: #e2b15a; font-size: 14px; }
+  .sum { width: 100%; min-height: 52px; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; padding: 0 14px; border: 0; background: transparent; color: var(--ink); text-align: left; }
+  .sum strong { font-size: 15px; font-weight: 620; }
+  .sum .count { color: #e2b15a; font-weight: 650; white-space: nowrap; }
+  .gradual { display: none; padding: 0 14px 12px; }
+  .sum[aria-expanded="true"] + .gradual { display: block; }
+  .gradual p, .ev { margin: 0; color: var(--muted); font-size: 13px; }
+  .ev { min-height: 32px; display: flex; align-items: center; box-shadow: inset 0 1px 0 var(--line); }
+  .more, .consult { margin-top: 8px; border: 0; background: transparent; color: var(--ink); padding: 6px 0; }
+  .section { margin: 0 0 10px; font-size: 15px; font-weight: 620; letter-spacing: -0.01em; }
+  .sheet { background: var(--sheet); border-radius: 16px; padding: 6px; box-shadow: 0 1px 0 rgba(255,255,255,.03) inset; }
+  .dot { width: 100%; height: 52px; max-height: 56px; display: grid; grid-template-columns: 28px minmax(0,1fr) auto 16px; gap: 12px; align-items: center; padding: 0 12px; text-align: left; background: transparent; border: 0; border-radius: 12px; color: var(--ink); transition: background-color var(--dur) var(--ease); }
+  .dot + .dot { box-shadow: inset 0 1px 0 var(--line); }
+  .dot:hover { background: var(--hover); }
+  .dot:focus-visible, .dot.is-focus { outline: 3px solid #ffffff; outline-offset: 2px; }
+  .dot strong { font-size: 15px; font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .state { color: var(--alive); font-size: 13px; font-weight: 600; white-space: nowrap; }
+  .chev { width: 16px; height: 16px; stroke: var(--faint); fill: none; stroke-width: 1.7; }
+  .search { position: relative; display: block; margin: 0 0 28px; }
+  .search svg { position: absolute; left: 14px; top: 12px; width: 16px; height: 16px; stroke: var(--faint); fill: none; stroke-width: 1.7; }
+  .search input { width: 100%; height: 40px; border: 0; border-radius: 999px; background: #1a1c22; color: var(--ink); padding: 0 16px 0 40px; }
+  .search input::placeholder { color: var(--faint); }
+  .only-loading, .only-error { display: none; }
+  .frame[data-home="loading"] .settled, .frame[data-home="error"] .settled { display: none; }
+  .frame[data-home="loading"] .only-loading, .frame[data-home="error"] .only-error { display: block; }
+  .notice h2 { margin: 0 0 8px; font-size: 28px; letter-spacing: -0.03em; font-weight: 640; }
+  .notice p { margin: 0 0 8px; color: var(--muted); max-width: 42ch; }
+  .screen { display: none; min-width: 0; }
+  .frame[data-screen="home"] .screen-home,
+  .frame[data-screen="canvas"] .screen-canvas,
+  .frame[data-screen="computer"] .screen-computer { display: block; }
+  .canvas-head, .who { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+  .canvas-head h2, .who h2 { margin: 0; font-size: 22px; letter-spacing: -0.03em; font-weight: 640; }
+  .canvas-head .grow, .who .grow { flex: 1; }
+  .canvas-head img, .who img { width: 36px; height: 36px; }
+  .phases { display: flex; gap: 8px; margin: 0 0 10px; overflow-x: auto; }
+  .phase { flex: 0 0 auto; border: 0; background: #1a1c22; color: var(--muted); border-radius: 10px; padding: 6px 10px; display: grid; justify-items: start; }
+  .phase b { color: var(--ink); font-size: 14px; font-weight: 650; }
+  .phase span { font-size: 12px; }
+  .phase[aria-pressed="true"] { background: #f4f4f5; color: #141416; }
+  .phase[aria-pressed="true"] b { color: #141416; }
+  .meaning { margin: 0 0 12px; color: var(--muted); font-size: 14px; max-width: 68ch; }
+  .stage { min-height: 460px; border-radius: 18px; background: #0c0d11; padding: 28px 20px; }
+  .frame[data-w="390"] .stage { min-height: 0; padding: 12px; }
+  .work { width: min(520px, 100%); margin: 0 auto; background: #16181d; border-radius: 14px; padding: 12px; }
+  .work header { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .work header strong { font-size: 14px; }
+  .halt { color: #e2b15a; font-size: 13px; font-weight: 620; }
+  .tools-row, .task-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .tools-row button, .task-row button, .task-row select { border: 0; background: #22262e; color: var(--ink); border-radius: 8px; padding: 6px 8px; font-size: 12px; }
+  .tools-row button[aria-pressed="true"] { background: #f4f4f5; color: #141416; }
+  .screen-term { min-height: 160px; border-radius: 10px; background: #07080b; display: grid; place-items: center; text-align: center; margin-bottom: 10px; }
+  .screen-term b { font-size: 28px; letter-spacing: .18em; font-weight: 700; }
+  .screen-term span { color: var(--muted); font-size: 12px; }
+  .fine { margin: 8px 0 0; color: var(--faint); font-size: 12px; }
+  .split { display: grid; grid-template-columns: minmax(0,1.05fr) minmax(300px,.95fr); gap: 16px; align-items: start; }
+  .frame[data-w="768"] .split { grid-template-columns: minmax(0,1fr) minmax(240px,.9fr); }
+  .frame[data-w="390"] .split { grid-template-columns: 1fr; }
+  .bubble { background: #17191e; border-radius: 16px; padding: 14px; margin: 12px 0; }
+  .bubble .meta-line { color: var(--faint); font-size: 12px; margin-bottom: 6px; }
+  .uncertain { display: inline-block; margin: 8px 0; padding: 4px 8px; border-radius: 999px; background: #3a2e18; color: #e2b15a; font-size: 12px; }
+  .who p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
+  .lead-state { background: #17191e; border-radius: 16px; padding: 14px; margin-bottom: 12px; }
+  .lead-state strong { display: block; font-size: 18px; letter-spacing: -0.02em; }
+  .lead-state p { margin: 4px 0 8px; color: #e2b15a; }
+  .lead-state li { color: var(--muted); font-size: 13px; margin: 2px 0; }
+  .tabs { display: flex; gap: 14px; margin: 8px 0; }
+  .tab { border: 0; background: transparent; color: var(--muted); padding: 4px 0; }
+  .tab[aria-selected="true"] { color: var(--ink); box-shadow: inset 0 -2px 0 #f4f4f5; }
+  .config { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+  .frame[data-w="390"] .config { grid-template-columns: 1fr; }
+  .config label { display: grid; gap: 4px; color: var(--faint); font-size: 12px; }
+  .config input, .config select { border: 0; background: #101114; color: var(--ink); border-radius: 8px; padding: 8px; }
+  .danger { margin-top: 16px; color: var(--muted); font-size: 13px; }
+  .danger summary { cursor: pointer; color: var(--faint); }
+  .composer { margin-top: 12px; background: #17191e; border-radius: 16px; padding: 12px; color: var(--faint); }
+  .frame.reduce * { transition: none !important; animation: none !important; }
+  @media (prefers-reduced-motion: reduce) {
+    .frame * { transition: none !important; animation: none !important; }
+  }
+</style>
+</head>
+<body>
+<header class="chrome">
+  <h1>Bancada</h1>
+  <p>A Home com pendências usa os prints do usuário em <code>Maestri-drops/c887fef8-6776-4d75-ad56-7fc98198e6f7.png</code> e <code>97fbb455-ba49-45a0-999c-d587b357c6bc.png</code>. O primeiro repete dezenas de linhas cruas <code>message.uncertain</code>. O segundo solta o menu Atualizar para fora da cápsula. O quadro abaixo usa 32 eventos de exemplo, sem conversa e sem operação, porque o print não traz esses nomes. 32 não é a contagem do broker. O produto conta o array real e não apaga o restante. Não é PASS e não é o shell 50282.</p>
+  <div class="tools">
+    <button type="button" data-screen="home" aria-pressed="true">Home</button>
+    <button type="button" data-screen="canvas" aria-pressed="false">Canvas</button>
+    <button type="button" data-screen="computer" aria-pressed="false">Computador</button>
+    <button type="button" data-width="1440" aria-pressed="true">1440</button>
+    <button type="button" data-width="768" aria-pressed="false">768</button>
+    <button type="button" data-width="390" aria-pressed="false">390</button>
+    <button type="button" id="load">Consultando</button>
+    <button type="button" id="readerr">Erro de leitura</button>
+    <button type="button" id="settled">Assentado</button>
+    <button type="button" id="pending">Pendências</button>
+    <button type="button" id="ring">Anel no segundo Dot</button>
+    <button type="button" id="motion" aria-pressed="false">Reduzir movimento</button>
+  </div>
+  <p class="meta">
+    <span>04:20 · desktop.js sha256 e9d3f16230f5ad4d71571a617cbf1dd15752e54da7f2d942cb14f36e4b867f65 · 2043655 bytes</span>
+    <span id="measure">coluna —</span>
+    <span>seis Dots em Ativo · running_terminals 0</span>
+  </p>
+</header>
+<div class="stage-wrap">
+  <div class="frame" id="frame" data-w="1440" data-screen="home" data-home="settled">
+    <aside class="rail" aria-label="Trilho">
+      <div class="brand"><i>S</i> SENTRA</div>
+      <label>Projeto<select aria-label="Projeto"><option>Oxta</option></select></label>
+      <button class="navbtn" type="button" aria-current="page"><svg viewBox="0 0 24 24"><path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-5v-6H10v6H5a1 1 0 0 1-1-1z"/></svg>Home</button>
+      <button class="navbtn" type="button"><svg viewBox="0 0 24 24"><path d="M5 6h14M5 12h14M5 18h9"/></svg>Conversas</button>
+      <button class="navbtn" type="button"><svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="3"/><path d="M5 19c1.5-3 3.8-4.5 7-4.5S17.5 16 19 19"/></svg>Dots</button>
+      <button class="navbtn" type="button"><svg viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9a1 1 0 0 1-1 1H4z"/></svg>Spaces</button>
+      <h2>Seus Dots</h2>
+      <button class="rail-dot" type="button"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt="">Sentra Aqrt</button>
+      <button class="rail-dot" type="button"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt="">dasdas</button>
+      <button class="rail-dot" type="button"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/mint.png" alt="">Teste</button>
+      <button class="rail-dot" type="button"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/purple.png" alt="">testegpt6</button>
+      <button class="rail-dot" type="button"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt="">Testando Advanced</button>
+      <h2>Seus Spaces</h2>
+      <div class="space">Oxta</div>
+      <h2>Neste Space</h2>
+      <button class="navbtn" type="button"><svg viewBox="0 0 24 24"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5"/></svg>Documentos</button>
+      <button class="navbtn" type="button"><svg viewBox="0 0 24 24"><rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/></svg>Canvas</button>
+      <button class="navbtn" type="button"><svg viewBox="0 0 24 24"><circle cx="6" cy="12" r="2"/><circle cx="18" cy="7" r="2"/><circle cx="18" cy="17" r="2"/><path d="M8 12h8M16.5 8.5 8 11M16.5 15.5 8 13"/></svg>Rede</button>
+    </aside>
+    <div class="main">
+      <div class="capsule" role="toolbar" aria-label="Barra do Space">
+        <button class="iconbtn" type="button" id="menu" aria-label="Abrir trilho"><svg viewBox="0 0 24 24"><path d="M5 7h14M5 12h14M5 17h14"/></svg></button>
+        <div class="crumb"><span class="pre">Oxta</span> <b id="crumb">Home</b></div>
+        <span class="grow"></span>
+        <span class="run">Em andamento</span>
+        <button class="iconbtn" type="button" aria-label="Tema"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4"/></svg></button>
+        <details class="update" id="update">
+          <summary>Atualizar</summary>
+          <div class="update-panel">
+            <button type="button">Atualizar dados</button>
+            <button type="button">Atualizar código local</button>
+            <button type="button">Versão instalada</button>
+          </div>
+        </details>
+        <button class="iconbtn" type="button" aria-label="Atividade"><svg viewBox="0 0 24 24"><path d="M4 14c2 0 2-4 4-4s2 6 4 6 2-8 4-8 2 4 4 4"/></svg></button>
+        <span class="win" aria-hidden="true"><button class="iconbtn" type="button">–</button><button class="iconbtn" type="button">□</button><button class="iconbtn" type="button">×</button></span>
+      </div>
+      <div class="column" id="column">
+        <section class="screen screen-home" aria-label="Home">
+          <div class="only-loading notice" role="status"><h2>Consultando seu trabalho…</h2><p>A lista aparece quando a consulta assentar.</p></div>
+          <div class="only-error notice" role="alert"><h2>A consulta não chegou ao Canvas</h2><p>A ligação com o Canvas local falhou.</p><p>Consulte de novo. Uma consulta não reenvia uma operação já iniciada.</p><button class="primary" type="button">Consultar de novo</button></div>
+          <div class="settled">
+            <button class="continue pending" type="button">Continuar em Conversa</button>
+            <header class="focus">
+              <h2>Oxta</h2>
+              <div class="factline">
+                <p>1 envio não confirmado, em 45 registros</p>
+                <button type="button">Abrir o Space</button>
+              </div>
+            </header>
+            <div class="sheet workfirst" aria-label="Envios não confirmados">
+              <button class="sum" type="button" aria-expanded="false"><strong>Envios não confirmados</strong><span class="count">45 registros</span></button>
+              <p class="gradual" style="display:block">Consulte o estado. Não repita o envio.</p>
+              <button class="consult" type="button">Consultar</button>
+            </div>
+            <label class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m16 16 4 4"/></svg><input id="q" aria-label="Buscar no trabalho" placeholder="Dots, projetos, aprovações, entregas ou falhas"></label>
+            <p class="lede quiet-empty">Nenhuma aprovação, entrega ou falha nesta consulta.</p>
+            <div class="pending">
+              <h3 class="section">Pendências</h3>
+              <p class="tally" id="tally"></p>
+              <div class="sheet" id="groups"></div>
+            </div>
+            <h3 class="section">Dots recentes</h3>
+            <div class="sheet" id="roster">
+              <button class="dot" type="button" data-name="sentra aqrt"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt=""><span class="copy"><strong>Sentra Aqrt</strong><small>1 envio não confirmado</small></span><span class="state">Ativo</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              <button class="dot" type="button" data-name="testegpt6"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/purple.png" alt=""><span class="copy"><strong>testegpt6</strong><small>12 conversas · 12/10/2026</small></span><span class="state">Ativo</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              <button class="dot" type="button" data-name="testando advanced"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt=""><span class="copy"><strong>Testando Advanced</strong><small>12 conversas · 12/10/2026</small></span><span class="state">Ativo</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              <button class="dot" type="button" data-name="subagentegpt6"><span class="mono">S</span><span class="copy"><strong>SubAgenteGPT6</strong><small>2 conversas · 11/10/2026</small></span><span class="state">Ativo</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              <button class="dot" type="button" data-name="teste"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/mint.png" alt=""><span class="copy"><strong>Teste</strong><small>1 conversa · 11/10/2026</small></span><span class="state">Ativo</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              <button class="dot" type="button" data-name="dasdas"><img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt=""><span class="copy"><strong>dasdas</strong><small>8 conversas · 11/10/2026</small></span><span class="state">Ativo</span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+            </div>
+            <div class="section-row"><h3 class="section">Conversas recentes</h3><button class="consult" type="button">Ver todas</button></div>
+            <div class="sheet">
+              <button class="conv" type="button"><span class="copy"><strong>Conversa com Sentra Aqrt</strong><small>Sentra Aqrt · 7 conversas · 13/10/2026</small></span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+              <button class="conv" type="button"><span class="copy"><strong>testegpt6</strong><small>2 conversas · 12/10/2026</small></span><svg class="chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg></button>
+            </div>
+          </div>
+        </section>
+        <section class="screen screen-canvas" aria-label="Canvas">
+          <div class="canvas-head">
+            <img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt="">
+            <h2>Testando Advanced</h2>
+            <span class="grow"></span>
+            <button class="ghost" type="button">Computador</button>
+            <button class="ghost" type="button">Novo terminal de agente</button>
+          </div>
+          <div class="phases" role="toolbar" aria-label="Fases do Canvas">
+            <button class="phase" type="button" data-phase="planning" aria-pressed="true"><b>0</b><span>Planejamento</span></button>
+            <button class="phase" type="button" data-phase="executing" aria-pressed="false"><b>0</b><span>Execução</span></button>
+            <button class="phase" type="button" data-phase="waiting" aria-pressed="false"><b>0</b><span>Espera</span></button>
+            <button class="phase" type="button" data-phase="review" aria-pressed="false"><b>0</b><span>Revisão</span></button>
+            <button class="phase" type="button" data-phase="completed" aria-pressed="false"><b>0</b><span>Conclusão</span></button>
+            <button class="phase" type="button" data-phase="failed" aria-pressed="false"><b>0</b><span>Falha</span></button>
+            <button class="phase" type="button" data-phase="uncertain" aria-pressed="false"><b>0</b><span>Incerta</span></button>
+          </div>
+          <p class="meaning" id="drawer-copy"></p>
+          <div class="stage" id="spatial">
+            <article class="work">
+              <header><strong>Testando Advanced</strong><span class="halt">Interrompido</span></header>
+              <div class="tools-row" role="toolbar" aria-label="Ferramentas do agente">
+                <button type="button" aria-pressed="true">Conversa do Dot</button>
+                <button type="button">SENTRA CLI · GPT-6 High</button>
+                <button type="button">OpenCode · Muse Spark High</button>
+                <button type="button">Codex CLI</button>
+              </div>
+              <div class="screen-term"><div><b>SENTRA</b><span>Seu ambiente de criação e colaboração</span></div></div>
+              <p>Tarefa SENTRA (aceitar ≠ concluir)</p>
+              <div class="task-row">
+                <select aria-label="Papel do Dot"><option>Dot não é trabalhador de uma equipe</option></select>
+                <button type="button">Trabalho para este Dot</button>
+                <button type="button">Aceitar tarefa</button>
+              </div>
+              <p class="fine">Conclusão só após consolidação do coordenador. Antigravity: aplicativo externo, sem API de agente validada.</p>
+            </article>
+          </div>
+        </section>
+        <section class="screen screen-computer" aria-label="Conversa e computador">
+          <div class="split">
+            <div>
+              <div class="who">
+                <img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt="">
+                <div><h2>Conversa com Testando Advanced</h2><p>Testando Advanced · sentra/chatgpt-web/gpt-6</p></div>
+              </div>
+              <div class="tools-row">
+                <button type="button">/model</button>
+                <button type="button">/goal</button>
+                <button type="button">Canvas do Dot</button>
+                <button type="button">Coordenar</button>
+              </div>
+              <article class="bubble">
+                <div class="meta-line">Você · 14:42</div>
+                <p>Você possui uma maquina linux no computador, por gentileza tente controlar</p>
+                <div class="uncertain">Resultado ainda não confirmado</div>
+                <p>O provedor não confirmou uma resposta.</p>
+                <button class="ghost" type="button">Consultar diagnóstico sem reenviar</button>
+              </article>
+              <div class="composer">Mensagem para Testando Advanced…</div>
+            </div>
+            <div>
+              <div class="who">
+                <img src="../../../../sentra_canvas/desktop_ui/src/assets/opendots/blue.png" alt="">
+                <div><h2>Testando Advanced</h2><p>Computador do canvas</p></div>
+                <span class="grow"></span>
+                <button class="ghost" type="button">Ocultar computador</button>
+              </div>
+              <div class="lead-state">
+                <strong>Ainda não criada</strong>
+                <p>VirtualBox indisponível</p>
+                <ul>
+                  <li>Teclado sem posse ativa</li>
+                  <li>Desempenho da VM ainda não consultado</li>
+                  <li>Nenhuma cópia de projeto confirmada no guest</li>
+                </ul>
+                <button class="primary" type="button">Configurar a máquina</button>
+              </div>
+              <div class="tabs" role="tablist" aria-label="Visões do computador">
+                <button class="tab" type="button" data-view="desktop" aria-selected="true">Desktop</button>
+                <button class="tab" type="button" data-view="terminal" aria-selected="false">Terminal</button>
+                <button class="tab" type="button" data-view="files" aria-selected="false">Arquivos</button>
+                <button class="tab" type="button" data-view="browser" aria-selected="false">Navegador</button>
+              </div>
+              <div class="view on" id="view-desktop">
+                <p class="fine">O limite recomendado não altera CPU, RAM nem a VM registrada.</p>
+                <div class="config">
+                  <label>Sistema<select aria-label="Sistema"><option>Linux com interface gráfica</option></select></label>
+                  <label>Processadores<input aria-label="Processadores" value="2" readonly></label>
+                  <label>RAM (MiB)<input aria-label="RAM" value="4096" readonly></label>
+                  <label>Disco virtual (GiB)<input aria-label="Disco" value="64" readonly></label>
+                </div>
+              </div>
+              <div class="view" id="view-terminal"></div>
+              <div class="view" id="view-files"></div>
+              <div class="view" id="view-browser"></div>
+              <details class="danger">
+                <summary>Pedir exclusão</summary>
+                <p>Pausar e retomar não excluem o Dot. Pedir exclusão só registra o bloqueio. Nenhum Dot, VM ou conversa é apagado.</p>
+                <div class="tools-row">
+                  <button type="button">Pausar família</button>
+                  <button type="button">Retomar família</button>
+                  <button type="button">Pedir exclusão</button>
+                </div>
+              </details>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+<script>
+const phases = {
+  planning: 'O trabalho foi admitido e ainda não está em execução. Acompanhe pela conversa ou pelo Canvas. Nenhum efeito é reenviado daqui.',
+  executing: 'Há uma operação em andamento, com responsável e recibo ainda abertos. Acompanhe o progresso. Não inicie a mesma operação outra vez.',
+  waiting: 'O fluxo parou à espera de uma pessoa ou de outro Dot. A ação disponível é decidir ou consultar. Não reenvie a operação.',
+  review: 'O resultado existe e aguarda consolidação. Aceitar não é concluir. Revise o recibo. A conclusão continua com o coordenador.',
+  completed: 'O WorkItem ou a operação chegou a um estado terminal de sucesso. Consulte o recibo. Não há repetição automática.',
+  failed: 'A operação terminou sem o efeito pedido. Leia o motivo e escolha uma correção nova. A tentativa anterior não é reenviada.',
+  uncertain: 'Não há confirmação de que o efeito ocorreu. Consulte o recibo original. Não reenvie.'
+};
+const frame = document.getElementById('frame');
+const names = { home: 'Home', canvas: 'Canvas', computer: 'Conversa' };
+function measure() {
+  const width = Math.round(document.getElementById('column').getBoundingClientRect().width);
+  const overflow = frame.scrollWidth > frame.clientWidth + 1;
+  document.getElementById('measure').textContent = 'coluna ' + width + ' px · overflow ' + (overflow ? 'sim' : '0');
+}
+function showPhase(id) {
+  document.querySelectorAll('.phase').forEach(button => button.setAttribute('aria-pressed', button.dataset.phase === id ? 'true' : 'false'));
+  document.getElementById('drawer-copy').textContent = phases[id];
+}
+document.querySelectorAll('.tools [data-screen]').forEach(button => button.addEventListener('click', () => {
+  frame.dataset.screen = button.dataset.screen;
+  document.getElementById('crumb').textContent = names[button.dataset.screen];
+  document.querySelectorAll('.tools [data-screen]').forEach(item => item.setAttribute('aria-pressed', item === button ? 'true' : 'false'));
+  measure();
+}));
+document.querySelectorAll('[data-width]').forEach(button => button.addEventListener('click', () => {
+  frame.dataset.w = button.dataset.width;
+  if (button.dataset.width !== '390') frame.classList.remove('rail-open');
+  document.querySelectorAll('[data-width]').forEach(item => item.setAttribute('aria-pressed', item === button ? 'true' : 'false'));
+  measure();
+}));
+document.getElementById('menu').addEventListener('click', () => frame.classList.toggle('rail-open'));
+document.getElementById('load').addEventListener('click', () => { frame.dataset.home = 'loading'; frame.dataset.screen = 'home'; });
+document.getElementById('readerr').addEventListener('click', () => { frame.dataset.home = 'error'; frame.dataset.screen = 'home'; });
+document.getElementById('settled').addEventListener('click', () => {
+  frame.dataset.home = 'settled';
+  frame.dataset.screen = 'home';
+  document.getElementById('update').open = false;
+});
+const pendingEvents = Array.from({ length: 32 }, (_, index) => ({
+  seq: index + 1, kind: 'message.uncertain', status: 'uncertain',
+  conversation_id: '', operation_id: '', summary: ''
+}));
+function groupTitle(kind, count) {
+  if (kind === 'message.uncertain') return count > 1 ? 'Mensagens não confirmadas' : 'Mensagem não confirmada';
+  return count > 1 ? 'Resultados não confirmados' : 'Resultado não confirmado';
+}
+function renderPending() {
+  const host = document.getElementById('groups');
+  host.replaceChildren();
+  const groups = new Map();
+  pendingEvents.forEach(event => {
+    const key = event.conversation_id ? 'conversation:' + event.conversation_id
+      : event.operation_id ? 'operation:' + event.operation_id
+      : 'kind:' + event.kind;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(event);
+  });
+  document.getElementById('tally').textContent = pendingEvents.length + ' resultados ainda não confirmados. Nenhum virou sucesso.';
+  groups.forEach(events => {
+    const row = document.createElement('button');
+    row.type = 'button';
+    row.className = 'sum';
+    row.setAttribute('aria-expanded', 'false');
+    row.innerHTML = '<strong>' + groupTitle(events[0].kind, events.length) + '</strong><span class="count">' + events.length + '</span>';
+    const body = document.createElement('div');
+    body.className = 'gradual';
+    const note = document.createElement('p');
+    note.textContent = 'Consulte o estado. Não repita o envio.';
+    const list = document.createElement('div');
+    const rest = document.createElement('button');
+    rest.type = 'button';
+    rest.className = 'more';
+    const page = 6;
+    function paint(limit) {
+      list.replaceChildren();
+      events.slice(0, limit).forEach(event => {
+        const line = document.createElement('div');
+        line.className = 'ev';
+        const label = event.operation_id ? 'Operação ' + event.operation_id
+          : event.conversation_id ? 'Conversa ' + event.conversation_id
+          : 'Registro ' + event.seq;
+        line.textContent = label;
+        list.appendChild(line);
+      });
+      rest.hidden = limit >= events.length;
+      rest.textContent = 'Mostrar os outros ' + (events.length - limit);
+    }
+    paint(page);
+    rest.addEventListener('click', () => paint(events.length));
+    const consult = document.createElement('button');
+    consult.type = 'button';
+    consult.className = 'consult';
+    consult.textContent = 'Consultar este grupo';
+    body.append(note, list, rest, consult);
+    row.addEventListener('click', () => row.setAttribute('aria-expanded', row.getAttribute('aria-expanded') === 'true' ? 'false' : 'true'));
+    host.append(row, body);
+  });
+}
+document.getElementById('pending').addEventListener('click', () => {
+  frame.dataset.home = 'pending';
+  frame.dataset.screen = 'home';
+  document.getElementById('crumb').textContent = 'Home';
+  document.getElementById('update').open = true;
+  renderPending();
+  measure();
+});
+renderPending();
+document.getElementById('ring').addEventListener('click', () => {
+  const card = document.querySelectorAll('.dot')[1];
+  card.classList.add('is-focus');
+  card.focus();
+});
+document.getElementById('motion').addEventListener('click', (event) => {
+  const on = frame.classList.toggle('reduce');
+  event.currentTarget.setAttribute('aria-pressed', on ? 'true' : 'false');
+});
+document.getElementById('q').addEventListener('input', (event) => {
+  const query = event.target.value.trim().toLowerCase();
+  document.querySelectorAll('.dot').forEach(card => { card.hidden = query && !card.dataset.name.includes(query); });
+});
+document.querySelectorAll('.phase').forEach(button => button.addEventListener('click', () => showPhase(button.dataset.phase)));
+document.querySelectorAll('.tab').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll('.tab').forEach(item => item.setAttribute('aria-selected', item === button ? 'true' : 'false'));
+  document.querySelectorAll('.view').forEach(view => view.classList.toggle('on', view.id === 'view-' + button.dataset.view));
+}));
+showPhase('planning');
+measure();
+addEventListener('resize', measure);
+</script>
+</body>
+</html>

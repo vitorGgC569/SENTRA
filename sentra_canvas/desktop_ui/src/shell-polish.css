@@ -1,0 +1,412 @@
+/* Presentation layer: shared rhythm, quiet surfaces, progressive disclosure. */
+.shell-visually-hidden { position:absolute !important; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; border:0; }
+.opendots-shell .shell-home-resume { margin-block:0 24px; border:1px solid var(--shell-line); border-radius:16px; background:var(--shell-panel); overflow:hidden; }
+.opendots-shell .shell-home-resume-primary { display:flex; justify-content:space-between; align-items:center; gap:20px; padding:22px 24px; }
+.opendots-shell .shell-home-resume h2 { margin:8px 0 5px; font-size:20px; overflow-wrap:anywhere; }
+.opendots-shell .shell-home-resume p { margin:0; color:var(--shell-muted); font-size:12px; }
+.opendots-shell .shell-home-resume-primary > button { flex-shrink:0; min-height:40px; }
+.opendots-shell .shell-home-attention { padding:16px 24px; border-top:1px solid var(--shell-line); }
+.opendots-shell .shell-home-attention summary { display:flex; align-items:center; gap:8px; cursor:pointer; font-weight:600; font-size:13px; }
+.opendots-shell .shell-home-attention summary span { margin-inline-start:auto; color:var(--shell-muted); }
+.opendots-shell .shell-home-attention ul { list-style:none; margin:12px 0; padding:0; }
+.opendots-shell .shell-home-attention li { display:flex; gap:16px; align-items:center; justify-content:space-between; padding:10px 0; border-bottom:1px solid var(--shell-line); }
+.opendots-shell .shell-home-attention li div { display:grid; gap:4px; min-width:0; overflow-wrap:anywhere; }
+.opendots-shell .shell-home-attention small { font-size:12px; color:var(--shell-muted); }
+.opendots-shell .shell-home-attention li button { min-height:36px; flex-shrink:0; }
+@media (max-width:600px) { .opendots-shell .shell-home-resume-primary { align-items:flex-start; flex-direction:column; padding:18px; } .opendots-shell .shell-home-attention { padding:14px 18px; } }
+.opendots-shell .dot-computer-resize { position:absolute; z-index:8; inset:0 auto 0 0; width:9px; cursor:col-resize; touch-action:none; }
+.opendots-shell .dot-computer-resize:hover, .opendots-shell .dot-computer-resize:focus-visible { background:color-mix(in srgb,var(--polish-accent) 25%,transparent); outline:2px solid var(--polish-accent); outline-offset:-2px; }
+@media (max-width:1000px) { .opendots-shell .dot-computer-resize { display:none; } }
+.opendots-shell .shell-message-window { overflow-anchor:none; }
+.opendots-shell .shell-message-slot { display:flow-root; }
+.opendots-shell .shell-message-slot + .shell-message-slot { border-top:1px solid var(--shell-line); }
+.opendots-shell .shell-history-display { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:4px 28px; font-size:12px; color:var(--shell-muted); }
+.opendots-shell .shell-history-display button { min-height:32px; font-size:12px; background:transparent; border:1px solid var(--shell-line); }
+.opendots-shell .shell-message :is(time,.shell-message-export) { font-size:var(--sentra-type-meta); }
+.opendots-shell .shell-markdown { white-space:normal; }
+.opendots-shell .shell-markdown :is(p,ul,ol,blockquote,table) { margin-block:0 1em; }
+.opendots-shell .shell-markdown :is(ul,ol) { padding-inline-start:1.6em; }
+.opendots-shell .shell-markdown li { padding-inline-start:.15em; margin-block:.25em; }
+.opendots-shell .shell-markdown li > p { margin-block:.25em; }
+.opendots-shell .shell-markdown li :is(ul,ol) { margin-block:.4em; }
+.opendots-shell .shell-markdown :is(h3,h4,h5,h6) { line-height:1.4; margin-block:1.1em .5em; }
+.opendots-shell .shell-markdown h3 { font-size:1.25em; }
+.opendots-shell .shell-markdown h4 { font-size:1.1em; }
+.opendots-shell .shell-markdown :is(h5,h6) { font-size:1em; }
+.opendots-shell .shell-markdown-table { max-width:100%; overflow-x:auto; border:1px solid var(--shell-line); border-radius:10px; margin-block:1em; }
+.opendots-shell .shell-markdown table { width:100%; border-collapse:collapse; margin:0; font-size:.9em; }
+.opendots-shell .shell-markdown :is(th,td) { border-bottom:1px solid var(--shell-line); padding:10px 14px; text-align:start; min-width:100px; vertical-align:top; }
+.opendots-shell .shell-markdown th { background:var(--shell-hover); font-weight:600; }
+.opendots-shell .shell-markdown tr:last-child td { border-bottom:0; }
+.opendots-shell .shell-markdown-code { margin-block:1em; max-width:100%; border:1px solid var(--shell-line); border-radius:10px; overflow:hidden; background:var(--shell-code,var(--shell-soft)); }
+.opendots-shell .shell-code-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:5px 12px; font-size:12px; color:var(--shell-muted); border-bottom:1px solid var(--shell-line); }
+.opendots-shell .shell-code-toolbar button { min-height:32px; padding:4px 10px; border:0; background:transparent; color:var(--shell-ink); font-size:12px; }
+.opendots-shell .shell-markdown-code pre { border:0; border-radius:0; margin:0; max-height:480px; font-size:13px; line-height:1.6; }
+.opendots-shell .shell-markdown :is(pre,.shell-markdown-table):focus-visible, .opendots-shell .shell-transcript:focus-visible { outline:2px solid var(--polish-accent); outline-offset:-2px; }
+@media (prefers-reduced-motion:reduce) {
+  .opendots-shell *, .opendots-shell *::before, .opendots-shell *::after { scroll-behavior:auto !important; animation:none !important; transition:none !important; }
+}
+.opendots-shell {
+  --polish-accent: #657fc7;
+  --polish-grid: #cbd0dc;
+  --polish-shadow: 0 8px 28px #1823440a;
+  --polish-ring: color-mix(in srgb, var(--polish-accent) 36%, transparent);
+  --shell-bg: #f8f9fb;
+  --shell-panel: #fff;
+  --shell-rail: #f0f2f6;
+  --shell-hover: #e9edf5;
+  --shell-line: #e2e5eb;
+  --shell-muted: #6b7280;
+  --shell-input-line: #d8dde6;
+  font-size: 13px;
+  --sentra-type-body: 16px;
+  --sentra-type-meta: 12px;
+}
+:root[data-sentra-theme=dark] .opendots-shell {
+  --shell-bg: #131416;
+  --shell-rail: #17181b;
+  --shell-panel: #1d1f23;
+  --shell-hover: #292c32;
+  --shell-line: #2d3036;
+  --shell-input-line: #393d45;
+  --shell-ink: #edeef2;
+  --shell-muted: #9da2ae;
+  --shell-soft: #24272d;
+  --polish-accent: #98aceb;
+  --polish-grid: #363a44;
+  --polish-shadow: 0 10px 32px #00000025;
+}
+.opendots-shell :is(button, a, summary, input, textarea, select) {
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+.opendots-shell :is(button, a, summary, input, textarea, select):focus-visible {
+  outline: 2px solid var(--polish-accent);
+  outline-offset: 3px;
+}
+.opendots-shell :is(button, summary):active:not(:disabled) { transform: translateY(1px); }
+.opendots-shell button svg { flex: 0 0 auto; }
+.opendots-shell button:disabled { opacity: .4; }
+.opendots-shell :is(.shell-icon, .icon-button) { min-width: 32px; min-height: 32px; }
+.opendots-shell :is(.shell-icon, .icon-button):hover:not(:disabled) { background: var(--shell-hover); color: var(--shell-ink); }
+.opendots-shell * { scrollbar-width: thin; scrollbar-color: color-mix(in srgb, var(--shell-muted) 28%, transparent) transparent; }
+.opendots-shell ::-webkit-scrollbar { width: 5px; height: 5px; }
+.opendots-shell ::-webkit-scrollbar-track { background: transparent; }
+.opendots-shell ::-webkit-scrollbar-thumb { border-radius: 10px; background: color-mix(in srgb, var(--shell-muted) 28%, transparent); }
+.opendots-shell .shell-rail { width: 224px; flex: 0 0 224px; padding: 24px 14px 14px; border-right: 1px solid var(--shell-line); }
+.opendots-shell .shell-wordmark { font-size: 20px; letter-spacing: -.7px; padding-bottom: 24px; }
+.opendots-shell .shell-rail-label { padding-top: 22px; font-size: 9px; letter-spacing: .12em; }
+.opendots-shell .shell-primary-nav { gap: 4px; }
+.opendots-shell .shell-primary-nav button { border-radius: 10px; padding: 11px 13px; }
+.opendots-shell .shell-primary-nav button[aria-current=page] { background: var(--shell-hover); box-shadow: inset 2px 0 var(--polish-accent); }
+.opendots-shell .shell-dot-nav-row:hover { background: var(--shell-hover); }
+.opendots-shell .shell-dot-nav-row { transition: background 160ms ease; }
+.opendots-shell .shell-dots-nav { max-height: min(270px, 30vh); }
+.opendots-shell .shell-dots-nav .shell-dot-nav-open { padding-block: 8px; }
+.opendots-shell .shell-topbar { height: 56px; flex-basis: 56px; padding-inline: 22px; }
+.opendots-shell .shell-content { padding: 38px clamp(24px, 4vw, 64px) 56px; }
+.opendots-shell .shell-content > * { max-width: 1040px; }
+.opendots-shell .shell-home-hero { margin-bottom: 24px; min-height: 158px; }
+.opendots-shell .shell-home-hero h1 { font-size: clamp(28px, 3vw, 38px); font-weight: 620; letter-spacing: -.045em; }
+.opendots-shell .shell-home-hero .shell-mascot.hero { width: 144px; height: 144px; filter: drop-shadow(0 12px 24px #0002); }
+.opendots-shell .shell-home-start { padding: 21px 24px; margin-bottom: 30px; border-radius: 16px; background: linear-gradient(110deg, color-mix(in srgb, var(--polish-accent) 8%, var(--shell-panel)), var(--shell-panel)); }
+.opendots-shell .shell-home-start h2 { font-size: 16px; }
+.opendots-shell .shell-home-start p { font-size: 12px; }
+.opendots-shell .shell-dot-grid { grid-template-columns: repeat(auto-fill, minmax(235px, 1fr)); gap: 14px; }
+.opendots-shell .shell-dot-card { position: relative; grid-template-columns: 52px minmax(0, 1fr); gap: 10px 16px; padding: 22px 20px 16px; border-color: color-mix(in srgb, var(--shell-line) 75%, transparent); border-radius: 17px; transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease; }
+.opendots-shell .shell-dot-card:is(:hover, :focus-within) { border-color: var(--polish-ring); box-shadow: var(--polish-shadow); transform: translateY(-3px); }
+.opendots-shell .shell-dot-card > .shell-mascot.card { width: 52px; height: 58px; transition: transform 200ms ease; }
+.opendots-shell .shell-dot-card:hover > .shell-mascot.card { transform: translateY(-3px) rotate(-4deg); }
+.opendots-shell .shell-dot-card h3 { font-size: 15px; line-height: 1.4; }
+.opendots-shell .shell-dot-card p { font-size: 12px; margin-bottom: 3px; }
+.opendots-shell .shell-dot-model { font-size: 10px; color: var(--shell-muted); }
+.opendots-shell .shell-dot-model summary { cursor: pointer; padding: 2px 0; }
+.opendots-shell .shell-dot-model small { display: block; padding-top: 5px; }
+.opendots-shell .shell-dot-card > .shell-status { border: 0; background: transparent; padding: 0; margin: 0; font-size: 10px; }
+.opendots-shell .shell-dot-card footer { flex-wrap: nowrap; gap: 6px; padding-top: 12px; border-top: 1px solid var(--shell-line); }
+.opendots-shell .shell-dot-card footer button { padding: 7px 9px; font-size: 11px; }
+.opendots-shell .shell-dot-card footer button:first-child { flex: 1; }
+.opendots-shell .shell-dot-card footer .icon-button { width: 30px; min-width: 30px; padding: 6px; border-color: transparent; background: transparent; }
+.opendots-shell .shell-section-heading h2 { font-size: 15px; font-weight: 600; }
+.opendots-shell .shell-conversation-row { padding: 15px 18px; }
+.opendots-shell .shell-conversation-row > svg:last-child { transition: transform 160ms ease; }
+.opendots-shell .shell-conversation-row:hover > svg:last-child { transform: translateX(3px); }
+.opendots-shell .shell-space-card { min-height: 148px; padding: 20px; }
+
+/* Conversation stays primary while the computer is open. */
+.opendots-shell .dot-computer-chat-toolbar { padding: 7px 18px; border-bottom: 0; }
+.opendots-shell .dot-computer-chat-toolbar button { border-radius: 20px; background: transparent; padding: 6px 12px; }
+.opendots-shell .dot-computer-chat-toolbar button[aria-expanded=true] { background: var(--shell-hover); }
+.opendots-shell .dot-computer-workspace.is-open { grid-template-columns: minmax(0, 1fr) 330px; }
+.opendots-shell .dot-computer-workspace.is-open:has(.dot-computer-panel.is-expanded) { grid-template-columns: minmax(320px, .8fr) minmax(380px, 1.2fr); }
+.opendots-shell .shell-chat-heading { padding: 12px 28px; gap: 12px; border-bottom: 1px solid color-mix(in srgb, var(--shell-line) 65%, transparent); }
+.opendots-shell .shell-persona .shell-mascot { width: 40px; height: 44px; }
+.opendots-shell .shell-persona h2 { font-size: 14px; letter-spacing: -.02em; }
+.opendots-shell .shell-chat-actions button { background: transparent; border-color: transparent; }
+.opendots-shell .shell-chat-filter { margin: 8px 28px 0; opacity: .65; }
+.opendots-shell .shell-chat-filter:focus-within { opacity: 1; }
+.opendots-shell .shell-chat-filter input { padding-block: 6px; font-size: var(--sentra-type-meta); }
+.opendots-shell .shell-message-content { font-size: var(--sentra-type-body); line-height: 1.65; }
+.opendots-shell .shell-message > header { font-size: var(--sentra-type-meta); }
+.opendots-shell .shell-jump-latest { align-self: center; min-height: 32px; padding: 6px 14px; margin: 4px; border: 1px solid var(--shell-line); border-radius: 20px; font-size: var(--sentra-type-meta); background: var(--shell-panel); color: var(--shell-ink); }
+.opendots-shell .shell-preview-window { display: block; margin-top: 8px; color: var(--shell-muted); font-size: var(--sentra-type-meta); }
+.opendots-shell .shell-chat-stream-status { margin: 0 28px; min-height: 18px; font-size: var(--sentra-type-meta); color: var(--shell-muted); }
+.opendots-shell .shell-chat-stream-status[data-state=reconnecting],
+.opendots-shell .shell-chat-stream-status[data-state=reauth_required] { color: var(--shell-ink); }
+.opendots-shell .shell-mascot-fallback { display: grid; place-items: center; width: 100%; height: 100%; border-radius: 32%; background: var(--shell-hover); color: var(--shell-ink); font-size: 1em; font-weight: 650; }
+.opendots-shell .shell-chat-intro h3 { font-size: 24px; font-weight: 600; letter-spacing: -.04em; }
+.opendots-shell .shell-chat-intro .shell-mascot.intro { width: 100px; height: 100px; margin-bottom: 18px; }
+.opendots-shell .shell-chat-intro p { font-size: 13px; }
+.opendots-shell .shell-composer { border-radius: 22px; box-shadow: 0 4px 20px #00000009; transition: border-color 160ms ease, box-shadow 160ms ease; }
+.opendots-shell .shell-composer:focus-within { border-color: var(--polish-ring); box-shadow: 0 0 0 3px color-mix(in srgb, var(--polish-accent) 7%, transparent); }
+.opendots-shell .shell-composer textarea { min-height: 68px; }
+.opendots-shell .shell-send { border-radius: 50%; }
+
+/* Profile, tabs and a compact screen inspired by the supplied reference. */
+.opendots-shell .dot-computer-panel { position: relative; overflow-y: auto; background: var(--shell-bg); padding: 10px 16px 20px; }
+.opendots-shell .dot-computer-window-actions { display: flex; justify-content: flex-end; gap: 4px; flex-shrink: 0; }
+.opendots-shell .dot-computer-window-actions button { border-radius: 50%; color: var(--shell-muted); }
+.opendots-shell .dot-computer-heading { flex-direction: column; gap: 10px; padding: 4px 8px 22px; border: 0; flex-shrink: 0; text-align: center; }
+.opendots-shell .dot-computer-heading .shell-mascot { width: 76px; height: 82px; }
+.opendots-shell .dot-computer-identity { display: grid; gap: 4px; max-width: 100%; }
+.opendots-shell .dot-computer-identity strong { font-size: 16px; font-weight: 600; overflow-wrap: anywhere; }
+.opendots-shell .dot-computer-heading small { display: block; margin: 0; font-size: 11px; color: var(--shell-muted); }
+.opendots-shell .dot-computer-tabs { padding: 4px; gap: 2px; border: 0; margin: 0 0 18px; justify-content: center; flex-shrink: 0; border-radius: 12px; background: var(--shell-panel); }
+.opendots-shell .dot-computer-tabs button { flex: 1; gap: 5px; padding: 8px 6px; font-size: 11px; color: var(--shell-muted); background: transparent; border: 0; border-radius: 9px; }
+.opendots-shell .dot-computer-tabs > button:last-child { margin: 0; }
+.opendots-shell .dot-computer-tabs [aria-selected=true] { color: var(--shell-ink); background: var(--shell-hover); box-shadow: 0 2px 5px #0001; }
+.opendots-shell .dot-computer-view { flex: 0 0 auto; overflow: visible; display: block; }
+.opendots-shell .dot-vm-panel { display: flex; flex-direction: column; width: 100%; overflow: visible; }
+.opendots-shell .dot-vm-panel > header { padding: 0 3px 10px; gap: 6px; background: transparent; border: 0; min-height: 30px; }
+.opendots-shell .dot-vm-panel > header strong { font-size: 11px; font-weight: 500; }
+.opendots-shell .dot-vm-panel > header small { font-size: 10px; max-width: 160px; }
+.opendots-shell .dot-vm-panel > header small[data-live=true] { color: #69bd99; }
+.opendots-shell .dot-vm-panel > header .shell-icon { padding: 5px; min-width: 26px; min-height: 26px; }
+.opendots-shell .dot-vm-frame { flex: 0 0 auto; width: 100%; min-height: 185px; aspect-ratio: 16 / 10; background: var(--shell-panel); border: 1px solid var(--shell-line); border-radius: 16px; overflow: hidden; box-shadow: inset 0 1px #ffffff04; }
+.opendots-shell .dot-vm-frame.has-frame { background: #08090b; }
+.opendots-shell .dot-vm-frame > img { max-height: 100%; max-width: 100%; }
+.opendots-shell .dot-computer-empty { gap: 9px; padding: 24px 16px; }
+.opendots-shell .dot-computer-empty > svg { color: var(--shell-muted); margin-bottom: 4px; opacity: .65; }
+.opendots-shell .dot-computer-empty strong { font-size: 12px; font-weight: 550; }
+.opendots-shell .dot-computer-empty p { font-size: 11px; line-height: 1.6; max-width: 240px; }
+.opendots-shell .dot-vm-panel > footer { padding: 12px 0 16px; border: 0; gap: 6px; justify-content: center; }
+.opendots-shell .dot-vm-panel > footer > span { text-align: center; padding-bottom: 5px; }
+.opendots-shell .dot-vm-panel > footer button { border-radius: 20px; padding: 6px 9px; font-size: 10px; }
+.opendots-shell .dot-vm-panel:not([data-power=running]) > footer :is(.dot-vm-watch, .dot-vm-handoff) { display: none; }
+.opendots-shell :is(.dot-vm-advanced, .dot-computer-details, .shell-dot-family-fold) { flex-shrink: 0; margin: 0; padding: 0; border: 0; border-top: 1px solid var(--shell-line); color: var(--shell-muted); font-size: 11px; }
+.opendots-shell :is(.dot-vm-advanced, .dot-computer-details, .shell-dot-family-fold) > summary { padding: 12px 4px; cursor: pointer; }
+.opendots-shell :is(.dot-vm-advanced, .dot-computer-details, .shell-dot-family-fold) > summary:hover { color: var(--shell-ink); }
+.opendots-shell :is(.dot-computer-details, .dot-vm-advanced) > p { padding: 6px; overflow-wrap: anywhere; }
+.opendots-shell :is(.dot-vm-advanced, .dot-computer-details) button { font-size: 11px; margin-bottom: 8px; }
+.opendots-shell .dot-vm-advanced input { width: 100%; }
+.opendots-shell .dot-vm-form { padding: 14px 0; }
+.opendots-shell .dot-vm-install { padding: 10px; }
+.opendots-shell .dot-computer-terminal { padding: 0; min-height: 250px; }
+.opendots-shell .dot-computer-files { padding: 0; }
+.opendots-shell .dot-computer-panel .shell-failure { margin: 8px 0; font-size: 11px; }
+.opendots-shell .dot-computer-panel .shell-error { overflow-wrap: anywhere; }
+
+/* Canvas: readable agent cards with detail available on demand. */
+.opendots-shell .shell-dot-canvas { height: 100%; padding: 0 18px 18px; gap: 14px; }
+.opendots-shell .shell-dot-canvas-heading { min-height: 76px; padding: 12px 2px 0; flex-wrap: wrap; }
+.opendots-shell .shell-canvas-title { display: flex; align-items: center; gap: 12px; flex: 1; min-width: 180px; }
+.opendots-shell .shell-canvas-title > svg { color: var(--polish-accent); }
+.opendots-shell .shell-canvas-title > div { display: grid; gap: 3px; }
+.opendots-shell .shell-canvas-title strong { font-size: 17px; letter-spacing: -.03em; }
+.opendots-shell .shell-canvas-title small { font-size: 11px; color: var(--shell-muted); }
+.opendots-shell .shell-dot-canvas-heading :is(button, select) { font-size: 12px; border-radius: 10px; padding: 9px 12px; }
+.opendots-shell .shell-dot-canvas button:not(.shell-primary) { color: var(--shell-ink); }
+.opendots-shell .shell-dot-canvas :is(input, select, textarea) { color: var(--shell-ink); border-color: var(--shell-line); background: var(--shell-bg); }
+.opendots-shell .shell-dot-flow { min-height: 240px; border-radius: 18px; background: var(--shell-rail); }
+.opendots-shell .shell-dot-flow .react-flow { background: transparent; --xy-controls-button-background-color-default: var(--shell-panel); --xy-controls-button-background-color-hover-default: var(--shell-hover); --xy-controls-button-color-default: var(--shell-ink); --xy-controls-button-border-color-default: var(--shell-line); }
+.opendots-shell .shell-dot-flow .react-flow__background { background: radial-gradient(ellipse at 50% 30%, color-mix(in srgb, var(--polish-accent) 4%, var(--shell-rail)), var(--shell-rail)); }
+.opendots-shell .shell-dot-flow .react-flow__attribution { width: max-content; right: auto; background: transparent; bottom: 2px; }
+.opendots-shell .shell-dot-canvas-heading > button:not(.shell-primary) { background: var(--shell-panel); border-color: var(--shell-line); }
+.opendots-shell .shell-dot-flow .react-flow__controls { border-radius: 12px; overflow: hidden; border: 1px solid var(--shell-line); box-shadow: var(--polish-shadow); margin: 18px; }
+.opendots-shell .shell-dot-flow .react-flow__controls-button { width: 34px; height: 34px; padding: 9px; border-radius: 0; background: var(--shell-panel); color: var(--shell-ink); border: 0; }
+.opendots-shell .shell-dot-flow .react-flow__controls-button:hover { background: var(--shell-hover); }
+.opendots-shell .shell-dot-flow .react-flow__handle { width: 12px; height: 12px; border: 3px solid var(--shell-panel); background: var(--polish-accent); box-shadow: 0 0 0 1px var(--polish-ring); }
+.opendots-shell .shell-agent-terminal { border-radius: 18px; background: var(--shell-panel); border-color: var(--shell-line); box-shadow: var(--polish-shadow); font-size: 13px; transition: border-color 180ms ease, box-shadow 180ms ease; }
+.opendots-shell .shell-agent-terminal:hover, .opendots-shell .react-flow__node.selected .shell-agent-terminal { border-color: var(--polish-accent); box-shadow: 0 0 0 3px var(--polish-ring), var(--polish-shadow); }
+.opendots-shell .shell-agent-terminal > header { height: 80px; padding: 14px 20px; gap: 12px; }
+.opendots-shell .shell-agent-terminal > header .shell-mascot { width: 44px; height: 50px; }
+.opendots-shell .shell-agent-identity { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.opendots-shell .shell-agent-identity strong { font-size: 17px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opendots-shell .shell-agent-identity small { color: var(--shell-muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opendots-shell .shell-agent-tools { padding: 12px 20px 4px; }
+.opendots-shell .shell-agent-tools label { display: flex; align-items: center; gap: 12px; color: var(--shell-muted); font-size: 11px; }
+.opendots-shell .shell-agent-tools select { flex: 1; padding: 7px 10px; font-size: 12px; background: var(--shell-bg); border-color: var(--shell-line); }
+.opendots-shell .shell-agent-session { min-height: 35px; padding: 4px 20px; color: var(--shell-muted); font-size: 11px; }
+.opendots-shell .shell-agent-session button { padding: 5px 9px; font-size: 11px; margin-left: auto; }
+.opendots-shell .shell-agent-stage { flex: 1; min-height: 100px; overflow: hidden; display: flex; background: var(--shell-bg); margin: 8px 16px 12px; border-radius: 12px; }
+.opendots-shell .shell-terminal-empty { display: flex; flex: 1; flex-direction: column; justify-content: center; align-items: center; gap: 8px; padding: 18px; text-align: center; }
+.opendots-shell .shell-terminal-empty strong { font-size: 16px; font-weight: 550; letter-spacing: -.025em; }
+.opendots-shell .shell-terminal-empty p { color: var(--shell-muted); font-size: 12px; margin: 0 0 6px; }
+.opendots-shell .shell-terminal-empty .shell-mascot { margin: 0 0 8px; width: 60px; height: 66px; }
+.opendots-shell .shell-terminal-empty button { font-size: 12px; padding: 8px 16px; border-radius: 20px; }
+.opendots-shell .shell-agent-details { max-height: 230px; flex: 0 0 auto; overflow-y: auto; border-top: 1px solid var(--shell-line); }
+.opendots-shell .shell-agent-terminal:has(.shell-agent-fold[open]) .shell-terminal-empty { flex-direction: row; flex-wrap: wrap; padding: 12px; gap: 10px; }
+.opendots-shell .shell-agent-terminal:has(.shell-agent-fold[open]) .shell-terminal-empty :is(.shell-mascot, p) { display: none; }
+.opendots-shell .shell-agent-terminal:has(.shell-agent-fold[open]) .shell-terminal-empty strong { font-size: 13px; }
+.opendots-shell .shell-agent-fold { font-size: 12px; }
+.opendots-shell .shell-agent-fold > summary { padding: 14px 20px; cursor: pointer; color: var(--shell-muted); }
+.opendots-shell .shell-agent-fold > summary:hover { color: var(--shell-ink); background: var(--shell-hover); }
+.opendots-shell .shell-agent-fold > summary span { float: right; }
+.opendots-shell .shell-agent-fold > div { display: grid; gap: 10px; padding: 0 18px 18px; }
+.opendots-shell .shell-agent-fold > div > div { flex-wrap: wrap; }
+.opendots-shell .shell-agent-fold :is(input, select) { max-width: 100%; width: 100%; font-size: 12px; background: var(--shell-bg); }
+.opendots-shell .shell-agent-fold small { color: var(--shell-muted); }
+.opendots-shell .shell-canvas-hint { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid var(--shell-line); border-radius: 10px; background: var(--shell-panel); color: var(--shell-muted); font-size: 10px; margin: 18px; pointer-events: none; }
+.opendots-shell .shell-canvas-empty { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 35px; top: 20%; text-align: center; color: var(--shell-muted); }
+.opendots-shell .shell-canvas-empty strong { font-size: 20px; color: var(--shell-ink); }
+.opendots-shell .shell-canvas-empty p { margin: 0; }
+@media (max-width: 1100px) {
+  .opendots-shell .shell-rail { width: 200px; flex-basis: 200px; padding-inline: 10px; }
+  .opendots-shell .dot-computer-workspace.is-open { grid-template-columns: minmax(0, 1fr) 300px; }
+  .opendots-shell .dot-computer-panel { padding-inline: 12px; }
+  .opendots-shell .shell-canvas-hint span { max-width: 200px; }
+}
+@media (max-width: 850px) {
+  .opendots-shell .dot-computer-workspace.is-open:has(.dot-computer-panel.is-expanded) { grid-template-columns: minmax(0, 1fr) 330px; }
+  .opendots-shell .shell-home-start { gap: 12px; padding: 18px; }
+  .opendots-shell .shell-home-start > svg { display: none; }
+  .opendots-shell .shell-dot-canvas-heading .shell-canvas-title small { display: none; }
+  .opendots-shell .shell-dot-canvas-heading button { font-size: 11px; padding: 8px; }
+}
+@media (max-width: 760px) {
+  .opendots-shell .dot-computer-workspace.is-open,
+  .opendots-shell .dot-computer-workspace.is-open:has(.dot-computer-panel.is-expanded) { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(300px, 1fr) minmax(280px, 1fr); overflow-y: auto; }
+  .opendots-shell .dot-computer-panel { border-left: 0; border-top: 1px solid var(--shell-line); padding-inline: 20px; }
+  .opendots-shell .dot-computer-heading { flex-direction: row; text-align: left; padding-block: 0 14px; }
+  .opendots-shell .dot-computer-heading .shell-mascot { width: 48px; height: 52px; }
+  .opendots-shell .dot-computer-window-actions { position: absolute; top: 12px; right: 12px; }
+  .opendots-shell .dot-computer-tabs { max-width: 400px; }
+  .opendots-shell .shell-home-hero .shell-mascot.hero { width: 90px; height: 100px; }
+  .opendots-shell .shell-home-start { flex-wrap: wrap; }
+  .opendots-shell .shell-home-start button { margin-left: 0; }
+  .opendots-shell .shell-dot-canvas { padding: 0 10px 10px; }
+  .opendots-shell .shell-canvas-hint { display: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .opendots-shell *, .opendots-shell *::before, .opendots-shell *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+  .opendots-shell .shell-dot-card:is(:hover, :focus-within), .opendots-shell .shell-dot-card:hover > .shell-mascot.card { transform: none; }
+}
+
+/* Detached Dot management surfaces. Radix portals live directly under body. */
+.context-menu { z-index: 1500; padding: 6px; border-radius: 13px; border-color: #3b3e46; box-shadow: 0 18px 54px #0005; max-height: var(--radix-dropdown-menu-content-available-height); overflow-y: auto; transform-origin: var(--radix-dropdown-menu-content-transform-origin); animation: dot-menu-in 130ms ease-out; }
+.context-menu .menu-item { min-height: 35px; border-radius: 7px; gap: 10px; padding: 8px 10px; outline: none; }
+.context-menu .menu-item[data-highlighted] { background: #ffffff0d; }
+.context-menu .menu-item[data-disabled] { opacity: .35; }
+.context-menu .menu-separator { margin: 5px 4px; opacity: .6; }
+.shell-dot-menu { width: 240px; font: 12px/1.5 'Segoe UI', sans-serif; }
+.shell-dot-menu .context-menu-heading { display: flex; align-items: center; gap: 10px; padding: 8px 10px 12px; margin-bottom: 4px; border-bottom: 1px solid #ffffff12; }
+.shell-dot-menu .context-menu-heading > span:last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.shell-dot-menu .context-menu-heading small { display: block; opacity: .55; font-size: 10px; margin-top: 2px; }
+.dialog-overlay { z-index: 1400; background: #06080c99; backdrop-filter: blur(5px); }
+.dialog-content { z-index: 1401; }
+.shell-dot-editor { width: 580px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 40px); border-radius: 22px; padding: 26px; border: 1px solid var(--shell-line); box-shadow: 0 30px 100px #0006; }
+.shell-dot-editor .dialog-heading { align-items: flex-start; border: 0; padding: 0; margin-bottom: 20px; }
+.shell-dot-editor .dialog-heading h2 { font-size: 19px; letter-spacing: -.035em; }
+.shell-dot-editor .dialog-heading p { font-size: 12px; margin: 5px 0 0; }
+.shell-dot-editor .dialog-heading > button.icon-button { background: transparent; border: 0; border-radius: 50%; }
+.shell-dot-editor-profile { display: flex; align-items: center; gap: 18px; padding: 0 8px 22px; }
+.shell-dot-editor-profile .shell-mascot { width: 76px; height: 86px; }
+.shell-dot-editor-profile > div { display: grid; gap: 5px; min-width: 0; }
+.shell-dot-editor-profile strong { font-size: 20px; font-weight: 600; letter-spacing: -.035em; overflow-wrap: anywhere; }
+.shell-dot-editor-profile span { color: var(--shell-muted); font-size: 12px; }
+.shell-dot-editor-tabs { display: flex; padding: 4px; gap: 4px; border-radius: 12px; background: var(--shell-bg); margin-bottom: 22px; }
+.shell-dot-editor-tabs button { flex: 1; padding: 9px; font-size: 12px; background: transparent; color: var(--shell-muted); border: 0; }
+.shell-dot-editor-tabs [aria-selected=true] { background: var(--shell-hover); color: var(--shell-ink); box-shadow: 0 2px 5px #0001; }
+.shell-dot-editor .shell-form { gap: 14px; }
+.shell-dot-editor .shell-form section { display: grid; gap: 16px; min-height: 280px; align-content: start; }
+.shell-dot-editor .dialog-field > span { font-size: 12px; font-weight: 550; }
+.shell-dot-editor .dialog-field input, .shell-dot-editor .dialog-field select { padding: 11px 13px; border-radius: 10px; font-size: 13px; }
+.shell-dot-editor .dialog-field textarea { min-height: 210px; resize: vertical; border-radius: 12px; font-size: 13px; line-height: 1.7; }
+.shell-dot-editor .shell-mascot-picker { border: 0; padding: 0; margin: 0; }
+.shell-dot-editor .shell-mascot-picker legend { padding: 0 0 10px; font-size: 12px; color: var(--shell-muted); }
+.shell-dot-editor .shell-mascot-picker button { position: relative; border: 1px solid var(--shell-line); padding: 10px 5px 8px; border-radius: 14px; gap: 5px; background: var(--shell-bg); transition: border-color 150ms, background 150ms, transform 150ms; }
+.shell-dot-editor .shell-mascot-picker button:hover { transform: translateY(-3px); background: var(--shell-hover); }
+.shell-dot-editor .shell-mascot-picker button[aria-pressed=true] { border-color: #98aceb; box-shadow: 0 0 0 2px #98aceb1a; background: var(--shell-hover); }
+.shell-dot-editor .shell-mascot-picker img { width: 52px; height: 56px; }
+.shell-dot-editor .shell-mascot-picker button span { font-size: 10px; }
+.shell-mascot-check { position: absolute; top: 7px; right: 7px; color: #98aceb; }
+.shell-dot-editor-hint { color: var(--shell-muted); font-size: 11px; margin: -8px 0 0; }
+.shell-dot-editor .shell-form > footer { position: sticky; bottom: -26px; margin: 8px -26px -26px; padding: 18px 26px; border-top: 1px solid var(--shell-line); background: var(--shell-panel); }
+.shell-dot-editor .shell-form > footer button { min-width: 100px; border-radius: 10px; font-size: 12px; }
+:root[data-sentra-theme=dark] :is(.shell-dot-editor, .shell-dot-menu) { --shell-bg: #17181c; --shell-panel: #1e2025; --shell-line: #343740; --shell-muted: #9da2ae; --shell-ink: #edeef2; --shell-hover: #2c3039; --shell-input-line: #3b3f49; background: var(--shell-panel); color: var(--shell-ink); }
+:root[data-sentra-theme=light] :is(.context-menu, .shell-dot-editor) { --shell-bg: #f4f5f8; --shell-panel: #fff; --shell-line: #e2e5eb; --shell-muted: #6b7280; --shell-ink: #242833; --shell-hover: #e9edf5; --shell-input-line: #d8dde6; background: var(--shell-panel); color: var(--shell-ink); border-color: var(--shell-line); }
+:root[data-sentra-theme=light] .context-menu .menu-item[data-highlighted] { background: #edf0f7; }
+:root[data-sentra-theme=light] .context-menu-heading { border-color: #e2e5eb; }
+@keyframes dot-menu-in { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
+
+/* Maestri reference: edge-to-edge grid, floating tools, real terminal windows. */
+.opendots-shell .shell-dot-canvas.shell-studio { --shell-bg: #191a1e; --shell-panel: #25262b; --shell-line: #42434a; --shell-ink: #e0e0e6; --shell-muted: #92949e; --polish-accent: #85b7e4; padding: 0; gap: 0; color-scheme: dark; }
+.opendots-shell .shell-studio .shell-dot-flow { border: 0; border-radius: 0; background: #202124; }
+.opendots-shell .shell-studio .react-flow__background { background: transparent; }
+.opendots-shell .shell-studio .react-flow { background: #202124; }
+.opendots-shell .shell-studio-tools { display: flex; gap: 3px; align-items: center; padding: 4px 7px; height: 38px; border: 1px solid #48494f; background: #292a2eed; border-radius: 22px; box-shadow: 0 3px 12px #0003; margin-top: 12px; }
+.opendots-shell .shell-studio-tools button { width: 29px; height: 28px; padding: 6px; border: 0; background: transparent; border-radius: 50%; color: #b9bbc4; }
+.opendots-shell .shell-studio-tools button:hover { background: #ffffff0f; color: #fff; }
+.opendots-shell .shell-studio-tools button[aria-pressed=true] { color: #82bdf2; background: #85b7e414; }
+.shell-studio-divider { width: 1px; height: 17px; background: #46474e; margin: 0 3px; }
+.opendots-shell .shell-studio-location { display: flex; align-items: center; gap: 7px; height: 34px; border: 1px solid #3d3e45; border-radius: 9px; background: #292a2ed9; padding: 0 9px; color: #b9bbc4; margin: 14px; }
+.opendots-shell .shell-studio-location select { border: 0; padding: 4px 2px; background: transparent; font-size: 11px; max-width: 145px; }
+.opendots-shell .shell-studio .shell-agent-terminal { background: #191a1e; border: 1px solid #4b4c53; border-radius: 5px; box-shadow: 0 6px 22px #0003; color: #dddde3; }
+.opendots-shell .shell-studio .shell-agent-terminal:hover { border-color: #6a6d79; box-shadow: 0 6px 22px #0004; }
+.opendots-shell .shell-studio .react-flow__node.selected .shell-agent-terminal { border-color: #92adc9; box-shadow: 0 0 0 1px #92adc944, 0 6px 22px #0004; }
+.opendots-shell .shell-studio .shell-agent-terminal > header { height: 32px; padding: 0 8px; gap: 6px; background: #2b2c31; border-bottom: 1px solid #383a41; cursor: grab; }
+.opendots-shell .shell-studio .shell-agent-terminal > header:active { cursor: grabbing; }
+.opendots-shell .shell-studio .shell-agent-terminal > header > svg { color: #a1a5b3; }
+.opendots-shell .shell-studio .shell-agent-terminal > header .shell-mascot { width: 20px; height: 24px; }
+.opendots-shell .shell-studio .shell-agent-identity { display: flex; align-items: center; gap: 10px; }
+.opendots-shell .shell-studio .shell-agent-identity strong { font-size: 11px; font-weight: 550; letter-spacing: 0; }
+.opendots-shell .shell-studio .shell-agent-identity small { font-size: 9px; margin-left: auto; }
+.opendots-shell .shell-studio .shell-agent-terminal > header button { min-height: 23px; min-width: 23px; height: 23px; width: 23px; padding: 4px; border: 0; border-radius: 4px; background: transparent; }
+.opendots-shell .shell-studio .shell-agent-tools { padding: 5px 9px; background: #202126; }
+.opendots-shell .shell-studio .shell-agent-tools label { font-size: 10px; gap: 10px; }
+.opendots-shell .shell-studio .shell-agent-tools select { font-size: 10px; padding: 3px 7px; height: 25px; border-radius: 4px; background: #28292e; }
+.opendots-shell .shell-studio .shell-agent-session { padding: 2px 10px; min-height: 26px; font-size: 9px; border-bottom: 1px solid #2b2c33; }
+.opendots-shell .shell-studio .shell-agent-session button { font-size: 10px; padding: 3px 7px; border-radius: 4px; background: #303139; }
+.opendots-shell .shell-studio .shell-agent-stage { margin: 0; border-radius: 0; min-height: 100px; background: #191a1e; }
+.opendots-shell .shell-studio .shell-agent-stage .pty-slot { width: 100%; height: 100%; padding: 5px 3px; }
+.opendots-shell .shell-studio .shell-terminal-empty { gap: 10px; color: #a1a5b3; }
+.opendots-shell .shell-studio .shell-terminal-empty > svg { opacity: .5; margin-bottom: 8px; }
+.opendots-shell .shell-studio .shell-terminal-empty strong { color: #dddde3; font-size: 14px; letter-spacing: -.015em; }
+.opendots-shell .shell-studio .shell-terminal-empty p { font-size: 11px; color: #92949e; }
+.opendots-shell .shell-studio .shell-terminal-empty button { background: #292b32; font-size: 11px; padding: 7px 12px; border: 1px solid #3c3e48; border-radius: 6px; }
+.opendots-shell .shell-studio .shell-agent-details { border-color: #34353c; max-height: 205px; background: #202126; }
+.opendots-shell .shell-studio .shell-agent-fold > summary { padding: 7px 10px; font-size: 10px; }
+.opendots-shell .shell-studio .shell-agent-fold > summary:hover { background: #292b32; }
+.opendots-shell .shell-studio .shell-agent-fold > div { padding: 7px 10px 14px; }
+.opendots-shell .shell-studio .react-flow__handle { width: 9px; height: 9px; border: 2px solid #25262b; background: #9a9da8; box-shadow: 0 0 0 1px #626571; }
+.opendots-shell .shell-studio .react-flow__handle:hover, .opendots-shell .shell-studio .react-flow__handle.connecting { background: #8cbeee; box-shadow: 0 0 0 4px #8cbeee26; }
+.shell-physical-cable { stroke: #8a8d98; stroke-width: 1.6; stroke-dasharray: 8 5; fill: none; opacity: .65; }
+.react-flow__edge:hover .shell-physical-cable, .shell-physical-cable.is-selected { stroke: #a6c6e8; stroke-width: 2; opacity: 1; }
+.shell-physical-cable.is-connecting { stroke: #9bc7f3; opacity: 1; }
+.opendots-shell .shell-studio .shell-canvas-hint { padding: 6px 9px; font-size: 9px; border-color: #383940; background: #26272bd9; border-radius: 7px; margin: 12px 14px 20px; }
+.opendots-shell .shell-studio .react-flow__controls { border-color: #42434b; border-radius: 8px; margin: 12px 14px 20px; }
+.opendots-shell .shell-studio .react-flow__controls-button { width: 29px; height: 29px; padding: 7px; background: #2b2c31; }
+@media (max-width: 1000px) {
+  .opendots-shell .shell-studio-location { max-width: 150px; }
+  .opendots-shell .shell-studio-location select { max-width: 108px; }
+}
+@media (max-width: 760px) {
+  .opendots-shell .shell-studio-tools { margin-top: 57px; }
+  .shell-dot-editor { padding: 20px; }
+  .shell-dot-editor-profile { padding-bottom: 16px; }
+  .shell-dot-editor-profile strong { font-size: 18px; }
+  .shell-dot-editor-tabs button { padding: 8px 5px; font-size: 11px; gap: 5px; }
+  .shell-dot-editor .shell-form > footer { margin: 8px -20px -20px; padding: 14px 20px; bottom: -20px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .context-menu, .shell-dot-editor *, .shell-dot-editor *::before { animation: none !important; transition: none !important; }
+  .shell-dot-editor .shell-mascot-picker button:hover { transform: none; }
+}
+.shell-cache-note { color: var(--shell-muted, #b0b3bd); font-size: 12px; padding: 8px 0; }
+.shell-cached-message-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.shell-cached-message > header small { color: var(--shell-muted, #b0b3bd); font-size: 12px; }
+.shell-stream-content-modal { width: min(940px, calc(100vw - 32px)); max-width: calc(100vw - 32px); }
+.shell-stream-content-panel { min-width: 0; }
+.shell-stream-full-pages { height: min(60vh, 640px); overflow: auto; overscroll-behavior: contain; margin-top: 12px; padding: 12px; border: 1px solid var(--shell-line, #d9dce3); border-radius: 10px; }
+.shell-stream-content-page { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.6; }
+.shell-preview-count, .shell-preview-content-error { color: var(--shell-muted, #b0b3bd); font-size: 12px; }
+.shell-read-preview { margin-top: 8px; }

@@ -96,7 +96,13 @@ def parse_response(data,returncode):
     return messages[-1],native_thread,usage
 
 
-def generate(config,messages,model,delivery,*,usage_callback=None,checkpoint=None):
+def generate(config,messages,model,delivery,*,usage_callback=None,checkpoint=None,effect_key=None):
+    if effect_key is not None:
+        from orchestrator.providers.fleet_admission import claim_effect
+        try:
+            claim_effect(effect_key)
+        except PermissionError as exc:
+            raise NativeModelError("UNCERTAIN operation is not resent") from exc
     suffix=model.removeprefix(PREFIX)
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}",suffix):
         raise NativeModelError("invalid native model selection")
@@ -152,4 +158,7 @@ def generate(config,messages,model,delivery,*,usage_callback=None,checkpoint=Non
             try:process.communicate(timeout=5)
             except subprocess.TimeoutExpired:pass
             delivery("codex-cli",ident,"uncertain")
+            if effect_key is not None:
+                from orchestrator.providers.fleet_admission import note_uncertain_effect
+                note_uncertain_effect(effect_key)
         raise

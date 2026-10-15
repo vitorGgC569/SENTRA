@@ -25,6 +25,22 @@ from typing import Any, Dict, List
 from .conversation_pool import FixedConversationRouter, inspect_conversations
 
 
+def _job_payload(payload, job_id: str) -> Dict[str, Any]:
+    """Read a relay payload. Sealed rows use the same OS protection as JobStore."""
+    if not isinstance(payload, str) or not payload:
+        return {}
+    if payload.startswith(("dpapi:", "keyring:")):
+        from sentra_remote.secrets import unprotect_secret
+        opened = json.loads(unprotect_secret(payload))
+        if (not isinstance(opened, dict) or opened.get("version") != 1
+                or opened.get("job_id") != job_id
+                or not isinstance(opened.get("value"), dict)):
+            raise ValueError("sealed relay payload rejected")
+        return opened["value"]
+    data = json.loads(payload)
+    return data if isinstance(data, dict) else {}
+
+
 def relay_jobs_for_task(db_path, task_id: str, since_ts: float = 0.0) -> List[Dict[str, Any]]:
     """Read-only lookup of relay jobs for a task. Never writes, never locks
     for writing (immutable URI). Returns [] when the database is absent."""
@@ -45,10 +61,10 @@ def relay_jobs_for_task(db_path, task_id: str, since_ts: float = 0.0) -> List[Di
         return []
     for jid, payload, state, worker, lease_until, updated in rows:
         try:
-            data = json.loads(payload or "{}")
+            data = _job_payload(payload, jid)
         except Exception:
             continue
-        if data.get("task_id") != task_id:
+        if not isinstance(data, dict) or data.get("task_id") != task_id:
             continue
         if updated and updated < since_ts:
             continue
@@ -70,6 +86,29 @@ def blocked_seats(run_dir) -> List[Dict[str, Any]]:
                     "updated": entry.get("updated"),
                     "request_sha256": entry.get("request_sha256", "")[:16]})
     return out
+
+
+def classify_seat(run_dir, seat: str, db_path=None) -> Dict[str, Any]:
+    """Read-only decision for one seat. Never drops, resumes or replays it."""
+    run_dir = Path(run_dir)
+    info = inspect_conversations(run_dir, run_dir.name)
+    current = (info.get("seats") or {}).get(seat)
+    if not isinstance(current, dict):
+        raise ValueError(f"unknown seat '{seat}' for run '{run_dir.name}'")
+    state = current.get("state")
+    task_id = current.get("task_id") or ""
+    jobs = relay_jobs_for_task(db_path, task_id) if db_path is not None and task_id else []
+    if state not in {"IN_FLIGHT", "UNCERTAIN", "BLOCKED"}:
+        decision = "preserve"
+    elif any(job.get("state") == "COMPLETED" for job in jobs):
+        decision = "review_existing_answer"
+    elif not jobs:
+        decision = "observe_no_relay_job"
+    else:
+        decision = "observe_blocked"
+    return {"seat": seat, "state": state, "task_id": task_id, "decision": decision,
+            "automatic_replay": False, "effects_executed": 0, "may_resend": False,
+            "relay_jobs": len(jobs)}
 
 
 def drop_seat(run_dir, seat: str, reason: str) -> Dict[str, Any]:

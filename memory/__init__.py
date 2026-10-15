@@ -6,5 +6,6 @@ with digest + CAS and bounded retention.
 """
 from .store import MemoryStore
 from .costs import CostLedger
+from .dot_scope import DotScopedStore
 
-__all__ = ["MemoryStore", "CostLedger"]
+__all__ = ["MemoryStore", "CostLedger", "DotScopedStore"]

@@ -6,8 +6,10 @@ import re
 import sqlite3
 import unicodedata
 import base64
+import time
 from sentra_core.conversations import ConversationStore, UncertainCall
 from sentra_core.context import RollingContextCondenser, LedgerSummaryRunner
+from sentra_core.model_prose import prose_prefix
 from typing import Callable, Generator
 
 from .client import ModelClient
@@ -90,7 +92,8 @@ FERRAMENTAS:
 - [[CANVAS|child_reply|{"conversation_id":"ID retornado por children","content":"mensagem"}]] envia uma resposta para essa conversa filha; o trabalho do filho exige suas próprias permissões e não recebe as permissões do pai.
 - [[CANVAS|coordinator_intent|{"kind":"create_dot","name":"Worker_2","role":"worker","model":"sentra/codex/current","instructions":"objetivo"}]] propõe criação de metadata de um Dot; selecione um modelo realmente disponível no contexto.
 - [[CANVAS|coordinator_intent|{"kind":...,campos canônicos}]] envia uma intenção estruturada create_dot/create_team/connect/delegate/handoff/pause/resume/cancel/reassign/pause_dot/resume_dot. Consulte o contexto antes de selecionar agentes e campos; o host valida o schema e os alvos.
-- Para executar uma ferramenta de um filho conectado, use [[CANVAS|coordinator_intent|{"kind":"dot_tool_dispatch","tool":"opencode","target_dot_id":"ID retornado por context/list","instruction":"tarefa"}]]. Tools aceitas: sentra-cli (GPT-6 Web high), opencode (Muse Spark 1.3 free high), codex. Exige Grant específico; não substitua os modelos nem interprete envio como conclusão. Aguarde o recibo do runner e revise o resultado antes de consolidar. Não forneça runner, executável, caminho ou identidade de autoridade no intent.
+- Para executar uma ferramenta de um filho conectado, use [[CANVAS|coordinator_intent|{"kind":"dot_tool_dispatch","tool":"opencode","target_dot_id":"ID retornado por context/list","instruction":"tarefa"}]]. Tools aceitas: sentra-cli (GPT-6 Web high), opencode (Muse Spark 1.3 free high), codex. Cada faixa exige Run, WorkItem, Operation e Grant próprios. Não substitua os modelos nem interprete envio, ACK ou IN_REVIEW como conclusão. A consolidação só existe com três recibos verificados e a resposta do coordenador. Execução no guest só vale com processo verificado. Não forneça runner, executável, caminho ou identidade de autoridade no intent.
+- Antigravity não é ferramenta deste turno. Aplicativo gráfico aberto não é inferência. Se a admissão da frota marcar antigravity como indisponível, diga isso e não invente CLI nem API.
 - [[CANVAS|machine_list]] lista máquinas autorizadas; [[CANVAS|machine_execute|{"work_item_id":"ID canônico","machine_id":"ID canônico","capability_id":"capability vigente","arguments":{}}]] requer a tarefa e os Grants do servidor.
 - [[CANVAS|machine_observe|operation_id]] observa a mesma operação incerta.
 - [[CANVAS|vm_status]] consulta o orçamento e o estado real da VM deste Dot. [[CANVAS|vm_frame]] observa um PNG real no monitor e o transmite como imagem ao modelo. [[CANVAS|vm_input|{"action":"input.key","scancodes":[28,156]}]] envia Enter ao sistema convidado; input.mouse aceita x, y e buttons. VM e WorkItem são selecionados apenas pelo servidor; controle humano impede ações do agente. Observe novamente após cada interação e nunca reenvie uma operação UNCERTAIN com uma nova identidade.
@@ -217,6 +220,8 @@ class SentraAgent:
             prompt += '\nEXPERIÊNCIAS: [[CANVAS|machine_experiences|{"work_item_id":"...","machine_id":"...","query":"..."}]] ' \
                 'recupera sugestões com Operation de origem e validade. São conhecimento: revalide entradas, permissões e critérios da tarefa atual antes de reutilizar.'
         if self.canvas.is_shell_scope:
+            from orchestrator.providers.fleet_admission import shell_fleet_notice
+            prompt += "\n" + shell_fleet_notice()
             try:
                 context = self.canvas.working_context()
                 if context is not None:
@@ -304,7 +309,7 @@ class SentraAgent:
             return None
         encoded = evidence.get("image_base64")
         if evidence.get("transport") != "virtualbox-com-framebuffer" \
-                or evidence.get("desktop_verified") is not True \
+                or evidence.get("framebuffer_verified", evidence.get("desktop_verified")) is not True \
                 or evidence.get("mime_type") != "image/png" \
                 or not isinstance(evidence.get("vm_id"), str) or not evidence["vm_id"] \
                 or not isinstance(encoded, str) or len(encoded) > 1_400_000:
@@ -333,6 +338,11 @@ class SentraAgent:
                 evidence = payload.get("evidence")
                 evidence.pop("image_base64", None)
                 evidence["frame_available"] = True
+                # Legacy receipts used desktop_verified for a framebuffer.
+                # A screenshot of BIOS/Setup is not proof of an installed OS.
+                evidence["framebuffer_verified"] = True
+                evidence["desktop_verified"] = False
+                evidence["installed_os_verified"] = False
                 payload["evidence"] = evidence
                 safe = json.dumps(payload, ensure_ascii=False)
             except (ValueError, TypeError, AttributeError):
@@ -626,6 +636,13 @@ class SentraAgent:
         return (
             any(subject in folded for subject in subjects)
             and any(action in folded for action in actions)
+        )
+
+    @staticmethod
+    def orchestrate_stream(chunk_source, *, receipts=(), required=("coordinator",)):
+        from .orchestrated_stream import orchestrate_stream
+        return orchestrate_stream(
+            chunk_source, receipts=receipts, required=required,
         )
 
     def orchestrate_maestri(self, goal: str) -> str:
@@ -959,44 +976,52 @@ class SentraAgent:
             # [[TOOL|...]] directive into the user-visible response.
             parts: list[str] = []
             streamed = ""
-            tool_started = False
-            for chunk in self.client.chat_stream(self.messages):
-                if not isinstance(chunk, str):
-                    raise TypeError("provider stream must contain text")
-                parts.append(chunk)
-                if tool_started:
-                    continue
-                assembled = "".join(parts)
-                start = assembled.find("[[")
-                if start >= 0:
-                    tool_started = True
-                    safe_prefix = assembled[:start]
-                else:
-                    safe_prefix = assembled[:-1] if assembled.endswith("[") else assembled
-                safe_prefix = safe_prefix.lstrip()
-                if safe_prefix.startswith(streamed):
-                    delta = safe_prefix[len(streamed):]
-                    if delta:
-                        streamed = safe_prefix
-                        yield delta
+            checkpoint = getattr(self.store, 'checkpoint_response', None)
+            checkpoint_at, checkpoint_chars, response_chars = time.monotonic(), 0, 0
+            try:
+                for chunk in self.client.chat_stream(self.messages):
+                    if not isinstance(chunk, str):
+                        raise TypeError("provider stream must contain text")
+                    parts.append(chunk)
+                    response_chars += len(chunk)
+                    if callable(checkpoint) and (response_chars - checkpoint_chars >= 4096 or time.monotonic() - checkpoint_at >= 1):
+                        checkpoint(self.session_id, self._turn_id, ''.join(parts))
+                        checkpoint_at, checkpoint_chars = time.monotonic(), response_chars
+                    assembled = "".join(parts)
+                    safe_prefix = prose_prefix(assembled)
+                    safe_prefix = safe_prefix.lstrip()
+                    if safe_prefix.startswith(streamed):
+                        delta = safe_prefix[len(streamed):]
+                        if delta:
+                            streamed = safe_prefix
+                            yield delta
+            finally:
+                # Consumer cancellation/transport errors also keep the last short
+                # fragment. This is only a draft, never a completion receipt.
+                if parts and callable(checkpoint):
+                    checkpoint(self.session_id, self._turn_id, ''.join(parts))
             full_response = "".join(parts)
             if self.client.last_error:
+                if callable(checkpoint):
+                    checkpoint(self.session_id, self._turn_id, full_response)
                 self.messages.append(self.store.append(self.session_id, "assistant", full_response, kind="provider_error"))
                 state = "uncertain" if self.client.last_delivery_state == "uncertain" else "provider_error"
                 self.store.end_turn(self.session_id, self._turn_id, state)
                 # The provider error may already have been streamed; showing it
                 # again used to duplicate the exact same error in the console.
+                visible_error = prose_prefix(full_response, complete=True).lstrip()
                 if not streamed:
-                    yield full_response
-                elif full_response.lstrip().startswith(streamed):
-                    tail = full_response.lstrip()[len(streamed):]
+                    if visible_error:
+                        yield visible_error
+                elif visible_error.startswith(streamed):
+                    tail = visible_error[len(streamed):]
                     if tail:
                         yield tail
                 return
             self.messages.append(self.store.finish_response(self.session_id, self._turn_id, full_response))
 
             directives = list(DIRECTIVE_RE.finditer(full_response))
-            visible = DIRECTIVE_RE.sub("", full_response).strip()
+            visible = prose_prefix(DIRECTIVE_RE.sub("", full_response), complete=True).strip()
             if not directives:
                 self.store.end_turn(self.session_id, self._turn_id)
             if visible:

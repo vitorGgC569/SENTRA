@@ -11,7 +11,12 @@ import threading
 import time
 
 from sentra_core.conversations import _encode, _decode
+from .shell_optional import UNVERIFIED_TURN_MODEL, UNVERIFIED_TURN_REASON
 from .store import Denied
+
+
+class UnverifiedTurn(RuntimeError):
+    """A listed model was not submitted. Callers must not retry or fall through."""
 
 
 class ShellWebRuntime:
@@ -124,6 +129,8 @@ class ShellWebRuntime:
             return self.relay.state
 
     def execute(self, message, dot):
+        if dot.get("model") == UNVERIFIED_TURN_MODEL:
+            raise UnverifiedTurn(UNVERIFIED_TURN_REASON)
         from native_bridge.shell_multimodal import dispatch_shell_turn
         from sentra_mcp.services.web_history_assets import WebAssetDrafts
         grant = self.grants(message, dot)
@@ -176,20 +183,28 @@ class ShellWebRuntime:
             job_id = result["intent"]["job_id"]
             with closing(self.control.store.connect("shell")) as db, db:
                 db.execute("UPDATE canvas_shell_web_turns SET job_id=? WHERE operation_id=?", (job_id, oid))
-            deadline = time.monotonic() + 180
-            while not self.runtime._stop.is_set() and time.monotonic() < deadline:
-                status = self.observe(message, dot)
-                if status is not None:
-                    return status
-                operation = self.control.durable.operation_status(oid, self.owner)
-                run = self.control.durable.run_status(message["run_id"], self.owner, include_details=False)
-                if operation["state"] == "CANCEL_REQUESTED" or run["state"] != "RUNNING":
-                    relay.web_send.failure(self.owner, job_id, reason="shell authority interrupted")
-                    return None
-                self.runtime._stop.wait(.25)
-            return None
+            return self._wait_for_answer(message, dot, relay, job_id, resource, lease)
         finally:
             self.control.durable.release_lease(resource, self.owner, lease["fencing_token"])
+
+    def _wait_for_answer(self, message, dot, relay, job_id, resource, lease):
+        from .shell_runtime import SHELL_PROVIDER_TIMEOUT_SECONDS
+        deadline = time.monotonic() + SHELL_PROVIDER_TIMEOUT_SECONDS
+        renew_at = time.monotonic() + 60
+        while not self.runtime._stop.is_set() and time.monotonic() < deadline:
+            operation = self.control.durable.operation_status(message["operation_id"], self.owner)
+            run = self.control.durable.run_status(message["run_id"], self.owner, include_details=False)
+            if operation["state"] == "CANCEL_REQUESTED" or run["state"] != "RUNNING":
+                relay.web_send.failure(self.owner, job_id, reason="shell authority interrupted")
+                return None
+            if time.monotonic() >= renew_at:
+                self.control.durable.renew_lease(resource, self.owner, lease["fencing_token"], ttl_s=240)
+                renew_at = time.monotonic() + 60
+            status = self.observe(message, dot)
+            if status is not None:
+                return status
+            self.runtime._stop.wait(.25)
+        return None
 
     def observe(self, message, dot):
         """Read an original final only; never call admit, claim, or Send."""

@@ -222,8 +222,17 @@ int32_t configure(int64_t fuel, uint32_t mem_limit, uint32_t stack_size,
         "\"ok\"");
     int bad = JS_IsException(r);
     JS_FreeValue(g_ctx, r);
-    if (bad)
+    if (bad) {
+        JSValue exception = JS_GetException(g_ctx);
+        size_t length = 0;
+        const char *message = JS_ToCStringLen2(g_ctx, &length, exception, 0);
+        if (message) {
+            set_error(message, (uint32_t)length);
+            JS_FreeCString(g_ctx, message);
+        }
+        JS_FreeValue(g_ctx, exception);
         return -3;
+    }
     JSValue global = eval_helper("globalThis");
     if (JS_IsException(global))
         return -3;
@@ -252,19 +261,20 @@ int32_t eval_source(uint32_t src_ptr, uint32_t src_len) {
         JS_SetPropertyStr(g_ctx, global, "__err", ex);
         JS_FreeValue(g_ctx, global);
         JSValue txt = eval_helper(
-            "String((globalThis.__err && globalThis.__err.stack) "
-            "|| globalThis.__err)");
+            "String(globalThis.__err) + '\\n' + "
+            "String((globalThis.__err && globalThis.__err.stack) || '')");
         size_t elen = 0;
         const char *emsg = 0;
         if (!JS_IsException(txt))
             emsg = JS_ToCStringLen2(g_ctx, &elen, txt, 0);
+        int owns_emsg = emsg != 0;
         JS_FreeValue(g_ctx, txt);
         if (!emsg) {
             emsg = "exception rendering failed";
             elen = strlen(emsg);
         }
         set_error(emsg, (uint32_t)elen);
-        if (emsg != (const char *)"exception rendering failed")
+        if (owns_emsg)
             JS_FreeCString(g_ctx, emsg);
         JS_FreeValue(g_ctx, val);
         return 1;
@@ -300,6 +310,8 @@ int32_t eval_source(uint32_t src_ptr, uint32_t src_len) {
 }
 
 int32_t classify_exception(void) {
+    if (g_fuel <= 0)
+        return 10;
     /* 0 other, 10 fuel, 11 memory, 12 stack — matched on error text set
      * by eval_source() for engine-raised budget exceptions. */
     if (!g_error)

@@ -59,7 +59,10 @@ def test_quality_gate_objective_tests_required():
 
 def test_quality_gate_success_and_confidence_calculation():
     gate = QualityGate(QuorumPolicy(validators_required=3, minimum_approvals=2, minimum_confidence_threshold=0.7))
-    task = Task(id="T-1", run_id="r", objective="Test")
+    task = Task(
+        id="T-1", run_id="r", objective="Test",
+        metadata={"evidence_ids": ["artifact:unit"]},
+    )
     cand = Candidate(candidate_id="C-1", task_id="T-1", summary="Implemented math module")
 
     r1 = ValidationReport(validator_role="validator.logic", status="APPROVED")

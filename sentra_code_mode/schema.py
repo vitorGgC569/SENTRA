@@ -120,5 +120,6 @@ CODE_MODE_SIGNATURE = {
         "no Python eval/exec, no Node/VM subprocess, no WASI imports, no host I/O in sandbox",
         "ChatTrust/block + read/action consent never create grants",
         "deny-only removed: bounded-js executes real code; quickjs-wasm reports explicit UNAVAILABLE until reviewed",
+        "optional tool exposure is allow-only; deny-only does not close the surface and a tool cannot mint a grant",
     ],
 }

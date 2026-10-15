@@ -836,3 +836,41 @@ input:disabled, select:disabled, textarea:disabled { opacity: .6; cursor: not-al
 .shell-generated-asset figcaption{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:10px;overflow-wrap:anywhere}
 .shell-generated-asset figcaption span{min-width:0}.shell-generated-asset small{display:block;color:var(--shell-muted,#aaa);margin-top:4px}
 .shell-generated-asset button{display:inline-flex;align-items:center;gap:6px;flex-shrink:0}
+
+/* Functional additions use the original shell palette; no redesign or motion. */
+.shell-failure { display:grid; gap:8px; margin:12px 24px; padding:12px; border:1px solid var(--shell-line); border-radius:9px; background:var(--shell-panel); }
+.shell-failure p { margin:0; }
+.shell-failure > div { display:flex; flex-wrap:wrap; gap:8px; }
+.shell-update-menu { position:relative; flex:0 0 auto; }
+.shell-update-menu summary { display:flex; cursor:pointer; list-style:none; padding:9px; border-radius:9px; }
+.shell-update-menu summary::-webkit-details-marker { display:none; }
+.shell-update-panel { display:none; position:absolute; right:0; top:calc(100% + 8px); z-index:40; width:220px; max-width:calc(100vw - 24px); padding:8px; background:var(--shell-panel); border:1px solid var(--shell-line); border-radius:9px; box-shadow:0 8px 24px #0002; }
+.shell-update-menu[open] .shell-update-panel { display:grid; gap:4px; }
+.shell-topbar :is(summary,details) { -webkit-app-region:no-drag; }
+.shell-dot-family-fold { margin:12px; border-top:1px solid var(--shell-line); }
+.shell-dot-family-fold summary { padding:10px 0; cursor:pointer; }
+.shell-dot-family { display:grid; gap:8px; padding:12px 0; }
+.shell-dot-family label { display:grid; gap:4px; }
+.shell-dot-family > div { display:flex; flex-wrap:wrap; gap:8px; }
+.shell-computer-status { display:flex; flex-wrap:wrap; gap:8px; padding:8px 12px; font-size:12px; }
+.shell-computer-status span { color:var(--shell-muted); }
+.dot-vm-advance { padding:12px; }
+.shell-network,.shell-optional { display:grid; gap:12px; }
+.shell-network ul,.shell-optional ul { display:grid; gap:8px; }
+
+/* The updater occupies one fixed icon slot; it never inserts a layout banner. */
+.shell-update-trigger { position:relative; flex:0 0 auto; display:inline-flex; align-items:center; justify-content:center; }
+.shell-update-trigger.is-available::after { content:''; position:absolute; width:6px; height:6px; right:2px; top:2px; border-radius:50%; background:#d39b3d; pointer-events:none; }
+.shell-update-trigger.is-updating { opacity:1; cursor:progress; }
+.shell-update-trigger.is-updating::after { display:none; }
+.shell-update-trigger.is-updating svg { animation:sentra-update-rotation 1s linear infinite; transform-origin:center; }
+@keyframes sentra-update-rotation { to { transform:rotate(360deg); } }
+.shell-sr-only { position:absolute; width:1px; height:1px; overflow:hidden; white-space:nowrap; clip-path:inset(50%); }
+.shell-update-feedback { position:fixed; right:22px; top:64px; z-index:70; max-width:min(430px,calc(100vw - 44px)); display:flex; align-items:flex-start; gap:10px; padding:11px 13px; border:1px solid var(--shell-line); background:var(--shell-panel); box-shadow:0 8px 24px #0005; color:var(--shell-text); font-size:12px; border-radius:10px; }
+.shell-update-feedback button { flex:0 0 auto; border:1px solid var(--shell-line); border-radius:7px; padding:4px 7px; background:transparent; color:inherit; cursor:pointer; }
+@media (prefers-reduced-motion:reduce) { .shell-update-trigger.is-updating svg { animation:none; opacity:.65; } }
+
+/* Read-only visual warm start: never an authority for actions or receipts. */
+.shell-warm-indicator { position:absolute; z-index:2; top:6px; right:20px; max-width:calc(100% - 40px); padding:5px 9px; border-radius:7px; background:var(--shell-panel); border:1px solid var(--shell-line); color:var(--shell-muted); font-size:11px; pointer-events:none; }
+.shell-main[inert] { opacity:.8; }
+.shell-warm-indicator button { margin-left:8px; padding:3px 7px; border:1px solid var(--shell-line); border-radius:6px; background:transparent; color:inherit; cursor:pointer; pointer-events:auto; }

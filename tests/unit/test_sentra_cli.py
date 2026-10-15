@@ -336,6 +336,31 @@ def test_model_client_fallback_logic(tmp_path: Path):
         )
 
 
+def test_grok_selection_does_not_fall_through_to_another_provider(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-not-used")
+    cfg = CLIConfig(
+        workspace=tmp_path,
+        gateway_url="http://127.0.0.1:59999/v1",
+        local_base_url="http://127.0.0.1:59998/v1",
+        openai_api_key="sk-test-not-used",
+        auto_start_gateway=False,
+    )
+    client = ModelClient(cfg)
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("another provider was called for Grok")
+
+    monkeypatch.setattr(client, "_chat_completions_stream", boom)
+    monkeypatch.setattr(client, "probe_health", lambda: {"gateway": True, "openai": True, "local": True})
+    text = "".join(client.chat_stream(
+        [{"role": "user", "content": "oi"}],
+        model_override="sentra/grok/grok-4.7",
+    ))
+    assert "access is unverified" in text
+    assert client.last_delivery_state == "not_submitted"
+    assert client.active_model == "sentra/grok/grok-4.7"
+
+
 class _FakeSentraGatewayHandler(BaseHTTPRequestHandler):
     last_path = ""
     last_body: dict[str, object] = {}
@@ -806,7 +831,7 @@ def test_frozen_gateway_service_uses_headless_upstream(tmp_path: Path) -> None:
     fake_server.server_close.assert_called_once_with()
 
 def test_browser_host_ready_adopts_compatible_existing_launcher(tmp_path: Path):
-    cfg = CLIConfig(workspace=tmp_path, openai_api_key="none")
+    cfg = CLIConfig(workspace=tmp_path, openai_api_key="none", model="sentra/chatgpt-web/gpt-6")
     client = ModelClient(cfg)
     exe = tmp_path / "Codex Web GPT.exe"
     helper = tmp_path / "browser-helper.cjs"
@@ -833,8 +858,8 @@ def test_browser_host_ready_adopts_compatible_existing_launcher(tmp_path: Path):
     response.__exit__.return_value = False
     with patch.object(client, "_browser_descriptor_path", return_value=descriptor), patch.object(
         client, "_browser_host_executable_path", return_value=exe
-    ), patch.object(client, "_pid_running", return_value=True), patch(
-        "sentra_cli.client.urllib.request.urlopen", return_value=response
+    ), patch.object(client, "_pid_running", return_value=True), patch.object(
+        client, "_provider_http", return_value=response
     ):
         assert client._browser_host_ready() is True
 
@@ -903,10 +928,12 @@ def test_one_shot_returns_zero_when_provider_succeeds(tmp_path: Path) -> None:
 
     fake_repl = MagicMock()
     fake_repl.agent.client.last_error = None
+    fake_repl.run_one_shot.return_value = 0
     with patch("sentra_cli.__main__.SentraREPL", return_value=fake_repl):
         result = cli_main.main(["--workspace", str(tmp_path), "-p", "Ping"])
 
     assert result == 0
+    fake_repl.run_one_shot.assert_called_once_with("Ping")
 
 def test_maestri_orchestration_intent_is_explicit_and_conservative() -> None:
     assert SentraAgent.wants_maestri_orchestration(
@@ -1263,7 +1290,7 @@ def test_responses_stream_enforces_absolute_deadline(tmp_path: Path) -> None:
     cfg = CLIConfig(
         workspace=tmp_path,
         openai_api_key="none",
-        timeout_s=55.0,
+        timeout_s=55.0, model="sentra/chatgpt-web/gpt-6",
     )
     client = ModelClient(cfg)
 
@@ -1277,7 +1304,7 @@ def test_responses_stream_enforces_absolute_deadline(tmp_path: Path) -> None:
         def __iter__(self):
             yield b'event: response.heartbeat\n'
 
-    with patch("sentra_cli.client.urllib.request.urlopen", return_value=FakeResponse()), patch(
+    with patch.object(client, "_provider_http", return_value=FakeResponse()), patch(
         "sentra_cli.client.time.monotonic",
         side_effect=[100.0, 156.0],
     ), patch.object(
@@ -1292,7 +1319,7 @@ def test_responses_stream_enforces_absolute_deadline(tmp_path: Path) -> None:
     assert str(interrupt.call_args.args[0]).startswith("sentra-cli-turn-")
 
 def test_chatgpt_web_rejected_preflight_error_is_concise_and_not_uncertain(tmp_path: Path) -> None:
-    cfg = CLIConfig(workspace=tmp_path, openai_api_key="none")
+    cfg = CLIConfig(workspace=tmp_path, openai_api_key="none", model="sentra/chatgpt-web/gpt-6")
     client = ModelClient(cfg)
 
     class Response:
@@ -1309,7 +1336,7 @@ def test_chatgpt_web_rejected_preflight_error_is_concise_and_not_uncertain(tmp_p
                    b'{"code":"chatgpt_model_controls_unavailable",'
                    b'"message":"Think-only composer has no model picker"}}}\n')
 
-    with patch("sentra_cli.client.urllib.request.urlopen", return_value=Response()):
+    with patch.object(client, "_provider_http", return_value=Response()):
         with pytest.raises(Exception) as error:
             list(client._responses_stream([{"role": "user", "content": "test"}], cfg.model))
     assert "HTTP 400" in str(error.value)

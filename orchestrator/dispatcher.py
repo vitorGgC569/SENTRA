@@ -249,3 +249,19 @@ class Orchestrator:
 
         self.state.round_number += 1
         self.state.phase = Phase.ANALYZE
+
+
+def central_effect_admission(authority, observations=None, *, placement="host", guest_process=None, root=None):
+    """Bind providers and CLIs before an effect. Does not send a prompt."""
+    from .providers.fleet_admission import admit_fleet, place_execution
+
+    admitted = admit_fleet(authority, observations, root=root)
+    admitted["placement"] = place_execution(placement, guest_process)
+    return admitted
+
+
+def reconcile_coordinator_trio(admission, children, coordinator_receipt, **kwargs):
+    """Apply the trio closure. The legacy browser loop does not call this."""
+    from .providers.trio_orchestration import reconcile_trio
+
+    return reconcile_trio(admission, children, coordinator_receipt, **kwargs)

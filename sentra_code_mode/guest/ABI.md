@@ -50,9 +50,11 @@ are guest-memory offsets. Guest heap buffers are reset per run
   (raw result JSON; user code applies `JSON.parse`). Args serialized via the
   engine's own `JSON.stringify`; unserializable args (cycles, functions) raise
   `RangeError` before any host contact. Name charset enforced in C.
-- `Math.random` / `Date.now` throw `RangeError("nondeterministic API disabled")`.
-- No `import`/`require`/modules, no std/os/workers/timers/fetch, no `eval`
-  beyond the single host-driven `eval_source` entry.
+- `Math.random` throws `RangeError("nondeterministic API disabled")`; `Date`,
+  `Atomics` and `SharedArrayBuffer` are unavailable.
+- No host module loader, `require`, std/os/workers/timers/fetch or host-side
+  Python/Node evaluation. ECMAScript evaluation inside the guest stays within
+  the same bounded WASM store and cannot acquire another host surface.
 
 ## Bounds mapping (ResourceLimits → guest)
 
@@ -61,4 +63,5 @@ by the engine); `cpu_milliseconds` → actual worker CPU accounting
 (Windows GetThreadTimes / POSIX pthread CPU clock) + epoch interruption;
 `wall_milliseconds` → host epoch/watchdog (guest has no clock by design);
 `max_source_bytes`/`max_result_bytes`/`max_tool_calls`/`max_arg_bytes` →
-`configure()` + C checks; stack fixed at 256 KiB via `configure`.
+`configure()` + C checks; JS stack fixed at 256 KiB via `configure`, inside a
+512 KiB C linear stack. The latter includes native frames outside JS execution.

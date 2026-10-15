@@ -7,6 +7,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
+#include <wasi/api.h>
 #include "sentra_guest_platform.h"
 
 extern unsigned char __heap_base;
@@ -77,3 +78,24 @@ int clock_gettime(clockid_t id, struct timespec *value) {
 }
 char *getenv(const char *name) { (void)name; return 0; }
 void abort(void) { __builtin_trap(); }
+
+/* Static libc can retain clock/stdio fallback branches even when the guest
+ * only uses memory formatting. Intercept them before linking WASI wrappers:
+ * an attempted clock or descriptor access traps locally, never calls a host.
+ * The post-link ABI verifier still rejects every WASI import.
+ */
+__wasi_errno_t __wrap___wasi_clock_time_get(__wasi_clockid_t id,
+        __wasi_timestamp_t precision, __wasi_timestamp_t *time) {
+    (void)id; (void)precision; (void)time; __builtin_trap();
+}
+__wasi_errno_t __wrap___wasi_fd_close(__wasi_fd_t fd) {
+    (void)fd; __builtin_trap();
+}
+__wasi_errno_t __wrap___wasi_fd_seek(__wasi_fd_t fd, __wasi_filedelta_t offset,
+        __wasi_whence_t whence, __wasi_filesize_t *position) {
+    (void)fd; (void)offset; (void)whence; (void)position; __builtin_trap();
+}
+__wasi_errno_t __wrap___wasi_fd_write(__wasi_fd_t fd,
+        const __wasi_ciovec_t *buffers, size_t count, size_t *written) {
+    (void)fd; (void)buffers; (void)count; (void)written; __builtin_trap();
+}

@@ -1,9 +1,11 @@
-"""Pinned QuickJS artifact configuration (env-based, explicit unavailable).
+"""Pinned QuickJS configuration from operator env or frozen build selection.
 
 Owner: Pacto. The audited ``quickjs.wasm`` + CycloneDX SBOM are distributed by
 the release pipeline (Vitra owns manifests/distribution); this module only
 describes WHERE the host expects them and fails explicitly when they are
-absent or unpinned. No download, no fetch, no default bytes: an unconfigured
+absent or unpinned. Frozen builds can carry approved installed-artifact hashes;
+they never trust a workspace/sibling manifest as their own trust anchor.
+No download, no fetch, no default bytes: an unconfigured
 engine reports UNAVAILABLE with remediation, never silent deny.
 
 Expected host configuration (operator-set, never chat/model-supplied):
@@ -50,11 +52,32 @@ def load_artifact_from_env() -> QuickJSArtifact:
         sbom_sha256=os.environ["SENTRA_QUICKJS_SBOM_SHA256"].strip().lower())
 
 
+def load_artifact() -> QuickJSArtifact:
+    """Explicit operator pins take precedence; otherwise use frozen build pins.
+
+    A partial operator configuration is an error, never permission to choose a
+    different engine/artifact. Source checkouts remain explicit configuration.
+    Installed pins do not enable Code Mode or create tool/operation grants.
+    """
+    if any(os.environ.get(key) for key in _ENV):
+        return load_artifact_from_env()
+    from sentra_remote.runtime_payload import load_installed_component
+    try:
+        component = load_installed_component('quickjs')
+        component.file('manifest', maximum=1024 * 1024)
+        wasm = component.file('wasm', maximum=32 * 1024 * 1024)
+        sbom = component.file('sbom', maximum=1024 * 1024)
+        return QuickJSArtifact(str(wasm), str(sbom), component.files[component.entrypoints['wasm']],
+                               component.files[component.entrypoints['sbom']])
+    except (OSError, ValueError, RuntimeError) as error:
+        raise CodeModeUnavailable('Pinned installed QuickJS unavailable: ' + type(error).__name__) from error
+
+
 def build_admission(*, limits: ResourceLimits | None = None):
     """Admission bound to env pins when present, else explicitly unconfigured."""
     from . import QuickJSWasmAdmission
     try:
-        artifact = load_artifact_from_env()
+        artifact = load_artifact()
     except CodeModeUnavailable:
         return QuickJSWasmAdmission(limits=limits, artifact=None)
     return QuickJSWasmAdmission(limits=limits, artifact=artifact)

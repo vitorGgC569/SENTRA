@@ -36,11 +36,18 @@ class ShellGeneratedMedia:
                     bound['principal_id']) == (self.owner,message['run_id'],message['work_item_id'],
                                                 message['operation_id'],dot['agent_id']):
                     from native_bridge.web_generated_assets import WebGeneratedAssets
-                    manifests.extend(WebGeneratedAssets(self.control).for_job(
+                    native = WebGeneratedAssets(self.control)
+                    decision = native.verdict(
                         owner=self.owner, run_id=message['run_id'],
                         work_item_id=message['work_item_id'], operation_id=message['operation_id'],
                         job_id=web_turn['job_id'], conversation_id=bound['remote_conversation_id'],
-                        message_id=bound['answer_message_id']))
+                        message_id=bound['answer_message_id'])
+                    if decision.get('generated_asset_verified') is True and decision.get('success') is True:
+                        manifests.extend(native.for_job(
+                            owner=self.owner, run_id=message['run_id'],
+                            work_item_id=message['work_item_id'], operation_id=message['operation_id'],
+                            job_id=web_turn['job_id'], conversation_id=bound['remote_conversation_id'],
+                            message_id=bound['answer_message_id']))
         with closing(self.control.store.connect('shell')) as db, db:
             for manifest in manifests:
                 db.execute('INSERT OR IGNORE INTO canvas_shell_generated_media VALUES(?,?,?,?,?,?,?)',
@@ -52,9 +59,21 @@ class ShellGeneratedMedia:
         with closing(self.control.store.connect('shell')) as db:
             rows = db.execute('SELECT message_id,protected_manifest FROM canvas_shell_generated_media '
                 'WHERE owner=? AND project_id=? AND conversation_id=?', (self.owner,project_id,conversation_id)).fetchall()
+        decoded = [(row['message_id'], _decode(row['protected_manifest'])) for row in rows]
+        hidden = set()
+        native_ids = [manifest.get('asset_id') for _message_id, manifest in decoded
+                      if isinstance(manifest, dict) and str(manifest.get('asset_id', '')).startswith('web-native-')]
+        if native_ids:
+            try:
+                from native_bridge.web_generated_assets import WebGeneratedAssets
+                hidden = WebGeneratedAssets(self.control).fenced_asset_ids(self.owner, native_ids)
+            except Exception:
+                hidden = set(native_ids)
         by_message = {}
-        for row in rows:
-            by_message.setdefault(row['message_id'], []).append(_decode(row['protected_manifest']))
+        for message_id, manifest in decoded:
+            if isinstance(manifest, dict) and manifest.get('asset_id') in hidden:
+                continue
+            by_message.setdefault(message_id, []).append(manifest)
         return [{**item, 'generated_assets': by_message[item['message_id']]} if item['message_id'] in by_message else item for item in items]
 
     def read(self, project_id, space_id, conversation_id, message_id, asset_id):

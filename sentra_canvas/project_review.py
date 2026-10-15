@@ -383,6 +383,122 @@ def project_revision(root: str | Path, relative: str) -> dict:
             "size_bytes": size, "read_only": True, "grants_created": False}
 
 
+def _win32_file_api():
+    """kernel32 entry points for a local file index. Not the process-wide windll."""
+    api = getattr(_win32_file_api, "api", None)
+    if api is not None:
+        return api
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileTime(ctypes.Structure):
+        _fields_ = (("dwLowDateTime", wintypes.DWORD), ("dwHighDateTime", wintypes.DWORD))
+
+    class _ByHandleFileInformation(ctypes.Structure):
+        _fields_ = (
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", _FileTime),
+            ("ftLastAccessTime", _FileTime),
+            ("ftLastWriteTime", _FileTime),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+        )
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetDriveTypeW.argtypes = (wintypes.LPCWSTR,)
+    kernel.GetDriveTypeW.restype = wintypes.UINT
+    kernel.CreateFileW.argtypes = (
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+        wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    )
+    kernel.CreateFileW.restype = ctypes.c_void_p
+    kernel.GetFileInformationByHandle.argtypes = (
+        ctypes.c_void_p, ctypes.POINTER(_ByHandleFileInformation),
+    )
+    kernel.GetFileInformationByHandle.restype = wintypes.BOOL
+    kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+    api = (kernel, _ByHandleFileInformation, ctypes.c_void_p(-1).value)
+    _win32_file_api.api = api
+    return api
+
+
+def _network_volume(path: Path) -> bool:
+    """True when a handle open would address a UNC or remote drive."""
+    if os.name != "nt":
+        return False
+    text = os.fspath(path).replace("/", "\\")
+    if text.upper().startswith("\\\\?\\UNC\\"):
+        return True
+    if text.startswith("\\\\") and not text.startswith("\\\\?\\"):
+        return True
+    drive = Path(text).drive
+    if not drive:
+        return False
+    if drive.startswith("\\\\"):
+        return True
+    root = drive if drive.endswith("\\") else drive + "\\"
+    kernel, _information, _invalid = _win32_file_api()
+    return kernel.GetDriveTypeW(root) == 4
+
+
+def _windows_file_index(path: Path) -> tuple[int, int] | None:
+    """NT file index via GetFileInformationByHandle, or None when it is absent.
+
+    The handle is opened with FILE_FLAG_OPEN_REPARSE_POINT so a link or junction
+    is not followed, and FILE_FLAG_OPEN_NO_RECALL so remote file data is not
+    pulled. Desired access is metadata only. A zero index is not an identity.
+    """
+    if os.name != "nt" or _network_volume(path):
+        return None
+    import ctypes
+    kernel, information, invalid = _win32_file_api()
+    # Access 0 + backup semantics reads the index without file bytes.
+    handle = kernel.CreateFileW(
+        os.fspath(path),
+        0,
+        0x1 | 0x2 | 0x4,  # FILE_SHARE_READ | WRITE | DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x00100000 | 0x00200000 | 0x02000000,  # NO_RECALL | OPEN_REPARSE_POINT | BACKUP_SEMANTICS
+        None,
+    )
+    if not handle or handle == invalid:
+        return None
+    try:
+        found = information()
+        if not kernel.GetFileInformationByHandle(handle, ctypes.byref(found)):
+            return None
+        index = (int(found.nFileIndexHigh) << 32) | int(found.nFileIndexLow)
+        if index == 0:
+            return None
+        return (int(found.dwVolumeSerialNumber), index)
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _rename_identity(path: Path, info) -> tuple[int, int] | None:
+    """(device, index) that can prove a same-directory rename, or None.
+
+    Zero is never an identity, and file bytes are never hashed to invent one.
+    On Windows, DirEntry.stat(follow_symlinks=False) leaves st_ino at 0. os.stat's
+    FileId is a different number, so both the stored key and the later scan use
+    nFileIndexHigh/Low. If that index is missing, the caller keeps the refusal.
+    """
+    if os.name == "nt":
+        # Enumeration leaves st_ino at 0, which is not an identity. os.stat's
+        # non-zero FileId is not nFileIndex, so both observations use the handle.
+        return _windows_file_index(path)
+    inode = int(getattr(info, "st_ino", 0) or 0)
+    if not inode:
+        return None
+    return (int(info.st_dev), inode)
+
+
 class ProjectRevisionWatcher:
     """Debounced, per-instance synchronized read-only SHA watcher.
 
@@ -404,6 +520,8 @@ class ProjectRevisionWatcher:
         self.pending_since = None
         self._last_now = None
         self._closed = False
+        self._watched = False
+        self._identity = None
         self._lock = threading.RLock()
 
     def close(self) -> None:
@@ -415,14 +533,18 @@ class ProjectRevisionWatcher:
         """Recover a rename in the same bounded directory by file identity.
 
         Names alone and matching text hashes cannot prove a rename. Never follow
-        links, recurse, search other folders or expose protected entries.
+        links, recurse, search other folders or expose protected entries. A
+        Windows st_ino of 0 is not an identity; a missing NT file index refuses
+        the rename.
         """
         try:
             _base, target = confined(self.root, self.relative)
         except FileNotFoundError:
-            previous = getattr(self, "_identity", None)
-            if not previous:
+            if not self._watched:
                 raise
+            previous = self._identity
+            if not previous:
+                raise FileNotFoundError("watched file disappeared; rename cannot be established")
             relative = Path(self.relative)
             base, parent = confined(self.root, str(relative.parent) if str(relative.parent) != "." else "")
             candidates = []
@@ -437,7 +559,7 @@ class ProjectRevisionWatcher:
                             or path.suffix.lower() not in TEXT_EXT | {".pdf"}):
                         continue
                     info = entry.stat(follow_symlinks=False)
-                    if (info.st_dev, info.st_ino) == previous and info.st_ino:
+                    if _rename_identity(path, info) == previous:
                         candidates.append(path.relative_to(base).as_posix())
             if len(candidates) != 1:
                 raise FileNotFoundError("watched file disappeared; rename cannot be established")
@@ -445,8 +567,9 @@ class ProjectRevisionWatcher:
             self.relative = candidates[0]
             revision = project_revision(self.root, self.relative)
             return revision, old
-        info = target.stat()
-        self._identity = (info.st_dev, info.st_ino)
+        info = target.stat(follow_symlinks=False)
+        self._watched = True
+        self._identity = _rename_identity(target, info)
         return project_revision(self.root, self.relative), None
 
     def poll(self, *, now: float | None = None) -> dict:

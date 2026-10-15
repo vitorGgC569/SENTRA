@@ -193,6 +193,17 @@ async def _configure_executor(host, *, workspace_id, workspace_root, agent_id, k
         if set(profile) & {'capability_id', 'host_paths', 'paths'}:
             raise ValueError('host_owns_hcs_paths_and_capability')
         profile = dict(profile)
+        runtime = config.pop('runtime', None)
+        native_fields = {'bridge_executable', 'bridge_sha256'}
+        if runtime is not None and runtime != 'installed':
+            raise ValueError('unknown_hcs_runtime_selection')
+        if runtime == 'installed' and native_fields & set(profile):
+            raise ValueError('installed_hcs_selection_cannot_override_native_pins')
+        if runtime == 'installed' or not native_fields & set(profile):
+            from sentra_remote.runtime_payload import installed_hcs_configuration
+            selected = installed_hcs_configuration()
+            profile.update(selected); persisted.pop('runtime', None)
+            persisted['binding'].update(selected)
         host_roots = config.pop('host_read_roots')
         host_paths = AuthorizedPaths(tuple(host_roots), ())
         profile['commands'] = tuple(HCSCommand(**value) for value in profile.get('commands', []))

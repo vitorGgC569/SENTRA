@@ -28,7 +28,8 @@ def configure_taskbar_identity() -> bool:
     return setter(APP_USER_MODEL_ID) == 0
 
 
-def _window_taskbar_properties(hwnd, source):
+def _window_taskbar_properties(hwnd, source, *, app_id=APP_USER_MODEL_ID,
+                               display_name="SENTRA", relaunch_command=None):
     """Override the packaged Python identity on this HWND, including pin artwork.
 
     A process AppUserModelID alone does not replace the Windows Store Python
@@ -66,11 +67,12 @@ def _window_taskbar_properties(hwnd, source):
     release = ctypes.WINFUNCTYPE(ctypes.c_ulong, ctypes.c_void_p)(vtable[2])
     root = Path(__file__).resolve().parents[1]
     arguments = [sys.executable] if getattr(sys, "frozen", False) else [sys.executable, "-B", "-m", "sentra_canvas"]
-    command = subprocess.list2cmdline([*arguments, "--root", str(root), "--ui", "native", "--surface", "shell-home"])
+    command = relaunch_command or subprocess.list2cmdline([*arguments, "--ui", "auto"] if getattr(sys, "frozen", False)
+                 else [*arguments, "--root", str(root), "--ui", "native", "--surface", "shell-home"])
     fmtid = guid("9f4c2855-9f79-4b39-a8d0-e1d42de1d5f3")
     try:
         # All three relaunch properties must accompany a custom icon resource.
-        for pid, text in ((2, command), (3, str(source) + ",0"), (4, "SENTRA"), (5, APP_USER_MODEL_ID)):
+        for pid, text in ((2, command), (3, str(source) + ",0"), (4, display_name), (5, app_id)):
             key = PROPERTYKEY(fmtid, pid)
             buffer = ctypes.create_unicode_buffer(text)
             value = PROPVARIANT()

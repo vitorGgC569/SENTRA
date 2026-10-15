@@ -42,9 +42,9 @@ class CanvasCodeMachine:
                 raise ValueError("reviewed QuickJS artifact pins required")
             artifact = QuickJSArtifact(**artifact)
         else:
-            from sentra_code_mode.artifact_config import load_artifact_from_env
+            from sentra_code_mode.artifact_config import load_artifact
             try:
-                artifact = load_artifact_from_env()
+                artifact = load_artifact()
             except CodeModeUnavailable:
                 artifact = None
         limits = ResourceLimits(**configuration.get("limits", {}))

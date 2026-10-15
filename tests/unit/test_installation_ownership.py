@@ -125,6 +125,8 @@ def test_failed_rollback_rename_does_not_delete_original(tmp_path, monkeypatch):
 def test_first_copy_interruption_keeps_recoverable_ownership(tmp_path, monkeypatch):
     root = tmp_path / "Commander"
     state = tmp_path / "state"
+    monkeypatch.setattr(installer, "check_install_payload", lambda _: {"ok": True})
+    monkeypatch.setattr(installer, "prepare_tunnel_archive", lambda *_: tmp_path / "fixture.zip")
     def interrupted(path):
         (path / "sentra-cli.exe").write_bytes(b"partial")
         raise OSError("disk full")
@@ -138,5 +140,5 @@ def test_first_copy_interruption_keeps_recoverable_ownership(tmp_path, monkeypat
     monkeypatch.setattr(installer, "_stop_installed_processes", lambda path:stopped.append(path))
     with pytest.raises(OSError, match="disk full"):
         installer.install(install_dir=root, state_dir=state, launch=False)
-    assert stopped == [root.resolve()]
+    assert stopped == []  # Repair never terminates existing user sessions.
     assert installer._validate_sentra_install(root)["installation_id"] == identity

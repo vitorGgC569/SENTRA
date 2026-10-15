@@ -307,7 +307,7 @@ class Store:
 
     def create_terminal(self,ws,name,shell):
         validated_name(name)
-        if shell not in ("powershell","pwsh","cmd","sentra-cli","codex","opencode"):
+        if shell not in ("powershell","pwsh","cmd","sentra-cli","codex","opencode","grok"):
             raise ValueError("shell not allowed")
         with self.tx():
             self._ws(ws)

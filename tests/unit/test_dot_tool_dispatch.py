@@ -367,9 +367,104 @@ def test_coordinator_consolidation(shell_setup, monkeypatch):
         coordinator_work_item_id=ctx["wid"],
         child_work_item_ids=[child_wid],
     )
-    assert summary["status"] == "consolidated"
-    assert summary["completed_child_work_item_ids"] == [child_wid]
-
-    # Verify child work item transitioned to COMPLETED
+    assert summary["status"] == "review_required"
+    assert summary["completed_child_work_item_ids"] == []
+    assert summary["finalized"] is False
     final_wi = control.work_item_info(child_wid, owner)
-    assert final_wi["state"] == "COMPLETED"
+    assert final_wi["state"] == "IN_REVIEW"
+
+
+def test_guest_dispatch_uses_guestcontrol_only_with_dot_credentials(shell_setup, monkeypatch):
+    tool_cap = "canvas.coordinator.dot_tool_dispatch.sentra_cli"
+    ctx = _setup_coordinator_and_worker(shell_setup, monkeypatch, [tool_cap])
+    control, owner = ctx["control"], ctx["owner"]
+    control.authorization_grant(
+        owner, principal_type="agent", principal_id=ctx["root"]["agent_id"],
+        capability=tool_cap, scope_type="work_item", scope_id=ctx["wid"],
+    )
+
+    def boom(*_args, **_kwargs):
+        raise AssertionError("host execution")
+
+    monkeypatch.setattr("sentra_canvas.dot_tool_runner.subprocess.run", boom)
+    guest_process = {"verified": True, "pid": 7, "evidence_sha256": "ab" * 32}
+    common = dict(
+        project_id=ctx["pid"], conversation_id=ctx["cid"], run_id=ctx["run_id"],
+        work_item_id=ctx["wid"], parent_operation_id=ctx["oid"],
+        agent_id=ctx["root"]["agent_id"], process_alive=lambda: True,
+        connected_agents=lambda _p, _a: [ctx["worker"]["agent_id"]],
+        runner=boom, placement="guest", guest_process=guest_process,
+    )
+    intent = {
+        "kind": "dot_tool_dispatch",
+        "tool": "sentra-cli",
+        "target_dot_id": ctx["worker"]["dot_id"],
+        "instruction": "Inspect inside the guest",
+    }
+    blocked = execute_dot_tool_dispatch(
+        control, owner, intent=intent, request_key="guest-cred-block-" + uuid.uuid4().hex,
+        **common,
+    )
+    assert blocked["status"] == "uncertain"
+    assert blocked["tool_executed"] is False
+    assert blocked["execution_surface"] == "blocked"
+    assert blocked["claims_guest_execution"] is False
+    assert blocked["host_subprocess"] is False
+    assert blocked["receipt"]["evidence_source"] == "guest_executor_missing"
+
+    class BoomClient:
+        def guest_additions_runlevel(self, vm_id):
+            return "0"
+
+        def run(self, *parts, **kwargs):
+            raise AssertionError("unready guest channel was called: " + str(parts[:3]))
+
+    for vm_id in ("windows-installing", "owned-guest-vm"):
+        denied = execute_dot_tool_dispatch(
+            control, owner, intent=intent,
+            request_key="guest-windows-deny-" + vm_id[:8] + uuid.uuid4().hex,
+            vm_id=vm_id, username="sentra", password="dot-secret",
+            os_family="windows", virtualbox_client=BoomClient(), **common,
+        )
+        assert denied["status"] == "uncertain"
+        assert denied["tool_executed"] is False
+        assert denied["execution_surface"] == "blocked"
+        assert denied["claims_guest_execution"] is False
+        assert denied["host_subprocess"] is False
+        assert denied["physical_inference"] is False
+        assert denied["receipt"]["evidence_source"] == "guest_executor_missing"
+        assert denied["receipt"]["verified"] is False
+        assert "dot-secret" not in json.dumps(denied)
+
+    class FakeClient:
+        def __init__(self):
+            self.calls = []
+
+        def run(self, *parts, **kwargs):
+            assert parts[0] == "guestcontrol"
+            assert parts[1] == "owned-guest-vm"
+            assert "SENTRA-Dot-b1a7b4555800414f" not in parts
+            self.calls.append((parts, kwargs))
+            return "guestcontrol-stdout"
+
+    client = FakeClient()
+    ran = execute_dot_tool_dispatch(
+        control, owner, intent=intent, request_key="guest-cred-run-" + uuid.uuid4().hex,
+        vm_id="owned-guest-vm", username="sentra", password="dot-secret",
+        virtualbox_client=client, **common,
+    )
+    assert len(client.calls) == 1
+    parts, options = client.calls[0]
+    assert parts[:3] == ("guestcontrol", "owned-guest-vm", "run")
+    assert options["password"] == "dot-secret"
+    assert "dot-secret" not in parts
+    assert ran["execution_surface"] == "guest"
+    assert ran["claims_guest_execution"] is True
+    assert ran["host_subprocess"] is False
+    assert ran["physical_inference"] is False
+    assert ran["claims_success"] is False
+    assert ran["receipt"]["evidence_source"] == "guest_executor"
+    assert ran["receipt"]["live_model_verified"] is False
+    assert ran["receipt"]["guest_witness"] == "guestcontrol"
+    assert ran["receipt"]["vm_id"] == "owned-guest-vm"
+    assert ran["receipt"]["verified"] is False

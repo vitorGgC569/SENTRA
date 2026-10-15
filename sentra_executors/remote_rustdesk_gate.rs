@@ -3,6 +3,13 @@
 use std::{env, fs, path::PathBuf, sync::OnceLock, time::{Duration, SystemTime, UNIX_EPOCH}};
 use sha2::{Digest, Sha256};
 use serde::Deserialize;
+use hbb_common::anyhow;
+
+// Exported from the actual native library. Release validation uses this
+// bounded, side-effect-free probe as well as source/bundle hashes; the stock
+// RustDesk DLL cannot satisfy the SENTRA desktop-control contract.
+#[no_mangle]
+pub extern "C" fn sentra_desktop_control_abi_v1() -> u32 { 1 }
 
 #[derive(Clone, Deserialize)]
 struct Config {
@@ -36,7 +43,12 @@ pub fn bootstrap() {
     if args!=vec!["--connect".to_owned(),c.peer_id.clone()] { std::process::exit(93); }
     if !lease_active(&c) { std::process::exit(91); }
     // This is a native source addition, not a claim that stock CLI supports pinning.
-    *hbb_common::config::APP_HOME_DIR.write().unwrap()=c.profile.clone();
+    // Windows Config::path ignores APP_DIR/APP_HOME_DIR. Apply the reviewed
+    // storage and IPC override before any lazy Config store can initialize.
+    let ipc_scope=hex::encode(Sha256::digest(format!("{}:{}",c.session_id,c.scope_sha256).as_bytes()));
+    if hbb_common::config::set_sentra_owned_profile(&PathBuf::from(&c.profile),&ipc_scope).is_err() {
+        std::process::exit(94);
+    }
     std::thread::spawn(move || loop {
         if !lease_active(&c) { std::process::exit(92); }
         std::thread::sleep(Duration::from_millis(100));

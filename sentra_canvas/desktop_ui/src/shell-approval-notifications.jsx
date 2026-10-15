@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { BellRing, ShieldAlert } from 'lucide-react';
+import { canvasMaintenanceActive } from './shell-maintenance.js';
 
 // Owner-visible persisted requests. Neither polling nor mounting grants access.
-export function ShellApprovalNotifications({ bridge, projectId, onOpenConversation }) {
+export function ShellApprovalNotifications({ bridge, projectId, onOpenConversation, shellError = '' }) {
   const [items, setItems] = useState([]), [busy, setBusy] = useState(''), [error, setError] = useState('');
   const pendingKeys = useRef(new Map());
   const alive = useRef(true);
@@ -18,7 +19,9 @@ export function ShellApprovalNotifications({ bridge, projectId, onOpenConversati
       if (!projectId || document.hidden || loading) return;
       loading = true;
       try { await refresh(); if (alive.current) setError(''); }
-      catch (e) { if (alive.current) setError(e.message); }
+      catch (e) {
+        if (alive.current) setError(e.reauthorizing === true || e.maintenance === true || canvasMaintenanceActive() ? '' : e.message);
+      }
       finally { loading = false; }
     }
     void poll();
@@ -65,6 +68,6 @@ export function ShellApprovalNotifications({ bridge, projectId, onOpenConversati
         <button disabled={Boolean(busy)} onClick={() => onOpenConversation?.(item.conversation_id, item.space_id)}>Ver conversa</button>
       </div>
     </article>)}
-    {error && <p className="shell-error" role="alert">{error}</p>}
+    {error && error !== shellError && <p className="shell-error" role="alert">{error}</p>}
   </aside>;
 }

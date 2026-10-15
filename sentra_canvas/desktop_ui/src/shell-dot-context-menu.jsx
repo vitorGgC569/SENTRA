@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
 import { ArrowDown, ArrowUp, Layers, Pin, Pencil, ShieldAlert, Trash2 } from 'lucide-react';
 import { ActionMenu, Modal } from './primitives';
+import { DotFamilyControls } from './shell-dot-family.jsx';
+import { DotMascot } from './shell-mascot';
 
 export function ShellDotContextMenu({ dot, favorite, canMoveUp, canMoveDown, onEdit, onFavorite, onMove, onCanvas, onArchiveChange, archivedLocal = false, bridge, projectId, spaceId, children, className = '', ...rowProps }) {
   const [preflight, setPreflight] = useState(null), [busy, setBusy] = useState(false), [error, setError] = useState('');
@@ -76,15 +78,17 @@ export function ShellDotContextMenu({ dot, favorite, canMoveUp, canMoveDown, onE
     finally { setBusy(false); }
   }
   const items = [
-    { label: 'Editar Dot', icon: <Pencil size={15} />, action: onEdit },
+    { label: 'Editar Dot', icon: <Pencil size={15} />, action: () => { setMenuOpen(false); requestAnimationFrame(onEdit); } },
     ...(onCanvas ? [{ label: 'Abrir canvas', icon: <Layers size={15} />, action: onCanvas }] : []),
     { label: favorite ? 'Desafixar dos favoritos' : 'Fixar nos favoritos', icon: <Pin size={15} />, action: () => onFavorite(!favorite) },
     { label: 'Mover para cima', icon: <ArrowUp size={15} />, disabled: !canMoveUp, action: () => onMove('up') },
     { label: 'Mover para baixo', icon: <ArrowDown size={15} />, disabled: !canMoveDown, action: () => onMove('down') },
     { separator: true },
-    { label: archivedLocal ? 'Ver arquivo local' : 'Ver arquivamento local e remoção', icon: <Trash2 size={15} />, danger: true, action: inspectRemoval },
+    { label: archivedLocal ? 'Ver arquivo local' : 'Arquivamento e remoção…', icon: <Trash2 size={15} />, danger: true, action: inspectRemoval },
   ];
-  const menu = <ActionMenu label={'Opções de ' + dot.name} items={items} open={menuOpen} onOpenChange={setMenuOpen} />;
+  const menu = <ActionMenu label={'Opções de ' + dot.name} items={items} open={menuOpen} onOpenChange={setMenuOpen}
+    side={children ? 'right' : 'bottom'} sideOffset={children ? 24 : 10} align={children ? 'start' : 'end'} className="shell-dot-menu"
+    heading={<><DotMascot mascot={dot.mascot} identity={dot.agent_id} name={dot.name} size="nav" decorative /><span>{dot.name}<small>Gerenciar Dot</small></span></>} />;
   return <>
     {children ? <div className={className} {...rowProps}
       onContextMenu={event => { event.preventDefault(); setMenuOpen(true); }}
@@ -139,6 +143,7 @@ export function ShellDotContextMenu({ dot, favorite, canMoveUp, canMoveDown, onE
             <button type="button" disabled={busy || confirmName !== preflight.name}
               onClick={() => void updateLocalArchive('dot_archive_local')}>Arquivar somente no SENTRA</button>
           </> : <p>Arquivo local não disponível: {preflight.archive_blockers.join(', ')}.</p>}
+        <DotFamilyControls dot={dot} bridge={bridge} projectId={projectId} spaceId={spaceId} />
         <button type="button" disabled={busy} onClick={() => setPreflight(null)}>Fechar</button>
       </div>}
     </Modal>

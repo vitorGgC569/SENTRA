@@ -244,12 +244,14 @@ class AuthorizedPaths:
         for root in self.read_roots + self.write_roots + self.excluded_roots:
             if not isinstance(root, str) or not Path(root).is_absolute():
                 raise ValueError("absolute_authorized_roots_required")
-            if not Path(root).is_dir():
+            from sentra_remote.windows_paths import filesystem_path
+            if not Path(filesystem_path(Path(root))).is_dir():
                 raise ValueError("authorized_root_must_exist")
         # Resolve once: later symlink/junction substitutions cannot enlarge scope.
-        object.__setattr__(self, "read_roots", tuple(str(Path(p).resolve()) for p in self.read_roots))
-        object.__setattr__(self, "write_roots", tuple(str(Path(p).resolve()) for p in self.write_roots))
-        object.__setattr__(self, "excluded_roots", tuple(str(Path(p).resolve()) for p in self.excluded_roots))
+        from sentra_remote.windows_paths import resolved_path
+        object.__setattr__(self, "read_roots", tuple(str(resolved_path(Path(p))) for p in self.read_roots))
+        object.__setattr__(self, "write_roots", tuple(str(resolved_path(Path(p))) for p in self.write_roots))
+        object.__setattr__(self, "excluded_roots", tuple(str(resolved_path(Path(p))) for p in self.excluded_roots))
 
     def resolve(self, value: str, *, write: bool = False) -> Path:
         if not isinstance(value, str) or not Path(value).is_absolute():
@@ -257,23 +259,25 @@ class AuthorizedPaths:
         # Block Windows ADS/device paths; UNC is permitted only via an explicit root.
         if ':' in value.replace('\\', '/')[2:] or value.startswith(('\\\\?\\', '\\\\.\\')):
             raise ValueError("device_or_stream_path_denied")
-        path = Path(value).resolve(strict=not write)
+        from sentra_remote.windows_paths import filesystem_path, resolved_path
+        path = resolved_path(Path(value), strict=not write)
         if any(path.is_relative_to(Path(root)) for root in self.excluded_roots):
             raise ValueError("path_inside_protected_host_storage")
         roots = self.write_roots if write else self.read_roots
         if not any(path.is_relative_to(Path(root)) for root in roots):
             raise ValueError("path_outside_authorized_roots")
         if write:
-            if not path.parent.is_dir() or path.is_dir():
+            if not Path(filesystem_path(path.parent)).is_dir() or Path(filesystem_path(path)).is_dir():
                 raise ValueError("output_parent_required")
-        elif not path.is_file():
+        elif not Path(filesystem_path(path)).is_file():
             raise ValueError("input_file_required")
         return path
 
 
 def digest(path: Path) -> str:
+    from sentra_remote.windows_paths import filesystem_path
     h = hashlib.sha256()
-    with path.open('rb') as stream:
+    with Path(filesystem_path(path)).open('rb') as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b''):
             h.update(block)
     return h.hexdigest()

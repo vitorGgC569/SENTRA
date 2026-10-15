@@ -10,6 +10,29 @@ from contextlib import contextmanager
 import os
 
 DOT_WINDOW_MUTEX = "Local\\SENTRA.Dot.Native.Window"
+WINDOW_OWNER_PROPERTY = "SENTRA.Dot.Window.OwnerPID"
+
+
+def mark_native_window(window) -> bool:
+    """Identify this display for reactivation without an optional psutil import."""
+    if os.name != 'nt':
+        return False
+    import ctypes
+    from ctypes import wintypes
+    user = ctypes.windll.user32
+    user.SetPropW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.HANDLE]
+    user.SetPropW.restype = wintypes.BOOL
+    return bool(user.SetPropW(window.native.Handle.ToInt64(), WINDOW_OWNER_PROPERTY, os.getpid()))
+
+
+def unmark_native_window(window) -> None:
+    if os.name == 'nt':
+        import ctypes
+        from ctypes import wintypes
+        user = ctypes.windll.user32
+        user.RemovePropW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+        user.RemovePropW.restype = wintypes.HANDLE
+        user.RemovePropW(window.native.Handle.ToInt64(), WINDOW_OWNER_PROPERTY)
 
 
 def dot_window_identity() -> dict:
@@ -22,15 +45,13 @@ def focus_existing_window() -> bool:
         return False
     import ctypes
     from ctypes import wintypes
-    try:
-        import psutil
-    except ImportError:
-        return False
     user = ctypes.windll.user32
     user.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
     user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user.GetWindowTextLengthW.argtypes = [wintypes.HWND]
     user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user.GetPropW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+    user.GetPropW.restype = wintypes.HANDLE
     found = []
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -47,14 +68,22 @@ def focus_existing_window() -> bool:
             return True
         pid = wintypes.DWORD()
         user.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        try:
-            process = psutil.Process(pid.value)
-            arguments = " ".join(process.cmdline()).casefold()
-            image_name = process.name().casefold()
-            owned = ("sentra_canvas" in arguments or
-                     image_name in {"sentra-canvas.exe", "sentra-desktop.exe"})
-        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
-            owned = False
+        owned = user.GetPropW(hwnd, WINDOW_OWNER_PROPERTY) == pid.value
+        if not owned:
+            # Compatibility for older displays that predate the window marker.
+            try:
+                import psutil
+            except ImportError:
+                owned = False
+            else:
+                try:
+                    process = psutil.Process(pid.value)
+                    arguments = " ".join(process.cmdline()).casefold()
+                    image_name = process.name().casefold()
+                    owned = ("sentra_canvas" in arguments or
+                             image_name in {"sentra-canvas.exe", "sentra-desktop.exe"})
+                except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                    owned = False
         if owned:
             found.append(hwnd)
             return False

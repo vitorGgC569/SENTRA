@@ -128,4 +128,34 @@ def dispatch_shell_turn(control: Any, jobs: Any, drafts: Any, web: Any, *,
                          "sha256": [str(item.get("sha256")) for item in attachments
                                     if isinstance(item, dict)]},
             "web_uploaded": False, "requires_operator_reconciliation": False,
-            "automatic_resend": False}
+            "automatic_resend": False, "generated_asset_verified": False,
+            "admission_status": "ADMITTED", "image_bytes_verified": False}
+
+
+def project_native_image(verdict):
+    """Canvas-facing projection. Admission and an uncertain transfer are not delivery."""
+    if not isinstance(verdict, dict):
+        raise ValueError("native image verdict required")
+    status = verdict.get("status")
+    base = {"automatic_resend": False, "generated_asset_verified": False, "success": False, "assets": []}
+    if status == "UNCERTAIN_NO_RESEND":
+        return {**base, "status": "UNCERTAIN_NO_RESEND", "reason": verdict.get("reason")}
+    if status != "VERIFIED" or verdict.get("generated_asset_verified") is not True or verdict.get("success") is not True:
+        return {**base, "status": "ADMITTED"}
+    assets = verdict.get("assets")
+    if not isinstance(assets, list) or not assets:
+        return {**base, "status": "ADMITTED"}
+    projected = []
+    for item in assets:
+        if not isinstance(item, dict):
+            return {**base, "status": "ADMITTED"}
+        mime, count, digest = item.get("mime_type"), item.get("byte_length"), item.get("sha256")
+        if (mime not in _IMAGE_MIMES or type(count) is not int or count < 1
+                or not isinstance(digest, str) or not _SHA.fullmatch(digest)):
+            return {**base, "status": "ADMITTED"}
+        projected.append({"asset_id": item.get("asset_id"), "mime_type": mime,
+                          "byte_length": count, "sha256": digest})
+    return {"status": "VERIFIED", "generated_asset_verified": True, "automatic_resend": False,
+            "success": True, "assets": projected,
+            "run_id": verdict.get("run_id"), "work_item_id": verdict.get("work_item_id"),
+            "operation_id": verdict.get("operation_id")}

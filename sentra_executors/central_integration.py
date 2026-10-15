@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
 from sentra_mcp.services.control_plane import ControlPlaneService
@@ -220,12 +221,12 @@ class CentralExecutorFactory:
                 or request.capability_id not in (item.get("required_capabilities") or [])):
             raise AuthorizationRequired("run/work_item/capability binding not active")
 
-    async def submit(self, *, run_id: str, request: OperationRequest) -> OperationResult:
+    async def submit(self, *, run_id: str, request: OperationRequest, effect_authorize=None) -> OperationResult:
         from .input_control import InputBoundPolicy
         if isinstance(self.policy, InputBoundPolicy):
             with self.policy.scope(request):
-                return await self._submit_admitted(run_id=run_id, request=request)
-        return await self._submit_admitted(run_id=run_id, request=request)
+                return await self._submit_admitted(run_id=run_id, request=request, effect_authorize=effect_authorize)
+        return await self._submit_admitted(run_id=run_id, request=request, effect_authorize=effect_authorize)
 
     async def submit_human_input(self, *, run_id: str, request: OperationRequest,
                                  workspace_id: str, expected_epoch: int) -> OperationResult:
@@ -239,10 +240,32 @@ class CentralExecutorFactory:
                 machine_id=request.machine_id, resource_id=resource, expected_epoch=expected_epoch):
             return await self.submit(run_id=run_id, request=request)
 
-    async def _submit_admitted(self, *, run_id: str, request: OperationRequest) -> OperationResult:
+    async def _submit_admitted(self, *, run_id: str, request: OperationRequest,
+                               effect_authorize=None) -> OperationResult:
         """Only durable reservation can admit effect; no legacy unsafe fallback."""
         self._validate_link(run_id=run_id, request=request)
-        if self.policy(request).allowed is not True:
+        if effect_authorize is not None and not callable(effect_authorize):
+            raise ValueError("trusted effect authority must be callable")
+        def policy(candidate):
+            decision = self.policy(candidate)
+            if decision.allowed is not True or effect_authorize is None:
+                return decision
+            try:
+                # Host composition only. The callback is never deserialized
+                # from OperationRequest.arguments and cannot grant machine
+                # permissions; it can only further restrict this effect.
+                additional = effect_authorize()
+                if inspect.isawaitable(additional):
+                    if inspect.iscoroutine(additional):
+                        additional.close()
+                    raise TypeError("physical effect authority must be synchronous")
+                if additional is not None and additional is not True:
+                    raise AuthorizationRequired("additional host authority did not allow the effect")
+            except Exception:
+                from sentra_runtime.contracts import PolicyDecision
+                return PolicyDecision(False, "additional host effect authority was revoked")
+            return decision
+        if policy(request).allowed is not True:
             raise AuthorizationRequired("SENTRA live grant denied")
         declaration = self._declarations[request.machine_id]
         # Legacy central durable service must be denied unless the coordinator
@@ -259,7 +282,7 @@ class CentralExecutorFactory:
             capabilities=declaration.machine.capabilities,
         )
         gate = DurableOperationGate(
-            self.durable_intent_authority, self.policy,
+            self.durable_intent_authority, policy,
             machine=admission_machine,
         )
 
@@ -269,8 +292,12 @@ class CentralExecutorFactory:
             token = self._dispatch_fingerprint.set(digest)
             physical_token = None
             if request.machine_id in self._execution_machines:
+                from .workspace_files import WorkspaceFilesExecutor
+                output_resolver = (declaration.adapter.resolve_requested_output
+                    if isinstance(declaration.adapter, WorkspaceFilesExecutor) else None)
                 physical_token = current_effect_context.set(CentralEffectContext(
-                    self.durable_intent_authority, receipt, trusted_request, self.policy))
+                    self.durable_intent_authority, receipt, trusted_request, policy,
+                    output_resolver=output_resolver))
             try:
                 return await self.registry.submit(trusted_request)
             finally:

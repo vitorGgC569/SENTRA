@@ -10,6 +10,13 @@ from .release_gate import (ReleaseGateError, check_database_freshness,
                            diff_scan_receipts, fix_advice, verify_release)
 from .learning_review import ReviewedLearningStore
 from .langfuse_eval import LangfuseEvalStore
+from .decision_receipt_audit import (
+    AuditConflict, AuditRefusal, DecisionReceiptLedger, classify_untrusted,
+    decision_from_gate,
+)
+from .local_use_policy import LocalUsePolicy, evaluate_access, support_bundle
+from .production_audit import production_contract, record_fleet_admission
+from .distribution_diagnosis import PACKAGE_FILES, diagnose_installer, diagnose_tree
 
 __all__ = ["GateFailure", "ProjectPin", "SourceGate", "VerifiedSource",
            "PolicyVetoChain", "PolicyVetoRequest", "PolicyVetoResult",
@@ -18,4 +25,9 @@ __all__ = ["GateFailure", "ProjectPin", "SourceGate", "VerifiedSource",
            "OTelPipelineConfig", "SeloTelemetryExporter",
            "DiagnosticsReport", "ReleaseGateError", "check_database_freshness",
            "diff_scan_receipts", "fix_advice", "verify_release",
-           "ReviewedLearningStore", "LangfuseEvalStore"]
+           "ReviewedLearningStore", "LangfuseEvalStore",
+           "AuditConflict", "AuditRefusal", "DecisionReceiptLedger",
+           "classify_untrusted", "decision_from_gate",
+           "LocalUsePolicy", "evaluate_access", "support_bundle",
+           "production_contract", "record_fleet_admission",
+           "PACKAGE_FILES", "diagnose_installer", "diagnose_tree"]

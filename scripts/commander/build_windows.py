@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,15 +24,52 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 BUILD_STATUS_PATH = ROOT / ".tmp" / "build-windows-status.json"
+_RUNTIME_BINDING = ContextVar('sentra_build_runtime_binding', default=None)
 
 
-def _source_fingerprint() -> dict[str, str]:
+class _RuntimeBinding:
+    """One final-build selection, shared across isolated payload output paths."""
+    def __init__(self, staging, *, required=False):
+        self.staging, self.required = Path(staging), required
+        self.token = self.directory = None
+
+    def __enter__(self):
+        if not (self.staging / 'runtime-components.json').is_file():
+            if self.required:
+                raise RuntimeError('materialize integral runtime components before building release payload')
+            self.token = _RUNTIME_BINDING.set(None)
+            return self
+        from scripts.commander.runtime_bindings import write_runtime_pins
+        LOCAL_BUILD_ROOT.mkdir(parents=True, exist_ok=True)
+        self.directory = Path(tempfile.mkdtemp(prefix='runtime-binding-', dir=LOCAL_BUILD_ROOT))
+        try:
+            self.record = write_runtime_pins(self.staging, self.directory)
+            self.record['staging'] = str(self.staging.resolve(strict=True))
+        except BaseException:
+            self._cleanup(); raise
+        self.token = _RUNTIME_BINDING.set(self.record)
+        return self
+
+    def _cleanup(self):
+        if self.directory is not None:
+            (self.directory / 'sentra-runtime-pins.json').unlink(missing_ok=True)
+            self.directory.rmdir()
+
+    def __exit__(self, *_):
+        if self.token is not None:
+            _RUNTIME_BINDING.reset(self.token)
+        self._cleanup()
+
+
+def _source_fingerprint(root: Path | None = None) -> dict[str, str]:
     """Record product inputs only, excluding private state and generated caches."""
+    root = ROOT if root is None else Path(root)
     folders = (
         "browser", "integrations", "native_bridge", "orchestrator", "repository",
         "sentra_core", "sentra_mcp", "sentra_model_gateway", "sentra_remote",
-        "sentra_cli", "sentra_canvas", "sentra_runtime", "sentra_executors",
+        "sentra_cli", "sentra_canvas", "sentra_runtime", "sentra_executors", "sentra_code_mode",
         "sentra_interop", "sentra_collab", "sentra_quality", "workspace",
+        "sentra_federation", "sentra_marketplace", "memory", "local_model", "skills/optional_connectors",
         "scripts/commander", "scripts/integrations", "edge_extension", "sentra_electron",
     )
     # React desktop sources are JSX today; TS/TSX/SVG inputs must also invalidate
@@ -38,32 +77,40 @@ def _source_fingerprint() -> dict[str, str]:
     # The pinned Web Models patch is a product input just like its PowerShell
     # builder; both must invalidate provenance before a new Setup is accepted.
     # Packaged license/notice text is part of the distributed artifact too.
-    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".h", ".go", ".mod", ".sum", ".sh", ".wasm"}
-    files = {ROOT / name for name in ("main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt")}
+    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".cs", ".h", ".go", ".mod", ".sum", ".sh", ".wasm", ".rs", ".toml", ".lock", ".mjs"}
+    files = {root / name for name in ("main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt", "LICENSE")}
     # The Setup bundles this onboarding guide, while the vendored xterm
     # licenses have no suffix and would otherwise be missed by the scan.
-    files.update(ROOT / name for name in (
+    files.update(root / name for name in (
         "docs/SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md",
         "sentra_canvas/static/vendor/addon-fit-LICENSE",
         "sentra_canvas/static/vendor/xterm-LICENSE",
     ))
     # Brand PNGs are packaged inputs; excluding them would let an outdated
     # payload proof pass after a logo change without rebuilding the EXEs.
-    files.update(ROOT / name for name in (
+    files.update(root / name for name in (
         "sentra_canvas/assets/SENTRA-LOGO.png",
         "sentra_canvas/static/sentra-logo.png",
     ))
     # The Setup embeds the ENTIRE docs/ tree via --add-data, not just the
     # onboarding guide. Track nested screenshots, videos, JSON and every
     # other distributed file regardless of suffix to prevent stale proofs.
-    docs_root = ROOT / "docs"
-    if docs_root.is_dir():
-        files.update(path for path in docs_root.rglob("*") if path.is_file())
+    # These data trees are passed whole to PyInstaller/staging. Track every
+    # byte, including extensionless legal files, fonts and media, rather than
+    # only the suffixes used for source modules below.
+    data_trees = (
+        "docs", "sentra_canvas/assets", "sentra_canvas/static",
+        "sentra_canvas/desktop_ui/src/assets", "sentra_remote/human_ui",
+        "sentra_remote/provider_notices", "edge_extension",
+        "sentra_code_mode/guest/licenses",
+    )
+    for name in data_trees:
+        files.update(path for path in (root / name).rglob("*") if path.is_file())
     for folder in folders:
-        files.update(path for path in (ROOT / folder).rglob("*")
+        files.update(path for path in (root / folder).rglob("*")
                      if path.is_file() and path.suffix.lower() in extensions
-                     and not {"__pycache__", "node_modules", ".tmp", "dist", "build"}.intersection(path.parts))
-    return {path.relative_to(ROOT).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+                     and not {"__pycache__", "node_modules", ".tmp", "dist", "build"}.intersection(path.relative_to(root).parts))
+    return {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
             for path in sorted(files) if path.is_file()}
 
 
@@ -78,6 +125,20 @@ def _write_build_provenance(dist: Path, phase: str, expected: tuple[str, ...], s
         "executables": {name: {"sha256": hashlib.sha256((dist / name).read_bytes()).hexdigest(),
                                "bytes": (dist / name).stat().st_size} for name in expected},
     }
+    binding = _RUNTIME_BINDING.get()
+    if binding is not None:
+        if hashlib.sha256(Path(binding['path']).read_bytes()).hexdigest() != binding['sha256']:
+            raise PermissionError('embedded runtime pin input changed during build')
+        from scripts.commander.runtime_bindings import runtime_pins
+        current = (json.dumps(runtime_pins(Path(binding['staging'])), sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+        if hashlib.sha256(current).hexdigest() != binding['sha256']:
+            raise PermissionError('selected runtime components changed during build')
+        result['runtime_pins_sha256'] = binding['sha256']
+    seal = ROOT / "source-snapshot.json"
+    if seal.is_file():
+        from scripts.commander.source_snapshot import verify_source_snapshot
+        verify_source_snapshot(ROOT)
+        result["source_snapshot_sha256"] = hashlib.sha256(seal.read_bytes()).hexdigest()
     path = dist / ("build-provenance-" + phase + ".json")
     staged = path.with_suffix(".tmp")
     staged.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
@@ -259,8 +320,8 @@ def _build(
     prefix: list[str] = []
     if windowed:
         prefix.append("--noconsole")
-    if name in {"sentra-canvas", "sentra-desktop", "sentra-human"}:
-        icon_name = "SENTRA-DOT.ico" if name == "sentra-canvas" else "SENTRA.ico"
+    if name in {"sentra-canvas", "sentra-desktop", "sentra-human", "SENTRA-Setup"}:
+        icon_name = "SENTRA-DOT.ico"
         icon = ROOT / "sentra_canvas" / "assets" / icon_name
         if not icon.is_file():
             raise FileNotFoundError("official SENTRA icon is missing: " + str(icon))
@@ -268,6 +329,8 @@ def _build(
         # The native WebView2 HWND and the system tray also need image bytes
         # at runtime; setting only the executable icon is not sufficient.
         prefix += ["--add-data", f"{ROOT / 'sentra_canvas' / 'assets'}{os.pathsep}sentra_canvas/assets"]
+        if name == "SENTRA-Setup":
+            prefix += ["--add-data", f"{ROOT / 'sentra_canvas/desktop_ui/src/assets/opendots/blue.png'}{os.pathsep}sentra_canvas/assets"]
     if mcp_payload:
         prefix += ["--collect-all", "playwright", "--hidden-import", "pyarrow.parquet"]
     if mcp_payload or name in {'sentra-canvas', 'sentra-cli', 'sentra-update-helper'}:
@@ -276,11 +339,20 @@ def _build(
         prefix += ['--collect-all', 'wasmtime']
     if extra:
         prefix += extra
+    binding = _RUNTIME_BINDING.get()
+    if binding is not None:
+        resource = Path(binding['path'])
+        if hashlib.sha256(resource.read_bytes()).hexdigest() != binding['sha256']:
+            raise PermissionError('embedded runtime pin input changed before build')
+        prefix += ['--add-data', f'{resource}{os.pathsep}.']
     args[0:0] = prefix
     _run(args, timeout_s=timeout_s)
+    if binding is not None and hashlib.sha256(Path(binding['path']).read_bytes()).hexdigest() != binding['sha256']:
+        raise PermissionError('embedded runtime pin input changed during build')
 
 
 PAYLOAD_NAMES = (
+    "sentra-launcher.exe",
     "sentra-agent.exe", "sentra-mcp.exe", "sentra-browser-relay.exe",
     "sentra-desktop.exe", "sentra-human.exe", "sentra-human-worker.exe",
     "sentra-diagnostics.exe", "sentra-admin.exe",
@@ -517,6 +589,14 @@ def _clean_build_outputs(dist: Path, work: Path, spec: Path, phase: str) -> None
                 shutil.rmtree(stale, ignore_errors=True)
 
 
+def build_launcher(dist: Path) -> None:
+    """Compile the repository launcher. Release bytes stay unbound from this checkout."""
+    from scripts.commander.build_desktop_launcher import build_desktop_launcher
+
+    dist.mkdir(parents=True, exist_ok=True)
+    build_desktop_launcher(dist / "sentra-launcher.exe")
+
+
 def build_payload(dist: Path, work: Path, spec: Path) -> None:
     for path in (dist, work, spec):
         path.mkdir(parents=True, exist_ok=True)
@@ -569,6 +649,8 @@ def build_payload(dist: Path, work: Path, spec: Path) -> None:
         _build("sentra", "sentra_entry.py", build_staging, work, spec, mcp_payload=True)
         from scripts.commander.build_canvas import build_canvas
         build_canvas(build_staging, work, spec)
+        from scripts.commander.build_desktop_launcher import build_desktop_launcher
+        build_desktop_launcher(build_staging / "sentra-launcher.exe")
 
         # Copy only finalized one-file executables back into the OneDrive tree.
         # The heavy PyInstaller work/cache stays under LOCALAPPDATA.
@@ -626,14 +708,6 @@ def build_human(dist: Path, work: Path, spec: Path) -> None:
 
 
 def build_installer(dist: Path, work: Path, spec: Path) -> None:
-    import tempfile
-    work.mkdir(parents=True, exist_ok=True)
-    extension_parent = Path(tempfile.mkdtemp(prefix='sentra-extension-release-', dir=work))
-    staged_extension = extension_parent / 'edge_extension'
-    stage_extension_source(ROOT / 'edge_extension', staged_extension)
-    from scripts.commander.runtime_dependencies import stage_wasmtime_notices
-    runtime_legal = extension_parent / 'wasmtime'
-    stage_wasmtime_notices(runtime_legal)
     missing = [name for name in PAYLOAD_NAMES if not (dist / name).is_file()]
     if missing:
         raise RuntimeError("installer payload missing: " + ", ".join(missing))
@@ -643,12 +717,12 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
         try:
             proof = json.loads(path.read_text(encoding="utf-8"))
             if proof.get("sources") == sources:
-                proofs.append(proof.get("executables", {}))
+                proofs.append(proof)
         except (OSError, ValueError, TypeError):
             continue
     for name in PAYLOAD_NAMES:
         digest = hashlib.sha256((dist / name).read_bytes()).hexdigest()
-        if not any(proof.get(name, {}).get("sha256") == digest for proof in proofs):
+        if not any(proof.get('executables', {}).get(name, {}).get("sha256") == digest for proof in proofs):
             raise RuntimeError("stale or unverified installer payload: " + name + "; rebuild payload")
     web_models = dist / "web-models" / "win-unpacked"
     if not (web_models / "Codex Web GPT.exe").is_file() or not (web_models / "resources" / "runtime" / "manifest.json").is_file():
@@ -661,6 +735,35 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     patch_hash = hashlib.sha256(patch.read_bytes()).hexdigest()
     if str(build_state.get("patch_sha256") or "").lower() != patch_hash:
         raise RuntimeError("Web Models payload was built from a stale SENTRA upstream patch")
+    if not (dist / 'runtime-components.json').is_file() or not (dist / 'runtime').is_dir():
+        raise RuntimeError('materialized QuickJS/HCS/RustDesk release components required; stage via release_components in final phase')
+    binding = _RUNTIME_BINDING.get()
+    if binding is None:
+        raise RuntimeError('integral Setup requires build-embedded runtime pins; rebuild payload with --runtime-components')
+    from scripts.commander.runtime_bindings import runtime_pins
+    current_pins = (json.dumps(runtime_pins(dist), sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8')
+    if hashlib.sha256(current_pins).hexdigest() != binding['sha256']:
+        raise PermissionError('Setup runtime components differ from embedded payload pins')
+    for name in PAYLOAD_NAMES:
+        if name == 'sentra-launcher.exe':
+            continue  # C# launcher delegates to the pinned Python executables.
+        digest = hashlib.sha256((dist / name).read_bytes()).hexdigest()
+        if not any(proof.get('runtime_pins_sha256') == binding['sha256'] and
+                   proof.get('executables', {}).get(name, {}).get('sha256') == digest for proof in proofs):
+            raise RuntimeError('payload lacks current embedded runtime pins: ' + name)
+    # Reject incomplete or stale binaries before staging assets or downloading.
+    import tempfile
+    work.mkdir(parents=True, exist_ok=True)
+    extension_parent = Path(tempfile.mkdtemp(prefix='sentra-extension-release-', dir=work))
+    staged_extension = extension_parent / 'edge_extension'
+    stage_extension_source(ROOT / 'edge_extension', staged_extension)
+    from scripts.commander.runtime_dependencies import stage_wasmtime_notices
+    runtime_legal = extension_parent / 'wasmtime'
+    stage_wasmtime_notices(runtime_legal)
+    packaged_docs = extension_parent / "docs"
+    shutil.copytree(ROOT / "docs", packaged_docs)
+    shutil.copytree(ROOT / "sentra_remote/provider_notices", packaged_docs / "provider_notices", dirs_exist_ok=True)
+    shutil.copytree(runtime_legal, packaged_docs / "wasmtime", dirs_exist_ok=True)
     # Electron is a second *display*, not a parallel executor or MCP server.
     # If the pinned runtime was installed during build preparation, stage the
     # complete, versioned optional component; never download at packaging time.
@@ -674,18 +777,14 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     installer_extra: list[str] = [
         "--add-data", f"{electron_payload}{os.pathsep}payload/sentra-electron",
     ]
-    if not (dist / 'runtime-components.json').is_file() or not (dist / 'runtime').is_dir():
-        raise RuntimeError('materialized QuickJS/HCS/RustDesk release components required; stage via release_components in final phase')
     installer_extra += ['--add-data', f"{dist / 'runtime'}{os.pathsep}payload/runtime",
                         '--add-data', f"{dist / 'runtime-components.json'}{os.pathsep}payload"]
     for name in PAYLOAD_NAMES:
         installer_extra += ["--add-data", f"{dist / name}{os.pathsep}payload"]
     installer_extra += [
         "--add-data", f"{staged_extension}{os.pathsep}edge_extension",
-        "--add-data", f"{ROOT / 'docs'}{os.pathsep}docs",
+        "--add-data", f"{packaged_docs}{os.pathsep}docs",
         "--add-data", f"{dist / 'web-models'}{os.pathsep}payload/web-models",
-        "--add-data", f"{ROOT / 'sentra_remote/provider_notices'}{os.pathsep}docs/provider_notices",
-        "--add-data", f"{runtime_legal}{os.pathsep}docs/wasmtime",
     ]
     for name in ('opendots', 'guacamole'):
         legal = ROOT / 'sentra_canvas/desktop_ui/src/assets' / name
@@ -693,7 +792,21 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
         for filename in required:
             if not (legal / filename).is_file():
                 raise FileNotFoundError('integral Setup legal asset missing: ' + name + '/' + filename)
-            installer_extra += ['--add-data', f"{legal / filename}{os.pathsep}docs/{name}"]
+            (packaged_docs / name).mkdir(parents=True, exist_ok=True)
+            shutil.copy2(legal / filename, packaged_docs / name / filename)
+    # Client installation is offline: fetch the pinned dependency on the build
+    # machine and embed its original verified archive in Setup.
+    from sentra_remote.installer import prepare_tunnel_archive
+    from sentra_remote.installer_preflight import write_payload_manifest
+    from sentra_version import PRODUCT_VERSION
+    archive = prepare_tunnel_archive(work / "downloads")
+    prerequisites = dist / "prerequisites"
+    prerequisites.mkdir(exist_ok=True)
+    if archive.resolve() != (prerequisites / "tunnel-client.zip").resolve():
+        shutil.copy2(archive, prerequisites / "tunnel-client.zip")
+    manifest = write_payload_manifest(dist, staged_extension, packaged_docs, PRODUCT_VERSION, PAYLOAD_NAMES)
+    installer_extra += ["--add-data", f"{prerequisites}{os.pathsep}payload/prerequisites",
+                        "--add-data", f"{manifest}{os.pathsep}payload"]
     _build(
         "SENTRA-Setup",
         "installer_entry.py",
@@ -712,6 +825,7 @@ def build(dist: Path, work: Path, spec: Path, sources: dict[str, str] | None = N
 
 
 EXPECTED = (
+    "sentra-launcher.exe",
     "sentra-agent.exe", "sentra-mcp.exe", "sentra-browser-relay.exe",
     "sentra-desktop.exe", "sentra-human.exe", "sentra-human-worker.exe",
     "sentra-diagnostics.exe", "sentra-admin.exe",
@@ -725,16 +839,21 @@ def main() -> int:
     parser.add_argument("--work", default=str(LOCAL_BUILD_ROOT / "work"))
     parser.add_argument("--spec", default=str(LOCAL_BUILD_ROOT / "spec"))
     parser.add_argument("--clean-output", action="store_true")
+    parser.add_argument('--runtime-components', help='Host-selected materialized staging root; defaults to dist when present')
     parser.add_argument(
         "--phase",
-        choices=("all", "payload", "cli", "canvas", "mcp", "helper", "human", "installer"),
+        choices=("all", "payload", "launcher", "cli", "canvas", "mcp", "helper", "human", "installer", "runtime-probe"),
         default="all",
     )
     args = parser.parse_args()
     dist = Path(args.dist).resolve()
     work = Path(args.work).resolve()
     spec = Path(args.spec).resolve()
-    with _BuildLock(ROOT / ".sentra" / "build-windows.lock"):
+    with _BuildLock(ROOT / ".sentra" / "build-windows.lock"), _RuntimeBinding(
+            args.runtime_components or dist, required=args.phase in {'all', 'payload', 'installer', 'runtime-probe'}):
+        if (ROOT / "source-snapshot.json").is_file():
+            from scripts.commander.source_snapshot import verify_source_snapshot
+            verify_source_snapshot(ROOT)
         # Extension identity is materialized only in an isolated Setup staging
         # directory; live extension/preview inputs remain unchanged.
         sources = _source_fingerprint()
@@ -761,6 +880,9 @@ def main() -> int:
             elif args.phase == "payload":
                 build_payload(dist, work, spec)
                 expected = PAYLOAD_NAMES
+            elif args.phase == "launcher":
+                build_launcher(dist)
+                expected = ("sentra-launcher.exe",)
             elif args.phase == "cli":
                 build_cli(dist, work, spec)
                 expected = ("sentra-cli.exe",)
@@ -778,6 +900,12 @@ def main() -> int:
             elif args.phase == "human":
                 build_human(dist, work, spec)
                 expected = ("sentra-human.exe", "sentra-human-worker.exe")
+            elif args.phase == 'runtime-probe':
+                from scripts.commander.runtime_dependencies import require_wasmtime_pin
+                require_wasmtime_pin()
+                _build('sentra-runtime-probe', 'runtime_probe_entry.py', dist, work, spec,
+                    extra=['--collect-all', 'wasmtime'])
+                expected = ('sentra-runtime-probe.exe',)
             else:
                 build_installer(dist, work, spec)
                 expected = ("SENTRA-Setup.exe",)

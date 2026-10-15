@@ -66,6 +66,7 @@ def live_center(tmp_path):
     durable.create_run(owner, run_id=run)
     if durable.run_status(run, owner)["state"] != "RUNNING":
         durable.transition_run(run, owner, "RUNNING")
+    cp.ensure_agent(run, owner, agent_id="agent-effect", role="worker")
     cp.governance.create_work_item(run, owner, objective="Create a verifiable local artifact",
         work_item_id="WI-effect", assignee_agent_id="agent-effect",
         required_capabilities=["file:write"])
@@ -97,7 +98,10 @@ def test_real_effect_is_reserved_and_evidence_recovers_after_new_adapter(live_ce
     stored = cp.durable.operation_status(first.operation_id, center.owner)
     artifact = cp.durable.artifact_info(stored["result"]["evidence_artifact_id"], center.owner)
     assert artifact["operation_id"] == first.operation_id
-    assert json.loads(cp.durable.read_artifact(artifact["artifact_id"], max_bytes=70000))["evidence"] == first.evidence
+    assert artifact["metadata"]["os_protected"] is True
+    authority = CentralDurableIntentAuthority(cp.durable)
+    receipt = authority.receipt_for_operation(first.operation_id, center.owner)
+    assert authority.result_for_receipt(receipt).evidence == first.evidence
     restarted = CentralInteropAdapter(control=cp, run_id=center.run_id,
                                        owner=center.owner, machine=center.machine)
     restarted.bind_provider("file:write", write)

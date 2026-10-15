@@ -86,8 +86,10 @@ def build_cli_command(
     ws_path = str(workspace.resolve())
 
     if tool_key == "sentra-cli":
-        if model not in {None, 'sentra/chatgpt-web/gpt-6'} or effort not in {None, 'high'}:
-            raise ValueError('Dot SENTRA CLI requires GPT-6 Web high')
+        allowed = {None, 'sentra/chatgpt-web/gpt-6', 'sentra/grok/grok-4.7'}
+        if model not in allowed or effort not in {None, 'high'}:
+            raise ValueError('Dot SENTRA CLI requires GPT-6 Web high or Grok 4.7 high')
+        chosen = model or 'sentra/chatgpt-web/gpt-6'
         if source_cli.is_file() and not getattr(sys, 'frozen', False):
             console = Path(sys.executable)
             if console.name.lower().startswith('pythonw'):
@@ -96,7 +98,7 @@ def build_cli_command(
             argv = [str(console), '-u', '-c', bootstrap]
         else:
             argv = [executable]
-        argv.extend(["-p", prompt, "-w", ws_path, "--no-auto-start", '-m', 'sentra/chatgpt-web/gpt-6', '--effort', 'high'])
+        argv.extend(["-p", prompt, "-w", ws_path, "--no-auto-start", '-m', chosen, '--effort', 'high'])
         if session_id:
             argv.extend(['--session-id', session_id, '--state-dir', str(workspace / '.sentra')])
         return argv
@@ -206,7 +208,7 @@ def verify_receipt(
             except Exception:
                 pass
 
-    verified = bool((exit_code == 0) and transformed_found and not echo_only_detected)
+    verified = bool(type(exit_code) is int and exit_code == 0 and transformed_found and not echo_only_detected)
 
     return {
         "operation_id": oid,
@@ -226,6 +228,149 @@ def verify_receipt(
     }
 
 
+def _stamp_surface(receipt: dict[str, Any], *, surface: str, claims_guest: bool,
+                   host_subprocess: bool, guest_executor_used: bool) -> dict[str, Any]:
+    """Record where the turn ran. Guest placement never inherits a host stamp."""
+    receipt["execution_surface"] = surface
+    receipt["claims_guest_execution"] = claims_guest
+    receipt["host_subprocess"] = host_subprocess
+    receipt["guest_executor_used"] = guest_executor_used
+    return receipt
+
+
+def _guest_turn_shell(oid: str, wid: str, request_key: str, tool: str,
+                      nonce_info: dict[str, str], model: str | None, **extra: Any) -> dict[str, Any]:
+    body = {
+        "operation_id": oid,
+        "work_item_id": wid,
+        "request_key": request_key,
+        "tool": tool,
+        "exit_code": -1,
+        "stdout_sha256": None,
+        "effective_model": model,
+        "nonce": nonce_info["raw"],
+        "expected_reverse": nonce_info["reverse"],
+        "expected_sha256": nonce_info["sha256"],
+        "transformed_nonce_found": False,
+        "echo_only_detected": False,
+        "verified": False,
+        "launch_failed": False,
+        "automatic_retry": False,
+        "host_subprocess": False,
+    }
+    body.update(extra)
+    return body
+
+
+def _execute_guest_tool(
+    workspace: Path,
+    tool: str,
+    prompt: str,
+    nonce_info: dict[str, str],
+    oid: str,
+    wid: str,
+    request_key: str,
+    model: str | None,
+    effort: str | None,
+    timeout_s: float,
+    guest_executor: Any,
+    guest_workspace: str | None = None,
+) -> dict[str, Any]:
+    """Run only through a proven guest executor. Never substitute the host.
+
+    ``workspace`` is the host directory. It is not forwarded: the guest cwd
+    comes from the executor's own guest path.
+    """
+    host_path = os.fspath(workspace)
+    from sentra_executors.guest_execution import GuestExecutionRefused, is_proven_guest_executor
+
+    blocked_guest = _guest_turn_shell(
+        oid, wid, request_key, tool, nonce_info, model,
+        blocked=True, execution_uncertain=True, execution_surface="blocked",
+        claims_guest_execution=False, guest_executor_used=False,
+        error="guest placement requires a proven guest executor; host execution was not substituted",
+    )
+    if not is_proven_guest_executor(guest_executor):
+        return blocked_guest
+    try:
+        request = {
+            "placement": "guest",
+            "tool": tool,
+            "prompt": prompt,
+            "nonce_info": dict(nonce_info),
+            "model": model,
+            "effort": effort,
+            "timeout_s": timeout_s,
+            "operation_id": oid,
+            "work_item_id": wid,
+            "request_key": request_key,
+        }
+        if (isinstance(guest_workspace, str) and guest_workspace.strip()
+                and guest_workspace.strip() != host_path and "\0" not in guest_workspace):
+            request["guest_workspace"] = guest_workspace.strip()
+        produced = guest_executor.execute(request)
+    except GuestExecutionRefused as exc:
+        text = str(exc)
+        if "guest channel is not ready" in text:
+            text = "guest channel is not ready; host execution was not substituted"
+        blocked_guest["error"] = text
+        return blocked_guest
+    except Exception as exc:
+        if "guest channel is not ready" in str(exc):
+            blocked_guest["error"] = (
+                "guest channel is not ready; host execution was not substituted"
+            )
+            return blocked_guest
+        return _guest_turn_shell(
+            oid, wid, request_key, tool, nonce_info, model,
+            execution_uncertain=True, execution_surface="guest",
+            claims_guest_execution=False, guest_executor_used=True, blocked=False,
+            error=str(exc),
+        )
+    if not isinstance(produced, dict):
+        return _guest_turn_shell(
+            oid, wid, request_key, tool, nonce_info, model,
+            execution_uncertain=True, execution_surface="guest",
+            claims_guest_execution=False, guest_executor_used=True, blocked=False,
+            error="guest executor result is not an object",
+        )
+    exit_code = produced.get("exit_code")
+    stdout = produced.get("stdout")
+    stderr = produced.get("stderr") or ""
+    if type(exit_code) is not int or not isinstance(stdout, str) or not isinstance(stderr, str):
+        return _guest_turn_shell(
+            oid, wid, request_key, tool, nonce_info, model,
+            execution_uncertain=True, execution_surface="guest",
+            claims_guest_execution=False, guest_executor_used=True, blocked=False,
+            error="guest executor result is incomplete",
+        )
+    if (produced.get("execution_surface") != "guest"
+            or produced.get("host_subprocess") is True
+            or produced.get("claims_guest_execution") is not True
+            or produced.get("execution_uncertain") is True):
+        return _guest_turn_shell(
+            oid, wid, request_key, tool, nonce_info, model,
+            execution_uncertain=True, execution_surface="blocked",
+            claims_guest_execution=False, guest_executor_used=True, blocked=True,
+            error="guest executor did not prove a guest process",
+        )
+    receipt = verify_receipt(
+        tool=tool, stdout=stdout, stderr=stderr, exit_code=exit_code,
+        nonce_info=nonce_info, oid=oid, wid=wid, request_key=request_key,
+        effective_model=model,
+    )
+    receipt["blocked"] = False
+    receipt["automatic_retry"] = False
+    if produced.get("vm_id"):
+        receipt["vm_id"] = produced["vm_id"]
+    if produced.get("guest_witness"):
+        receipt["guest_witness"] = produced["guest_witness"]
+    return _stamp_surface(
+        receipt, surface="guest", claims_guest=True,
+        host_subprocess=False, guest_executor_used=True,
+    )
+
+
 def execute_non_interactive_tool(
     project_dir: Path,
     workspace: Path,
@@ -239,14 +384,26 @@ def execute_non_interactive_tool(
     effort: str | None = None,
     timeout_s: float = 30.0,
     runner: Callable[[list[str], str, dict[str, str]], tuple[int, str, str]] | None = None,
+    placement: str = "host",
+    guest_executor: Any = None,
+    guest_workspace: str | None = None,
 ) -> dict[str, Any]:
     """Execute a non-interactive CLI turn and return the evaluated receipt.
-    
+
     If runner is provided (e.g. in test doubles), it is invoked with
     (argv, prompt, nonce_info) -> (exit_code, stdout, stderr), preventing
-    accidental execution against real models.
+    accidental execution against real models. A host runner is never used
+    when placement is guest. Guest placement calls ``guest_executor`` or
+    returns a blocked uncertain receipt.
     """
+    if placement not in {"host", "guest"}:
+        raise ValueError("placement must be host or guest")
     prompt, nonce_info = build_dispatch_prompt(instruction, nonce)
+    if placement == "guest":
+        return _execute_guest_tool(
+            workspace, tool, prompt, nonce_info, oid, wid, request_key,
+            model, effort, timeout_s, guest_executor, guest_workspace,
+        )
     session_id = 'dot-tool-' + hashlib.sha256(json.dumps([oid,wid,request_key]).encode()).hexdigest()[:32]
     
     try:
@@ -254,7 +411,7 @@ def execute_non_interactive_tool(
             session_id=session_id if tool in {'sentra-cli', 'sentra_cli'} else None)
     except FileNotFoundError as exc:
         # Tool provably did not start
-        return {
+        return _stamp_surface({
             "operation_id": oid,
             "work_item_id": wid,
             "request_key": request_key,
@@ -270,9 +427,9 @@ def execute_non_interactive_tool(
             "verified": False,
             "launch_failed": True,
             "error": str(exc),
-        }
+        }, surface="host", claims_guest=False, host_subprocess=False, guest_executor_used=False)
     except Exception as exc:
-        return {
+        return _stamp_surface({
             "operation_id": oid,
             "work_item_id": wid,
             "request_key": request_key,
@@ -288,14 +445,14 @@ def execute_non_interactive_tool(
             "verified": False,
             "launch_failed": True,
             "error": str(exc),
-        }
+        }, surface="host", claims_guest=False, host_subprocess=False, guest_executor_used=False)
 
     if runner is not None:
         try:
             exit_code, stdout, stderr = runner(argv, prompt, nonce_info)
         except Exception as exc:
             # Runner failed during execution -> UNCERTAIN (may have started)
-            return {
+            return _stamp_surface({
                 "operation_id": oid,
                 "work_item_id": wid,
                 "request_key": request_key,
@@ -311,7 +468,7 @@ def execute_non_interactive_tool(
                 "verified": False,
                 "execution_uncertain": True,
                 "error": str(exc),
-            }
+            }, surface="host", claims_guest=False, host_subprocess=False, guest_executor_used=False)
     else:
         try:
             proc = subprocess.run(
@@ -326,7 +483,7 @@ def execute_non_interactive_tool(
             )
             exit_code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as exc:
-            return {
+            return _stamp_surface({
                 "operation_id": oid,
                 "work_item_id": wid,
                 "request_key": request_key,
@@ -342,9 +499,9 @@ def execute_non_interactive_tool(
                 "verified": False,
                 "execution_uncertain": True,
                 "error": f"process timed out after {timeout_s}s",
-            }
+            }, surface="host", claims_guest=False, host_subprocess=True, guest_executor_used=False)
         except Exception as exc:
-            return {
+            return _stamp_surface({
                 "operation_id": oid,
                 "work_item_id": wid,
                 "request_key": request_key,
@@ -360,7 +517,7 @@ def execute_non_interactive_tool(
                 "verified": False,
                 "execution_uncertain": True,
                 "error": str(exc),
-            }
+            }, surface="host", claims_guest=False, host_subprocess=True, guest_executor_used=False)
 
     assistant_text = None
     journal_confirmed = None
@@ -372,7 +529,7 @@ def execute_non_interactive_tool(
             answers = [item['content'] for item in journal.messages(session_id) if item['role'] == 'assistant']
             with journal._connect() as db:
                 provider_calls = db.execute("SELECT state FROM calls WHERE conversation_id=? AND kind='provider'", (session_id,)).fetchall()
-            journal_confirmed = bool(exit_code == 0 and not status['uncertain_calls'] and answers
+            journal_confirmed = bool(type(exit_code) is int and exit_code == 0 and not status['uncertain_calls'] and answers
                 and provider_calls and all(row['state'] == 'completed' for row in provider_calls))
             assistant_text = answers[-1] if journal_confirmed else ''
         except (ValueError, OSError, PermissionError, KeyError):
@@ -393,4 +550,7 @@ def execute_non_interactive_tool(
         receipt['provider_journal_confirmed'] = journal_confirmed
         receipt['provider_session_id'] = session_id
         receipt['verified'] = bool(receipt['verified'] and journal_confirmed)
-    return receipt
+    return _stamp_surface(
+        receipt, surface="host", claims_guest=False,
+        host_subprocess=runner is None, guest_executor_used=False,
+    )

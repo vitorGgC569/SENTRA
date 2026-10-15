@@ -92,8 +92,8 @@ def test_installer_error_message_is_actionable_for_tunnel_credentials() -> None:
     message = installer_mod._friendly_install_error(
         ValueError("both tunnel_id and Runtime API key are required")
     )
-    assert "What to do:" in message
-    assert "All permissions" in message
+    assert "Como continuar:" in message
+    assert "automaticamente pelo Edge" in message
 
 
 def test_connect_installed_openai_reuses_existing_payload(
@@ -128,11 +128,13 @@ def test_connect_installed_openai_reuses_existing_payload(
                     "mcp": {"ok": True},
                     "relay": {"ok": True},
                     "tunnel": {"ok": True},
+                    "web_models": {key: True for key in ("payload_complete", "ready", "catalog_ready", "turn_ready")},
                 },
                 "next_url": "sentra://home",
             }
 
     monkeypatch.setattr(installer_mod, "configure_tunnel", fake_configure)
+    monkeypatch.setattr(installer_mod, "configure_codex", lambda *_: {"ready": True})
     monkeypatch.setattr(
         installer_mod,
         "_enable_web_models_autostart",
@@ -152,7 +154,7 @@ def test_connect_installed_openai_reuses_existing_payload(
     assert result["reused_install"] is True
     assert result["connect_verify"]["core_ready"] is True
     assert calls == [("tunnel_test", "runtime-test-key")]
-    assert progress[-1] == ("Ready", 100)
+    assert progress[-1] == ("Túnel verificado; autorize o plugin no ChatGPT", 95)
 
 
 def test_product_settings_normalize_workspace_permissions(tmp_path: Path) -> None:
@@ -494,7 +496,10 @@ def test_upgrade_cli_preserves_existing_profile_and_ports(monkeypatch: pytest.Mo
 
     def fake_install(**kwargs):
         captured.update(kwargs)
-        return {"doctor": {"mcp": {"ok": True}, "relay": {"ok": True}}}
+        return {"connect_verify": {"core_ready": True, "onboarding_required": False,
+                                   "chatgpt_onboarding": {"ready": True},
+                                   "status": {"mcp": {"ok": True}, "tunnel": {"ok": True}}},
+                "doctor": {"mcp": {"ok": True}, "relay": {"ok": True}}}
 
     monkeypatch.setattr(installer_mod, "install", fake_install)
     code = installer_mod.main([
@@ -540,6 +545,8 @@ def test_install_defaults_full_computer_and_preserves_existing_settings(
             }
 
     monkeypatch.setattr(installer_mod, "_copy_product_files", lambda target: target.mkdir(exist_ok=True))
+    monkeypatch.setattr(installer_mod, "check_install_payload", lambda _: {"ok": True})
+    monkeypatch.setattr(installer_mod, "prepare_tunnel_archive", lambda *_: tmp_path / "fixture.zip")
     monkeypatch.setattr(installer_mod, "download_tunnel_client", lambda *_: {"ok": True})
     monkeypatch.setattr(installer_mod, "_enable_web_models_autostart", lambda *_: {"ok": True})
     monkeypatch.setattr(installer_mod, "LocalRuntime", Runtime)

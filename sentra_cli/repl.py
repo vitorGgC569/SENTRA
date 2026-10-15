@@ -25,6 +25,8 @@ class SentraREPL:
         self.config = config
         self.console = Console()
         self.agent = SentraAgent(config)
+        self._phase_announced = False
+        self._last_visible: dict | None = None
 
     @staticmethod
     def _gateway_label(health: dict[str, Any]) -> str:
@@ -573,10 +575,8 @@ class SentraREPL:
                 "Atuar neste repositório com implementação e revisão "
                 "independente, preservando trabalho concorrente."
             )
-            self.console.print(
-                self.agent.execute_directive("MAESTRI", "orchestrate|" + goal),
-                markup=False,
-            )
+            produced = self.agent.execute_directive("MAESTRI", "orchestrate|" + goal)
+            self._present(produced if isinstance(produced, str) else "")
             return True
 
         if cmd == "/clear":
@@ -754,23 +754,67 @@ class SentraREPL:
                 markup=True,
             )
 
-    def run_one_shot(self, prompt: str) -> None:
+    def _stream_receipts(self) -> tuple[str, ...]:
+        raw = getattr(self.agent, "stream_receipts", ())
+        if isinstance(raw, str):
+            return (raw,) if raw else ()
+        return tuple(item for item in raw if isinstance(item, str) and item)
+
+    def _present(self, text: str = "", *, announce: bool | None = None, on_delta=None, on_phase=None) -> dict:
+        """Show text that was already produced. Does not run the effect again."""
+        from .__main__ import stream_turn
+        if announce is None:
+            announce = not self._phase_announced
+        source = (text,) if text else ()
+        visible = stream_turn(
+            source,
+            receipts=self._stream_receipts(),
+            announce=announce,
+            on_delta=on_delta,
+            on_phase=on_phase,
+        )
+        client = getattr(self.agent, "client", None)
+        visible["delivery"] = getattr(client, "last_delivery_state", "not_submitted")
+        self._last_visible = visible
+        return visible
+
+    def _note_delivery(self, visible: dict, preview) -> dict:
+        """Record the delivery already observed. Does not run the turn again."""
+        visible["delivery"] = getattr(self.agent.client, "last_delivery_state", "not_submitted")
+        if visible["delivery"] == "uncertain":
+            preview.activity("delivery_uncertain")
+        self._last_visible = visible
+        return visible
+
+    def run_one_shot(self, prompt: str) -> dict | int:
+        from .__main__ import stream_turn
         from .shell_live_preview import LivePreviewWriter
         preview = LivePreviewWriter()
         prompt_clean = prompt.strip()
+        slash_announced = False
         if prompt_clean.startswith("/"):
-            if self.handle_slash_command(prompt_clean):
-                return
+            announced = self._present("", announce=True, on_phase=preview.activity)
+            slash_announced = True
+            self._phase_announced = True
+            try:
+                handled = self.handle_slash_command(prompt_clean)
+            finally:
+                self._phase_announced = False
+            if handled:
+                return self._last_visible or announced
 
         if (
             self.agent.maestri.is_available
             and self.agent.wants_maestri_orchestration(prompt_clean)
         ):
-            self.console.print(
-                self.agent.execute_directive("MAESTRI", "orchestrate|" + prompt_clean),
-                markup=False,
+            produced = self.agent.execute_directive(
+                "MAESTRI", "orchestrate|" + prompt_clean,
             )
-            return
+            return self._note_delivery(self._present(
+                produced if isinstance(produced, str) else "",
+                on_delta=preview.send,
+                on_phase=preview.activity,
+            ), preview)
 
         if prompt_clean.startswith("[[") and prompt_clean.endswith("]]"):
             match = DIRECTIVE_RE.fullmatch(prompt_clean)
@@ -778,11 +822,14 @@ class SentraREPL:
                 op = match.group(1)
                 raw_args = match.group(2) or ""
                 self.on_tool_call(op, raw_args[:120])
-                self.console.print(
-                    self.agent.execute_directive(op, raw_args),
-                    markup=False,
-                )
-                return
+                produced = self.agent.execute_directive(op, raw_args)
+                self._note_delivery(self._present(
+                    produced if isinstance(produced, str) else "",
+                    on_delta=preview.send,
+                    on_phase=preview.activity,
+                ), preview)
+                # Tool completion is not the unit receipt gate.
+                return 0
 
         def live_tool_call(operation, arguments_preview):
             preview.activity("tool_call", operation)
@@ -792,19 +839,75 @@ class SentraREPL:
             preview.activity("tool_result")
             self.on_tool_result(result_preview)
 
-        for chunk in self.agent.step_stream(
-            prompt,
-            on_tool_call=live_tool_call,
-            on_tool_result=live_tool_result,
-        ):
-            preview.send(chunk)
-            sys.stdout.write(chunk)
+        visible = stream_turn(
+            self.agent.step_stream(
+                prompt,
+                on_tool_call=live_tool_call,
+                on_tool_result=live_tool_result,
+            ),
+            receipts=self._stream_receipts(),
+            on_delta=preview.send,
+            on_phase=preview.activity,
+            announce=not slash_announced,
+        )
+        return self._note_delivery(visible, preview)
+
+    def _paint_live_frame(self, ui, turns, effort: str) -> None:
+        from .terminal_ui import geometry
+        layout = geometry(*ui._limits(), has_history=True)
+        ui._draw(
+            layout,
+            model=self.config.model,
+            effort=effort,
+            turns=list(turns),
+            value="",
+            cursor=0,
+        )
+
+    def _consume_live_text(self, text, *, ui, turns, line, reply, effort, state, now) -> None:
+        """Paint the centered UI. Coordinating is immediate. Deltas wait 70 ms."""
+        if text == "coordinating\n":
+            if ui.enabled:
+                label = "Coordenando"
+                if ("system", label) not in turns:
+                    turns.append(("system", label))
+                self._paint_live_frame(ui, turns + [("user", line)], effort)
+                state["last_draw"] = now
+            else:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            return
+        if text == "\n":
+            if not ui.enabled:
+                sys.stdout.write(text)
+                sys.stdout.flush()
+            return
+        reply.append(text)
+        if not ui.enabled:
+            sys.stdout.write(text)
             sys.stdout.flush()
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+            return
+        if now - state.get("last_draw", 0.0) >= 0.07:
+            self._paint_live_frame(
+                ui,
+                turns + [("user", line), ("assistant", "".join(reply))],
+                effort,
+            )
+            state["last_draw"] = now
+
+    def _finish_live_frame(self, *, ui, turns, line, reply, effort) -> None:
+        """Paint the frame that closed the stream, outside the 70 ms window."""
+        if not ui.enabled:
+            return
+        frame = list(turns)
+        frame.append(("user", line))
+        shown = "".join(reply)
+        if shown:
+            frame.append(("assistant", shown))
+        self._paint_live_frame(ui, frame, effort)
 
     def run_interactive(self) -> None:
-        from .terminal_ui import CenteredTerminalUI, geometry
+        from .terminal_ui import CenteredTerminalUI
         import time
         ui = CenteredTerminalUI()
         turns: list[tuple[str, str]] = []
@@ -876,15 +979,24 @@ class SentraREPL:
                         choosing = None
                         remember("system", "Nenhum modelo anunciado. Use /gateway status.")
                     continue
-                if clean.startswith("/") and self.handle_slash_command(clean):
-                    remember("user", clean)
-                    remember("system", flush_console())
-                    continue
+                slash_announced = False
+                if clean.startswith("/"):
+                    self._present("", announce=True)
+                    slash_announced = True
+                    self._phase_announced = True
+                    try:
+                        handled = self.handle_slash_command(clean)
+                    finally:
+                        self._phase_announced = False
+                    if handled:
+                        remember("user", clean)
+                        remember("system", flush_console())
+                        continue
 
                 if (self.agent.maestri.is_available
                         and self.agent.wants_maestri_orchestration(clean)):
-                    self.console.print(self.agent.execute_directive("MAESTRI", "orchestrate|" + clean),
-                                       markup=False)
+                    produced = self.agent.execute_directive("MAESTRI", "orchestrate|" + clean)
+                    self._present(produced if isinstance(produced, str) else "")
                     remember("user", clean)
                     remember("system", flush_console())
                     continue
@@ -894,41 +1006,65 @@ class SentraREPL:
                     if match:
                         op, args = match.group(1), match.group(2) or ""
                         self.on_tool_call(op, args[:120])
-                        self.console.print(self.agent.execute_directive(op, args), markup=False)
+                        produced = self.agent.execute_directive(op, args)
+                        self._present(produced if isinstance(produced, str) else "")
                         remember("user", clean)
                         remember("system", flush_console())
                         continue
 
                 reply: list[str] = []
-                last_draw = 0.0
+                live = {"last_draw": 0.0}
                 try:
                     if not ui.enabled:
                         self.console.print()
-                    for chunk in self.agent.step_stream(line, on_tool_call=self.on_tool_call,
-                                                        on_tool_result=self.on_tool_result):
-                        reply.append(chunk)
-                        if ui.enabled:
-                            now = time.monotonic()
-                            if now - last_draw >= .07:
-                                view = turns + [("user", line), ("assistant", "".join(reply))]
-                                layout = geometry(*ui._limits(), has_history=True)
-                                ui._draw(layout, model=self.config.model, effort=effort,
-                                         turns=view, value="", cursor=0)
-                                last_draw = now
-                        else:
-                            sys.stdout.write(chunk)
-                            sys.stdout.flush()
+                    from .__main__ import stream_turn
+                    from .shell_live_preview import LivePreviewWriter
+                    preview = LivePreviewWriter()
+
+                    def write_delta(text: str) -> None:
+                        self._consume_live_text(
+                            text,
+                            ui=ui,
+                            turns=turns,
+                            line=line,
+                            reply=reply,
+                            effort=effort,
+                            state=live,
+                            now=time.monotonic(),
+                        )
+
+                    visible = stream_turn(
+                        self.agent.step_stream(
+                            line,
+                            on_tool_call=self.on_tool_call,
+                            on_tool_result=self.on_tool_result,
+                        ),
+                        receipts=self._stream_receipts(),
+                        write=write_delta,
+                        on_delta=preview.send,
+                        on_phase=preview.activity,
+                        announce=not slash_announced,
+                    )
+                    visible = self._note_delivery(visible, preview)
+                    if ui.enabled:
+                        self._finish_live_frame(
+                            ui=ui, turns=turns, line=line, reply=reply, effort=effort,
+                        )
                     if not ui.enabled:
-                        sys.stdout.write("\n")
                         sys.stdout.flush()
                     flush_console()
                     remember("user", line)
-                    if self.agent.client.last_error:
+                    if visible.get("delivery") == "uncertain":
+                        remember(
+                            "system",
+                            "Entrega UNCERTAIN. Nenhuma chamada foi repetida.",
+                        )
+                    elif self.agent.client.last_error:
                         error = str(self.agent.client.last_error)[:130]
                         remember("system", "Provedor falhou: " + error +
                                  ". Verifique /doctor codex e /session; nenhuma chamada foi repetida.")
                     else:
-                        remember("assistant", "".join(reply))
+                        remember("assistant", visible.get("shown") or "".join(reply))
                 except Exception:
                     # Preserve the user's draft and terminal state; the outer
                     # handler prints a bounded error without a new provider call.
@@ -953,9 +1089,19 @@ class SentraREPL:
                 else:
                     self.console.print("[red]" + escape(message) + "[/red]")
 
-    def continue_previous(self):
-        for chunk in self.agent.step_stream("", on_tool_call=self.on_tool_call,
-                                            on_tool_result=self.on_tool_result, continue_previous=True):
-            sys.stdout.write(chunk)
-            sys.stdout.flush()
-        sys.stdout.write("\n")
+    def continue_previous(self) -> dict:
+        from .__main__ import stream_turn
+        from .shell_live_preview import LivePreviewWriter
+        preview = LivePreviewWriter()
+        visible = stream_turn(
+            self.agent.step_stream(
+                "",
+                on_tool_call=self.on_tool_call,
+                on_tool_result=self.on_tool_result,
+                continue_previous=True,
+            ),
+            receipts=self._stream_receipts(),
+            on_delta=preview.send,
+            on_phase=preview.activity,
+        )
+        return self._note_delivery(visible, preview)

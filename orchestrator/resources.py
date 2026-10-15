@@ -298,3 +298,555 @@ class ResourceCapabilityRegistry:
             ],
         })
         return registry
+
+
+_SURFACES = ("canvas", "terminal", "vm")
+_VM_EXES = {"vboxheadless.exe", "virtualboxvm.exe", "vboxsvc.exe"}
+_CANVAS_EXES = {"sentra.exe", "electron.exe"}
+_TERMINAL_EXES = {
+    "windowsterminal.exe", "openconsole.exe", "powershell.exe", "pwsh.exe",
+    "cmd.exe", "python.exe", "pythonw.exe", "py.exe", "conhost.exe",
+}
+_TERMINAL_HINTS = ("terminal", "conpty", "sentra-cli", "opencode", "codex")
+# Live probe opens VM and canvas images, plus the terminal host executables.
+# python/powershell/cmd/conhost stay out of the probe: without a command line
+# they cannot be attributed to SENTRA, and opening every one of them is enough
+# to stall a busy machine. Callers that already have a command line classify
+# those names through sample_surfaces.
+_PROBE_EXES = _VM_EXES | _CANVAS_EXES | {"windowsterminal.exe", "openconsole.exe"}
+
+
+@dataclass(frozen=True)
+class ResourceCeiling:
+    """Host headroom. Ceilings stay below 100% so admission cannot pin the machine."""
+
+    host_reserve_mb: int = 2048
+    max_ram_percent: float = 80.0
+    max_cpu_percent: float = 85.0
+    canvas_ram_mb: int = 2048
+    terminal_ram_mb: int = 1024
+    vm_ram_mb: int = 8192
+    hot_execution_cap: int = 40
+
+    def __post_init__(self) -> None:
+        if type(self.host_reserve_mb) is not int or self.host_reserve_mb < 512:
+            raise ValueError("host reserve must be at least 512 MB")
+        if isinstance(self.max_ram_percent, bool) or not isinstance(self.max_ram_percent, (int, float)):
+            raise ValueError("max_ram_percent must be a number")
+        if not 1 <= float(self.max_ram_percent) <= 90:
+            raise ValueError("ram percent ceiling must stay inside 1..90")
+        if isinstance(self.max_cpu_percent, bool) or not isinstance(self.max_cpu_percent, (int, float)):
+            raise ValueError("max_cpu_percent must be a number")
+        if not 1 <= float(self.max_cpu_percent) <= 95:
+            raise ValueError("cpu percent ceiling must stay inside 1..95")
+        for name, value in (
+            ("canvas", self.canvas_ram_mb),
+            ("terminal", self.terminal_ram_mb),
+            ("vm", self.vm_ram_mb),
+        ):
+            if type(value) is not int or value < 128:
+                raise ValueError(f"{name} ram ceiling must be an int >= 128")
+        if type(self.hot_execution_cap) is not int or not 10 <= self.hot_execution_cap <= 100:
+            raise ValueError("hot_execution_cap must be an int inside 10..100")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "host_reserve_mb": self.host_reserve_mb,
+            "max_ram_percent": self.max_ram_percent,
+            "max_cpu_percent": self.max_cpu_percent,
+            "canvas_ram_mb": self.canvas_ram_mb,
+            "terminal_ram_mb": self.terminal_ram_mb,
+            "vm_ram_mb": self.vm_ram_mb,
+            "hot_execution_cap": self.hot_execution_cap,
+        }
+
+
+def classify_surface(name: str, image_path: str = "", command_line: str = "") -> str | None:
+    """Classify a SENTRA-owned process. Unrelated host processes return None."""
+    exe = str(name or "").strip().lower()
+    image = str(image_path or "").replace("/", "\\").lower()
+    command = str(command_line or "").lower()
+    if exe in _VM_EXES:
+        return "vm"
+    sentra_owned = "sentra" in image or "sentra" in command
+    if exe in _CANVAS_EXES and sentra_owned:
+        return "canvas"
+    if exe in _TERMINAL_EXES and sentra_owned and any(
+        hint in command or hint in image for hint in _TERMINAL_HINTS
+    ):
+        return "terminal"
+    return None
+
+
+def sample_surfaces(processes: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Sum RSS and CPU time for canvas, terminal, and VM processes only."""
+    buckets = {
+        name: {"rss_bytes": 0, "cpu_time_s": 0.0, "pids": set()}
+        for name in _SURFACES
+    }
+    for proc in processes:
+        if not isinstance(proc, dict):
+            raise ValueError("process sample must be an object")
+        surface = classify_surface(
+            str(proc.get("name") or ""),
+            str(proc.get("image_path") or ""),
+            str(proc.get("command_line") or ""),
+        )
+        if surface is None:
+            continue
+        rss = proc.get("rss_bytes") or 0
+        cpu_time = proc.get("cpu_time_s") or 0
+        if isinstance(rss, bool) or not isinstance(rss, (int, float)) or rss < 0:
+            raise ValueError("rss_bytes must be a non-negative number")
+        if isinstance(cpu_time, bool) or not isinstance(cpu_time, (int, float)) or cpu_time < 0:
+            raise ValueError("cpu_time_s must be a non-negative number")
+        buckets[surface]["rss_bytes"] += int(rss)
+        buckets[surface]["cpu_time_s"] += float(cpu_time)
+        pid = proc.get("pid") or 0
+        if type(pid) is not int:
+            raise ValueError("pid must be an int")
+        if pid:
+            buckets[surface]["pids"].add(pid)
+    result = {}
+    for name, bucket in buckets.items():
+        pids = tuple(sorted(bucket["pids"]))
+        result[name] = {
+            "rss_mb": bucket["rss_bytes"] / (1024 * 1024),
+            "cpu_time_s": bucket["cpu_time_s"],
+            "process_count": len(pids),
+            "pids": pids,
+        }
+    return result
+
+
+def cpu_percent_between(
+    first_cpu_time_s: float,
+    second_cpu_time_s: float,
+    *,
+    elapsed_s: float,
+    cpu_count: int,
+) -> float:
+    """CPU percent from two cumulative samples. The caller owns the wait."""
+    if isinstance(elapsed_s, bool) or not isinstance(elapsed_s, (int, float)) or elapsed_s <= 0:
+        raise ValueError("elapsed_s must be positive")
+    if type(cpu_count) is not int or cpu_count < 1:
+        raise ValueError("cpu_count must be a positive int")
+    if isinstance(first_cpu_time_s, bool) or isinstance(second_cpu_time_s, bool):
+        raise ValueError("cpu time must be a number")
+    used = float(second_cpu_time_s) - float(first_cpu_time_s)
+    if used < 0:
+        raise ValueError("cpu time went backwards")
+    percent = (used / float(elapsed_s)) * 100.0 / cpu_count
+    return max(0.0, min(100.0, percent))
+
+
+def _surface_rss(surfaces: dict[str, Any], surface: str) -> float:
+    raw = surfaces.get(surface) or {}
+    if isinstance(raw, dict):
+        value = raw.get("rss_mb") or 0
+    else:
+        value = getattr(raw, "rss_mb", 0)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        raise ValueError("surface rss_mb must be a non-negative number")
+    return float(value)
+
+
+def evaluate_admission(
+    *,
+    ceiling: ResourceCeiling,
+    host: dict[str, Any],
+    surfaces: dict[str, Any],
+    surface: str,
+    ram_mb: int,
+    cpu_percent: float = 0.0,
+) -> dict[str, Any]:
+    """Decide whether new work fits. Never kills a process or changes priority."""
+    if not isinstance(ceiling, ResourceCeiling):
+        raise TypeError("ceiling must be a ResourceCeiling")
+    if surface not in _SURFACES:
+        raise ValueError("unknown surface")
+    if not isinstance(host, dict) or not isinstance(surfaces, dict):
+        raise TypeError("host and surfaces must be objects")
+    total = host.get("total_mb")
+    available = host.get("available_mb")
+    if type(total) is not int or type(available) is not int or total <= 0 or available < 0 or available > total:
+        raise ValueError("invalid host memory sample")
+    if type(ram_mb) is not int or ram_mb < 0:
+        raise ValueError("ram_mb must be a non-negative int")
+    if isinstance(cpu_percent, bool) or not isinstance(cpu_percent, (int, float)) or cpu_percent < 0:
+        raise ValueError("cpu_percent must be a non-negative number")
+    allowed = True
+    reasons: list[str] = []
+    if available - ram_mb < ceiling.host_reserve_mb:
+        allowed = False
+        reasons.append("host reserve")
+    used_after = (total - available) + ram_mb
+    if (used_after / total) * 100 > ceiling.max_ram_percent:
+        allowed = False
+        reasons.append("ram percent ceiling")
+    caps = {
+        "canvas": ceiling.canvas_ram_mb,
+        "terminal": ceiling.terminal_ram_mb,
+        "vm": ceiling.vm_ram_mb,
+    }
+    if _surface_rss(surfaces, surface) + ram_mb > caps[surface]:
+        allowed = False
+        reasons.append(surface + " ram ceiling")
+    cpu = host.get("cpu_percent")
+    if cpu is not None:
+        if isinstance(cpu, bool) or not isinstance(cpu, (int, float)) or not 0 <= float(cpu) <= 100:
+            raise ValueError("host.cpu_percent must be a number inside 0..100 or null")
+        if float(cpu) >= ceiling.max_cpu_percent or float(cpu) + float(cpu_percent) > ceiling.max_cpu_percent:
+            allowed = False
+            reasons.append("cpu ceiling")
+    return {
+        "allowed": allowed,
+        "reasons": reasons,
+        "kills_processes": False,
+        "changes_priority": False,
+        "authorizes_effects": False,
+    }
+
+
+def read_host_memory() -> dict[str, Any]:
+    """One GlobalMemoryStatusEx sample. Does not sleep or change process priority."""
+    if os.name != "nt":
+        raise OSError("Windows host memory probe is unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    class MEMORYSTATUSEX(ctypes.Structure):
+        _fields_ = [
+            ("dwLength", wintypes.DWORD),
+            ("dwMemoryLoad", wintypes.DWORD),
+            ("ullTotalPhys", ctypes.c_ulonglong),
+            ("ullAvailPhys", ctypes.c_ulonglong),
+            ("ullTotalPageFile", ctypes.c_ulonglong),
+            ("ullAvailPageFile", ctypes.c_ulonglong),
+            ("ullTotalVirtual", ctypes.c_ulonglong),
+            ("ullAvailVirtual", ctypes.c_ulonglong),
+            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+        ]
+
+    stat = MEMORYSTATUSEX()
+    stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
+    kernel.GlobalMemoryStatusEx.restype = wintypes.BOOL
+    if not kernel.GlobalMemoryStatusEx(ctypes.byref(stat)):
+        raise OSError("GlobalMemoryStatusEx failed")
+    total = int(stat.ullTotalPhys)
+    available = int(stat.ullAvailPhys)
+    return {
+        "total_mb": total // (1024 * 1024),
+        "available_mb": available // (1024 * 1024),
+        "ram_percent": float(stat.dwMemoryLoad),
+        "cpu_percent": None,
+        "cpu_count": os.cpu_count() or 0,
+        "authorizes_effects": False,
+    }
+
+
+def _invalid_handle(handle: int | None) -> bool:
+    if not handle:
+        return True
+    return int(handle) in {-1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF}
+
+
+def read_process_samples() -> list[dict[str, Any]]:
+    """One toolhelp pass over VM, canvas, and Windows Terminal host images.
+
+    python, powershell, cmd, and conhost are not opened. They are classified
+    only when the caller already has a command line. Access denied on a single
+    process omits that process. Does not change priority and does not
+    terminate anything.
+    """
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.OpenProcess.restype = ctypes.c_void_p
+
+    class PROCESSENTRY32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    class PROCESS_MEMORY_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("PageFaultCount", wintypes.DWORD),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
+        ]
+
+    kernel.Process32FirstW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel.Process32NextW.argtypes = [ctypes.c_void_p, ctypes.POINTER(PROCESSENTRY32W)]
+    kernel.Process32FirstW.restype = wintypes.BOOL
+    kernel.Process32NextW.restype = wintypes.BOOL
+    kernel.QueryFullProcessImageNameW.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)
+    ]
+    kernel.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel.GetProcessTimes.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel.GetProcessTimes.restype = wintypes.BOOL
+    psapi.GetProcessMemoryInfo.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(PROCESS_MEMORY_COUNTERS), wintypes.DWORD
+    ]
+    psapi.GetProcessMemoryInfo.restype = wintypes.BOOL
+
+    snapshot = kernel.CreateToolhelp32Snapshot(0x00000002, 0)
+    if _invalid_handle(snapshot):
+        return []
+    samples: list[dict[str, Any]] = []
+    shell_seen = 0
+    try:
+        entry = PROCESSENTRY32W()
+        entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+        if not kernel.Process32FirstW(snapshot, ctypes.byref(entry)):
+            err = ctypes.get_last_error()
+            raise OSError(err, "Process32FirstW failed")
+        while True:
+            name = str(entry.szExeFile or "")
+            pid = int(entry.th32ProcessID)
+            lowered = name.lower()
+            if pid and (lowered in _PROBE_EXES or (lowered in _SHELL_EXES and shell_seen < _SHELL_PROBE_CAP)):
+                if lowered in _SHELL_EXES:
+                    shell_seen += 1
+                samples.append(_sample_one(kernel, psapi, PROCESS_MEMORY_COUNTERS, pid, name))
+            if not kernel.Process32NextW(snapshot, ctypes.byref(entry)):
+                break
+    finally:
+        kernel.CloseHandle(snapshot)
+    return samples
+
+
+def _filetime_seconds(value: Any) -> float:
+    return ((int(value.dwHighDateTime) << 32) + int(value.dwLowDateTime)) / 10_000_000
+
+
+def _sample_one(kernel: Any, psapi: Any, counters_type: Any, pid: int, name: str) -> dict[str, Any]:
+    import ctypes
+    from ctypes import wintypes
+
+    sample = {
+        "pid": pid,
+        "name": name,
+        "image_path": "",
+        "command_line": "",
+        "rss_bytes": 0,
+        "cpu_time_s": 0.0,
+    }
+    handle = kernel.OpenProcess(0x1000, False, pid)
+    if _invalid_handle(handle):
+        return sample
+    try:
+        buf = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(buf))
+        if kernel.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            sample["image_path"] = buf.value
+        counters = counters_type()
+        counters.cb = ctypes.sizeof(counters_type)
+        if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            sample["rss_bytes"] = int(counters.WorkingSetSize)
+        created = wintypes.FILETIME()
+        exited = wintypes.FILETIME()
+        kernel_time = wintypes.FILETIME()
+        user_time = wintypes.FILETIME()
+        if kernel.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited),
+            ctypes.byref(kernel_time), ctypes.byref(user_time),
+        ):
+            sample["cpu_time_s"] = _filetime_seconds(kernel_time) + _filetime_seconds(user_time)
+        sample["command_line"] = _command_line(handle)
+    finally:
+        kernel.CloseHandle(handle)
+    return sample
+
+
+_VM_ID = __import__("re").compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+_SHELL_EXES = {"python.exe", "pythonw.exe", "py.exe", "powershell.exe", "pwsh.exe", "cmd.exe"}
+_SHELL_PROBE_CAP = 32
+
+
+def attribute_processes(processes: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attribute canvas, terminal, and VM samples without calling VBoxManage.
+
+    A VM id is taken only from a UUID already present on that process command
+    line. Command lines themselves are not returned.
+    """
+    rows = []
+    for proc in processes:
+        if not isinstance(proc, dict):
+            raise ValueError("process sample must be an object")
+        surface = classify_surface(
+            str(proc.get("name") or ""),
+            str(proc.get("image_path") or ""),
+            str(proc.get("command_line") or ""),
+        )
+        if surface is None:
+            continue
+        command = str(proc.get("command_line") or "")
+        found = _VM_ID.search(command) if surface == "vm" else None
+        pid = proc.get("pid") or 0
+        if type(pid) is not int:
+            raise ValueError("pid must be an int")
+        rss = proc.get("rss_bytes") or 0
+        if isinstance(rss, bool) or not isinstance(rss, (int, float)) or rss < 0:
+            raise ValueError("rss_bytes must be a non-negative number")
+        rows.append({
+            "surface": surface,
+            "pid": pid,
+            "name": str(proc.get("name") or ""),
+            "vm_id": found.group(0).lower() if found else None,
+            "rss_bytes": int(rss),
+            "authorizes_effects": False,
+        })
+    rows.sort(key=lambda row: (row["surface"], row["pid"], row["name"]))
+    return rows
+
+
+def admit_surface(
+    *,
+    ceiling: ResourceCeiling,
+    host: dict[str, Any],
+    surfaces: dict[str, Any],
+    surface: str,
+    ram_mb: int,
+    cpu_percent: float = 0.0,
+    budget: Any = None,
+    dot_id: str | None = None,
+) -> dict[str, Any]:
+    """Connect a measurement to the host budget. This does not change a VM."""
+    decision = evaluate_admission(
+        ceiling=ceiling, host=host, surfaces=surfaces, surface=surface,
+        ram_mb=ram_mb, cpu_percent=cpu_percent,
+    )
+    if not decision["allowed"]:
+        return {
+            "admitted": False,
+            "reservation_id": None,
+            "decision": decision,
+            "executed": False,
+            "authorizes_effects": False,
+        }
+    reservation_id = None
+    if budget is not None:
+        if not dot_id:
+            raise ValueError("dot_id is required to reserve")
+        try:
+            reservation = budget.reserve(dot_id, surface, ram_mb, cpu_percent)
+        except Exception as exc:
+            from orchestrator.budgets import BudgetExceeded
+
+            if not isinstance(exc, BudgetExceeded):
+                raise
+            refused = dict(decision)
+            refused["allowed"] = False
+            refused["reasons"] = list(decision["reasons"]) + [str(exc)]
+            return {
+                "admitted": False,
+                "reservation_id": None,
+                "decision": refused,
+                "executed": False,
+                "authorizes_effects": False,
+            }
+        reservation_id = reservation.id
+    return {
+        "admitted": True,
+        "reservation_id": reservation_id,
+        "decision": decision,
+        "executed": False,
+        "authorizes_effects": False,
+    }
+
+
+def read_host_snapshot() -> dict[str, Any]:
+    """Read-only host RAM plus SENTRA surface RSS. Does not mutate processes."""
+    host = read_host_memory()
+    try:
+        processes = read_process_samples()
+    except OSError:
+        processes = []
+    surfaces = sample_surfaces(processes)
+    return {
+        "host": host,
+        "surfaces": {
+            name: {
+                "rss_mb": round(bucket["rss_mb"], 3),
+                "cpu_time_s": round(bucket["cpu_time_s"], 3),
+                "process_count": bucket["process_count"],
+            }
+            for name, bucket in surfaces.items()
+        },
+        "process_count": len(processes),
+        "attributed": [
+            {key: row[key] for key in ("surface", "pid", "name", "vm_id", "rss_bytes")}
+            for row in attribute_processes(processes)
+        ],
+        "authorizes_effects": False,
+        "kills_processes": False,
+        "changes_priority": False,
+    }
+
+
+def _command_line(handle: int) -> str:
+    """Best-effort command line. Failure returns an empty string."""
+    import ctypes
+    from ctypes import wintypes
+
+    class UNICODE_STRING(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", ctypes.c_void_p),
+        ]
+
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtQueryInformationProcess.argtypes = [
+        ctypes.c_void_p, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG, ctypes.POINTER(wintypes.ULONG),
+    ]
+    ntdll.NtQueryInformationProcess.restype = wintypes.LONG
+    raw = ctypes.create_string_buffer(4096)
+    returned = wintypes.ULONG(0)
+    status = ntdll.NtQueryInformationProcess(handle, 60, raw, len(raw), ctypes.byref(returned))
+    if status != 0 or returned.value < ctypes.sizeof(UNICODE_STRING):
+        return ""
+    info = UNICODE_STRING.from_buffer_copy(raw)
+    if not info.Buffer or info.Length <= 0:
+        return ""
+    try:
+        return ctypes.wstring_at(info.Buffer, info.Length // 2)[:2000]
+    except (OSError, ValueError):
+        return ""

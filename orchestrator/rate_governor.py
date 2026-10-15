@@ -186,3 +186,177 @@ class ProviderRateGovernor:
                     }
                     for provider, lane in self._lanes.items()
                 }
+
+
+class HostResourceGovernor:
+    """Short, persisted pause while the host CPU or RAM is hot.
+
+    ``observe`` records pressure and returns a delay. It does not sleep, renice,
+    kill, or touch a VM. The delay never exceeds 2 seconds, including a value
+    reloaded from disk, so a restart cannot stall the machine for minutes.
+    """
+
+    SCHEMA_VERSION = 1
+    MAX_DELAY_S = 2.0
+
+    def __init__(
+        self,
+        *,
+        state_path: Path | str | None = None,
+        clock: Callable[[], float] = time.time,
+        max_delay_s: float = 2.0,
+        ram_hot_percent: float = 85.0,
+        cpu_hot_percent: float = 85.0,
+    ) -> None:
+        if isinstance(max_delay_s, bool) or not isinstance(max_delay_s, (int, float)):
+            raise ValueError("max_delay_s must be a number")
+        if not 0 < float(max_delay_s) <= self.MAX_DELAY_S:
+            raise ValueError("max_delay_s must be within (0, 2]")
+        for name, value in (("ram_hot_percent", ram_hot_percent), ("cpu_hot_percent", cpu_hot_percent)):
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not 50 <= float(value) <= 95:
+                raise ValueError(f"{name} must stay inside 50..95")
+        self.max_delay_s = float(max_delay_s)
+        self.ram_hot_percent = float(ram_hot_percent)
+        self.cpu_hot_percent = float(cpu_hot_percent)
+        self.clock = clock
+        self.state_path = Path(state_path).resolve() if state_path else None
+        self._process_lock_path = (
+            self.state_path.with_name(self.state_path.name + ".lock")
+            if self.state_path else None
+        )
+        self._lock = threading.RLock()
+        self._hold_until = 0.0
+        self._reason = ""
+        self._load()
+
+    def _process_guard(self):
+        return (
+            exclusive_file_lock(self._process_lock_path)
+            if self._process_lock_path is not None
+            else nullcontext()
+        )
+
+    def _load(self) -> None:
+        if not self.state_path or not self.state_path.is_file():
+            return
+        try:
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid host resource governor state") from exc
+        if not isinstance(data, dict) or data.get("schema_version") != self.SCHEMA_VERSION:
+            raise ValueError("invalid host resource governor state")
+        if "hold_until" not in data:
+            raise ValueError("invalid host resource governor state")
+        try:
+            hold = float(data.get("hold_until") or 0.0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid host resource governor state") from exc
+        now = self.clock()
+        if hold > now + self.max_delay_s:
+            hold = now + self.max_delay_s
+        self._hold_until = max(0.0, hold)
+        self._reason = str(data.get("reason") or "")[:120]
+
+    def _save(self) -> None:
+        if not self.state_path:
+            return
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp = tempfile.mkstemp(
+            prefix=".host-pressure-", suffix=".tmp", dir=str(self.state_path.parent)
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(
+                    {
+                        "schema_version": self.SCHEMA_VERSION,
+                        "hold_until": self._hold_until,
+                        "reason": self._reason,
+                    },
+                    handle, indent=2, sort_keys=True,
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, self.state_path)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+
+    def _delay_locked(self) -> float:
+        remaining = float(self._hold_until) - self.clock()
+        if remaining <= 0:
+            return 0.0
+        return min(self.max_delay_s, remaining)
+
+    def _hot(self, ram_percent: float, cpu_percent: float | None, available_mb: int | None) -> bool:
+        if ram_percent >= self.ram_hot_percent:
+            return True
+        if cpu_percent is not None and cpu_percent >= self.cpu_hot_percent:
+            return True
+        return available_mb is not None and available_mb < 1024
+
+    def observe(
+        self,
+        *,
+        ram_percent: float,
+        cpu_percent: float | None = None,
+        available_mb: int | None = None,
+    ) -> float:
+        """Return the seconds a caller may wait. This method itself does not sleep."""
+        if isinstance(ram_percent, bool) or not isinstance(ram_percent, (int, float)):
+            raise ValueError("ram_percent must be a number")
+        if not 0 <= float(ram_percent) <= 100:
+            raise ValueError("ram_percent out of range")
+        if cpu_percent is not None:
+            if isinstance(cpu_percent, bool) or not isinstance(cpu_percent, (int, float)):
+                raise ValueError("cpu_percent must be a number or null")
+            if not 0 <= float(cpu_percent) <= 100:
+                raise ValueError("cpu_percent out of range")
+        if available_mb is not None and (type(available_mb) is not int or available_mb < 0):
+            raise ValueError("available_mb must be a non-negative int")
+        with self._lock:
+            with self._process_guard():
+                if self.state_path and self.state_path.is_file():
+                    self._load()
+                if self._hot(float(ram_percent), None if cpu_percent is None else float(cpu_percent), available_mb):
+                    self._hold_until = min(
+                        max(self._hold_until, self.clock() + self.max_delay_s),
+                        self.clock() + self.max_delay_s,
+                    )
+                    self._reason = "host_pressure"
+                self._save()
+                return self._delay_locked()
+
+    def delay(self) -> float:
+        with self._lock:
+            with self._process_guard():
+                if self.state_path and self.state_path.is_file():
+                    self._load()
+                return self._delay_locked()
+
+    def clear(self) -> None:
+        with self._lock:
+            with self._process_guard():
+                self._hold_until = 0.0
+                self._reason = ""
+                self._save()
+
+    async def wait(self) -> float:
+        delay = self.delay()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return delay
+
+    def snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            with self._process_guard():
+                if self.state_path and self.state_path.is_file():
+                    self._load()
+                return {
+                    "delay_s": self._delay_locked(),
+                    "reason": self._reason,
+                    "hold_until": self._hold_until,
+                    "max_delay_s": self.max_delay_s,
+                    "authorizes_effects": False,
+                    "sleeps_in_observe": False,
+                    "changes_priority": False,
+                }

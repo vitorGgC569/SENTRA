@@ -92,7 +92,7 @@ class CLIConfig:
     local_base_url: str = "http://127.0.0.1:11434/v1"
     local_api_key: str = "local"
     local_model_name: str = "qwen2.5:0.5b-instruct-q4_K_M"
-    timeout_s: float = 120.0
+    timeout_s: float = 1800.0
     gateway_start_timeout_s: float = 120.0
     max_output_tokens: int = 4096
     max_tool_rounds: int = 8

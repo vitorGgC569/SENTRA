@@ -13,13 +13,17 @@ from urllib.parse import urlsplit
 class ConversationIdentity:
     provider: str
     conversation_id: str
+    # Gemini allows several signed-in Google accounts in one Edge profile.
+    # Preserve /u/N/ identity so canonicalization never switches accounts.
+    account_index: int | None = None
 
     @property
     def canonical_url(self) -> str:
         if self.provider == "chatgpt":
             return f"https://chatgpt.com/c/{self.conversation_id}"
         if self.provider == "gemini":
-            return f"https://gemini.google.com/app/{self.conversation_id}"
+            scope = f"/u/{self.account_index}" if self.account_index is not None else ""
+            return f"https://gemini.google.com{scope}/app/{self.conversation_id}"
         raise ValueError(f"unsupported conversation provider: {self.provider}")
 
     @classmethod
@@ -41,8 +45,12 @@ class ConversationIdentity:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", cid):
                 raise ValueError("invalid Gemini conversation_id")
         identity = cls(normalized, cid)
-        if conversation_url is not None and cls.parse(conversation_url) != identity:
-            raise ValueError("conversation provider/id/url mismatch")
+        if conversation_url is not None:
+            observed = cls.parse(conversation_url)
+            if (observed.provider, observed.conversation_id) != (identity.provider, identity.conversation_id):
+                raise ValueError("conversation provider/id/url mismatch")
+            # Retain the Google account slot from the trusted, validated URL.
+            return observed
         return identity
 
     @classmethod
@@ -60,8 +68,13 @@ class ConversationIdentity:
         parts = [part for part in path.split("/") if part]
         if parsed.hostname == "chatgpt.com" and len(parts) == 2 and parts[0] == "c":
             return cls.from_parts("chatgpt", parts[1])
-        if parsed.hostname == "gemini.google.com" and len(parts) == 2 and parts[0] == "app":
-            return cls.from_parts("gemini", parts[1])
+        if parsed.hostname == "gemini.google.com":
+            if len(parts) == 2 and parts[0] == "app":
+                return cls.from_parts("gemini", parts[1])
+            if (len(parts) == 4 and parts[0] == "u" and parts[2] == "app"
+                    and 1 <= len(parts[1]) <= 3 and parts[1].isascii() and parts[1].isdigit()):
+                cid = cls.from_parts("gemini", parts[3]).conversation_id
+                return cls("gemini", cid, int(parts[1]))
         raise ValueError("unsupported conversation URL")
 
     @classmethod

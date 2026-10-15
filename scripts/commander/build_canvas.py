@@ -12,6 +12,21 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def desktop_source_inputs(project: Path) -> dict[str, str]:
+    """Same explicit inputs as desktop_ui/scripts/source-inputs.mjs."""
+    names = {"package.json", "package-lock.json", "index.html", "vite.config.js",
+             "scripts/build.mjs", "scripts/materialize.mjs", "scripts/source-inputs.mjs"}
+    for folder in ("src", "public"):
+        names.update(path.relative_to(project).as_posix() for path in (project / folder).rglob("*") if path.is_file())
+    result = {}
+    for name in sorted(names):
+        path = project / name
+        if path.is_symlink() or not path.resolve().is_relative_to(project.resolve()):
+            raise ValueError("linked desktop source input")
+        result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return result
+
+
 def validate_desktop_bundle(ui: Path) -> dict:
     """Fail closed if the packaged React Canvas is missing or stale."""
     ui = Path(ui)
@@ -39,6 +54,10 @@ def validate_desktop_bundle(ui: Path) -> dict:
             raise ValueError("stale or tampered React Canvas bundle: " + name)
     if "desktop-assets/bootstrap.js" not in entry.read_text(encoding="utf-8"):
         raise ValueError("React Canvas entry does not load its pinned bootstrap")
+    project = ui.parent / "desktop_ui"
+    if (project / "package.json").is_file():
+        if manifest.get("source_inputs") != desktop_source_inputs(project):
+            raise ValueError("React Canvas bundle differs from current desktop sources; run npm run build")
     return manifest
 
 

@@ -8,15 +8,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-EXTENSION_IDENTITY_FILES = (
-    "service-worker.js",
-    "content-script.js",
-    "recovery-guard.js",
-    "selectors.js",
-    "observer.js",
-    "conversation-evidence.js",
-    "COS-NOTICE.txt",
-)
+from .extension_sources import EXTENSION_IDENTITY_FILES, extension_source_identity
 BOOTSTRAP_FILENAME = "sentra-bootstrap.json"
 BOOTSTRAP_DOMAIN = b"sentra-edge-bootstrap-v1\0"
 
@@ -32,15 +24,8 @@ def extension_identity(root: Path) -> dict[str, Any]:
     if not version or not build_id:
         raise ValueError("extension manifest requires version and sentra_build_id")
 
-    files: dict[str, dict[str, str]] = {}
-    for name in EXTENSION_IDENTITY_FILES:
-        target = root / name
-        if not target.is_file():
-            raise FileNotFoundError(f"extension identity file missing: {target}")
-        files[name] = {"sha256": hashlib.sha256(target.read_bytes()).hexdigest()}
-    source_hash = hashlib.sha256(
-        json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    identity = extension_source_identity(root)
+    files, source_hash = identity['files'], identity['source_hash']
     declared = str(manifest.get("sentra_source_hash") or "").strip().lower()
     if declared and declared != source_hash:
         raise ValueError("extension manifest source hash is stale")

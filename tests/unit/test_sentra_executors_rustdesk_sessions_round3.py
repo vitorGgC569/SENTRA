@@ -101,13 +101,47 @@ class NativePeerConfigurationContract(unittest.TestCase):
         except ExecutorFailure as exc:
             # Source drift is a required fail-closed outcome: do NOT
             # produce a guessed executable/patch against a newer clone.
-            self.assertIn('rustdesk_native_patch_source_drift',str(exc))
+            self.assertIn(exc.code, {'rustdesk_native_patch_source_drift','rustdesk_native_patch_submodule_unavailable'})
             self.assertTrue(exc.evidence.get('file'))
             return
         self.assertFalse(plan['compiled']);self.assertFalse(plan['operational'])
         self.assertIn('SENTRA requires verified rendezvous peer identity',plan['patch'])
         self.assertIn('GetEnvironmentVariableW',plan['patch'])
         self.assertIn('check_identity(peer_id, &sign_pk.0)',plan['patch'])
+
+    def test_windows_line_endings_do_not_hide_real_source_drift(self):
+        clone=Path(__file__).resolve().parents[2]/'third_party/rustdesk'
+        if not clone.is_dir():self.skipTest('pinned source clone unavailable')
+        try:
+            original=native_peer_gate_patch(str(clone))
+        except ExecutorFailure as exc:
+            if exc.code=='rustdesk_native_patch_submodule_unavailable':
+                self.skipTest('original submodule uninitialized; no native source/build proof manufactured')
+            raise
+        for name in original['source_sha256']:
+            target=self.root/name;target.parent.mkdir(parents=True,exist_ok=True)
+            target.write_bytes((clone/name).read_bytes().replace(b'\r\n',b'\n'))
+        lf=native_peer_gate_patch(str(self.root))
+        for name in original['source_sha256']:
+            path=self.root/name;path.write_bytes(path.read_bytes().replace(b'\n',b'\r\n'))
+        crlf=native_peer_gate_patch(str(self.root))
+        self.assertEqual(lf['patch'],crlf['patch'])
+        self.assertNotEqual(lf['source_sha256'],crlf['source_sha256'])
+        path=self.root/'src/lib.rs'
+        path.write_bytes(path.read_bytes().replace(b'pub mod core_main;',b'pub mod drifted_core;'))
+        with self.assertRaisesRegex(ExecutorFailure,'source_drift'):native_peer_gate_patch(str(self.root))
+
+    def test_absent_submodule_is_a_typed_refusal_without_initializing_original(self):
+        clone=Path(__file__).resolve().parents[2]/'third_party/rustdesk'
+        names=('src/lib.rs','src/core_main.rs','src/client.rs','src/client/io_loop.rs','flutter/windows/runner/main.cpp')
+        if any(not (clone/name).is_file() for name in names):
+            self.skipTest('pinned source files unavailable; no native patch proof')
+        for name in names:
+            path=self.root/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes((clone/name).read_bytes())
+        with self.assertRaisesRegex(ExecutorFailure,'submodule_unavailable') as result:
+            native_peer_gate_patch(str(self.root))
+        self.assertEqual(result.exception.evidence.get('file'),'libs/hbb_common/src/config.rs')
+        self.assertFalse((self.root/'libs/hbb_common').exists())
 
     def test_deployment_specs_have_real_daemon_commands_and_no_unpinned_images(self):
         with self.assertRaises(ValueError):guacd_compose(image='guacamole/guacd:latest',
@@ -145,7 +179,7 @@ class RealRustDeskNativeAcceptance(unittest.TestCase):
             try:
                 opened=invoke(action='open');self.assertEqual(opened.state,'SUCCEEDED',(opened.error,opened.evidence))
                 sid=opened.evidence['session_id'];self.assertTrue(opened.evidence['peer_authenticated'])
-                self.assertFalse(opened.evidence['desktop_login_asserted']);self.assertFalse(opened.evidence['control_api_available'])
+                self.assertFalse(opened.evidence['desktop_login_asserted']);self.assertTrue(opened.evidence['control_api_available'])
                 denied=invoke(work='foreign',action='read',session_id=sid);self.assertNotEqual(denied.state,'SUCCEEDED')
                 attached=invoke(action='reattach',session_id=sid);self.assertEqual(attached.state,'SUCCEEDED',attached.error)
                 self.assertEqual(attached.evidence['current_transport_state'],'UNKNOWN')

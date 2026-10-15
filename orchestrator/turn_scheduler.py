@@ -32,6 +32,11 @@ class ConversationTurnScheduler:
         self.collect_concurrency = collect_concurrency
 
     async def _start_one(self, item: Any) -> dict[str, Any]:
+        from .providers.fleet_admission import uncertain_resend_block
+
+        blocked = uncertain_resend_block(item)
+        if blocked is not None:
+            return blocked
         provider = self.provider_of(item)
         if self.governor is not None:
             await self.governor.wait(provider)

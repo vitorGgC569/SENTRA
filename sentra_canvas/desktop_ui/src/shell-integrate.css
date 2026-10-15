@@ -1,0 +1,423 @@
+/* After Cadencia. One sheet, 52px rows, no card wire. */
+.opendots-shell .shell-home-board .shell-home-sheet {
+  background: var(--sentra-sheet, #17191e);
+  border: 0;
+  border-radius: 16px;
+  overflow: hidden;
+}
+.opendots-shell .shell-home-board .shell-home-list {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+.opendots-shell .shell-home-board .shell-home-list > button {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  max-height: 56px;
+  width: 100%;
+  margin: 0;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #f3f3f5;
+  box-shadow: inset 0 -1px 0 #2c3038;
+}
+.opendots-shell .shell-home-board .shell-home-list > button:hover {
+  background: #22262e;
+}
+.opendots-shell .shell-home-board .shell-home-list > button:focus-visible,
+:root[data-sentra-theme=dark] .opendots-shell .shell-home-board .shell-home-sheet button:focus-visible,
+.opendots-shell .shell-home-board .shell-home-sheet button:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-color: #ffffff;
+  outline-offset: -4px;
+}
+.opendots-shell .shell-home-board .shell-home-list > button .shell-mascot.nav {
+  width: 28px;
+  height: 28px;
+}
+.opendots-shell .shell-home-board .shell-home-list > button .shell-home-dot-context {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #9b9ba3;
+  font-size: 13px;
+}
+.opendots-shell .shell-home-board .shell-home-list > button strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #f3f3f5;
+  font-size: 15px;
+  font-weight: 620;
+}
+.opendots-shell .shell-home-board .shell-home-search {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  max-width: none;
+  height: 40px;
+  min-height: 40px;
+  box-sizing: border-box;
+  border-radius: 999px;
+}
+.opendots-shell .shell-home-board .shell-home-search input {
+  width: 100%;
+  height: 40px;
+  min-height: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+}
+:root[data-sentra-theme=dark] .opendots-shell .shell-home-board .shell-home-search input:focus-visible,
+.opendots-shell .shell-home-board .shell-home-search input:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-color: #ffffff;
+  outline-offset: 2px;
+}
+.opendots-shell .shell-home-focus {
+  display: grid;
+  justify-items: start;
+  row-gap: 8px;
+  margin: 0;
+  min-width: 0;
+}
+.opendots-shell .shell-home-focus h1 {
+  margin: 0;
+  font-size: 40px;
+  font-weight: 640;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
+}
+.opendots-shell .shell-home-focus-line {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  align-items: baseline;
+  column-gap: 16px;
+  row-gap: 0;
+  width: 100%;
+  min-width: 0;
+}
+.opendots-shell .shell-home-focus .shell-home-support {
+  flex: 0 0 auto;
+  max-width: 100%;
+  margin: 0;
+  color: #9b9ba3;
+  font-size: 16px;
+  line-height: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.opendots-shell .shell-home-board .shell-home-open-space {
+  flex: 0 0 auto;
+  line-height: 20px;
+}
+.opendots-shell .shell-home-board .shell-home-open-space,
+.opendots-shell .shell-home-board .shell-home-open-space:hover,
+.opendots-shell .shell-home-board .shell-home-open-space:active {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #f3f3f5;
+  transform: none;
+  white-space: nowrap;
+}
+:root[data-sentra-theme=dark] .opendots-shell .shell-home-board .shell-home-open-space:focus-visible,
+.opendots-shell .shell-home-board .shell-home-open-space:focus-visible {
+  outline: 3px solid #ffffff;
+  outline-color: #ffffff;
+  outline-offset: 2px;
+}
+.opendots-shell .shell-home-conversation-sum,
+.opendots-shell .shell-home-conversation-sum:hover,
+.opendots-shell .shell-home-conversation-sum:active,
+.opendots-shell .shell-home-conversation-item,
+.opendots-shell .shell-home-conversation-item:hover,
+.opendots-shell .shell-home-conversation-item:active {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #f3f3f5;
+  text-align: left;
+  transform: none;
+}
+.opendots-shell .shell-home-conversation-sum {
+  max-height: 56px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  overflow: hidden;
+}
+.opendots-shell .shell-home-conversation-copy {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 20px 16px;
+  align-content: center;
+}
+.opendots-shell .shell-home-conversation-sum strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+  font-weight: 620;
+  line-height: 20px;
+}
+.opendots-shell .shell-home-conversation-detail {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  color: #9b9ba3;
+  font-size: 13px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.opendots-shell .shell-home-conversation-dot {
+  flex: 0 0 auto;
+  color: #c5c8ce;
+}
+.opendots-shell .shell-home-conversation-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.opendots-shell .shell-home-conversation-sum > svg { width: 16px; min-width: 16px; }
+.opendots-shell .shell-home-conversation-item {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 14px 0 28px;
+  box-shadow: inset 0 1px 0 #2c3038;
+}
+.opendots-shell .shell-home-conversation-item strong { font-size: 13px; font-weight: 620; }
+.opendots-shell .shell-home-conversation-item small { color: #9b9ba3; font-size: 13px; }
+.opendots-shell .shell-home-quiet { margin: 0; color: #6f7480; font-size: 13px; }
+.opendots-shell .shell-home-board .shell-continue {
+  justify-self: start;
+  width: auto;
+  display: inline-flex;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #f3f3f5;
+  border-radius: 0;
+}
+.opendots-shell .shell-home-tally { margin: 0; color: #e2b15a; font-size: 14px; }
+.opendots-shell .shell-failure-sum {
+  width: 100%;
+  height: 52px;
+  min-height: 52px;
+  max-height: 52px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 16px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border: 0;
+  background: transparent;
+  color: #f3f3f5;
+  text-align: left;
+}
+.opendots-shell .shell-failure-sum:active { transform: none; }
+.opendots-shell .shell-failure-sum strong { font-size: 15px; font-weight: 620; }
+.opendots-shell .shell-failure-sum span { color: #e2b15a; font-weight: 650; }
+.opendots-shell .shell-failure-chevron {
+  width: 16px;
+  height: 16px;
+  color: #6f7480;
+  justify-self: end;
+}
+.opendots-shell .shell-failure-group-sum {
+  width: 100%;
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 0;
+  padding: 4px 14px;
+  border: 0;
+  background: transparent;
+  color: #f3f3f5;
+  text-align: left;
+}
+.opendots-shell .shell-failure-panel > p,
+.opendots-shell .shell-failure-group > p { margin: 0 14px 8px; color: #9b9ba3; font-size: 13px; }
+.opendots-shell .shell-failure-consult,
+.opendots-shell .shell-failure-consult:hover,
+.opendots-shell .shell-failure-consult:active,
+.opendots-shell .shell-failure-more,
+.opendots-shell .shell-failure-more:hover,
+.opendots-shell .shell-failure-more:active {
+  justify-self: start;
+  width: auto;
+  margin: 0 14px 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  color: #f3f3f5;
+  transform: none;
+}
+.opendots-shell .shell-failure-consult {
+  height: 32px;
+  min-height: 32px;
+}
+.opendots-shell .shell-failure-record {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  margin: 0 14px;
+  color: #9b9ba3;
+  font-size: 13px;
+  box-shadow: inset 0 1px 0 #2c3038;
+}
+.opendots-shell .shell-topbar { position: relative; z-index: 5; overflow: visible; }
+.opendots-shell .shell-workspace { container-type: inline-size; container-name: shell; }
+.opendots-shell .shell-breadcrumb {
+  flex: 1 1 auto;
+  min-width: min-content;
+  overflow: hidden;
+}
+.opendots-shell .shell-breadcrumb > span,
+.opendots-shell .shell-breadcrumb > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.opendots-shell .shell-breadcrumb > span { min-width: 0; }
+.opendots-shell .shell-breadcrumb > strong { flex: 0 0 auto; }
+.opendots-shell .shell-topbar-actions { flex: 0 0 auto; min-width: min-content; }
+@container shell (max-width: 560px) {
+  .opendots-shell .shell-breadcrumb > span,
+  .opendots-shell .shell-breadcrumb > svg { display: none; }
+}
+.opendots-shell .shell-update-menu { position: relative; flex: 0 0 auto; display: block; }
+.opendots-shell .shell-update-menu[open] { display: block; }
+.opendots-shell .shell-update-panel {
+  display: none;
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 6;
+  width: 220px;
+  max-width: min(220px, calc(100vw - 16px));
+  padding: 6px;
+  border-radius: 14px;
+  background: #1a1c22;
+}
+.opendots-shell .shell-update-menu[open] .shell-update-panel { display: grid; gap: 2px; }
+.opendots-shell .shell-update-panel button {
+  width: 100%;
+  justify-content: flex-start;
+  border: 0;
+  background: transparent;
+  color: #f3f3f5;
+  text-align: left;
+  white-space: nowrap;
+}
+.opendots-shell .shell-home-board h2 { margin: 0; font-size: 15px; font-weight: 620; line-height: 20px; letter-spacing: 0; text-transform: none; }
+.opendots-shell .shell-topbar .shell-run-label,
+.opendots-shell .shell-topbar .shell-run-label .shell-status {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: #9b9ba3;
+  font-size: 13px;
+  white-space: nowrap;
+  box-shadow: none;
+}
+.opendots-shell .shell-topbar .shell-run-label {
+  flex: 0 0 auto;
+  margin-inline-start: 8px;
+  white-space: nowrap;
+}
+@media (max-width: 700px) {
+  .opendots-shell .shell-home-focus h1 { font-size: 32px; }
+  .opendots-shell .shell-dot-flow { min-height: 280px; }
+  .opendots-shell .shell-breadcrumb > span,
+  .opendots-shell .shell-breadcrumb > svg { display: none; }
+  .opendots-shell .shell-home-board .shell-home-list > button {
+    grid-template-columns: 28px minmax(0, 1fr) auto 16px;
+    grid-template-rows: 18px 16px;
+    column-gap: 10px;
+    row-gap: 0;
+    align-content: center;
+    height: 52px;
+    max-height: 56px;
+  }
+  .opendots-shell .shell-home-board .shell-home-list > button .shell-mascot.nav {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+  }
+  .opendots-shell .shell-home-board .shell-home-list > button strong {
+    grid-column: 2;
+    grid-row: 1;
+    align-self: end;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .opendots-shell .shell-home-board .shell-home-list > button .shell-home-dot-context {
+    grid-column: 2;
+    grid-row: 2;
+    align-self: start;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .opendots-shell .shell-home-board .shell-home-list > button small[data-phase] {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    white-space: nowrap;
+    min-width: max-content;
+    overflow: visible;
+  }
+  .opendots-shell .shell-home-board .shell-home-list > button > svg {
+    grid-column: 4;
+    grid-row: 1 / span 2;
+    width: 16px;
+    min-width: 16px;
+  }
+}
+.opendots-shell .shell-failure {
+  animation: none;
+  transform: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .opendots-shell .shell-home-board .shell-home-list > button,
+  .opendots-shell .shell-failure,
+  .opendots-shell .cadence-activity,
+  .opendots-shell .cadence-surface {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+  .opendots-shell .cadence-set-chevron,
+  .opendots-shell .shell-failure-chevron {
+    transition: none !important;
+  }
+}

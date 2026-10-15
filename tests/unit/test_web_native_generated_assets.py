@@ -281,6 +281,23 @@ def test_authenticated_relay_http_chunk_finalize_and_denied_origins(tmp_path):
         thread.join(timeout=3)
 
 
+def test_fenced_native_image_is_not_readable(tmp_path):
+    media, _relay, scope, descriptor, raw = setup(tmp_path)
+    media.declare(owner=OWNER, job_id=JOB, conversation_id=CONV,
+                  message_id=ASSISTANT, file_ids=[FILE])
+    send_all(media, scope, descriptor, raw)
+    media.finalize(**scope)
+    asset_id = _asset_id(JOB, ASSISTANT, FILE)
+    media._write_fence(owner=OWNER, job_id=JOB, operation_id="op-12345678",
+                       reason="integrity_mismatch", allow_finalized=True)
+    with pytest.raises(PermissionError, match="UNCERTAIN_NO_RESEND"):
+        media.read(owner=OWNER, operation_id="op-12345678", asset_id=asset_id)
+    assert media.fenced_asset_ids(OWNER, [asset_id, "cli-asset"]) == {asset_id}
+    assert media.for_job(owner=OWNER, run_id="run-12345678", work_item_id="work-12345678",
+                         operation_id="op-12345678", job_id=JOB, conversation_id=CONV,
+                         message_id=ASSISTANT) == []
+
+
 def test_canvas_http_reads_only_confirmed_native_web_file(shell,monkeypatch):
     """Disposable Canvas fixture: synthetic native bytes traversing the real HTTP consumer."""
     import time

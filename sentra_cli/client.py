@@ -1330,6 +1330,7 @@ class ModelClient:
         emitted = False
         received_asset = False
         completed = False
+        streamed_text = ""
         deadline = time.monotonic() + max(self.config.timeout_s, 0.1)
         try:
             with response:
@@ -1365,7 +1366,6 @@ class ModelClient:
                         continue
                     data_text = line[5:].strip()
                     if data_text == "[DONE]":
-                        completed = True
                         break
                     try:
                         data = json.loads(data_text)
@@ -1392,6 +1392,7 @@ class ModelClient:
                         delta = data.get("delta")
                         if isinstance(delta, str) and delta:
                             emitted = True
+                            streamed_text += delta
                             yield delta
                     elif event_type == "response.completed":
                         completed = True
@@ -1399,11 +1400,18 @@ class ModelClient:
                         if isinstance(completed_response,dict):
                             from sentra_core.provider_usage import normalize_usage
                             self._usage("gateway",turn_id,model,normalize_usage(completed_response.get("usage")))
-                        if not emitted and isinstance(completed_response, dict):
+                        if isinstance(completed_response, dict):
                             text = self._extract_response_text(completed_response)
                             if text:
+                                if not text.startswith(streamed_text):
+                                    raise ProviderHTTPError("gateway", None, "final response differs from streamed text; reconciliation required")
+                                remainder = text[len(streamed_text):]
                                 emitted = True
-                                yield text
+                                if remainder:
+                                    yield remainder
+                        break  # The terminal event is sufficient; do not await a socket close.
+                    elif event_type in {"response.incomplete", "response.cancelled"}:
+                        raise ProviderHTTPError("gateway", None, "response is incomplete; partial output preserved, automatic retry disabled")
                     elif event_type in {"response.failed", "error"}:
                         detail, rejected = self._stream_failure_detail(data)
                         raise ProviderHTTPError("gateway", 400 if rejected else None, detail)
@@ -1533,6 +1541,13 @@ class ModelClient:
                 provider, None, f"{type(exc).__name__}: {exc}"
             ) from exc
 
+    @staticmethod
+    def stream_orchestrated_turn(chunk_source, *, receipts=(), required=("coordinator",)):
+        from .orchestrated_stream import stream_orchestrated_turn
+        yield from stream_orchestrated_turn(
+            chunk_source, receipts=receipts, required=required,
+        )
+
     def chat_stream(
         self,messages: list[dict[str,Any]],tools: list[dict[str,Any]]|None=None,
         model_override: str|None=None,
@@ -1575,6 +1590,13 @@ class ModelClient:
         health = self.probe_health()
         if self._provider_admission_error is not None:
             raise ProviderAdmissionError(self._provider_admission_error)
+        if model == "sentra/grok/grok-4.7":
+            self.active_provider = "grok"
+            self.active_model = model
+            self.last_error = "sentra/grok/grok-4.7 is listed and access is unverified"
+            self.last_delivery_state = "not_submitted"
+            yield "\n" + self.last_error + "\n"
+            return
         pre_send_errors: list[str] = []
 
         is_chatgpt_web = (

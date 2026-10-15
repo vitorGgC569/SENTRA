@@ -55,6 +55,24 @@ class InvalidStateTransitionError(ValueError):
     pass
 
 
+_UNREPLAYABLE_EFFECTS = frozenset({
+    "UNCERTAIN", "RUNNING", "WAITING_EXTERNAL", "IN_FLIGHT", "CLAIMED", "LEASED", "IN_REVIEW",
+})
+
+
+def admit_effect_retry(metadata: Any) -> bool:
+    """A retry is a second effect when the previous effect may already have started."""
+    if not isinstance(metadata, dict):
+        return True
+    if metadata.get("may_have_started") is True:
+        return False
+    raw = metadata.get("effect_state")
+    if raw is None or raw == "":
+        return True
+    state = raw.value if hasattr(raw, "value") else str(raw)
+    return state not in _UNREPLAYABLE_EFFECTS
+
+
 class TaskStateMachine:
     """
     Deterministic state machine for Task lifecycle.
@@ -75,6 +93,10 @@ class TaskStateMachine:
         if not TaskStateMachine.can_transition(current, target):
             raise InvalidStateTransitionError(
                 f"Cannot transition task {task.id} from {current.value} to {target.value}. Allowed: {[s.value for s in VALID_TASK_TRANSITIONS.get(current, set())]}"
+            )
+        if target == TaskStatus.RETRYING and not admit_effect_retry(getattr(task, "metadata", None)):
+            raise InvalidStateTransitionError(
+                f"Cannot retry task {task.id} while its effect requires observation"
             )
         task.status = target
         if "transition_history" not in task.metadata:

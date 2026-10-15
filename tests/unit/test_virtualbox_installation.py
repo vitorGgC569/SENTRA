@@ -3,7 +3,7 @@ import struct, uuid
 import pytest
 from sentra_executors.rpa import ExecutorFailure
 from sentra_executors.virtualbox_vm import VirtualBoxBinding, VirtualBoxExecutor, machine_readable
-from sentra_executors.virtualbox_installation import inspect_vdi, installation_plan, configure_disk_boot, verify_guest, classify_linux_guest, debian_postinstall_template, prepare_debian_installer_templates
+from sentra_executors.virtualbox_installation import inspect_vdi, installation_plan, configure_disk_boot, verify_guest, classify_linux_guest, debian_postinstall_template, prepare_debian_installer_templates, windows_guest_additions, classify_windows_guest, windows_usable, WINDOWS_GUEST_PROBE
 
 def vdi(path, *, allocated=False, partitioned=False):
     ident=str(uuid.uuid4()); header=bytearray(512)
@@ -91,6 +91,11 @@ def test_fixed_guest_probe_uses_configured_credentials_via_stdin(tmp_path):
     assert value['installed_os_verified'] and value['disk_uuid']==ident
     args,options=c.calls[0]
     assert args[:3]==('guestcontrol',b.vm_id,'run') and '--passwordfile' in args
+    assert args[args.index('--username')+1]=='sentra'
+    cfg['username']='dotuser'
+    c.calls.clear()
+    verify_guest(c,b,cfg)
+    assert c.calls[0][0][c.calls[0][0].index('--username')+1]=='dotuser'
     assert cfg['password'] not in str(args) and options['password']==cfg['password']
     executor=VirtualBoxExecutor(machine_id='m',owner_principal_id='a',bindings={'vm:guest':b},client=c)
     with pytest.raises(ValueError):executor._validate(type('Request',(),{'capability_id':'vm:guest','arguments':{'action':'installation.verify','command':'echo fake'}})(),b)
@@ -114,12 +119,109 @@ def test_empty_vdi_cannot_be_certified_installed_even_if_guest_could_report_othe
 def test_installer_templates_prepare_only_exact_empty_poweroff_guest_without_secret(tmp_path):
     c,b,cfg,path,ident=client(tmp_path,state='poweroff')
     plan=installation_plan(c,b,cfg)
+    assert plan['username']=='sentra'
     prepared=prepare_debian_installer_templates(plan)
     assert prepared['vm_id']==b.vm_id and prepared['disk_uuid']==ident
     assert 'xfce-desktop' in prepared['preseed_template']
     assert '@@VBOX_INSERT_USER_PASSWORD_SHACRYPT512@@' in prepared['preseed_template']
     assert cfg['password'] not in str(prepared)
+    assert 'passwd/username string sentra' in prepared['preseed_template']
+    cfg['username']='dotuser'
+    named_plan=installation_plan(c,b,cfg)
+    assert named_plan['username']=='dotuser'
+    named=prepare_debian_installer_templates(named_plan)
+    assert 'passwd/username string dotuser' in named['preseed_template']
+    assert 'autologin-user=dotuser' in named['postinstall_script']
+    assert 'passwd/username string sentra' not in named['preseed_template']
+    with pytest.raises(ValueError, match='guest account'):
+        prepare_debian_installer_templates({**plan,'username':'../sentra'})
     assert not c.calls and not prepared['physical_effects_performed']
     assert not prepared['automatic_installation_ready']
     with pytest.raises(ValueError):prepare_debian_installer_templates({**plan,'vm_state':'running'})
     with pytest.raises(ValueError):prepare_debian_installer_templates({**plan,'os_family':'windows'})
+
+def windows_additions_client(tmp_path, probe, *, iso=True):
+    c,b,cfg,path,ident=client(tmp_path,state='running',allocated=True,partitioned=True)
+    cfg['os_family']='windows'
+    cfg['windows_license']={'channel':'owner_attested_license','product_key_stored':False,'attested_by':'owner'}
+    executable=tmp_path/'VBoxManage.exe'
+    executable.write_bytes(b'not-vbox')
+    if iso:(tmp_path/'VBoxGuestAdditions.iso').write_bytes(b'additions')
+    c.path=str(executable)
+    def run(*args,**kwargs):
+        c.calls.append((args,kwargs))
+        if args[:1]==('guestcontrol',):return probe
+        return ''
+    c.run=run
+    return c,b,cfg,ident
+
+def _commands(fake):
+    return [args[0] for args,_ in fake.calls]
+
+@pytest.mark.parametrize('probe',[
+    'SENTRA_USER=absent\nSENTRA_EXPLORER=absent\nSENTRA_LICENSE_STATUS=unknown\n',
+    'SENTRA_USER=present\nSENTRA_EXPLORER=absent\nSENTRA_LICENSE_STATUS=Licensed\n',
+    'SENTRA_USER=absent\nSENTRA_EXPLORER=running\nSENTRA_LICENSE_STATUS=Licensed\n'])
+def test_windows_guest_additions_refuses_without_user_and_explorer(tmp_path,probe):
+    c,b,cfg,ident=windows_additions_client(tmp_path,probe)
+    folder=tmp_path/'owned'
+    before=sorted(p.name for p in folder.rglob('*'))
+    result=windows_guest_additions(c,b,cfg)
+    assert result['status']=='windows_guest_additions_refused'
+    assert result['reason']=='guest_user_and_explorer_required'
+    assert result['windows_usable'] is False and result['activation_claimed'] is False
+    assert result['product_key_stored'] is False and result['guest_additions_attached'] is False
+    assert result['additions_effect'] is None and result['physical_effects_performed'] is False
+    assert result['automatic_retry'] is False and result['disk_uuid']==ident
+    assert result['guest_additions_runlevel']=='0'
+    assert not (result['user_present'] and result['explorer_running'])
+    assert _commands(c)==['guestcontrol']
+    args,options=c.calls[0]
+    assert args[-1]==WINDOWS_GUEST_PROBE.replace('@@ACCOUNT@@','sentra') and 'VBoxWindowsAdditions' not in str(args)
+    assert cfg['password'] not in str(args) and options['password']==cfg['password']
+    assert 'storageattach' not in str(c.calls) and 'b1a7b4555800414f' not in str(c.calls)
+    assert sorted(p.name for p in folder.rglob('*'))==before
+
+@pytest.mark.parametrize('probe,helper_usable',[
+    ('SENTRA_USER=present\nSENTRA_EXPLORER=running\nSENTRA_LICENSE_STATUS=Licensed\n',True),
+    ('SENTRA_USER=present\nSENTRA_EXPLORER=running\nSENTRA_LICENSE_STATUS=unknown\n',False)])
+def test_windows_guest_additions_iso_attach_is_only_an_injected_client_effect(tmp_path,probe,helper_usable):
+    c,b,cfg,ident=windows_additions_client(tmp_path,probe)
+    folder=tmp_path/'owned'
+    before=sorted(p.name for p in folder.rglob('*'))
+    result=windows_guest_additions(c,b,cfg)
+    classified=classify_windows_guest(probe)
+    assert windows_usable(classified,{'evaluation_usable':False}) is helper_usable
+    assert result['windows_usable'] is False and result['activation_claimed'] is False
+    assert result['product_key_stored'] is False and result['status']=='windows_guest_additions_iso_attached'
+    assert result['user_present'] is True and result['explorer_running'] is True
+    assert result['guest_additions_attached'] is True and result['physical_effects_performed'] is True
+    assert result['disk_uuid']==ident and result['guest_additions_runlevel']=='0'
+    effect=result['additions_effect']
+    assert effect['via']=='injected_client' and effect['medium_name']=='VBoxGuestAdditions.iso'
+    assert effect['command']=='storageattach' and effect['port']==3 and effect['controller']=='SATA'
+    medium=Path(effect['medium'])
+    assert medium== (tmp_path/'VBoxGuestAdditions.iso').resolve() and medium.name=='VBoxGuestAdditions.iso'
+    assert _commands(c)==['guestcontrol','storageattach']
+    probe_args,probe_options=c.calls[0]
+    attach_args,attach_options=c.calls[1]
+    assert probe_args[-1]==WINDOWS_GUEST_PROBE.replace('@@ACCOUNT@@','sentra') and cfg['password'] not in str(probe_args)
+    assert probe_options['password']==cfg['password'] and 'password' not in attach_options
+    assert attach_args==('storageattach',b.vm_id,'--storagectl','SATA','--port',3,'--device',0,'--type','dvddrive','--medium',effect['medium'])
+    assert ('--port',1) not in list(zip(attach_args,attach_args[1:]))
+    assert 'Program Files' not in str(c.calls) and 'b1a7b4555800414f' not in str(c.calls)+str(result)
+    assert cfg['password'] not in str(result) and 'product_key' not in result
+    assert sorted(p.name for p in folder.rglob('*'))==before
+
+def test_windows_guest_additions_fails_without_local_iso_or_product_key(tmp_path):
+    c,b,cfg,ident=windows_additions_client(tmp_path,'SENTRA_USER=present\nSENTRA_EXPLORER=running\nSENTRA_LICENSE_STATUS=Licensed\n')
+    c.path=None
+    with pytest.raises(ValueError,match='Guest Additions ISO'):windows_guest_additions(c,b,cfg)
+    c.path=str(tmp_path/'VBoxManage.exe')
+    (tmp_path/'VBoxGuestAdditions.iso').unlink()
+    with pytest.raises(ValueError,match='Guest Additions ISO'):windows_guest_additions(c,b,cfg)
+    (tmp_path/'VBoxGuestAdditions.iso').write_bytes(b'additions')
+    with pytest.raises(ValueError,match='product keys'):windows_guest_additions(c,b,{**cfg,'product_key':'not-stored'})
+    licensed={**cfg['windows_license'],'product_key':'not-stored'}
+    with pytest.raises(ValueError,match='product keys'):windows_guest_additions(c,b,{**cfg,'windows_license':licensed})
+    assert c.calls==[] and ident

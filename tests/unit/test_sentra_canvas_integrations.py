@@ -11,7 +11,7 @@ ROOT=Path(__file__).resolve().parents[2]
 
 def test_adapter_allowlist_and_discovery(tmp_path):
     found={x["id"]:x for x in catalog(ROOT)}
-    assert set(found)=={"cmd","powershell","pwsh","sentra-cli","codex","antigravity-app"}
+    assert set(found)=={"cmd","powershell","pwsh","sentra-cli","codex","opencode","grok","antigravity-app"}
     assert found["antigravity-app"]["session_compatible"] is False
     with pytest.raises(ValueError):
         cli_argv(ROOT,tmp_path,"../../evil")

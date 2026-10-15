@@ -86,7 +86,8 @@ class CentralEffectContext:
     """Trusted host context; never constructed from untrusted operation arguments."""
 
     def __init__(self, authority: CentralDurableIntentAuthority, receipt: IntentReceipt,
-                 request: OperationRequest, authorize: Callable, *, lock_timeout: float = 5.0):
+                 request: OperationRequest, authorize: Callable, *, lock_timeout: float = 5.0,
+                 output_resolver: Callable | None = None):
         if not isinstance(authority, CentralDurableIntentAuthority):
             raise TypeError("real central physical effect authority required")
         if not callable(authorize) or not 0 <= lock_timeout <= 60:
@@ -96,6 +97,9 @@ class CentralEffectContext:
             raise ValueError("physical context intent mismatch")
         self.authority, self.receipt, self.request = authority, receipt, intent
         self.authorize, self.lock_timeout = authorize, lock_timeout
+        if output_resolver is not None and not callable(output_resolver):
+            raise ValueError("trusted output resolver must be callable")
+        self._output_resolver = output_resolver
         self._serial = threading.Lock()
         self._lost = threading.Event()
         self._owned_async=set()
@@ -144,8 +148,13 @@ class CentralEffectContext:
         """
         self.checkpoint()
         source = Path(path).resolve(strict=True)
-        requested = self.request.arguments.get("output")
-        if (not isinstance(requested, str) or Path(requested).resolve() != source
+        # Some fixed adapters publish by a relative path instead of `output`.
+        # Their resolver is injected by the host registration, bound to the
+        # same frozen AuthorizedPaths as physical execution. No generic
+        # request argument can supply a root or select a different resolver.
+        requested = (self._output_resolver(self.request) if self._output_resolver is not None
+                     else self.request.arguments.get("output"))
+        if (not isinstance(requested, (str, Path)) or Path(requested).resolve() != source
                 or not source.is_file() or type(max_bytes) is not int
                 or not 1 <= max_bytes <= 512 * 1024 * 1024
                 or source.stat().st_size > max_bytes):

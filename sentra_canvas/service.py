@@ -317,6 +317,32 @@ class Canvas:
                             if operation["state"] == "UNCERTAIN" else
                             "A operação ainda está em " + str(operation["state"]) + ".")}
 
+    def shell_stream_head(self, project_id, space_id, conversation_id):
+        """Scoped durable snapshot; a read never repeats a provider request."""
+        from contextlib import closing
+        self.store.workspace(project_id)
+        control = self._shell_service()
+        with closing(control.store.connect("shell")) as db:
+            control.shell._entity(db, self._runtime().owner, project_id, "conversation",
+                                  conversation_id, space_id=space_id)
+        return self._shell_runtime.stream.head(project_id, conversation_id) or {"status": "idle", "sequence": 0}
+
+    def shell_stream_content(self, project_id, space_id, conversation_id, reference_id, *, offset=0, limit=65536):
+        """Page an immutable protected preview under current live resource scope."""
+        from contextlib import closing
+        self.store.workspace(project_id)
+        control = self._shell_service()
+        owner = self._runtime().owner
+        control.shell._project(owner, project_id)
+        with closing(control.store.connect("shell")) as db:
+            db.execute("BEGIN")
+            space = control.shell._entity(db, owner, project_id, "space", space_id)
+            conversation = control.shell._entity(db, owner, project_id, "conversation", conversation_id, space_id=space_id)
+            if (space.get("project_id") != project_id or space.get("space_id") != space_id
+                    or conversation.get("project_id") != project_id or conversation.get("conversation_id") != conversation_id):
+                raise Denied("conversation identity differs from the authorized stream scope")
+            return self._shell_runtime.stream.content(project_id, space_id, conversation_id, reference_id, offset=offset, limit=limit, _db=db)
+
     def shell_live_preview(self, project_id, space_id, conversation_id):
         """Authenticated, conversation-scoped, nonauthoritative model projection."""
         from contextlib import closing
@@ -331,6 +357,20 @@ class Canvas:
         from .shell_web_preview import web_preview
         observed = web_preview(self._shell_runtime, project_id, conversation_id)
         native = self._shell_runtime.live.view(project_id, conversation_id)
+        if native['status'] == 'idle' and observed['status'] == 'idle':
+            try:
+                draft = self._shell_runtime.conversations.response_draft(conversation_id)
+            except PermissionError:
+                draft = None
+            if draft:
+                from sentra_core.model_prose import prose_prefix
+                from .shell_stream import content_window
+                text = prose_prefix(draft['content'])
+                content = content_window(text)
+                return {"status": "interrupted", "content": content, "truncated": content != text,
+                        "content_offset": len(text)-len(content),
+                        "activity": "Entrega incerta. Não reenvie.", "partial": True,
+                        "authoritative": False, "closes_trio": False, "persisted": True}
         return observed if observed.get('content') or (native['status'] == 'idle' and observed['status'] != 'idle') else native
 
     def shell_bridge(self, payload):
@@ -354,6 +394,23 @@ class Canvas:
         if action == "attachment_upload_status" and request_key is not None:
             # This read uses the original mutation key as a reconciliation selector.
             params["request_key"] = request_key
+        if action == "conversation_request_status":
+            # This is an owner-scoped inspection of the original durable key.
+            # Never dispatch conversation_create or silently replay a prompt.
+            if set(params) != {"space_id", "dot_id"} or not request_key:
+                raise ValueError("exact original conversation request scope required")
+            result = control.shell.inspect_conversation_request(
+                self._runtime().owner, project_id=project_id,
+                request_key=request_key, space_id=params["space_id"],
+                dot_id=params["dot_id"])
+            return {"ok": True, "value": result}
+        if action == "message_request_status":
+            if set(params) != {"space_id", "conversation_id"} or not request_key:
+                raise ValueError("exact original message request scope required")
+            result = control.shell.inspect_message_request(
+                self._runtime().owner, project_id=project_id, request_key=request_key,
+                space_id=params["space_id"], conversation_id=params["conversation_id"])
+            return {"ok": True, "value": result}
         if action == "channel_configure":
             value = self._channel_configure(project_id, params)
             return {"ok": True, "value": value, "request_key": request_key}
@@ -383,6 +440,16 @@ class Canvas:
             return {"ok": True, "value": value, "request_key": request_key}
         if "path" in payload:
             raise Denied("filesystem paths are allowed only by scoped project preview actions")
+        from .shell_federation import NETWORK_ACTIONS, NETWORK_READS, dispatch_network
+        if action in NETWORK_ACTIONS:
+            value = dispatch_network(self, project_id, action, params,
+                None if action in NETWORK_READS else request_key)
+            return {"ok": True, "value": value, "request_key": request_key}
+        from .shell_capabilities import CAPABILITY_ACTIONS, CAPABILITY_READS, dispatch_capability
+        if action in CAPABILITY_ACTIONS:
+            value = dispatch_capability(self, project_id, action, params,
+                None if action in CAPABILITY_READS else request_key)
+            return {"ok": True, "value": value, "request_key": request_key}
         from sentra_mcp.services.pacto_product import PACTO_ACTIONS, PACTO_READS, dispatch_pacto_product
         if action in PACTO_ACTIONS:
             if action in PACTO_READS:
@@ -407,7 +474,13 @@ class Canvas:
             with self._lock:
                 if getattr(self, '_shell_dot_vm', None) is None:
                     self._shell_dot_vm = DotVmServices(self)
-            value = self._shell_dot_vm.dispatch(project_id, action, params, request_key)
+            # Only this bearer-authenticated native owner entry point installs
+            # the reviewed storage scope. ShellActor dispatch has no such scope.
+            if action == 'dot_vm_execute' and isinstance(params.get('arguments'), dict) and params['arguments'].get('action') == 'storage.enroll':
+                from sentra_executors.virtualbox_storage_enrollment import dispatch_owner_storage_enrollment
+                value = dispatch_owner_storage_enrollment(self._shell_dot_vm, project_id, params, request_key)
+            else:
+                value = self._shell_dot_vm.dispatch(project_id, action, params, request_key)
             return {'ok': True, 'value': value, 'request_key': request_key}
         if action in DOT_LIFECYCLE_ACTIONS:
             with self._lock:
@@ -454,6 +527,21 @@ class Canvas:
             return {"ok": True, "value": value, "request_key": request_key}
         result = control.shell_dispatch(self._runtime().owner, project_id=project_id,
             action=action, payload=params, request_key=request_key)
+        if action == "home" and result.get("ok") is True:
+            # Optional reads share this owner and project. Their failure must not
+            # discard the already confirmed Home or pretend an effect was sent.
+            from .shell_federation import home_network
+            from .shell_capabilities import home_capabilities
+            for field, read_surface in (("network", home_network),
+                                       ("optional_surfaces", home_capabilities)):
+                try:
+                    result["value"][field] = read_surface(self, project_id)
+                except (OSError, ValueError, RuntimeError, PermissionError, LookupError):
+                    result["value"][field] = {
+                        "status": "unavailable", "project_id": project_id,
+                        "query_failed": True, "effect_uncertain": False,
+                        "reason_code": field + "_query_failed",
+                    }
         if action == 'message_list' and result.get('ok') is True:
             from .shell_generated_media import ShellGeneratedMedia
             result['value']['items'] = ShellGeneratedMedia(self._shell_runtime).messages(project_id,
@@ -468,6 +556,17 @@ class Canvas:
                 dispatch_access(self, project_id, 'access_set', {'space_id': conversation['space_id'],
                     'conversation_id': conversation['conversation_id'], 'mode': 'ask'},
                     'default-access-' + hashlib.sha256(request_key.encode()).hexdigest())
+        if action in {"dot_create", "dot_update"} and result.get("ok") is True:
+            # The shell picker posts an id it already read from /api/models.
+            # Accepting that id does not run a turn and does not prove access.
+            from .shell_optional import CATALOG_SELECTABLE_MODELS
+            value = result.get("value")
+            chosen = value.get("model") if isinstance(value, dict) else None
+            if chosen in CATALOG_SELECTABLE_MODELS:
+                catalog = self.model_catalog()
+                if chosen in catalog["models"]:
+                    result = {**result, "value": {**value, "model_selection":
+                        self._unverified_model_selection(chosen, catalog["source"])}}
         return result
 
     def _machine_service(self):
@@ -1937,16 +2036,54 @@ class Canvas:
         """Advisory model names from the authenticated Gateway; never attest access."""
         from sentra_cli.client import ModelClient,ProviderHTTPError
         from sentra_cli.config import CLIConfig
+        from .shell_optional import CATALOG_SELECTABLE_MODELS
         cfg=CLIConfig(workspace=self.project_dir,state_root=self.state_dir.parent,
                       openai_api_key="none",auto_start_gateway=False)
         try:
             models=ModelClient(cfg).list_models()
-            return {"models":[name for name in models if isinstance(name,str)
-                              and name.startswith(("sentra/","chatgpt-web/","gemini-web/"))],
-                    "source":"authenticated_catalog",
-                    "model_access_verified":False}
+            names=[name for name in models if isinstance(name,str)
+                   and name.startswith(("sentra/","chatgpt-web/","gemini-web/"))]
+            source="authenticated_catalog"
         except (ProviderHTTPError,OSError,ValueError,RuntimeError):
-            return {"models":[],"source":"unavailable","model_access_verified":False}
+            names=[]
+            source="unavailable"
+        for name in CATALOG_SELECTABLE_MODELS:
+            if name not in names:
+                names.append(name)
+        return {"models":names,"source":source,"model_access_verified":False,
+                "inference_executed":False,"receipt":"access unverified"}
+
+    def select_listed_model(self, model):
+        """Accept an id the selector already read from this catalog.
+
+        No provider call is made. Without a credential and a real turn the
+        receipt stays access unverified.
+        """
+        if not isinstance(model,str) or not MODEL_RE.fullmatch(model):
+            raise ValueError("invalid model identifier")
+        catalog=self.model_catalog()
+        if model not in catalog["models"]:
+            raise ValueError("model is not in the catalog")
+        return self._unverified_model_selection(model, catalog["source"])
+
+    @staticmethod
+    def _unverified_model_selection(model, source):
+        return {"model":model,"selectable":True,"selected":True,"source":source,
+                "model_access_verified":False,"inference_executed":False,
+                "credential_present":False,"turn_executed":False,
+                "receipt":"access unverified"}
+
+    def _catalog_selection(self, model):
+        from .shell_optional import CATALOG_SELECTABLE_MODELS
+        if model not in CATALOG_SELECTABLE_MODELS:
+            return None
+        return self.select_listed_model(model)
+
+    @staticmethod
+    def _attach_catalog_selection(record, selection):
+        if not selection:
+            return record
+        return {**record,"model_selection":selection}
 
     def center_capabilities(self, ws):
         """Authenticated Canvas read-only view of operational integration."""
@@ -2075,7 +2212,8 @@ class Canvas:
             if effort is not None:
                 raise ValueError("effort selection requires SENTRA CLI")
             command=cli_argv(self.project_dir,workspace,shell)
-        return self._start(ws,name,shell,command)
+        selection=self._catalog_selection(model) if isinstance(model,str) else None
+        return self._attach_catalog_selection(self._start(ws,name,shell,command), selection)
 
     def launch_antigravity(self,ws,approved=False):
         workspace=self.store.workspace(ws)
@@ -2173,10 +2311,11 @@ class Canvas:
             raise ValueError("invalid agent role")
         if goal is not None and (not isinstance(goal,str) or len(goal.encode())>16000):
             raise ValueError("bounded agent working goal required")
+        selection=self._catalog_selection(model)
         if not start:
             agent=self.store.create_agent(ws,name,model,role)
             if goal is not None:self.agent_working_context(ws,agent["id"],goal=goal,expected_revision=0)
-            return agent
+            return self._attach_catalog_selection(agent, selection)
         # Process started is NOT evidence of authenticated model readiness.
         conversation_id=new_id()
         command=self._cli_command(["--workspace",self.store.workspace(ws)["path"],
@@ -2186,7 +2325,7 @@ class Canvas:
         try:
             agent=self.store.create_agent(ws,name,model,role,t["id"],conversation_id)
             if goal is not None:self.agent_working_context(ws,agent["id"],goal=goal,expected_revision=0)
-            return agent
+            return self._attach_catalog_selection(agent, selection)
         except BaseException:
             self.terminal_close(ws,t["id"])
             raise

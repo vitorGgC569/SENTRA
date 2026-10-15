@@ -152,3 +152,19 @@ class HumanReceiptViews(OperationReceiptViews):
                 "next_step": self._NEXT.get(
                     state, "Query this operation_id again for its current state."),
                 "reconcile_before_retry": state == "UNCERTAIN"}
+
+    def recovery_projection(self, owner: str, operation_id: str, *,
+                            incident: str, work_item_id: str | None = None) -> dict[str, Any]:
+        """Project one operation after crash, canvas close, relay loss or reboot.
+
+        The projection never authorizes a resend. RUNNING and QUEUED stay
+        observable: a lost acknowledgement is not proof that the effect did
+        not start.
+        """
+        if incident not in {"crash", "canvas_closed", "relay_down", "reboot"}:
+            raise ValueError("incident must be crash, canvas_closed, relay_down or reboot")
+        base = self.receipt(owner, operation_id, work_item_id=work_item_id)
+        observe = base["state"] in {"UNCERTAIN", "RUNNING", "QUEUED", "WAITING_EXTERNAL"}
+        return {**base, "incident": incident, "may_resend": False,
+                "automatic_retry": False, "second_effect": False,
+                "disposition": "observe" if observe else "preserve"}

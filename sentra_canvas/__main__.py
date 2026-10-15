@@ -9,6 +9,7 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import uuid
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,14 +24,18 @@ STATIC=Path(__file__).parent/"static"
 
 class CanvasServer(ThreadingHTTPServer):
     daemon_threads=True
+    request_queue_size=64
     allow_reuse_address=os.name!="nt"
 
     def __init__(self,canvas,port=0):
         self.canvas=canvas
         self.secret=secrets.token_urlsafe(36)
         self.runtime_id=uuid.uuid4().hex
+        self.runtime_started_at_ns=time.time_ns()
         self._collab_process=None
         self._collab_lock=threading.RLock()
+        self._stream_slots=threading.BoundedSemaphore(32)
+        self._stream_stopping=threading.Event()
         super().__init__(("127.0.0.1",port),CanvasHandler)
         canvas._agent_port=self.server_port
         canvas._shell_origins=(f"http://127.0.0.1:{self.server_port}",
@@ -48,6 +53,7 @@ class CanvasServer(ThreadingHTTPServer):
             return self._collab_process.status()
 
     def server_close(self):
+        self._stream_stopping.set()
         with self._collab_lock:
             if self._collab_process is not None:
                 self._collab_process.close()
@@ -59,6 +65,73 @@ class CanvasServer(ThreadingHTTPServer):
         return connection,address
 
 class CanvasHandler(BaseHTTPRequestHandler):
+    disable_nagle_algorithm=True
+
+    def _shell_stream(self, project_id, after):
+        canvas=self.server.canvas
+        canvas.store.workspace(project_id)
+        canvas._shell_service()
+        runtime=canvas._shell_runtime
+        if runtime.stream_error:
+            self._send(503,{"error":"presentation stream temporarily unavailable"})
+            return
+        if not self.server._stream_slots.acquire(blocking=False):
+            self._send(429,{"error":"too many presentation streams"})
+            return
+        headers_sent=False
+        try:
+            batch=runtime.stream.read(project_id,after)
+            self.protocol_version="HTTP/1.1"
+            self.close_connection=True
+            self.connection.settimeout(5)
+            self.send_response(200)
+            self.send_header("Content-Type","text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control","no-store")
+            self.send_header("Transfer-Encoding","chunked")
+            self.send_header("Connection","close")
+            self.send_header("X-Content-Type-Options","nosniff")
+            self.send_header("Referrer-Policy","no-referrer")
+            self.end_headers()
+            headers_sent=True
+
+            def emit(event,value,cursor=None):
+                data=(('id: '+str(cursor)+'\n') if cursor is not None else '')
+                data+='event: '+event+'\ndata: '+json.dumps(value,ensure_ascii=False,separators=(',',':'))+'\n\n'
+                payload=data.encode('utf-8')
+                self.wfile.write(f'{len(payload):X}\r\n'.encode()+payload+b'\r\n')
+                self.wfile.flush()
+
+            last_heartbeat=time.monotonic()
+            while not self.server._stream_stopping.is_set() and not runtime.stream.closed.is_set():
+                # Session rotation and project removal invalidate an already-open feed.
+                if not self._auth():
+                    break
+                canvas.store.workspace(project_id)
+                if runtime.stream_error:
+                    emit("unavailable",{"automatic_retry":False,"read_only":True})
+                    break
+                if batch['reset']:
+                    emit('snapshot',batch,batch['cursor'])
+                else:
+                    for item in batch['items']:
+                        emit('shell',item,item['sequence'])
+                after=batch['cursor']
+                if time.monotonic()-last_heartbeat>=10:
+                    emit('heartbeat',{"cursor":after,"read_only":True})
+                    last_heartbeat=time.monotonic()
+                if not batch['items']:
+                    runtime.stream.wait(1)
+                batch=runtime.stream.read(project_id,after)
+            self.wfile.write(b'0\r\n\r\n')
+            self.wfile.flush()
+        except Exception:
+            if not headers_sent:
+                raise
+            # Broken observation channels do not cancel producers or replay commands.
+            self.close_connection=True
+        finally:
+            self.server._stream_slots.release()
+
     def log_message(self,format,*args):
         return  # no bearer tokens or request bodies in HTTP access logs
 
@@ -156,6 +229,37 @@ class CanvasHandler(BaseHTTPRequestHandler):
         qs=parse_qs(path.query)
         ws=(qs.get("ws") or [""])[0]
         a=self.server.canvas
+        if path.path=="/api/shell/stream":
+            if set(qs)-{"project_id","after"} or "project_id" not in qs or any(len(v)!=1 for v in qs.values()):
+                raise ValueError("exact project stream scope required")
+            cursor=(qs.get("after") or [self.headers.get("Last-Event-ID")])[0]
+            if cursor is not None and (not cursor.isascii() or not cursor.isdecimal() or len(cursor)>19):
+                raise ValueError("invalid stream cursor")
+            self._shell_stream(qs["project_id"][0],int(cursor) if cursor is not None else None)
+            return
+        if path.path=="/api/shell/stream/content":
+            required={"project_id","space_id","conversation_id","reference_id"}
+            query=parse_qs(path.query,keep_blank_values=True)
+            if (not required.issubset(query) or set(query)-required-{"offset","limit"}
+                    or any(len(values)!=1 or not values[0] for values in query.values())):
+                raise ValueError("exact conversation stream reference required")
+            numbers={name:query.get(name,[default])[0] for name,default in (("offset","0"),("limit","65536"))}
+            if any(not value.isascii() or not value.isdecimal() or len(value)>10 for value in numbers.values()):
+                raise ValueError("bounded stream content offset and limit required")
+            try:
+                content=a.shell_stream_content(**{key:query[key][0] for key in required},
+                    offset=int(numbers["offset"]),limit=int(numbers["limit"]))
+            except FileNotFoundError:
+                self._send(404,{"error":"stream reference unavailable in this scope"})
+                return
+            self._send(200,content)
+            return
+        if path.path=="/api/shell/stream/head":
+            fields={"project_id","space_id","conversation_id"}
+            if set(qs)!=fields or any(len(v)!=1 for v in qs.values()):
+                raise ValueError("exact conversation stream scope required")
+            self._send(200,a.shell_stream_head(**{k:qs[k][0] for k in fields}))
+            return
         if path.path == '/api/shell/generated-media':
             fields = {'project_id','space_id','conversation_id','message_id','asset_id'}
             if set(qs) != fields or any(len(qs[key]) != 1 for key in fields):
@@ -186,7 +290,8 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,{"ok":True,"provider_ready":"unverified",
                            "terminal_backend":"Windows ConPTY",
                            "maestri_required":False,"runtime_id":self.server.runtime_id,
-                           "pid":os.getpid(),"state_dir":str(a.state_dir.resolve()),
+                           "pid":os.getpid(),"runtime_started_at_ns":self.server.runtime_started_at_ns,
+                           "state_dir":str(a.state_dir.resolve()),
                            "task_scheduler":a.task_scheduler_status()});return
         if path.path=="/api/workspaces":
             self._send(200,a.workspaces());return
@@ -321,7 +426,16 @@ class CanvasHandler(BaseHTTPRequestHandler):
             return
         ws=p.get("ws","")
         if route=="/api/shell/bridge":
-            response=a.shell_bridge(p)
+            try:
+                response=a.shell_bridge(p)
+            except FileNotFoundError:
+                # This selector only reads an authorized conversation. A
+                # missing entity is distinct from an interrupted observation;
+                # do not change error semantics for effectful mutations.
+                if p.get("action") != "conversation_get":
+                    raise
+                self._send(404,{"error":"conversation unavailable in this scope"})
+                return
             if p.get("action")=="document_session" and response.get("ok") is True:
                 response={**response,"value":{**response["value"],**self.server.collaboration()}}
             self._send(200,response)
@@ -530,22 +644,35 @@ class CanvasHandler(BaseHTTPRequestHandler):
 
 def main(argv=None):
     p=argparse.ArgumentParser(description="SENTRA Canvas independent of Maestri")
-    p.add_argument("--root",type=Path,default=Path.cwd(),help="authorized SENTRA root")
+    p.add_argument("--root",type=Path,help="authorized SENTRA root; defaults to the installed workspace")
     p.add_argument("--state-dir",type=Path,help="persisted Canvas state directory")
     p.add_argument("--port",type=int,default=0,help="local port; 0 chooses free port")
     p.add_argument("--no-open",action="store_true",help="do not open UI")
-    p.add_argument("--ui",choices=("native","electron","terminal"),default="native",
+    p.add_argument("--ui",choices=("auto","native","electron","terminal"),default="auto",
                    help="desktop UI host, Electron view or SENTRA CLI terminal")
     p.add_argument("--surface",choices=("shell-home","desktop","native"),default="shell-home",
                    help="shell-first Home/Dots/Spaces surface; Canvas stays as internal view")
     p.add_argument("--broker",action="store_true",help="run persistent local Canvas owner")
     args=p.parse_args(argv)
+    if args.root is None:
+        if getattr(sys, "frozen", False):
+            from sentra_remote.product import ProductPaths, ProductSettings
+            from sentra_remote.setup_assistant import first_workspace
+            paths = ProductPaths.default(Path(sys.executable).resolve().parent)
+            args.root = first_workspace(paths, ProductSettings.load(paths.settings))
+        else:
+            args.root = Path.cwd()
     from .broker import connect_or_start,publish_endpoint,remove_endpoint
     if not args.no_open and not args.broker:
         if args.ui == "terminal":
             from sentra_cli.__main__ import main as cli_main
             return cli_main(["--workspace",str(args.root.resolve())])
         endpoint=connect_or_start(args.root,args.state_dir,port=args.port)
+        if args.ui == "auto":
+            from .electron_host import electron_binary
+            # Setup ships its renderer. Fresh Windows does not need a separate
+            # Python, Node or WebView2 installation just to open the product.
+            args.ui = "electron" if getattr(sys, "frozen", False) and electron_binary() else "native"
         if args.ui == "electron":
             from .electron_host import launch_electron
             return launch_electron(endpoint,wait=True)
@@ -557,7 +684,8 @@ def main(argv=None):
         from pathlib import Path as _Path
         if not (_Path(__file__).parent / "static" / surface_file).is_file():
             surface_file = resolve_surface()
-        launch_native(endpoint,serve=False,surface=surface_file)
+        launch_native(endpoint,serve=False,surface=surface_file,
+                      state_dir=args.state_dir or (_Path(args.root).resolve() / ".sentra" / "canvas"))
         return 0
     app=Canvas(args.root,state_dir=args.state_dir)
     server=None

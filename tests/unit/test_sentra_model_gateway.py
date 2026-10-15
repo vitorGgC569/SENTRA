@@ -125,6 +125,25 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": True})
         if self.path == "/v1/responses/compact":
             return self._send(200, {"output": [{"type": "compaction", "encrypted_content": "summary"}]})
+        if body.get("input") == "fragmented-long-terminal":
+            text = "Resposta longa 🌎 " * 10000
+            terminal = ('data: ' + json.dumps({'type':'response.completed', 'response':{
+                'status':'completed', 'output':[{'content':[{'type':'output_text','text':text}]}]
+            }}, ensure_ascii=False) + '\n\n').encode()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.send_header('Transfer-Encoding', 'chunked')
+            self.end_headers()
+            try:
+                for chunk in [b'event: response.completed\n', *[terminal[i:i+8192] for i in range(0,len(terminal),8192)]]:
+                    self.wfile.write(f'{len(chunk):X}\r\n'.encode() + chunk + b'\r\n')
+                    self.wfile.flush()
+                    time.sleep(.005)
+                self.wfile.write(b'0\r\n\r\n')
+                self.wfile.flush()
+            except OSError:
+                pass
+            return
         if body.get("input") == "terminal-keepalive":
             terminal = b'event: response.completed\ndata: {"response":{"status":"completed","model":"chatgpt-web/high"}}\n\n'
             self.send_response(200)
@@ -675,6 +694,15 @@ def test_responses_sse_and_compaction_preserve_turn_header(servers):
     assert status == 200 and json.loads(payload)["output"][0]["type"] == "compaction"
     assert upstream.received["body"]["model"] == "chatgpt-web/high"
     assert call(gateway.server_port, "POST", "/v1/responses", {"model": "sentra/unknown", "input": []})[0] == 400
+    grok_status, grok_payload, _ = call(
+        gateway.server_port, "POST", "/v1/responses",
+        {"model": "sentra/grok/grok-4.7", "input": "oi"},
+    )
+    grok_body = json.loads(grok_payload)
+    assert grok_status == 409
+    assert grok_body["model_access_verified"] is False
+    assert grok_body["inference_executed"] is False
+    assert upstream.received["body"]["model"] == "chatgpt-web/high"
     assert call(gateway.server_port, "POST", "/v1/responses", {"model": "chatgpt-web/", "input": []})[0] == 400
     assert call(gateway.server_port, "POST", "/v1/responses", {"model": "gemini-web/", "input": []})[0] == 400
     assert call(gateway.server_port, "POST", "/v1/responses", {"model": "sentra/gemini-web/", "input": []})[0] == 400
@@ -780,7 +808,18 @@ def test_gateway_rechunks_streaming_upstream_without_buffering(servers):
     rest = response.read()
     connection.close()
     assert b"response.completed" in rest
-    assert b"[DONE]" in rest
+    assert b'"status":"completed"' in rest
+
+
+def test_gateway_forwards_entire_long_terminal_before_closing_legacy_stream(servers):
+    _, gateway = servers
+    status, body, _ = call(gateway.server_port, 'POST', '/v1/responses', {
+        'model':'sentra/chatgpt-web/high', 'stream':True, 'input':'fragmented-long-terminal'})
+    assert status == 200
+    data = next(line[6:] for line in body.decode().splitlines() if line.startswith('data: '))
+    event = json.loads(data)
+    assert event['type'] == 'response.completed'
+    assert event['response']['output'][0]['content'][0]['text'] == 'Resposta longa 🌎 ' * 10000
 
 
 def test_gateway_closes_sse_on_terminal_event_without_waiting_for_upstream_eof(servers):

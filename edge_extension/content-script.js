@@ -35,9 +35,16 @@ function omaProvider() {
 }
 
 function omaHomeUrl() {
-  return omaProvider() === "gemini"
-    ? "https://gemini.google.com/app"
-    : "https://chatgpt.com/";
+  if (omaProvider() !== "gemini") return "https://chatgpt.com/";
+  // Keep the selected Google account. /app without /u/N switches a
+  // multi-login user back to the default account (and a different model).
+  const match = window.location.pathname.match(/^\/u\/(\d{1,3})\/app(?:\/|$)/);
+  if (match) return `https://gemini.google.com/u/${match[1]}/app`;
+  const index = new URLSearchParams(window.location.search).get("authuser");
+  if (index && /^\d{1,3}$/.test(index)) {
+    return `https://gemini.google.com/app?authuser=${index}`;
+  }
+  return "https://gemini.google.com/app";
 }
 
 async function omaWaitForComposer(timeoutMs = 15000) {
@@ -854,7 +861,7 @@ async function omaSubmitAttempt(box, text, attachments = []) {
 function omaConversationId() {
   const path = window.location.pathname || "";
   if (omaProvider() === "gemini") {
-    const m = path.match(/^\/app\/([A-Za-z0-9_-]{1,256})(?:\/|$)/);
+    const m = path.match(/^\/(?:u\/\d{1,3}\/)?app\/([A-Za-z0-9_-]{1,256})(?:\/|$)/);
     return m ? m[1] : null;
   }
   const m = path.match(/\/c\/([A-Za-z0-9-]+)/i);

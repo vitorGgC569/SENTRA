@@ -203,6 +203,13 @@ class GuardedExecutor:
         if not await self._allowed(request, args):
             return await self._finish(op, "uncertain",
                                       error="policy_revoked_after_dispatch")
+        if isinstance(evidence, dict) and (
+            evidence.get("execution_uncertain") is True or evidence.get("blocked") is True
+        ):
+            return await self._finish(
+                op, "uncertain", evidence=evidence,
+                error=str(evidence.get("reason") or evidence.get("error") or "blocked"),
+            )
         return await self._finish(op, "succeeded", evidence=evidence)
 
     def _snapshot(self, op: str, record: _Record) -> Any:

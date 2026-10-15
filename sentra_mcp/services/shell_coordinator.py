@@ -37,7 +37,7 @@ def _id(value, name):
     return result
 
 
-READS = frozenset({"home", "space_list", "space_get", "dot_list", "conversation_list", "message_list", "message_content", "events"})
+READS = frozenset({"home", "space_list", "space_get", "dot_list", "conversation_list", "conversation_get", "message_list", "message_content", "events"})
 MUTATIONS = frozenset({"space_create", "dot_create", "dot_update", "conversation_create", "message_send", "coordinate"})
 VOICE_READS = frozenset({"voice_status", "attachment_upload_status"})
 
@@ -277,6 +277,13 @@ class ShellCoordinatorService:
                 return self._list(db, owner, pid, "space", payload)
             if action in {"dot_list", "conversation_list"}:
                 return self._list(db, owner, pid, action.split("_")[0], payload, sid)
+            if action == "conversation_get":
+                if set(payload) != {"space_id", "conversation_id"}:
+                    raise ValueError("exact conversation read scope required")
+                conversation = self._entity(db, owner, pid, "conversation", payload["conversation_id"], space_id=sid)
+                if conversation.get("project_id") != pid or conversation.get("conversation_id") != payload["conversation_id"]:
+                    raise PermissionError("stored conversation identity mismatch")
+                return conversation
             if action == "events":
                 return self._events(db, owner, pid, payload, sid)
             if action in {"home", "space_get"}:
@@ -324,8 +331,24 @@ class ShellCoordinatorService:
                 cid = payload.get("conversation_id")
                 self._entity(db, owner, pid, "conversation", cid, space_id=sid)
                 offset, limit = self._page(payload)
-                total = db.execute("SELECT COUNT(*) AS total FROM shell_messages WHERE owner=? AND project_id=? AND conversation_id=?", (owner, pid, cid)).fetchone()["total"]
-                rows = db.execute("SELECT * FROM shell_messages WHERE owner=? AND project_id=? AND conversation_id=? ORDER BY created_at,message_id LIMIT ? OFFSET ?", (owner, pid, cid, limit, offset)).fetchall()
+                tail = payload.get("tail", False)
+                if type(tail) is not bool or (tail and offset != 0):
+                    raise ValueError("tail must be boolean and cannot select a nonzero offset")
+                if tail:
+                    if set(payload) - {"space_id", "conversation_id", "tail", "limit", "offset"}:
+                        raise ValueError("exact conversation tail scope required")
+                    # One statement gives a coherent range/count snapshot. The
+                    # uncorrelated count uses the scoped index once, without a
+                    # window that materializes every protected message body.
+                    rows = db.execute("SELECT *, (SELECT COUNT(*) FROM shell_messages WHERE owner=? AND project_id=? AND conversation_id=?) AS conversation_total "
+                        "FROM shell_messages WHERE owner=? AND project_id=? AND conversation_id=? ORDER BY created_at DESC,message_id DESC LIMIT ?",
+                        (owner, pid, cid, owner, pid, cid, limit)).fetchall()
+                    total = rows[0]["conversation_total"] if rows else 0
+                    rows = list(reversed(rows))
+                    offset = max(0, total - len(rows))
+                else:
+                    total = db.execute("SELECT COUNT(*) AS total FROM shell_messages WHERE owner=? AND project_id=? AND conversation_id=?", (owner, pid, cid)).fetchone()["total"]
+                    rows = db.execute("SELECT * FROM shell_messages WHERE owner=? AND project_id=? AND conversation_id=? ORDER BY created_at,message_id LIMIT ? OFFSET ?", (owner, pid, cid, limit, offset)).fetchall()
                 items = [self._message_view(row) for row in rows]
                 if callable(getattr(self.runtime, "reconcile_message", None)):
                     for index, message in enumerate(items):
@@ -342,8 +365,11 @@ class ShellCoordinatorService:
                     for message in items:
                         if message['message_id'] in keys:
                             message['request_key'] = keys[message['message_id']]
-                return {"project_id": pid, "items": items, "page": {"offset": offset, "limit": limit, "returned": len(items), "total": total,
-                    "next_offset": offset + len(items) if offset + len(items) < total else None}}
+                page = {"offset": offset, "limit": limit, "returned": len(items), "total": total,
+                    "next_offset": offset + len(items) if offset + len(items) < total else None}
+                if tail:
+                    page.update(tail=True, previous_offset=max(0, offset - limit) if offset else None)
+                return {"project_id": pid, "items": items, "page": page}
         raise ValueError("unsupported shell read")
 
     @staticmethod
@@ -439,6 +465,95 @@ class ShellCoordinatorService:
                     raise ShellConflict("only inactive WorkItems may be reassigned")
         return result
 
+    def inspect_conversation_request(self, owner: str, *, project_id: str,
+                                     request_key: str, space_id: str, dot_id: str) -> dict:
+        """Read exact durable intent by authenticated owner and scope.
+
+        No mutation dispatch or request replay occurs here. An absent receipt
+        is NOT proof that the original operation can be sent again.
+        """
+        self._project(owner, project_id)
+        key = _text(request_key, "request_key", 200)
+        sid, did = _id(space_id, "space_id"), _id(dot_id, "dot_id")
+        with self.store.connect("shell") as db:
+            row = db.execute(
+                "SELECT action,state,protected_result FROM shell_requests "
+                "WHERE owner=? AND project_id=? AND request_key=?",
+                (owner, project_id, key)).fetchone()
+        if row is None:
+            return {"status": "unverified", "request_key": key,
+                    "confirmed": False, "automatic_retry": False}
+        if row["action"] != "conversation_create":
+            raise PermissionError("request key belongs to another operation")
+        if row["state"] == "rejected":
+            return {"status": "rejected", "request_key": key,
+                    "confirmed": False, "automatic_retry": False}
+        if row["protected_result"]:
+            result = _decode(row["protected_result"])
+            value = result.get("value") if isinstance(result, dict) else None
+            if isinstance(value, dict) and result.get("ok") is True and (
+                    value.get("project_id") == project_id
+                    and value.get("space_id") == sid and value.get("dot_id") == did
+                    and isinstance(value.get("conversation_id"), str)
+                    and value["conversation_id"] and value.get("status") != "uncertain"):
+                return {
+                    "status": "confirmed", "request_key": key,
+                    "confirmed": True, "automatic_retry": False,
+                    "conversation": {field: value[field] for field in (
+                        "project_id", "space_id", "dot_id", "conversation_id")
+                        if field in value},
+                }
+        return {"status": "unverified", "request_key": key,
+                "confirmed": False, "automatic_retry": False}
+
+    def inspect_message_request(self, owner: str, *, project_id: str,
+                                request_key: str, space_id: str, conversation_id: str) -> dict:
+        """Inspect an existing send intent without dispatching or reconciling it.
+
+        A missing original request never proves that another Send is safe. The
+        confirmation here means the stored message/ack match the original key;
+        it does not attest that a provider generation or task has completed.
+        """
+        self._project(owner, project_id)
+        key = _text(request_key, "request_key", 200)
+        sid, cid = _id(space_id, "space_id"), _id(conversation_id, "conversation_id")
+        result = {"status": "unverified", "request_key": key, "confirmed": False,
+                  "found": False, "automatic_retry": False, "resent": False}
+        with self.store.connect("shell") as db:
+            self._entity(db, owner, project_id, "conversation", cid, space_id=sid)
+            request = db.execute("SELECT action,state,protected_payload,protected_result FROM shell_requests "
+                "WHERE owner=? AND project_id=? AND request_key=?", (owner, project_id, key)).fetchone()
+            if request is None:
+                return result
+            if request["action"] != "message_send":
+                raise PermissionError("request key belongs to another operation")
+            original = _decode(request["protected_payload"])
+            if (not isinstance(original, dict) or original.get("conversation_id") != cid
+                    or original.get("space_id") not in {None, sid}):
+                raise PermissionError("message request belongs to another conversation/Space")
+            result["found"] = True
+            row = db.execute("SELECT m.* FROM shell_messages m JOIN shell_message_requests r "
+                "ON m.owner=r.owner AND m.project_id=r.project_id AND m.message_id=r.message_id "
+                "WHERE r.owner=? AND r.project_id=? AND r.request_key=? AND m.space_id=? AND m.conversation_id=?",
+                (owner, project_id, key, sid, cid)).fetchone()
+            if row is None:
+                if request["state"] == "rejected":
+                    result["status"] = "rejected"
+                return result
+            message = {**self._message_view(row), "request_key": key}
+            result["message"] = message
+            acknowledgement = _decode(request["protected_result"]) if request["protected_result"] else None
+            value = acknowledgement.get("value") if isinstance(acknowledgement, dict) else None
+            known_status = message["status"] in {"queued", "running", "dispatched", "waiting_approval", "not_submitted"}
+            if (isinstance(value, dict) and acknowledgement.get("ok") is True
+                    and value.get("message_id") == message["message_id"]
+                    and value.get("conversation_id") == cid and known_status
+                    and request["state"] not in {"claimed", "dispatching", "uncertain", "rejected"}):
+                result.update(status="confirmed", confirmed=True, confirmation_kind="stored_message")
+            else:
+                result["status"] = "uncertain"
+            return result
+
     def dispatch(self, owner: str, *, project_id: str, action: str, payload: dict, request_key: str | None = None) -> dict:
         if action not in READS | MUTATIONS | VOICE_READS | VOICE_MUTATIONS or not isinstance(payload, dict):
             raise ValueError("unsupported shell action")
@@ -447,7 +562,10 @@ class ShellCoordinatorService:
         if set(payload) & {"owner", "principal", "principal_id", "principal_type", "grant", "grant_id", "permissions", "path", "workspace_root", "run_id", "operation_id", "work_item_id"} - ({"work_item_id"} if action == "coordinate" else set()):
             raise PermissionError("server-owned shell authority field")
         project = self._project(owner, project_id)
-        sid = self._migrate(owner, project)
+        # Restoring one existing conversation must not migrate/create Spaces,
+        # Dots, or teams just because it is outside the current list page.
+        exact_existing_scope = action == "conversation_get" or (action == "message_list" and payload.get("tail") is True)
+        sid = payload.get("space_id") if exact_existing_scope else self._migrate(owner, project)
         if action in READS:
             return {"ok": True, "value": self._read(owner, project, action, payload, sid)}
         if action in VOICE_READS:
@@ -669,13 +787,16 @@ class ShellCoordinatorService:
             return value
 
     def _record_delivery(self, owner, pid, sid, mid, authority, delivery, key):
-        if not isinstance(delivery, dict) or delivery.get("status") not in {"queued", "running", "dispatched", "waiting_approval", "uncertain"}:
+        if not isinstance(delivery, dict) or delivery.get("status") not in {"queued", "running", "dispatched", "waiting_approval", "uncertain", "not_submitted"}:
             delivery = {"status": "uncertain", "reason": "invalid runtime delivery receipt"}
         if delivery["status"] == "dispatched" and not delivery.get("receipt_id"):
             delivery = {**delivery, "status": "uncertain", "reason": "dispatch receipt absent"}
         value = {"message_id": mid, **authority, "status": delivery["status"], "receipt_id": delivery.get("receipt_id")}
         if delivery.get("reason"):
             value["reason"] = str(delivery["reason"])[:2000]
+        if delivery.get("status") == "not_submitted":
+            value.update(receipt="access unverified", delivery="not_submitted", resent=False,
+                automatic_retry=False, model_access_verified=False, inference_executed=False)
         # Runtime may return an admitted Canvas task operation; retain both links.
         if delivery.get("operation_id"):
             operation = self.control.durable.operation_status(delivery["operation_id"], owner)

@@ -1,5 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
-import { ArrowUp, Download, MessageCircle, Search, Users } from 'lucide-react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ShellMessageWindow } from './shell-message-window';
+import { ShellStreamContent } from './shell-stream-content.jsx';
+import { ArrowUp, Download, MessageCircle, Search, Users, Layers, SlidersHorizontal, Flag } from 'lucide-react';
 import { OperationReceipt, Status } from './shell-receipts';
 import { ShellVoice } from './shell-voice';
 import { ConversationMarkdown } from './shell-markdown';
@@ -12,8 +14,14 @@ import { ShellAccess } from './shell-access';
 import { ShellGoalDialog } from './shell-goals';
 import { shellCommand } from './shell-commands';
 import { mergeMessages } from './shell-chat-state';
+import { conversationCache } from './shell-conversation-cache';
+import { readRecentMessagePage, recentPageDisposition } from './shell-message-pages';
+import { inspectMessageRequest, confirmedMessageRequest } from './shell-message-request-status';
 import { api, route } from './api';
-import { Modal } from './primitives';
+import { presentLive, previewStillVisible, reconcileLivePreview } from './shell-live-feed.js';
+import { subscribeShellStream } from './shell-stream.js';
+import { feedMotion, useReducedMotion } from './experience/cadencia/index.js';
+import { Modal, ActionMenu } from './primitives';
 
 function readDraft(key) {
   try { return JSON.parse(sessionStorage.getItem(key)) || { content: '', pending: null }; }
@@ -32,11 +40,24 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
   const scope = { project_id: conversation.project_id, space_id: conversation.space_id, conversation_id: conversation.conversation_id };
   const draftKey = 'sentra_shell_draft:' + scope.project_id + ':' + scope.conversation_id;
   const initial = useRef(readDraft(draftKey));
+  const lastAutomaticInspection = useRef(null);
   const [content, setContent] = useState(initial.current.content), [pending, setPending] = useState(initial.current.pending);
   const [messages, setMessages] = useState([]), [page, setPage] = useState(null), [busy, setBusy] = useState(false);
+  const [cachedPreview, setCachedPreview] = useState(() => conversationCache.get(scope));
+  const [historyVerified, setHistoryVerified] = useState(false);
   const [error, setError] = useState(''), [loading, setLoading] = useState(true), [filter, setFilter] = useState('');
   const [loadError, setLoadError] = useState('');
+  const [renderAll, setRenderAll] = useState(false);
+  const presentedMessages = useMemo(() => historyVerified || !cachedPreview ? messages :
+    mergeMessages(cachedPreview.items, messages.map(message => ({ ...message, cached_visual: false }))), [messages, cachedPreview, historyVerified]);
+  const filteredMessages = useMemo(() => {
+    const query = filter.toLocaleLowerCase('pt-BR');
+    return query ? presentedMessages.filter(message => String(message.content || '').toLocaleLowerCase('pt-BR').includes(query)) : presentedMessages;
+  }, [presentedMessages, filter]);
   const [receipt, setReceipt] = useState(null), [follow, setFollow] = useState(true);
+  const [recentPage, setRecentPage] = useState(null);
+  const pageRef = useRef(page), followRef = useRef(follow);
+  pageRef.current = page; followRef.current = follow;
   const [fileApproval, setFileApproval] = useState(null), [fileApprovalBusy, setFileApprovalBusy] = useState(false);
   const [fileTestBusy, setFileTestBusy] = useState(false), [fileTest, setFileTest] = useState(null);
   const [fileConsent, setFileConsent] = useState(null);
@@ -48,26 +69,52 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
   const [deliveryChecks, setDeliveryChecks] = useState({});
   const [deliveryLoading, setDeliveryLoading] = useState('');
   const [livePreview, setLivePreview] = useState(null);
+  const [connectionState, setConnectionState] = useState('connecting');
+  const streamState = useRef('connecting');
+  const feedPrevious = useRef({});
   const activityRef = useRef(false), refreshRef = useRef(null), liveRefreshRef = useRef(null);
   const messagesRef = useRef(messages); messagesRef.current = messages;
+  const readAccess = useRef(true), accessEpoch = useRef(0);
   const lastMessage = messages[messages.length - 1];
   const activeResponse = Boolean(busy || pending || (lastMessage?.role === 'user' &&
     ['sending', 'queued', 'running', 'dispatched', 'pending'].includes(lastMessage.status)));
   activityRef.current = activeResponse;
   useEffect(() => {
+    streamState.current = 'connecting'; setConnectionState('connecting');
+    return subscribeShellStream(scope, {
+      onState: state => { streamState.current = state; setConnectionState(state); if (state === 'reauth_required') invalidateHistory(); },
+      onPreview: value => {
+        if (!readAccess.current) return;
+        setLivePreview(previous => reconcileLivePreview(value, previous));
+        if (value.status === 'committed') void refreshRef.current?.();
+      },
+    });
+  }, [scope.project_id, scope.space_id, scope.conversation_id]);
+  useEffect(() => {
     let active = true, timer, refreshing = false;
+    setLivePreview(null);
+    feedPrevious.current = {};
     const refresh = async () => {
       if (!active || refreshing) return;
       clearTimeout(timer); refreshing = true;
+      const epoch = accessEpoch.current;
       try {
-        if (document.hidden) return;
+        if (document.hidden || ['connected', 'reauth_required'].includes(streamState.current)) return;
         const result = await api(route('/api/shell/live', {
           project_id: scope.project_id, space_id: scope.space_id,
           conversation_id: scope.conversation_id,
         }));
-        if (active) setLivePreview(['generating', 'confirming'].includes(result?.status) ? result : null);
-      } catch { if (active) setLivePreview(null); }
-      finally { refreshing = false; if (active) timer = setTimeout(refresh, activityRef.current ? 350 : 4000); }
+        if (active && readAccess.current && epoch === accessEpoch.current) setLivePreview(previous => reconcileLivePreview(result, previous));
+      } catch (error) {
+        if (active && epoch === accessEpoch.current) {
+          if ([401, 403].includes(error.status)) {
+            streamState.current = 'reauth_required';
+            setConnectionState('reauth_required'); invalidateHistory();
+          } else setLivePreview(previous => reconcileLivePreview(null, previous, { readFailed: true }));
+        }
+      }
+      finally { refreshing = false; if (active) timer = setTimeout(refresh,
+        streamState.current === 'connected' ? 10000 : activityRef.current ? 350 : 4000); }
     };
     liveRefreshRef.current = refresh;
     void refresh();
@@ -89,10 +136,13 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
     const oid = message?.operation_id;
     if (!oid || deliveryLoading) return;
     setDeliveryLoading(oid);
+    const epoch = accessEpoch.current;
     try {
       const result = await api(route('/api/shell/delivery', { ...scope, operation_id: oid }));
+      if (!alive.current || epoch !== accessEpoch.current) return;
       setDeliveryChecks(old => ({ ...old, [oid]: result }));
     } catch (e) {
+      if (!alive.current || epoch !== accessEpoch.current) return;
       setDeliveryChecks(old => ({ ...old, [oid]: { status: 'read_error',
         message: 'Não foi possível consultar o registro: ' + e.message } }));
     } finally { setDeliveryLoading(''); }
@@ -163,6 +213,21 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
   const [pendingAttachment, setPendingAttachment] = useState(initial.current.pendingAttachment || null), [exporting, setExporting] = useState(false);
   const alive = useRef(true), list = useRef(null), loadingRef = useRef(false), submitLock = useRef(false);
   const bridgeRef = useRef(bridge); bridgeRef.current = bridge;
+  function invalidateHistory() {
+    accessEpoch.current++;
+    readAccess.current = false;
+    conversationCache.forget(scope); setCachedPreview(null); setHistoryVerified(false);
+    setLivePreview(null);
+    setMessages(old => old.filter(message => message.optimistic));
+    setRecentPage(null); pageRef.current = null; setPage(null);
+    setReceipt(null); setDeliveryChecks({});
+    fullCache.current.clear(); setFullContents({});
+  }
+  useEffect(() => {
+    const invalidate = () => invalidateHistory();
+    window.addEventListener('sentra:auth-recovery-failed', invalidate);
+    return () => window.removeEventListener('sentra:auth-recovery-failed', invalidate);
+  }, [scope.project_id, scope.space_id, scope.conversation_id]);
   useEffect(() => {
     try { sessionStorage.setItem(draftKey, JSON.stringify({ content, pending, attachments, pendingAttachment })); } catch { /* Current draft remains in memory. */ }
   }, [content, pending, attachments, pendingAttachment, draftKey]);
@@ -172,29 +237,45 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
     const load = async () => {
       if (!active || loadingRef.current || document.hidden) return;
       loadingRef.current = true;
+      const epoch = accessEpoch.current;
       try {
-        const result = await bridgeRef.current({ action: 'message_list', ...scope, offset: 0, limit: 50 });
-        if (!alive.current) return;
-        setMessages(old => mergeMessages(old, result.items || [])); setPage(previous => previous || result.page);
-        setReceipt(previous => previous?.message_id ? result.items?.find(row => row.message_id === previous.message_id) || previous : previous);
-        if (result.page?.total > 50) {
-          const latest = await bridgeRef.current({ action: 'message_list', ...scope, offset: Math.max(0, result.page.total - 50), limit: 50 });
-          if (alive.current) setMessages(old => mergeMessages(old, latest.items || []));
-          if (alive.current) setReceipt(previous => previous?.message_id ? latest.items?.find(row => row.message_id === previous.message_id) || previous : previous);
+        const result = await readRecentMessagePage(bridgeRef.current, scope);
+        if (!active || !alive.current || epoch !== accessEpoch.current) return;
+        conversationCache.set(scope, result.items || []);
+        const previous = pageRef.current;
+        const disposition = recentPageDisposition(previous, result.page, followRef.current);
+        if (disposition === 'defer') setRecentPage(result);
+        else {
+          setRecentPage(null);
+          setMessages(old => mergeMessages(disposition === 'replace' ? old.filter(row => row.optimistic) : old, result.items));
+          const nextPage = disposition === 'replace' ? result.page : { ...previous, total: result.page.total };
+          pageRef.current = nextPage; setPage(nextPage);
         }
+        readAccess.current = true; setHistoryVerified(true); setCachedPreview(null);
+        setReceipt(previous => previous?.message_id ? result.items?.find(row => row.message_id === previous.message_id) || previous : previous);
         setLoadError('');
-      } catch (e) { if (alive.current) setLoadError(e.message); }
+      } catch (e) {
+        if (active && alive.current && epoch === accessEpoch.current) {
+          setLoadError(e.message);
+          if ([400, 401, 403, 404].includes(e.status)) {
+            invalidateHistory();
+          }
+        }
+      }
       finally { loadingRef.current = false; if (alive.current) setLoading(false); }
     };
     const poll = async () => {
       clearTimeout(timer);
       await load();
-      if (active) { clearTimeout(timer); timer = setTimeout(poll, activityRef.current ? 500 : 6000); }
+      // Live deltas arrive via the scoped preview poll. Full transcript snapshots
+      // are heavier and are only needed to confirm durable message completion.
+      if (active) { clearTimeout(timer); timer = setTimeout(poll,
+        streamState.current === 'connected' ? 30000 : activityRef.current ? 1400 : 6000); }
     };
     refreshRef.current = poll;
     void poll();
     return () => { active = false; alive.current = false; clearTimeout(timer); refreshRef.current = null; };
-  }, [conversation.conversation_id, conversation.project_id]);
+  }, [conversation.conversation_id, conversation.project_id, conversation.space_id]);
   useEffect(() => {
     if (activeResponse) { void refreshRef.current?.(); void liveRefreshRef.current?.(); }
   }, [activeResponse]);
@@ -203,14 +284,28 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
     document.addEventListener('visibilitychange', resume);
     return () => document.removeEventListener('visibilitychange', resume);
   }, []);
-  useEffect(() => { if (follow && list.current) list.current.scrollTop = list.current.scrollHeight; }, [messages, receipt, livePreview?.content, follow]);
+  useEffect(() => { if (follow && !filter && list.current) list.current.scrollTop = list.current.scrollHeight; }, [messages, receipt, livePreview?.content, follow, filter]);
+  useEffect(() => { if (filter && list.current) list.current.scrollTop = 0; }, [filter]);
   useEffect(() => {
-    if (!pending) return;
+    if (!Number.isFinite(livePreview?.received_at_ms)) return;
+    const started = livePreview.received_at_ms;
+    let second;
+    const first = requestAnimationFrame(() => { second = requestAnimationFrame(() => {
+      window.dispatchEvent(new CustomEvent('sentra:stream-metric', { detail: {
+        kind: 'receive_to_frame', duration_ms: Math.max(0, performance.now() - started),
+        sequence: livePreview.sequence,
+      } }));
+    }); });
+    return () => { cancelAnimationFrame(first); if (second) cancelAnimationFrame(second); };
+  }, [livePreview?.sequence]);
+  useEffect(() => {
+    if (!pending) { lastAutomaticInspection.current = null; return; }
     const canonical = messages.find(message => message.request_key === pending.request_key && !message.optimistic);
-    if (canonical && !['uncertain', 'unconfirmed'].includes(canonical.status)) {
-      setPending(null); setAttachments([]);
+    if (!busy && canonical && !['uncertain', 'unconfirmed'].includes(canonical.status) && lastAutomaticInspection.current !== pending.request_key) {
+      lastAutomaticInspection.current = pending.request_key;
+      void inspectPendingSend();
     }
-  }, [messages, pending]);
+  }, [messages, pending, busy]);
   useEffect(() => {
     const restored = initial.current.pending;
     if (restored) setMessages(old => mergeMessages(old, [{ ...scope, role: 'user', content: restored.content,
@@ -222,13 +317,60 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
     addEventListener('beforeunload', before); return () => removeEventListener('beforeunload', before);
   }, [content, pending]);
   async function loadMore() {
+    if (page?.previous_offset == null || loadingRef.current) return;
+    loadingRef.current = true;
     setBusy(true);
+    const epoch = accessEpoch.current;
     try {
-      const result = await bridge({ action: 'message_list', ...scope, offset: page.next_offset, limit: 50 });
-      setMessages(old => mergeMessages(old, result.items || [])); setPage(result.page); setFollow(false);
-    } catch (e) { setError(e.message); } finally { setBusy(false); }
+      const offset = page.previous_offset, limit = Math.min(50, page.offset - offset);
+      const result = await bridge({ action: 'message_list', ...scope, offset, limit });
+      if (!alive.current || epoch !== accessEpoch.current) return;
+      setMessages(old => mergeMessages(old, result.items || []));
+      const nextPage = { ...pageRef.current, offset, previous_offset: offset > 0 ? Math.max(0, offset - 50) : null, tail: true };
+      pageRef.current = nextPage; setPage(nextPage);
+      setFollow(false);
+    } catch (e) {
+      if (alive.current && epoch === accessEpoch.current) {
+        setError(e.message);
+        if ([400, 401, 403, 404].includes(e.status)) invalidateHistory();
+      }
+    }
+    finally { loadingRef.current = false; if (alive.current) setBusy(false); }
+  }
+  function jumpLatest() {
+    if (recentPage) {
+      setMessages(old => mergeMessages(old.filter(row => row.optimistic), recentPage.items));
+      pageRef.current = recentPage.page; setPage(recentPage.page); setRecentPage(null);
+    }
+    setFilter(''); setFollow(true);
+    list.current?.scrollTo({ top: list.current.scrollHeight });
+  }
+  async function inspectPendingSend() {
+    if (submitLock.current || busy || !pending) return;
+    const original = pending;
+    const epoch = accessEpoch.current;
+    submitLock.current = true; setBusy(true); setError('');
+    try {
+      const inspected = await inspectMessageRequest(bridge, original, scope);
+      if (!alive.current || epoch !== accessEpoch.current) return;
+      if (confirmedMessageRequest(inspected, original, scope)) {
+        setMessages(old => mergeMessages(old, [inspected.message]));
+        setReceipt(inspected.message); setPending(null); setAttachments([]);
+        setContent(old => old === original.content ? '' : old);
+        void refreshRef.current?.();
+      } else {
+        setError(inspected.status === 'rejected'
+          ? 'O registro original foi rejeitado. Nenhuma mensagem foi reenviada.'
+          : 'O envio original ainda não foi confirmado. O rascunho permanece preservado; nenhuma mensagem foi reenviada.');
+      }
+    } catch (e) {
+      if (alive.current) setError('Não foi possível consultar o envio original: ' + e.message);
+    } finally { submitLock.current = false; if (alive.current) setBusy(false); }
   }
   async function send(reconcile = false, messageContent = content) {
+    // Compatibility for an older caller is observation-only as well. A status
+    // check can never pass the old prompt to message_send, even if it was lost.
+    if (reconcile) return inspectPendingSend();
     if (submitLock.current || attachmentBusy || pendingAttachment || (!reconcile && (busy || !messageContent.trim() || pending))) return;
     const nativeImage = !reconcile && /^\/image(?:\s|$)/i.test(messageContent.trim());
     if (nativeImage) {
@@ -255,9 +397,10 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
       setContent(''); setFollow(true);
     }
     try { sessionStorage.setItem(draftKey, JSON.stringify({ content, pending: request, attachments, pendingAttachment })); } catch { /* Memory copy is retained. */ }
+    const epoch = accessEpoch.current;
     try {
       const result = await bridge(request);
-      if (!alive.current) return;
+      if (!alive.current || epoch !== accessEpoch.current) return;
       setReceipt(result);
       setMessages(old => mergeMessages(old, [{ ...scope, message_id: result.message_id, role: 'user', content: request.content,
         request_key: request.request_key, optimistic: false, status: result.status, operation_id: result.operation_id,
@@ -268,10 +411,9 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
       setFollow(true); onChanged();
     } catch (e) {
       if (!alive.current) return;
-      const known = messagesRef.current.find(message => message.request_key === request.request_key && !message.optimistic);
-      if (e.uncertain && known && !['uncertain', 'unconfirmed'].includes(known.status)) {
-        setReceipt(known); setPending(null); setAttachments([]); return;
-      }
+      if (epoch !== accessEpoch.current) return;
+      // A matching history row triggers a read-only receipt inspection above;
+      // only that confirmed receipt may release an uncertain restored draft.
       setError(e.message);
       if (!e.uncertain) {
         setPending(null); setContent(request.content);
@@ -297,31 +439,38 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
   }
   async function exportConversation() {
     if (exporting) return; setExporting(true); setError('');
+    const epoch = accessEpoch.current;
     try {
       let offset = 0, values = [];
       do {
         const result = await bridge({ action: 'message_list', ...scope, offset, limit: 200 });
+        if (!alive.current || epoch !== accessEpoch.current) return;
         values = mergeMessages(values, result.items || []); offset = result.page?.next_offset ?? null;
       } while (offset !== null);
       const complete = [];
       for (const message of values) complete.push(await readComplete(message));
-      if (alive.current) downloadMarkdown(conversation, complete);
+      if (alive.current && epoch === accessEpoch.current) downloadMarkdown(conversation, complete);
     } catch (e) { setError(e.message); } finally { if (alive.current) setExporting(false); }
   }
   async function readComplete(message) {
+    const epoch = accessEpoch.current;
+    const active = () => alive.current && readAccess.current && epoch === accessEpoch.current;
+    if (!active()) throw Error('O acesso ao conteúdo da conversa foi interrompido.');
     const key = messageContentKey(message);
     if (fullCache.current.has(key)) return fullCache.current.get(key);
-    const value = await completeMessage(message, bridgeRef.current, scope, () => alive.current);
-    if (alive.current && message.content_truncated) {
+    const value = await completeMessage(message, bridgeRef.current, scope, active);
+    if (!active()) throw Error('O acesso ao conteúdo da conversa foi interrompido.');
+    if (message.content_truncated) {
       fullCache.current.set(key, value); setFullContents(old => ({ ...old, [key]: value.content }));
     }
     return value;
   }
   async function readOriginal(message, exportingMessage = false) {
     if (readingContent) return;
+    const epoch = accessEpoch.current;
     setReadingContent(messageContentKey(message)); setError('');
     try { const value = await readComplete(message);
-      if (alive.current && exportingMessage) downloadMarkdown({ ...conversation, title: (conversation.title || 'Conversa') + ' — mensagem' }, [value]);
+      if (alive.current && epoch === accessEpoch.current && exportingMessage) downloadMarkdown({ ...conversation, title: (conversation.title || 'Conversa') + ' — mensagem' }, [value]);
     } catch (e) { if (alive.current) setError(e.message); }
     finally { if (alive.current) setReadingContent(null); }
   }
@@ -392,7 +541,7 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
       setFileTest({ steps: [...operationLog], status: 'stopped', error: e.message });
     } finally { setFileTestBusy(false); }
   }
-  function prepareInteractiveUiDraft(text) {
+  const prepareInteractiveUiDraft = useCallback(function prepareInteractiveUiDraft(text) {
     // Model-generated UI cannot itself submit a turn or acquire tool grants.
     if (busy || pending || activeResponse || attachmentBusy || pendingAttachment || attachments.length || submitLock.current) {
       setError('Finalize o envio atual e os anexos antes de preparar respostas ao painel.');
@@ -402,32 +551,54 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
     setContent(text);
     setError('');
     return true;
-  }
+  }, [busy, pending, activeResponse, attachmentBusy, pendingAttachment, attachments.length, content]);
   const latest = messages[messages.length - 1];
   const latestStatus = String(latest?.status || '').toLowerCase();
   const waitingApproval = latestStatus === 'waiting_approval' || receipt?.status === 'waiting_approval';
   const inFlight = !loading && !loadError && !error && !waitingApproval &&
     (Boolean(submitLock.current) || (latest?.role === 'user' &&
       ['sending', 'queued', 'running', 'dispatched', 'pending'].includes(latestStatus)));
-  const showLivePreview = livePreview && !messages.some(message => message.role === 'assistant' &&
-    message.operation_id === livePreview.operation_id);
+  const live = presentLive(livePreview);
+  const reducedMotion = useReducedMotion();
+  const beat = feedMotion(livePreview && typeof livePreview === 'object' ? livePreview : { status: 'idle' }, feedPrevious.current);
+  useEffect(() => { feedPrevious.current = { activity: beat.activity, content: beat.content }; }, [beat.activity, beat.content]);
+  const showLivePreview = previewStillVisible(livePreview, messages);
   return <section className="shell-chat" aria-label={'Conversa com ' + (dot?.name || 'Dot')}>
-    <header className="shell-chat-heading"><div className="shell-persona"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} size="small" decorative />
-      <div><h2>{conversation.title || dot?.name || 'Conversa'}</h2><p>{dot?.name} · {dot?.model || 'Modelo não informado'} {dot?.effort && '· ' + dot.effort}</p></div></div>
-      <div className="shell-chat-actions"><button onClick={() => onModel('')}>/model</button><button onClick={() => setGoalDialog({ argument: '' })}>/goal</button>
-        <button onClick={onCanvas}>Canvas do Dot</button><button onClick={onCoordinate}><Users size={15} /> Coordenar</button>
-        <button onClick={() => onTools('history')} aria-label="Pesquisar histórico"><Search size={16} /></button>
-        <button onClick={exportConversation} disabled={exporting || !messages.length} title="Exportar conversa em Markdown" aria-label="Exportar conversa"><Download size={16} /></button></div>
+    <header className="shell-chat-heading"><div className="shell-persona"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="small" decorative />
+      <div><h2>{conversation.title || dot?.name || 'Conversa'}</h2><p title={dot?.model}>{dot?.name}</p></div></div>
+      <div className="shell-chat-actions"><button onClick={onCanvas}><Layers size={15} />Canvas</button><ActionMenu label="Opções da conversa" items={[
+        { label: 'Modelo e raciocínio', icon: <SlidersHorizontal size={15} />, action: () => onModel('') },
+        { label: 'Definir objetivo', icon: <Flag size={15} />, action: () => setGoalDialog({ argument: '' }) },
+        { label: 'Coordenar equipe', icon: <Users size={15} />, action: onCoordinate },
+        { separator: true },
+        { label: 'Pesquisar histórico', icon: <Search size={15} />, action: () => onTools('history') },
+        { label: 'Exportar conversa', icon: <Download size={15} />, action: exportConversation, disabled: exporting || !messages.length },
+      ]} /></div>
     </header>
-    <label className="shell-chat-filter"><Search size={14} /><input value={filter} onChange={e => setFilter(e.target.value)} placeholder="Buscar nesta conversa" aria-label="Buscar nas mensagens carregadas" /></label>
-    <div className="shell-transcript" ref={list} role="log" aria-live="polite" aria-relevant="additions text"
+    <div className="shell-chat-stream-status" role="status" data-state={!readAccess.current && connectionState !== 'reauth_required' ? 'access_unavailable' : connectionState}>
+      {!readAccess.current && connectionState !== 'reauth_required' ? 'Acesso à conversa indisponível · consulte novamente' :
+        { connecting: 'Conectando', connected: 'Conexão contínua', reconnecting: 'Reconectando · texto preservado',
+          unavailable: 'Modo de compatibilidade', reauth_required: 'Sessão expirada · reabra a janela' }[connectionState]}
+    </div>
+    <div className="shell-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
+      {latest?.role === 'assistant' && !latest.optimistic && <span key={latest.message_id}>Resposta de {dot?.name || 'Dot'} disponível no histórico da conversa.</span>}
+    </div>
+    <label className="shell-chat-filter"><Search size={14} /><input value={filter} onChange={e => { setFollow(false); setFilter(e.target.value); }} placeholder="Buscar nesta conversa" aria-label="Buscar nas mensagens carregadas" /></label>
+    {messages.length > 80 && <div className="shell-history-display"><button type="button" aria-pressed={renderAll} onClick={() => setRenderAll(value => !value)}>{renderAll ? 'Usar histórico otimizado' : 'Exibir todo o histórico carregado'}</button><small>{filteredMessages.length} {filteredMessages.length === 1 ? (filter ? 'mensagem encontrada' : 'mensagem carregada') : (filter ? 'mensagens encontradas' : 'mensagens carregadas')}</small></div>}
+    <div className="shell-transcript" ref={list} role="log" aria-label="Histórico da conversa" aria-live="off" tabIndex={0}
       onScroll={e => setFollow(e.currentTarget.scrollHeight - e.currentTarget.scrollTop - e.currentTarget.clientHeight < 90)}>
-      {page?.next_offset != null && <button disabled={busy} onClick={loadMore}>Carregar mais mensagens</button>}
-      {loading && <p className="shell-empty">Consultando mensagens…</p>}
-      {!loading && !messages.length && <div className="shell-chat-intro"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} size="intro" decorative /><h3>Uma conversa que continua.</h3><p>Descreva seu objetivo para {dot?.name || 'este Dot'}.</p></div>}
-      {messages.filter(message => String(message.content || '').toLowerCase().includes(filter.toLowerCase())).map(message =>
-        <article className={'shell-message ' + (message.role === 'user' ? 'from-user' : '')} key={message.message_id}>
-          <header>{message.role === 'assistant' && <DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} size="message" decorative />}
+      {page?.previous_offset != null && <button disabled={busy} onClick={loadMore}>Carregar mais mensagens</button>}
+      {!historyVerified && cachedPreview?.items.length > 0 && <p className="shell-cache-note" role="status">Visualização anterior · atualizando histórico</p>}
+      {loading && !cachedPreview?.items.length && <p className="shell-empty">Consultando mensagens…</p>}
+      {!loading && historyVerified && !error && !loadError && !presentedMessages.length && !livePreview?.content && <div className="shell-chat-intro"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="intro" decorative /><h3>Uma conversa que continua.</h3><p>Descreva seu objetivo para {dot?.name || 'este Dot'}.</p></div>}
+      {!loading && filter && !filteredMessages.length && <p className="shell-empty" role="status">Nenhuma mensagem carregada contém “{filter}”.</p>}
+      <ShellMessageWindow items={filteredMessages} scrollRef={list} follow={follow && !filter} enabled={!renderAll && !filter}>{message =>
+        message.cached_visual ? <article className="shell-message shell-cached-message" key={message.message_id} data-authoritative="false">
+          <header><strong>{message.role === 'user' ? 'Você' : dot?.name || 'Dot'}</strong><small>Visualização anterior</small></header>
+          <div className="shell-message-content shell-cached-message-text">{message.content}</div>
+          {message.content_truncated && <small>Prévia do conteúdo armazenado</small>}
+        </article> : <article className={'shell-message ' + (message.role === 'user' ? 'from-user' : '')} key={message.message_id}>
+          <header>{message.role === 'assistant' && <DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="message" decorative />}
             <strong>{message.role === 'user' ? 'Você' : message.role === 'assistant' ? dot?.name || 'Dot' : message.role}</strong>
             <time>{message.created_at ? new Date(message.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}</time></header>
           <div className="shell-message-content">{fullContents[messageContentKey(message)] !== undefined ?
@@ -452,20 +623,26 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
             </div>}
           {!message.optimistic && <button className="shell-message-export" disabled={Boolean(readingContent)} onClick={() => readOriginal(message, true)}><Download size={12} />Exportar mensagem completa</button>}
           {message.attachments?.map(item => <p key={item.attachment_id}>Anexo: {item.name || item.attachment_id} <Status value={item.status} /></p>)}
-        </article>)}
-      {showLivePreview && livePreview?.content && <article className="shell-message shell-live-preview" aria-label="Resposta parcial, ainda não confirmada">
+        </article>}</ShellMessageWindow>
+      {showLivePreview && beat.content && <article className="shell-message shell-live-preview cadence-activity" aria-label="Resposta parcial, ainda não confirmada" data-authoritative="false" data-partial="true" data-closes-trio="false" data-resend="false" data-stop={beat.stop ? 'true' : 'false'} data-animate={!reducedMotion && beat.animate ? 'true' : 'false'}>
         <header><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id}
-          name={dot?.name} status="working" size="message" decorative />
-          <strong>{dot?.name || 'Dot'}</strong><small>{livePreview.activity || 'Escrevendo em tempo real'} · prévia</small></header>
-        <div className="shell-message-content"><ConversationMarkdown content={livePreview.content} /></div>
+          name={dot?.name} status={dot?.status} execution={dot?.execution} size="message" decorative />
+          <strong>{dot?.name || 'Dot'}</strong><small>{beat.activity || live.activity || 'Prévia'} · prévia</small></header>
+        <div className="shell-message-content"><ConversationMarkdown content={beat.content} /></div>
+        {livePreview?.truncated && <small className="shell-preview-window">Trecho mais recente de uma resposta ainda não confirmada.</small>}
+        <ShellStreamContent scope={scope} preview={livePreview} onAccessDenied={() => {
+          invalidateHistory(); setLoadError('O acesso à prévia não está mais autorizado.');
+        }} />
       </article>}
-      {inFlight && !(showLivePreview && livePreview?.content) && <div className="shell-thinking" role="status" aria-live="polite" aria-label={(dot?.name || 'Dot') + ' está processando a mensagem'}>
-        <DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status="working" size="message" decorative />
-        <span className="shell-thinking-label">{busy ? 'Preparando envio' : livePreview?.activity || 'Aguardando resposta'}</span>
+      {((inFlight && !(showLivePreview && beat.content)) || (showLivePreview && live && !beat.content)) && <div className="shell-thinking cadence-activity" role="status" aria-live="polite" data-authoritative="false" data-partial="true" data-closes-trio="false" data-stop={beat.stop ? 'true' : 'false'} data-animate={!reducedMotion && beat.animate && !beat.content ? 'true' : 'false'} data-resend="false" aria-label={(dot?.name || 'Dot') + ' está processando a mensagem'}>
+        <DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="message" decorative />
+        <span className="shell-thinking-label">{busy ? 'Preparando envio' : beat.activity || live?.activity || 'Aguardando resposta'}</span>
         <span className="shell-thinking-dots" aria-hidden="true"><i /><i /><i /></span>
       </div>}
       {waitingApproval && latest?.role === 'user' && <p className="shell-notice" role="status">Aguardando aprovação das permissões necessárias para continuar.</p>}
+      {showLivePreview && !beat.content && livePreview?.content_error && <ShellStreamContent scope={scope} preview={livePreview} />}
     </div>
+    {(!follow || recentPage) && <button className="shell-jump-latest" type="button" onClick={jumpLatest}>{recentPage ? 'Há novas mensagens · Ir para o mais recente' : 'Ir para o mais recente'}</button>}
     <div className="shell-composer-wrap">
       {(error || loadError) && <div className="shell-error" role="alert">{error || loadError}</div>}
       {receipt && <OperationReceipt value={receipt} />}
@@ -476,7 +653,7 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
           {step.label}: {step.state || 'não confirmado'} {step.operation_id && <small>· {step.operation_id}</small>}</div>)}
         {fileTest.error && <p className="shell-error">{fileTest.error}</p>}
       </div>}
-      {pending && <div className="shell-notice" role="status">Envio preservado para consulta. <button disabled={busy} onClick={() => send(true)}>Consultar envio</button><small>Chave: {pending.request_key}</small></div>}
+      {pending && <div className="shell-notice" role="status">Envio preservado para consulta. <button disabled={busy} onClick={() => void inspectPendingSend()}>Consultar envio</button><small>Chave: {pending.request_key}</small></div>}
       <form className="shell-composer" onSubmit={e => { e.preventDefault(); void send(); }}>
         {content.trim().startsWith('/') && !content.trim().includes(' ') && <div className="shell-command-menu" role="group" aria-label="Comandos da conversa">
           {['model', 'goal', 'image'].filter(name => ('/' + name).startsWith(content.trim().toLowerCase())).map(name => <button key={name} type="button" onClick={() => { setContent(name === 'image' ? '/image ' : ''); if (name === 'model') onModel(''); else if (name === 'goal') setGoalDialog({ argument: '' }); }}>

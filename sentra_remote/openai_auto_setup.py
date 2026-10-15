@@ -12,6 +12,18 @@ from .product import ProductPaths, configure_tunnel, tunnel_credential_storage, 
 from .secrets import protect_secret, unprotect_secret
 
 
+def edge_automation_profile(state_dir) -> Path:
+    """Empty Edge profile for installer automation. Never the signed-in Edge user."""
+    from pathlib import Path
+    profile = (Path(state_dir) / "edge-automation").resolve()
+    local = os.environ.get("LOCALAPPDATA", "")
+    signed_in = (Path(local) / "Microsoft" / "Edge" / "User Data").resolve() if local else None
+    if signed_in is not None and (profile == signed_in or signed_in in profile.parents):
+        raise ValueError("automation browser must not use the signed-in Edge profile")
+    profile.mkdir(parents=True, exist_ok=True)
+    return profile
+
+
 def authorize_installer_enrollment(paths: ProductPaths) -> None:
     """Persist the installer checkbox authorization for one Desktop handoff."""
     paths.state_dir.mkdir(parents=True, exist_ok=True)

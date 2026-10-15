@@ -187,14 +187,22 @@ class OpenAIConsentBrowser:
             from playwright.sync_api import sync_playwright
 
             with sync_playwright() as playwright:
-                # Browser context is nonpersistent and unprivileged. The user
-                # signs in directly; SENTRA does NOT handle their login.
-                browser = playwright.chromium.launch(channel="msedge", headless=False)
+                # Dedicated empty profile. The signed-in Edge user is never reused.
+                # The person signs in on this window; SENTRA does not handle login.
+                from .openai_auto_setup import edge_automation_profile
+                profile = edge_automation_profile(self.paths.state_dir)
+                context = playwright.chromium.launch_persistent_context(
+                    str(profile),
+                    channel="msedge",
+                    headless=False,
+                    accept_downloads=False,
+                    args=[
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        "--disable-sync",
+                    ],
+                )
                 try:
-                    context = browser.new_context(
-                        accept_downloads=False, service_workers="block"
-                    )
-                    try:
                         page = context.new_page()
                         page.goto(OPENAI_TUNNELS_URL, wait_until="domcontentloaded", timeout=30000)
                         self._running.set()
@@ -280,10 +288,8 @@ class OpenAIConsentBrowser:
                                 }
                                 reason = str(exc) if str(exc) in known_reasons else type(exc).__name__
                                 self._emit("attention", reason)
-                    finally:
-                        context.close()
                 finally:
-                    browser.close()
+                    context.close()
         except Exception as exc:
             # Browser startup may fail for network, login, or Playwright
             # errors. Only the exception class is safe to disclose.

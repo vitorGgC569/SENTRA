@@ -1,9 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronLeft, FileText, Folder, Globe, Monitor, RefreshCw, Terminal, X } from 'lucide-react';
+import { ChevronLeft, FileText, Folder, Globe, Monitor, RefreshCw, Terminal, X, Maximize2, Minimize2 } from 'lucide-react';
 import { ShellMachines } from './shell-machines';
 import { PtySlot } from './nodes';
 import { DotMascot } from './shell-mascot';
 import { ShellDotVm } from './shell-dot-vm';
+import { DotFamilyControls } from './shell-dot-family.jsx';
+import { ComputerStatusStrip } from './shell-computer-status.jsx';
+import { ComputerResizeHandle } from './shell-computer-resize.jsx';
 
 function ComputerFiles({ inventory, conversation, bridge, onConfigure }) {
   const [path, setPath] = useState('.'), [result, setResult] = useState(null), [error, setError] = useState('');
@@ -45,6 +48,9 @@ function ComputerFiles({ inventory, conversation, bridge, onConfigure }) {
 
 export function ShellDotComputer({ dot, conversation, bridge, onClose, onConfigure, onCanvas, visible = true }) {
   const [tab, setTab] = useState('desktop'), [inventory, setInventory] = useState({ machines: [], work_items: [], agents: [], terminals: [], dots: [] });
+  const [machine, setMachine] = useState(null);
+  const [expanded, setExpanded] = useState(false);
+  const panelRef = useRef(null);
   const [error, setError] = useState(''), [agentId, setAgentId] = useState(dot.agent_id);
   const scopedBridge = useCallback(async payload => {
     const { action, request_key, project_id, space_id, dot_id, conversation_id, ...request } = payload;
@@ -67,15 +73,22 @@ export function ShellDotComputer({ dot, conversation, bridge, onClose, onConfigu
   }, [scopedBridge, visible]);
   const agent = inventory.agents.find(item => item.id === agentId);
   const terminal = inventory.terminals.find(item => item.id === agent?.terminal_id);
-  return <aside className="dot-computer-panel" aria-label={'Computador de ' + dot.name}>
-    <header className="dot-computer-heading"><DotMascot mascot={dot.mascot} identity={dot.agent_id} name={dot.name} size="small" decorative /><strong>{dot.name}</strong><small>Computador do canvas</small><button className="shell-icon" aria-label="Fechar computador" onClick={onClose}><X size={16} /></button></header>
+  return <aside ref={panelRef} className={'dot-computer-panel' + (expanded ? ' is-expanded' : '')} aria-label={'Computador de ' + dot.name}>
+    <ComputerResizeHandle panelRef={panelRef} expanded={expanded} />
+    <div className="dot-computer-window-actions"><button className="shell-icon" aria-label={expanded ? 'Recolher computador' : 'Ampliar computador'} aria-pressed={expanded} onClick={() => setExpanded(value => !value)}>{expanded ? <Minimize2 size={16} /> : <Maximize2 size={16} />}</button><button className="shell-icon" aria-label="Fechar computador" onClick={onClose}><X size={17} /></button></div>
+    <header className="dot-computer-heading"><DotMascot mascot={dot.mascot} identity={dot.agent_id} name={dot.name} status={dot.status} execution={dot.execution} size="intro" decorative /><div className="dot-computer-identity"><strong>{dot.name}</strong><small>Seu computador</small></div></header>
     {error && <p className="shell-error" role="alert">{error}</p>}
-    <div className="dot-computer-tabs" role="tablist" aria-label="Visões do computador">{[['desktop', 'Desktop', Monitor], ['terminal', 'Terminal', Terminal], ['files', 'Arquivos', Folder]].map(([id, label, Icon]) => <button key={id} id={'dot-computer-tab-' + id} role="tab" aria-selected={tab === id} aria-controls={'dot-computer-view-' + id} onClick={() => setTab(id)}><Icon size={15} />{label}</button>)}<button title="Configurar navegador autorizado" onClick={onConfigure}><Globe size={15} /><span>Navegador</span></button></div>
+    <div className="dot-computer-tabs" role="tablist" aria-label="Visões do computador">{[['desktop', 'Computador', Monitor], ['terminal', 'Terminal', Terminal], ['files', 'Arquivos', Folder], ...(tab === 'remote' ? [['remote', 'Remoto', Globe]] : [])].map(([id, label, Icon], index, tabs) => <button key={id} id={'dot-computer-tab-' + id} role="tab" tabIndex={tab === id ? 0 : -1} aria-selected={tab === id} aria-controls={'dot-computer-view-' + id} onClick={() => setTab(id)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1 : null; if (next !== null) { event.preventDefault(); setTab(tabs[next][0]); event.currentTarget.parentElement.children[next].focus(); } }}><Icon size={14} />{label}</button>)}</div>
     <div className="dot-computer-view" id={'dot-computer-view-' + tab} role="tabpanel" aria-labelledby={'dot-computer-tab-' + tab}>
-      {tab === 'desktop' && <ShellDotVm key={dot.dot_id + ':' + conversation?.conversation_id} dot={dot} conversation={conversation} bridge={bridge} visible={visible} onRemote={() => setTab('remote')} />}
+      {tab === 'desktop' && <ShellDotVm key={dot.dot_id + ':' + conversation?.conversation_id} dot={dot} conversation={conversation} bridge={bridge} visible={visible} onStatus={setMachine} onRemote={() => setTab('remote')} />}
       {tab === 'remote' && <ShellMachines key={dot.dot_id} compact bridge={scopedBridge} scope={{ project_id: dot.project_id, space_id: dot.space_id, dot_id: dot.dot_id }} visible={visible} onConfigure={onConfigure} />}
       {tab === 'terminal' && <section className="dot-computer-terminal"><select aria-label="Terminal deste canvas" value={agentId} onChange={e => setAgentId(e.target.value)}>{inventory.dots.map(item => <option key={item.agent_id} value={item.agent_id}>{item.name}</option>)}</select>{terminal?.status === 'running' ? <PtySlot ws={dot.project_id} resource={terminal} priority={30} /> : <div className="dot-computer-empty"><Terminal size={38} /><strong>Terminal encerrado</strong><p>Abra ou reabra o terminal deste agente no canvas.</p><button onClick={onCanvas}>Abrir canvas de agentes</button></div>}</section>}
       {tab === 'files' && <ComputerFiles key={dot.dot_id + ':' + (conversation?.conversation_id || 'canvas')} inventory={inventory} conversation={conversation} bridge={scopedBridge} onConfigure={onConfigure} />}
     </div>
+    <details className="dot-computer-details"><summary>Detalhes do computador</summary><ComputerStatusStrip status={machine} /><p>{dot.model || 'Modelo não informado'}</p><button onClick={onConfigure}><Globe size={14} />Configurar navegador</button></details>
+    <details className="shell-dot-family-fold">
+      <summary>Família do Dot</summary>
+      <DotFamilyControls dot={dot} bridge={bridge} projectId={dot.project_id} spaceId={dot.space_id} />
+    </details>
   </aside>;
 }

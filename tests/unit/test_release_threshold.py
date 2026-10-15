@@ -26,7 +26,8 @@ def _base_gate(**kw):
 
 
 def _task_cand():
-    return (Task(id="T-1", run_id="r", objective="x"),
+    return (Task(id="T-1", run_id="r", objective="x",
+                 metadata={"evidence_ids": ["artifact:unit"]}),
             Candidate(candidate_id="C-1", task_id="T-1", summary="s"))
 
 
@@ -202,6 +203,15 @@ async def test_engine_loop_refines_until_bar_then_releases(tmp_path, monkeypatch
     engine = OMAEngine(run_id="release-run", objective="do thing", workspace_path=ws,
                        router=router,
                        anti_explosion_config=AntiExplosionConfig(global_task_budget=50))
+    planned = engine.planner.plan
+
+    async def plan_with_evidence(*args, **kwargs):
+        tasks = await planned(*args, **kwargs)
+        for task in tasks:
+            task.metadata["evidence_ids"] = ["artifact:unit"]
+        return tasks
+
+    engine.planner.plan = plan_with_evidence
     result = await engine.run()
     assert result["status"] == "COMPLETED"
     assert result["completed_tasks"] == 1

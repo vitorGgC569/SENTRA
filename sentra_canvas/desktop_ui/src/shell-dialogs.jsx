@@ -1,7 +1,8 @@
 import React, { useRef, useState } from 'react';
 import { Field, Modal } from './primitives';
 import { OperationReceipt } from './shell-receipts';
-import { DOT_MASCOTS, mascotFor } from './shell-mascot';
+import { DOT_MASCOTS, DotMascot, mascotFor } from './shell-mascot';
+import { UserRound, SlidersHorizontal, FileText, Check } from 'lucide-react';
 
 export function ShellEntityDialog({ kind, dot, canvasRoot, initialModel, space, projectId, models, bridge, onClose, onCreated }) {
   const [busy, setBusy] = useState(false), [error, setError] = useState('');
@@ -11,6 +12,7 @@ export function ShellEntityDialog({ kind, dot, canvasRoot, initialModel, space, 
   const [instructions, setInstructions] = useState(dot?.instructions || '');
   const [mascot, setMascot] = useState(dot?.mascot || mascotFor(dot?.agent_id || dot?.dot_id));
   const [pending, setPending] = useState(null), key = useRef(crypto.randomUUID());
+  const [editorTab, setEditorTab] = useState(kind === 'model' ? 'model' : 'identity');
   const editing = Boolean(dot);
   async function submit(e) {
     e.preventDefault(); if (busy) return;
@@ -33,19 +35,25 @@ export function ShellEntityDialog({ kind, dot, canvasRoot, initialModel, space, 
   if (model && !choices.some(item => item.id === model)) choices.unshift({ id: model, name: model + ' (atual)' });
   const selected = choices.find(item => item.id === model);
   return <Modal open onOpenChange={value => { if (!value && !pending) onClose(); }} busy={busy || Boolean(pending)}
-    className="shell-modal" title={kind === 'space' ? 'Novo Space' : kind === 'model' ? 'Modelo de ' + dot?.name : editing ? 'Editar Dot' : canvasRoot ? 'Novo subagente' : 'Novo Dot'}
+    className={'shell-modal' + (kind !== 'space' ? ' shell-dot-editor' : '')} title={kind === 'space' ? 'Novo Space' : kind === 'model' ? 'Modelo de ' + dot?.name : editing ? 'Editar Dot' : canvasRoot ? 'Novo subagente' : 'Novo Dot'}
     description={kind === 'space' ? 'Organize o trabalho no projeto selecionado.' : kind === 'model' ? 'O modelo escolhido será usado nas próximas mensagens deste Dot.' : canvasRoot ? 'Este agente pertence ao canvas do Dot selecionado.' : 'Personalize seu Dot e escolha o modelo.'}>
-    <form className="shell-form" onSubmit={submit}>
-      {kind !== 'model' && <Field label="Nome"><input required maxLength={80} value={name} disabled={Boolean(pending)} onChange={e => setName(e.target.value)} autoFocus /></Field>}
+    {kind !== 'space' && <div className="shell-dot-editor-profile"><DotMascot mascot={mascot} identity={dot?.agent_id} name={name || 'Seu Dot'} size="intro" decorative /><div><strong>{name || 'Seu próximo Dot'}</strong><span>{editing ? 'Do seu jeito, pronto para continuar.' : 'Dê personalidade ao seu novo parceiro.'}</span></div></div>}
+    {kind !== 'space' && kind !== 'model' && <div className="shell-dot-editor-tabs" role="tablist" aria-label="Configurações do Dot">{[['identity', 'Identidade', UserRound], ['model', 'Modelo', SlidersHorizontal], ['instructions', 'Instruções', FileText]].map(([id,label,Icon], index, tabs) => <button type="button" key={id} id={'dot-editor-tab-' + id} role="tab" aria-selected={editorTab === id} aria-controls={'dot-editor-panel-' + id} tabIndex={editorTab === id ? 0 : -1} onClick={() => setEditorTab(id)} onKeyDown={event => { const next = event.key === 'ArrowRight' ? (index + 1) % tabs.length : event.key === 'ArrowLeft' ? (index + tabs.length - 1) % tabs.length : null; if (next !== null) { event.preventDefault(); setEditorTab(tabs[next][0]); event.currentTarget.parentElement.children[next].focus(); } }}><Icon size={15} />{label}</button>)}</div>}
+    <form className="shell-form" onSubmit={submit} onInvalidCapture={event => { const panel = event.target.closest('[data-editor-tab]'); if (panel && panel.hidden) { event.preventDefault(); const input = event.target; setEditorTab(panel.dataset.editorTab); requestAnimationFrame(() => input.focus()); } }}>
+      {kind === 'space' && <Field label="Nome"><input required maxLength={80} value={name} disabled={Boolean(pending)} onChange={e => setName(e.target.value)} autoFocus /></Field>}
       {kind === 'space' ? <Field label="Descrição"><textarea maxLength={4000} value={description} disabled={Boolean(pending)} onChange={e => setDescription(e.target.value)} /></Field> : <>
-        {kind !== 'model' && <><fieldset className="shell-mascot-picker" disabled={Boolean(pending)}><legend>Cor do Dot</legend><div>{DOT_MASCOTS.map(item => <button type="button" key={item.id} aria-label={'Dot ' + item.label} aria-pressed={mascot === item.id} onClick={() => setMascot(item.id)}><img src={item.image} alt="" width="60" height="60" /><span>{item.label}</span></button>)}</div></fieldset>
+        {kind !== 'model' && <><section role="tabpanel" id="dot-editor-panel-identity" aria-labelledby="dot-editor-tab-identity" data-editor-tab="identity" hidden={editorTab !== 'identity'}>
+        <Field label="Nome"><input required maxLength={80} value={name} disabled={Boolean(pending)} onChange={e => setName(e.target.value)} autoFocus /></Field>
+        <fieldset className="shell-mascot-picker" disabled={Boolean(pending)}><legend>Escolha seu Dot</legend><div>{DOT_MASCOTS.map(item => <button type="button" key={item.id} aria-label={'Dot ' + item.label} aria-pressed={mascot === item.id} onClick={() => setMascot(item.id)}><img src={item.image} alt="" width="60" height="60" /><span>{item.label}</span>{mascot === item.id && <Check size={12} className="shell-mascot-check" />}</button>)}</div></fieldset>
         <Field label="Papel"><input required maxLength={80} value={role} disabled={Boolean(pending)} onChange={e => setRole(e.target.value)} /></Field>
-        <Field label="Instruções"><textarea maxLength={16000} value={instructions} disabled={Boolean(pending)} onChange={e => setInstructions(e.target.value)} /></Field></>}
+        </section><section role="tabpanel" id="dot-editor-panel-instructions" aria-labelledby="dot-editor-tab-instructions" data-editor-tab="instructions" hidden={editorTab !== 'instructions'}><Field label="Como este Dot deve trabalhar?"><textarea maxLength={16000} value={instructions} placeholder="Descreva seu estilo, especialidade e o que ele deve considerar…" disabled={Boolean(pending)} onChange={e => setInstructions(e.target.value)} /></Field><p className="shell-dot-editor-hint">Estas instruções orientam as próximas conversas.</p></section></>}
+        <section role={kind === 'model' ? undefined : 'tabpanel'} id="dot-editor-panel-model" aria-labelledby={kind === 'model' ? undefined : 'dot-editor-tab-model'} data-editor-tab="model" hidden={editorTab !== 'model'}>
         <Field label="Modelo disponível"><select required value={model} disabled={Boolean(pending)} onChange={e => { setModel(e.target.value); setEffort(''); }} autoFocus={kind === 'model'}>
           <option value="">Selecione um modelo</option>{choices.map(item => <option key={item.id} value={item.id} disabled={item.available === false}>{item.name}</option>)}</select></Field>
           {!choices.length && <p className="shell-notice">O runtime ainda não anunciou modelos disponíveis. Configure a conta em Ambientes e modelos.</p>}
           <Field label="Esforço"><select value={effort} disabled={Boolean(pending)} onChange={e => setEffort(e.target.value)}><option value="">Padrão autorizado</option>
             {(selected?.efforts || selected?.reasoning_efforts || ['low', 'medium', 'high', 'xhigh', 'max', 'ultra']).map(value => <option key={typeof value === 'string' ? value : value.id} value={typeof value === 'string' ? value : value.id}>{typeof value === 'string' ? value : value.label || value.id}</option>)}</select></Field>
+        </section>
       </>}
       {error && <p className="shell-error" role="alert">{error}</p>}
       {pending && <p className="shell-notice">Resposta não confirmada. A consulta mantém a mesma chave e os mesmos campos.</p>}

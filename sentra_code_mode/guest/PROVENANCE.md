@@ -1,9 +1,10 @@
 # Provenance — SENTRA QuickJS guest (A08)
 
-Owner: Pacto. All pins below were verified 2026-10-11. The guest `.wasm`
-binary itself is built by the distribution pipeline (Vitra) via `build.sh`;
-it is NOT committed here and has NOT been executed anywhere (no runtime
-evidence yet — final QA only after the principal's liberation).
+The upstream source pin was verified 2026-10-11. The guest is built outside
+the checkout by `scripts/commander/build_quickjs.py` using `build.sh`; no binary
+is committed here. The ASTRA implementation has now compiled and executed it
+in real Wasmtime. `.tmp/astra-quickjs-runtime.json` records 11 acceptance cases;
+`docs/ASTRA_IMPLEMENTACAO_E_ACEITE.md` distinguishes these from installed QA.
 
 ## Upstream QuickJS source (real, downloaded + hashed)
 
@@ -42,11 +43,14 @@ hash the current C/platform/header/ABI/inspector/build inputs before shipping.
    `provenance.json` (wasm SHA, upstream pin, ABI v1, `validated: false`)
 3. Set host env pins (`SENTRA_QUICKJS_WASM_PATH/SBOM_PATH/*_SHA256`, see
    `sentra_code_mode/artifact_config.py`) + `pip install wasmtime`
-4. Runtime evidence (execute + observe) ONLY in final QA after liberation
+4. Run `tests/qa/astra_quickjs_runtime.py` against those exact artifact bytes.
+   This tests the runtime without granting system tools. Then validate actual
+   Control Plane tools and the installed journey separately.
 
 ## What is explicitly NOT claimed
 
-- No guest binary exists yet; no QuickJS code has executed in SENTRA.
+- The built guest and runtime acceptance do not prove the installed release,
+  central tool dispatch, or an arbitrary workload's result quality.
 - `readiness()` reports `READY_ABI_V1` only when artifact + wasmtime resolve.
 - `bounded-js` is interim (`a08_satisfied: false` on every receipt).
 
@@ -63,3 +67,18 @@ future build stage. Atomics/pthreads removed from pinned source without
 disabling engine stack checks. Tool request length/scratch reuse/attempt count
 and C JSON serialization corrected. Current sources require final rebuild;
 old binary/pins, if staged separately by root, cannot certify these changes.
+
+## ASTRA build/runtime corrections
+
+The build now compiles pinned `dtoa.c`, removes its unused setjmp header with
+an exact checked transformation, and uses wasm32-wasip1 plus upstream signed
+overflow/character flags. The C linear stack is 512 KiB so the 256 KiB JS stack
+floor does not underflow. Static libc clock/descriptor fallback paths trap
+locally; the inspected binary still imports only `env.sentra_host_call`.
+
+Exception classification preserves both the error message and stack, and fuel
+exhaustion is checked independently of exception wording. Runtime acceptance
+tests actual CPU/wall interruption, memory/result limits, cancellation and
+denied host calls. Static libc/compiler-rt licenses and source revisions are
+in `licenses/`, copied and hashed into the artifact/SBOM. The build manifest's
+`validated: false` is not rewritten by these tests; QA evidence is separate.

@@ -40,6 +40,10 @@ class ModelInvocationFence:
         return work
 
     def checkpoint(self, session_id, workspace, *, provider=None, expected=None):
+        if provider in {"antigravity", "antigravity-app"}:
+            raise PermissionError(
+                "Antigravity graphical application is not a verified non-interactive inference"
+            )
         context = self.ledger.context(session_id, workspace)
         if expected is not None and context != expected:
             raise PermissionError('model authority changed after the submission admission')
