@@ -34,11 +34,15 @@ a formatação. Um commit enviado não comprova backup desses diretórios.
 - A entrega usa duas partes, pois o executável excede o limite por asset do GitHub.
 - O kit local está em `release/preformat-20261017`, ignorado pelo Git.
 
-O rascunho estava sem assets durante a inspeção inicial. O upload dos binários
-foi bloqueado pela revisão automática por exigir autorização explícita para
-exportar esses arquivos. A presença deste documento no Git não significa que
-o upload foi concluído. Antes de formatar, confirme que ambas as partes e o kit
-estão disponíveis no remoto ou guardados em outro dispositivo.
+Depois da autorização explícita do proprietário, as duas partes do instalador,
+hashes, proveniência, scripts de recomposição e kit de recuperação foram enviados
+ao rascunho `installer-preview-20261015-42870dc`, na
+[lista de releases](https://github.com/vitorGgC569/SENTRA/releases).
+Os tamanhos e SHA-256 dos assets foram comparados com os valores calculados pelo
+GitHub. A tag remota `installer-preview-20261015-42870dc` aponta para o commit
+real do build, `42870dc`. A release continua como rascunho de pré-release,
+acessível pela conta proprietária. Baixe as duas partes e
+`SENTRA-recovery-kit-20261017.zip`; extraia o kit na mesma pasta das partes.
 
 Em 17/10, os 14 executáveis e o Setup corresponderam aos hashes de proveniência.
 A comparação dos inputs do build com o checkout encontrou somente três capturas
