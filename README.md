@@ -1,13 +1,13 @@
 # SENTRA
 
-> **Estado em 13/10/2026 — versão em desenvolvimento.**
-> Interface Windows com Dots, conversas e canvas de terminais. O Setup prepara
-> MCP, integração Codex, Secure Tunnel e Web Models; o fluxo GPT6-WEB exige
-> conexão, catálogo disponível e autorização na conta.
-> **Ainda não há um novo instalador completo validado em Windows limpo.**
-> Faltam componentes nativos e evidências de build para fechar a distribuição.
-> [Estado do instalador e validação](docs/INSTALADOR_AUTOMATICO_20261013.md) ·
-> [Auditoria independente das 18 frentes](docs/frentes-18/Auditoria-independente-20261013.md).
+> **Checkpoint para reinstalação em 17/10/2026 — versão em desenvolvimento.**
+> O candidato completo de 15/10 inclui 14 executáveis, Electron, Web Models e
+> componentes QuickJS/HCS/RustDesk. Os hashes e o `--check` do Setup foram
+> revalidados em 17/10. Não houve nova compilação nesta rodada.
+> **Instalação em Windows limpo e rollback ainda não estão homologados.**
+> [Recuperação do projeto e teste do instalador](docs/REINSTALACAO_WINDOWS_LIMPO_20261017.md) ·
+> [Relatório histórico de 13/10](docs/INSTALADOR_AUTOMATICO_20261013.md) ·
+> [Auditoria das 18 frentes](docs/frentes-18/Auditoria-independente-20261013.md).
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![Windows](https://img.shields.io/badge/platform-Windows-blue)

@@ -1,0 +1,17 @@
+{
+  "fixture": true,
+  "real_sessions": false,
+  "checks": {
+    "spring_settles": true,
+    "spring_has_intermediate_frames": true,
+    "finite_path": true,
+    "ports_stay_attached": true,
+    "reduced_motion_stops_spring": true,
+    "no_browser_errors": true
+  },
+  "errors": [],
+  "attachment_error_px": [
+    0.00012582719804741396,
+    0
+  ]
+}

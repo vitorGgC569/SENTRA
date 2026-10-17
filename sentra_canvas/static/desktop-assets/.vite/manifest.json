@@ -1,0 +1,968 @@
+{
+  "_chunk-Bsn9Q0LE.js": {
+    "file": "chunk-Bsn9Q0LE.js",
+    "name": "dist",
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js"
+    ]
+  },
+  "_chunk-CDXbQho_.js": {
+    "file": "chunk-CDXbQho_.js",
+    "name": "dist",
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-k9Cc-WVi.js"
+    ]
+  },
+  "_chunk-D8mJGfID.js": {
+    "file": "chunk-D8mJGfID.js",
+    "name": "dist",
+    "imports": [
+      "index.html"
+    ]
+  },
+  "_chunk-DXiLM1-G.js": {
+    "file": "chunk-DXiLM1-G.js",
+    "name": "simple-mode"
+  },
+  "_chunk-k9Cc-WVi.js": {
+    "file": "chunk-k9Cc-WVi.js",
+    "name": "dist",
+    "imports": [
+      "index.html"
+    ]
+  },
+  "index.html": {
+    "file": "desktop.js",
+    "name": "index",
+    "src": "index.html",
+    "isEntry": true,
+    "dynamicImports": [
+      "node_modules/@codemirror/lang-sql/dist/index.js",
+      "node_modules/@codemirror/lang-cpp/dist/index.js",
+      "_chunk-Bsn9Q0LE.js",
+      "node_modules/@codemirror/lang-go/dist/index.js",
+      "node_modules/@codemirror/lang-html/dist/index.js",
+      "node_modules/@codemirror/lang-java/dist/index.js",
+      "_chunk-CDXbQho_.js",
+      "node_modules/@codemirror/lang-json/dist/index.js",
+      "node_modules/@codemirror/lang-less/dist/index.js",
+      "node_modules/@codemirror/lang-liquid/dist/index.js",
+      "node_modules/@codemirror/lang-markdown/dist/index.js",
+      "node_modules/@codemirror/lang-php/dist/index.js",
+      "node_modules/@codemirror/lang-python/dist/index.js",
+      "node_modules/@codemirror/lang-rust/dist/index.js",
+      "node_modules/@codemirror/lang-sass/dist/index.js",
+      "node_modules/@codemirror/lang-wast/dist/index.js",
+      "node_modules/@codemirror/lang-xml/dist/index.js",
+      "node_modules/@codemirror/lang-yaml/dist/index.js",
+      "node_modules/@codemirror/legacy-modes/mode/apl.js",
+      "node_modules/@codemirror/legacy-modes/mode/asciiarmor.js",
+      "node_modules/@codemirror/legacy-modes/mode/asn1.js",
+      "node_modules/@codemirror/legacy-modes/mode/asterisk.js",
+      "node_modules/@codemirror/legacy-modes/mode/brainfuck.js",
+      "node_modules/@codemirror/legacy-modes/mode/cobol.js",
+      "node_modules/@codemirror/legacy-modes/mode/clike.js",
+      "node_modules/@codemirror/legacy-modes/mode/clojure.js",
+      "node_modules/@codemirror/legacy-modes/mode/css.js",
+      "node_modules/@codemirror/legacy-modes/mode/cmake.js",
+      "node_modules/@codemirror/legacy-modes/mode/coffeescript.js",
+      "node_modules/@codemirror/legacy-modes/mode/commonlisp.js",
+      "node_modules/@codemirror/legacy-modes/mode/cypher.js",
+      "node_modules/@codemirror/legacy-modes/mode/python.js",
+      "node_modules/@codemirror/legacy-modes/mode/crystal.js",
+      "node_modules/@codemirror/legacy-modes/mode/d.js",
+      "node_modules/@codemirror/legacy-modes/mode/diff.js",
+      "node_modules/@codemirror/legacy-modes/mode/dockerfile.js",
+      "node_modules/@codemirror/legacy-modes/mode/dtd.js",
+      "node_modules/@codemirror/legacy-modes/mode/dylan.js",
+      "node_modules/@codemirror/legacy-modes/mode/ebnf.js",
+      "node_modules/@codemirror/legacy-modes/mode/ecl.js",
+      "node_modules/@codemirror/legacy-modes/mode/eiffel.js",
+      "node_modules/@codemirror/legacy-modes/mode/elm.js",
+      "node_modules/@codemirror/legacy-modes/mode/erlang.js",
+      "node_modules/@codemirror/legacy-modes/mode/sql.js",
+      "node_modules/@codemirror/legacy-modes/mode/factor.js",
+      "node_modules/@codemirror/legacy-modes/mode/fcl.js",
+      "node_modules/@codemirror/legacy-modes/mode/forth.js",
+      "node_modules/@codemirror/legacy-modes/mode/fortran.js",
+      "node_modules/@codemirror/legacy-modes/mode/mllike.js",
+      "node_modules/@codemirror/legacy-modes/mode/gas.js",
+      "node_modules/@codemirror/legacy-modes/mode/gherkin.js",
+      "node_modules/@codemirror/legacy-modes/mode/groovy.js",
+      "node_modules/@codemirror/legacy-modes/mode/haskell.js",
+      "node_modules/@codemirror/legacy-modes/mode/haxe.js",
+      "node_modules/@codemirror/legacy-modes/mode/http.js",
+      "node_modules/@codemirror/legacy-modes/mode/idl.js",
+      "node_modules/@codemirror/legacy-modes/mode/javascript.js",
+      "node_modules/@codemirror/legacy-modes/mode/jinja2.js",
+      "node_modules/@codemirror/legacy-modes/mode/julia.js",
+      "node_modules/@codemirror/legacy-modes/mode/livescript.js",
+      "node_modules/@codemirror/legacy-modes/mode/lua.js",
+      "node_modules/@codemirror/legacy-modes/mode/mirc.js",
+      "node_modules/@codemirror/legacy-modes/mode/mathematica.js",
+      "node_modules/@codemirror/legacy-modes/mode/modelica.js",
+      "node_modules/@codemirror/legacy-modes/mode/mumps.js",
+      "node_modules/@codemirror/legacy-modes/mode/mbox.js",
+      "node_modules/@codemirror/legacy-modes/mode/nginx.js",
+      "node_modules/@codemirror/legacy-modes/mode/nsis.js",
+      "node_modules/@codemirror/legacy-modes/mode/ntriples.js",
+      "node_modules/@codemirror/legacy-modes/mode/octave.js",
+      "node_modules/@codemirror/legacy-modes/mode/oz.js",
+      "node_modules/@codemirror/legacy-modes/mode/pascal.js",
+      "node_modules/@codemirror/legacy-modes/mode/perl.js",
+      "node_modules/@codemirror/legacy-modes/mode/pig.js",
+      "node_modules/@codemirror/legacy-modes/mode/powershell.js",
+      "node_modules/@codemirror/legacy-modes/mode/properties.js",
+      "node_modules/@codemirror/legacy-modes/mode/protobuf.js",
+      "node_modules/@codemirror/legacy-modes/mode/pug.js",
+      "node_modules/@codemirror/legacy-modes/mode/puppet.js",
+      "node_modules/@codemirror/legacy-modes/mode/q.js",
+      "node_modules/@codemirror/legacy-modes/mode/r.js",
+      "node_modules/@codemirror/legacy-modes/mode/rpm.js",
+      "node_modules/@codemirror/legacy-modes/mode/ruby.js",
+      "node_modules/@codemirror/legacy-modes/mode/sas.js",
+      "node_modules/@codemirror/legacy-modes/mode/scheme.js",
+      "node_modules/@codemirror/legacy-modes/mode/shell.js",
+      "node_modules/@codemirror/legacy-modes/mode/sieve.js",
+      "node_modules/@codemirror/legacy-modes/mode/smalltalk.js",
+      "node_modules/@codemirror/legacy-modes/mode/solr.js",
+      "node_modules/@codemirror/legacy-modes/mode/sparql.js",
+      "node_modules/@codemirror/legacy-modes/mode/spreadsheet.js",
+      "node_modules/@codemirror/legacy-modes/mode/stylus.js",
+      "node_modules/@codemirror/legacy-modes/mode/swift.js",
+      "node_modules/@codemirror/legacy-modes/mode/stex.js",
+      "node_modules/@codemirror/legacy-modes/mode/verilog.js",
+      "node_modules/@codemirror/legacy-modes/mode/tcl.js",
+      "node_modules/@codemirror/legacy-modes/mode/textile.js",
+      "node_modules/@codemirror/legacy-modes/mode/tiddlywiki.js",
+      "node_modules/@codemirror/legacy-modes/mode/tiki.js",
+      "node_modules/@codemirror/legacy-modes/mode/toml.js",
+      "node_modules/@codemirror/legacy-modes/mode/troff.js",
+      "node_modules/@codemirror/legacy-modes/mode/ttcn.js",
+      "node_modules/@codemirror/legacy-modes/mode/ttcn-cfg.js",
+      "node_modules/@codemirror/legacy-modes/mode/turtle.js",
+      "node_modules/@codemirror/legacy-modes/mode/webidl.js",
+      "node_modules/@codemirror/legacy-modes/mode/vb.js",
+      "node_modules/@codemirror/legacy-modes/mode/vbscript.js",
+      "node_modules/@codemirror/legacy-modes/mode/velocity.js",
+      "node_modules/@codemirror/legacy-modes/mode/vhdl.js",
+      "node_modules/@codemirror/legacy-modes/mode/xquery.js",
+      "node_modules/@codemirror/legacy-modes/mode/yacas.js",
+      "node_modules/@codemirror/legacy-modes/mode/z80.js",
+      "node_modules/@codemirror/legacy-modes/mode/mscgen.js",
+      "node_modules/@codemirror/lang-vue/dist/index.js",
+      "node_modules/@codemirror/lang-angular/dist/index.js",
+      "node_modules/guacamole-common-js/dist/esm/guacamole-common.js"
+    ],
+    "css": [
+      "desktop.css"
+    ],
+    "assets": [
+      "desktop2.png",
+      "desktop3.png",
+      "desktop4.png",
+      "desktop.png"
+    ]
+  },
+  "node_modules/@codemirror/lang-angular/dist/index.js": {
+    "file": "chunk-Znus0BXT.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-angular/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-CDXbQho_.js",
+      "node_modules/@codemirror/lang-html/dist/index.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-cpp/dist/index.js": {
+    "file": "chunk-cKJt0ICv.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-cpp/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-go/dist/index.js": {
+    "file": "chunk-BxlDAfKz.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-go/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-k9Cc-WVi.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-html/dist/index.js": {
+    "file": "chunk-DwEmtXUh.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-html/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-Bsn9Q0LE.js",
+      "_chunk-CDXbQho_.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-java/dist/index.js": {
+    "file": "chunk-B2r4Cu8j.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-java/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-json/dist/index.js": {
+    "file": "chunk-CsGzmbHs.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-json/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-less/dist/index.js": {
+    "file": "chunk-BQ3jk683.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-less/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-Bsn9Q0LE.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-liquid/dist/index.js": {
+    "file": "chunk-DIREOWxE.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-liquid/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "node_modules/@codemirror/lang-html/dist/index.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-markdown/dist/index.js": {
+    "file": "chunk-CypMflHO.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-markdown/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-k9Cc-WVi.js",
+      "node_modules/@codemirror/lang-html/dist/index.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-php/dist/index.js": {
+    "file": "chunk-BdH9P7JN.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-php/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "node_modules/@codemirror/lang-html/dist/index.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-python/dist/index.js": {
+    "file": "chunk-CJVEvuVg.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-python/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-k9Cc-WVi.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-rust/dist/index.js": {
+    "file": "chunk-BypO90EA.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-rust/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-sass/dist/index.js": {
+    "file": "chunk-DR3xfYX8.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-sass/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-Bsn9Q0LE.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-sql/dist/index.js": {
+    "file": "chunk-D3A-2wxB.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-sql/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-k9Cc-WVi.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-vue/dist/index.js": {
+    "file": "chunk-BOmg50Wh.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-vue/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js",
+      "_chunk-CDXbQho_.js",
+      "node_modules/@codemirror/lang-html/dist/index.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-wast/dist/index.js": {
+    "file": "chunk-DSc-FFfx.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-wast/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-xml/dist/index.js": {
+    "file": "chunk-C2YCEjRU.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-xml/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js"
+    ]
+  },
+  "node_modules/@codemirror/lang-yaml/dist/index.js": {
+    "file": "chunk-DtTzTFiu.js",
+    "name": "dist",
+    "src": "node_modules/@codemirror/lang-yaml/dist/index.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "index.html",
+      "_chunk-D8mJGfID.js"
+    ]
+  },
+  "node_modules/@codemirror/legacy-modes/mode/apl.js": {
+    "file": "chunk-gfMMiTNf.js",
+    "name": "apl",
+    "src": "node_modules/@codemirror/legacy-modes/mode/apl.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/asciiarmor.js": {
+    "file": "chunk-C_eisQCp.js",
+    "name": "asciiarmor",
+    "src": "node_modules/@codemirror/legacy-modes/mode/asciiarmor.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/asn1.js": {
+    "file": "chunk-DCl_8MCW.js",
+    "name": "asn1",
+    "src": "node_modules/@codemirror/legacy-modes/mode/asn1.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/asterisk.js": {
+    "file": "chunk-BEn0Cwpx.js",
+    "name": "asterisk",
+    "src": "node_modules/@codemirror/legacy-modes/mode/asterisk.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/brainfuck.js": {
+    "file": "chunk-D5EjA2JK.js",
+    "name": "brainfuck",
+    "src": "node_modules/@codemirror/legacy-modes/mode/brainfuck.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/clike.js": {
+    "file": "chunk-xvONpD0Z.js",
+    "name": "clike",
+    "src": "node_modules/@codemirror/legacy-modes/mode/clike.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/clojure.js": {
+    "file": "chunk-BflJGmDX.js",
+    "name": "clojure",
+    "src": "node_modules/@codemirror/legacy-modes/mode/clojure.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/cmake.js": {
+    "file": "chunk-84nbDH0I.js",
+    "name": "cmake",
+    "src": "node_modules/@codemirror/legacy-modes/mode/cmake.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/cobol.js": {
+    "file": "chunk-DHLQUbN7.js",
+    "name": "cobol",
+    "src": "node_modules/@codemirror/legacy-modes/mode/cobol.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/coffeescript.js": {
+    "file": "chunk-De_zI4J0.js",
+    "name": "coffeescript",
+    "src": "node_modules/@codemirror/legacy-modes/mode/coffeescript.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/commonlisp.js": {
+    "file": "chunk-DgAKBe0r.js",
+    "name": "commonlisp",
+    "src": "node_modules/@codemirror/legacy-modes/mode/commonlisp.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/crystal.js": {
+    "file": "chunk-Bsdphhtm.js",
+    "name": "crystal",
+    "src": "node_modules/@codemirror/legacy-modes/mode/crystal.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/css.js": {
+    "file": "chunk-CnaYoQib.js",
+    "name": "css",
+    "src": "node_modules/@codemirror/legacy-modes/mode/css.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/cypher.js": {
+    "file": "chunk-p9eYesGn.js",
+    "name": "cypher",
+    "src": "node_modules/@codemirror/legacy-modes/mode/cypher.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/d.js": {
+    "file": "chunk-DWkQyNnU.js",
+    "name": "d",
+    "src": "node_modules/@codemirror/legacy-modes/mode/d.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/diff.js": {
+    "file": "chunk-ChtP43wD.js",
+    "name": "diff",
+    "src": "node_modules/@codemirror/legacy-modes/mode/diff.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/dockerfile.js": {
+    "file": "chunk-B4SKHCfn.js",
+    "name": "dockerfile",
+    "src": "node_modules/@codemirror/legacy-modes/mode/dockerfile.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_chunk-DXiLM1-G.js"
+    ]
+  },
+  "node_modules/@codemirror/legacy-modes/mode/dtd.js": {
+    "file": "chunk-DTF72YNO.js",
+    "name": "dtd",
+    "src": "node_modules/@codemirror/legacy-modes/mode/dtd.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/dylan.js": {
+    "file": "chunk-S7ucR4pR.js",
+    "name": "dylan",
+    "src": "node_modules/@codemirror/legacy-modes/mode/dylan.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/ebnf.js": {
+    "file": "chunk-D4c0_ac3.js",
+    "name": "ebnf",
+    "src": "node_modules/@codemirror/legacy-modes/mode/ebnf.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/ecl.js": {
+    "file": "chunk-BVIeWmwY.js",
+    "name": "ecl",
+    "src": "node_modules/@codemirror/legacy-modes/mode/ecl.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/eiffel.js": {
+    "file": "chunk-BEjRio4Q.js",
+    "name": "eiffel",
+    "src": "node_modules/@codemirror/legacy-modes/mode/eiffel.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/elm.js": {
+    "file": "chunk-Cshzl8qu.js",
+    "name": "elm",
+    "src": "node_modules/@codemirror/legacy-modes/mode/elm.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/erlang.js": {
+    "file": "chunk-BV0c4Hdn.js",
+    "name": "erlang",
+    "src": "node_modules/@codemirror/legacy-modes/mode/erlang.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/factor.js": {
+    "file": "chunk-DPeRJTgX.js",
+    "name": "factor",
+    "src": "node_modules/@codemirror/legacy-modes/mode/factor.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_chunk-DXiLM1-G.js"
+    ]
+  },
+  "node_modules/@codemirror/legacy-modes/mode/fcl.js": {
+    "file": "chunk-ClOhbFR7.js",
+    "name": "fcl",
+    "src": "node_modules/@codemirror/legacy-modes/mode/fcl.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/forth.js": {
+    "file": "chunk-D6RzAl64.js",
+    "name": "forth",
+    "src": "node_modules/@codemirror/legacy-modes/mode/forth.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/fortran.js": {
+    "file": "chunk-Bt6PBEDR.js",
+    "name": "fortran",
+    "src": "node_modules/@codemirror/legacy-modes/mode/fortran.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/gas.js": {
+    "file": "chunk-BHEdbvp9.js",
+    "name": "gas",
+    "src": "node_modules/@codemirror/legacy-modes/mode/gas.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/gherkin.js": {
+    "file": "chunk-oBAE_ms0.js",
+    "name": "gherkin",
+    "src": "node_modules/@codemirror/legacy-modes/mode/gherkin.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/groovy.js": {
+    "file": "chunk-CUpZ7dEl.js",
+    "name": "groovy",
+    "src": "node_modules/@codemirror/legacy-modes/mode/groovy.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/haskell.js": {
+    "file": "chunk-BRsoo5mP.js",
+    "name": "haskell",
+    "src": "node_modules/@codemirror/legacy-modes/mode/haskell.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/haxe.js": {
+    "file": "chunk-DjVOVvNP.js",
+    "name": "haxe",
+    "src": "node_modules/@codemirror/legacy-modes/mode/haxe.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/http.js": {
+    "file": "chunk-CLVgA2GD.js",
+    "name": "http",
+    "src": "node_modules/@codemirror/legacy-modes/mode/http.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/idl.js": {
+    "file": "chunk-BUZw3wgd.js",
+    "name": "idl",
+    "src": "node_modules/@codemirror/legacy-modes/mode/idl.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/javascript.js": {
+    "file": "chunk-Bu8mWwtz.js",
+    "name": "javascript",
+    "src": "node_modules/@codemirror/legacy-modes/mode/javascript.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/jinja2.js": {
+    "file": "chunk-B0MGmaEv.js",
+    "name": "jinja2",
+    "src": "node_modules/@codemirror/legacy-modes/mode/jinja2.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/julia.js": {
+    "file": "chunk-CQfgDRfP.js",
+    "name": "julia",
+    "src": "node_modules/@codemirror/legacy-modes/mode/julia.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/livescript.js": {
+    "file": "chunk-BXxG0Yva.js",
+    "name": "livescript",
+    "src": "node_modules/@codemirror/legacy-modes/mode/livescript.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/lua.js": {
+    "file": "chunk-DPCEkfD_.js",
+    "name": "lua",
+    "src": "node_modules/@codemirror/legacy-modes/mode/lua.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/mathematica.js": {
+    "file": "chunk-u8YMmbU0.js",
+    "name": "mathematica",
+    "src": "node_modules/@codemirror/legacy-modes/mode/mathematica.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/mbox.js": {
+    "file": "chunk-BEMVcqjs.js",
+    "name": "mbox",
+    "src": "node_modules/@codemirror/legacy-modes/mode/mbox.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/mirc.js": {
+    "file": "chunk-C9zpzAZU.js",
+    "name": "mirc",
+    "src": "node_modules/@codemirror/legacy-modes/mode/mirc.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/mllike.js": {
+    "file": "chunk-B45xgp2S.js",
+    "name": "mllike",
+    "src": "node_modules/@codemirror/legacy-modes/mode/mllike.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/modelica.js": {
+    "file": "chunk-CqHI_q-D.js",
+    "name": "modelica",
+    "src": "node_modules/@codemirror/legacy-modes/mode/modelica.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/mscgen.js": {
+    "file": "chunk-qgSLujhx.js",
+    "name": "mscgen",
+    "src": "node_modules/@codemirror/legacy-modes/mode/mscgen.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/mumps.js": {
+    "file": "chunk-BSzj6Xyz.js",
+    "name": "mumps",
+    "src": "node_modules/@codemirror/legacy-modes/mode/mumps.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/nginx.js": {
+    "file": "chunk-8H7HVH4w.js",
+    "name": "nginx",
+    "src": "node_modules/@codemirror/legacy-modes/mode/nginx.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/nsis.js": {
+    "file": "chunk-Dw8rdalz.js",
+    "name": "nsis",
+    "src": "node_modules/@codemirror/legacy-modes/mode/nsis.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "_chunk-DXiLM1-G.js"
+    ]
+  },
+  "node_modules/@codemirror/legacy-modes/mode/ntriples.js": {
+    "file": "chunk-CzMBulkp.js",
+    "name": "ntriples",
+    "src": "node_modules/@codemirror/legacy-modes/mode/ntriples.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/octave.js": {
+    "file": "chunk-D2Q8cUp1.js",
+    "name": "octave",
+    "src": "node_modules/@codemirror/legacy-modes/mode/octave.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/oz.js": {
+    "file": "chunk-BwTct_5T.js",
+    "name": "oz",
+    "src": "node_modules/@codemirror/legacy-modes/mode/oz.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/pascal.js": {
+    "file": "chunk-Dp_KdFgX.js",
+    "name": "pascal",
+    "src": "node_modules/@codemirror/legacy-modes/mode/pascal.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/perl.js": {
+    "file": "chunk-BkSkiI9m.js",
+    "name": "perl",
+    "src": "node_modules/@codemirror/legacy-modes/mode/perl.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/pig.js": {
+    "file": "chunk-AF4Hwhju.js",
+    "name": "pig",
+    "src": "node_modules/@codemirror/legacy-modes/mode/pig.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/powershell.js": {
+    "file": "chunk-D8WpQPaX.js",
+    "name": "powershell",
+    "src": "node_modules/@codemirror/legacy-modes/mode/powershell.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/properties.js": {
+    "file": "chunk-C357ku5U.js",
+    "name": "properties",
+    "src": "node_modules/@codemirror/legacy-modes/mode/properties.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/protobuf.js": {
+    "file": "chunk-D1ij_kNL.js",
+    "name": "protobuf",
+    "src": "node_modules/@codemirror/legacy-modes/mode/protobuf.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/pug.js": {
+    "file": "chunk-Jk7HA9cy.js",
+    "name": "pug",
+    "src": "node_modules/@codemirror/legacy-modes/mode/pug.js",
+    "isDynamicEntry": true,
+    "imports": [
+      "node_modules/@codemirror/legacy-modes/mode/javascript.js"
+    ]
+  },
+  "node_modules/@codemirror/legacy-modes/mode/puppet.js": {
+    "file": "chunk-BZyAS7I4.js",
+    "name": "puppet",
+    "src": "node_modules/@codemirror/legacy-modes/mode/puppet.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/python.js": {
+    "file": "chunk-B_1Jd8HM.js",
+    "name": "python",
+    "src": "node_modules/@codemirror/legacy-modes/mode/python.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/q.js": {
+    "file": "chunk-B9NhS7L_.js",
+    "name": "q",
+    "src": "node_modules/@codemirror/legacy-modes/mode/q.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/r.js": {
+    "file": "chunk-CxDmU1I4.js",
+    "name": "r",
+    "src": "node_modules/@codemirror/legacy-modes/mode/r.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/rpm.js": {
+    "file": "chunk-gpDK5sbt.js",
+    "name": "rpm",
+    "src": "node_modules/@codemirror/legacy-modes/mode/rpm.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/ruby.js": {
+    "file": "chunk-ChfNwlCY.js",
+    "name": "ruby",
+    "src": "node_modules/@codemirror/legacy-modes/mode/ruby.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/sas.js": {
+    "file": "chunk-C2OyD2Y6.js",
+    "name": "sas",
+    "src": "node_modules/@codemirror/legacy-modes/mode/sas.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/scheme.js": {
+    "file": "chunk-D9qYN0V5.js",
+    "name": "scheme",
+    "src": "node_modules/@codemirror/legacy-modes/mode/scheme.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/shell.js": {
+    "file": "chunk-DwuoZtxw.js",
+    "name": "shell",
+    "src": "node_modules/@codemirror/legacy-modes/mode/shell.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/sieve.js": {
+    "file": "chunk-tLWDfEkZ.js",
+    "name": "sieve",
+    "src": "node_modules/@codemirror/legacy-modes/mode/sieve.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/smalltalk.js": {
+    "file": "chunk-BLp5-jwC.js",
+    "name": "smalltalk",
+    "src": "node_modules/@codemirror/legacy-modes/mode/smalltalk.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/solr.js": {
+    "file": "chunk-B78wSQJQ.js",
+    "name": "solr",
+    "src": "node_modules/@codemirror/legacy-modes/mode/solr.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/sparql.js": {
+    "file": "chunk-Dz-mlCAC.js",
+    "name": "sparql",
+    "src": "node_modules/@codemirror/legacy-modes/mode/sparql.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/spreadsheet.js": {
+    "file": "chunk-CTIncYxj.js",
+    "name": "spreadsheet",
+    "src": "node_modules/@codemirror/legacy-modes/mode/spreadsheet.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/sql.js": {
+    "file": "chunk-DuQMFDvy.js",
+    "name": "sql",
+    "src": "node_modules/@codemirror/legacy-modes/mode/sql.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/stex.js": {
+    "file": "chunk-DNzd62Q_.js",
+    "name": "stex",
+    "src": "node_modules/@codemirror/legacy-modes/mode/stex.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/stylus.js": {
+    "file": "chunk-BOVgKnng.js",
+    "name": "stylus",
+    "src": "node_modules/@codemirror/legacy-modes/mode/stylus.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/swift.js": {
+    "file": "chunk-DKB6_1j6.js",
+    "name": "swift",
+    "src": "node_modules/@codemirror/legacy-modes/mode/swift.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/tcl.js": {
+    "file": "chunk-BGfruO1u.js",
+    "name": "tcl",
+    "src": "node_modules/@codemirror/legacy-modes/mode/tcl.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/textile.js": {
+    "file": "chunk-C4jVoHG1.js",
+    "name": "textile",
+    "src": "node_modules/@codemirror/legacy-modes/mode/textile.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/tiddlywiki.js": {
+    "file": "chunk-VlUiK86J.js",
+    "name": "tiddlywiki",
+    "src": "node_modules/@codemirror/legacy-modes/mode/tiddlywiki.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/tiki.js": {
+    "file": "chunk-DTszW0OQ.js",
+    "name": "tiki",
+    "src": "node_modules/@codemirror/legacy-modes/mode/tiki.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/toml.js": {
+    "file": "chunk-BPTmHmyx.js",
+    "name": "toml",
+    "src": "node_modules/@codemirror/legacy-modes/mode/toml.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/troff.js": {
+    "file": "chunk-C2dAgh7P.js",
+    "name": "troff",
+    "src": "node_modules/@codemirror/legacy-modes/mode/troff.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/ttcn-cfg.js": {
+    "file": "chunk-2b4Gb5sE.js",
+    "name": "ttcn-cfg",
+    "src": "node_modules/@codemirror/legacy-modes/mode/ttcn-cfg.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/ttcn.js": {
+    "file": "chunk-PPSTk1ow.js",
+    "name": "ttcn",
+    "src": "node_modules/@codemirror/legacy-modes/mode/ttcn.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/turtle.js": {
+    "file": "chunk-Cx3rYX2g.js",
+    "name": "turtle",
+    "src": "node_modules/@codemirror/legacy-modes/mode/turtle.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/vb.js": {
+    "file": "chunk-BthdM_4N.js",
+    "name": "vb",
+    "src": "node_modules/@codemirror/legacy-modes/mode/vb.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/vbscript.js": {
+    "file": "chunk-D9f6rSsU.js",
+    "name": "vbscript",
+    "src": "node_modules/@codemirror/legacy-modes/mode/vbscript.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/velocity.js": {
+    "file": "chunk-CqftRsjg.js",
+    "name": "velocity",
+    "src": "node_modules/@codemirror/legacy-modes/mode/velocity.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/verilog.js": {
+    "file": "chunk-CjI9Y6RI.js",
+    "name": "verilog",
+    "src": "node_modules/@codemirror/legacy-modes/mode/verilog.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/vhdl.js": {
+    "file": "chunk-kS471soi.js",
+    "name": "vhdl",
+    "src": "node_modules/@codemirror/legacy-modes/mode/vhdl.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/webidl.js": {
+    "file": "chunk-D5jiJvOU.js",
+    "name": "webidl",
+    "src": "node_modules/@codemirror/legacy-modes/mode/webidl.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/xquery.js": {
+    "file": "chunk-BKJx4mf9.js",
+    "name": "xquery",
+    "src": "node_modules/@codemirror/legacy-modes/mode/xquery.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/yacas.js": {
+    "file": "chunk-CXXgtw0p.js",
+    "name": "yacas",
+    "src": "node_modules/@codemirror/legacy-modes/mode/yacas.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/@codemirror/legacy-modes/mode/z80.js": {
+    "file": "chunk-Co3PbHdE.js",
+    "name": "z80",
+    "src": "node_modules/@codemirror/legacy-modes/mode/z80.js",
+    "isDynamicEntry": true
+  },
+  "node_modules/guacamole-common-js/dist/esm/guacamole-common.js": {
+    "file": "chunk-D-_bu6Cm.js",
+    "name": "guacamole-common",
+    "src": "node_modules/guacamole-common-js/dist/esm/guacamole-common.js",
+    "isDynamicEntry": true
+  },
+  "src/assets/opendots/blue.png": {
+    "file": "desktop2.png",
+    "src": "src/assets/opendots/blue.png"
+  },
+  "src/assets/opendots/mint.png": {
+    "file": "desktop3.png",
+    "src": "src/assets/opendots/mint.png"
+  },
+  "src/assets/opendots/orange.png": {
+    "file": "desktop4.png",
+    "src": "src/assets/opendots/orange.png"
+  },
+  "src/assets/opendots/purple.png": {
+    "file": "desktop.png",
+    "src": "src/assets/opendots/purple.png"
+  }
+}

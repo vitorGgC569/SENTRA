@@ -16,6 +16,7 @@
 *.jpg binary
 *.jpeg binary
 *.gif binary
+*.mp4 binary
 *.ico binary
 *.exe binary
 *.msi binary

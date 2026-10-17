@@ -1,0 +1,116 @@
+{
+  "page_errors": [],
+  "blocked_mutations": [],
+  "screens": [
+    {
+      "name": "home-1440",
+      "width": 1440,
+      "documentWidth": 1440,
+      "panel": null,
+      "canvasZoom": "translate(55px, 55px) scale(1)",
+      "cardCount": 5,
+      "clipped": []
+    },
+    {
+      "name": "canvas-1440",
+      "width": 1440,
+      "documentWidth": 1440,
+      "panel": null,
+      "canvasZoom": "translate(-393px, -332.5px) scale(1)",
+      "cardCount": 0,
+      "clipped": []
+    },
+    {
+      "name": "computer-1440",
+      "width": 1440,
+      "documentWidth": 1440,
+      "panel": 330,
+      "canvasZoom": "translate(55px, 55px) scale(1)",
+      "cardCount": 0,
+      "clipped": []
+    },
+    {
+      "name": "home-1024",
+      "width": 1024,
+      "documentWidth": 1024,
+      "panel": null,
+      "canvasZoom": "translate(55px, 55px) scale(1)",
+      "cardCount": 5,
+      "clipped": []
+    },
+    {
+      "name": "canvas-1024",
+      "width": 1024,
+      "documentWidth": 1024,
+      "panel": null,
+      "canvasZoom": "translate(-589px, -392.5px) scale(1)",
+      "cardCount": 0,
+      "clipped": []
+    },
+    {
+      "name": "computer-1024",
+      "width": 1024,
+      "documentWidth": 1024,
+      "panel": 300,
+      "canvasZoom": "translate(55px, 55px) scale(1)",
+      "cardCount": 0,
+      "clipped": []
+    },
+    {
+      "name": "home-390",
+      "width": 390,
+      "documentWidth": 390,
+      "panel": null,
+      "canvasZoom": "translate(55px, 55px) scale(1)",
+      "cardCount": 5,
+      "clipped": []
+    },
+    {
+      "name": "canvas-390",
+      "width": 390,
+      "documentWidth": 390,
+      "panel": null,
+      "canvasZoom": "translate(-289.355px, 4.72581px) scale(0.483871)",
+      "cardCount": 0,
+      "clipped": []
+    },
+    {
+      "name": "computer-390",
+      "width": 390,
+      "documentWidth": 390,
+      "panel": 390,
+      "canvasZoom": "translate(55px, 55px) scale(1)",
+      "cardCount": 0,
+      "clipped": []
+    }
+  ],
+  "checks": {
+    "editor_detached_1440": true,
+    "editor_fits_1440": true,
+    "editor_model_1440": true,
+    "editor_instructions_1440": true,
+    "editor_releases_page_1440": true,
+    "sidebar_menu_outside_rail": true,
+    "canvas_disclosure": true,
+    "pan_tool": true,
+    "grid_toggle": true,
+    "terminal_expand_survives_refresh": true,
+    "expand_computer": true,
+    "keyboard_tabs": true,
+    "files_tab": true,
+    "diagnostics": true,
+    "conversation_menu": true,
+    "reduced_motion": true,
+    "editor_detached_390": true,
+    "editor_fits_390": true,
+    "editor_model_390": true,
+    "editor_instructions_390": true,
+    "editor_releases_page_390": true,
+    "no_page_errors": true,
+    "no_horizontal_document_overflow": true
+  },
+  "served_assets": {
+    "desktop.js": true,
+    "desktop.css": true
+  }
+}

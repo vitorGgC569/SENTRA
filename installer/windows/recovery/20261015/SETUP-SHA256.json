@@ -1,0 +1,18 @@
+{
+  "source_commit": "42870dcd50a2476b2f3b52b3c36bd27d86f9496c",
+  "filename": "SENTRA-Setup-preview-20261015-42870dc.exe",
+  "bytes": 2834212662,
+  "sha256": "ac568db91d7614a91d9521d6560bfc94a34085853e102672eeae4f2914487c9e",
+  "parts": [
+    {
+      "name": "SENTRA-Setup-preview-20261015-42870dc.exe.part01",
+      "bytes": 1500000000,
+      "sha256": "bc56025328e8cc1d5de76eb7515bd47af0f7ff55c667dd3338f57b6cf9ce960b"
+    },
+    {
+      "name": "SENTRA-Setup-preview-20261015-42870dc.exe.part02",
+      "bytes": 1334212662,
+      "sha256": "d12b64ea3e87f489342aa0f2c97f59deb369fc7dd6770879657a43f23633933b"
+    }
+  ]
+}
