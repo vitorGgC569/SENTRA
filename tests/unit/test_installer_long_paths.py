@@ -61,6 +61,42 @@ def test_failed_update_restores_deep_files_and_installation_identity(tmp_path, m
     assert stopped == [root.resolve()]
     assert deep.read_bytes() == b"original runtime"
     assert json.loads((root / update_helper.INSTALL_MARKER).read_text()) == marker
+    from sentra_remote.program_stage import require_no_interrupted_stage
+    import hashlib
+    namespace = root.parent / "Rollback" / hashlib.sha256(b"original-installation").hexdigest()
+    journals = list(Path(installer._filesystem_path(namespace)).glob("txn-*.json"))
+    assert len(journals) == 1
+    assert json.loads(journals[0].read_text())["phase"] == "RESTORED"
+    require_no_interrupted_stage(namespace)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 extended paths")
+@pytest.mark.parametrize("phase", ["PREPARED", "APPLYING", "COMMITTED", "RESTORED"])
+def test_deep_journal_still_blocks_uncertain_setup_and_accepts_terminal_state(tmp_path, phase):
+    from sentra_remote.program_stage import require_no_interrupted_stage
+    namespace = tmp_path / ("a" * 70) / ("b" * 70) / ("c" * 70)
+    disk = Path(installer._filesystem_path(namespace))
+    disk.mkdir(parents=True)
+    journal = disk / "txn-test.json"
+    assert len(str(namespace / journal.name)) > 260
+    journal.write_text(json.dumps({"schema": 1, "phase": phase}))
+    if phase in {"COMMITTED", "RESTORED"}:
+        require_no_interrupted_stage(namespace)
+    else:
+        with pytest.raises(PermissionError, match="uncertain"):
+            require_no_interrupted_stage(namespace)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Win32 extended paths")
+def test_deep_install_lock_serializes_prefixed_and_normal_paths(tmp_path):
+    from sentra_remote.installation_lock import installation_lock
+    root = tmp_path / ("a" * 70) / ("b" * 70) / ("c" * 70) / "Commander"
+    with installation_lock(root):
+        with pytest.raises(RuntimeError, match="another installation"):
+            with installation_lock(Path(installer._filesystem_path(root))):
+                pytest.fail("same installation acquired twice")
+    with installation_lock(root):
+        pass  # The handle was released even after a contending operation failed.
 
 
 def test_rollback_rejects_other_installation_before_mutation(tmp_path, monkeypatch):

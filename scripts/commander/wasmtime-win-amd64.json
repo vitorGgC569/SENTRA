@@ -1,0 +1,12 @@
+{
+  "wasmtime": {
+    "files": {
+      "wasmtime/win32-x86_64/_wasmtime.dll": "fed9c7984a8fc0d4bf3a11356b4ce6bc9f7b2317a13c233b0eaf08d8a9fca9df"
+    },
+    "license": "Apache-2.0 WITH LLVM-exception",
+    "license_files": {
+      "wasmtime-49.0.0.dist-info/licenses/LICENSE": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+    },
+    "version": "49.0.0"
+  }
+}

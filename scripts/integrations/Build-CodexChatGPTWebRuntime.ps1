@@ -87,6 +87,7 @@ function Invoke-SentraWebRuntimeControl {
 $Manifest = Get-Content -Raw -LiteralPath (Join-Path $Root "integrations\codex_chatgpt_web\upstream.json") | ConvertFrom-Json
 $Checkout = [IO.Path]::GetFullPath((Join-Path $Root ([string]$Manifest.development_checkout)))
 $StateRoot = if ($StageRoot) { [IO.Path]::GetFullPath($StageRoot) } else { [IO.Path]::GetFullPath((Join-Path $Root ".sentra\integrations\codex-chatgpt-web")) }
+$ElectronDownloadCache = if ($env:electron_config_cache) { [IO.Path]::GetFullPath($env:electron_config_cache) } else { Join-Path $StateRoot "downloads\electron" }
 $UpstreamRef = ([string]$Manifest.ref).Trim()
 if ($UpstreamRef -notmatch '^v(?<version>[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)$') {
     throw "Integration manifest ref must be an exact v-prefixed semantic version"
@@ -228,22 +229,36 @@ try {
     # Install the pinned Electron dependencies before running launcher tests,
     # otherwise the saved-conversations suite fails with MODULE_NOT_FOUND.
     Push-Location (Join-Path $Source "launcher")
+    $PreviousElectronCache = $env:electron_config_cache
     try {
+        $env:electron_config_cache = $ElectronDownloadCache
         & $Bun install --frozen-lockfile
         if ($LASTEXITCODE -ne 0) { throw "Electron dependency install failed" }
-    } finally { Pop-Location }
+        # Bun can retain a package after its binary postinstall failed. A retry
+        # may then report "no changes" while Electron is still absent. The
+        # locked package's installer verifies/reuses the runtime when complete.
+        & node (Join-Path $Source "launcher\node_modules\electron\install.js")
+        if ($LASTEXITCODE -ne 0) { throw "Electron runtime materialization failed" }
+    } finally {
+        $env:electron_config_cache = $PreviousElectronCache
+        Pop-Location
+    }
     & node --test "launcher/tests/saved-conversations.test.cjs"
     if ($LASTEXITCODE -ne 0) { throw "Saved ChatGPT conversation persistence tests failed" }
     & $Bun run scripts/build-runtime-bundle.ts $Runtime
     if ($LASTEXITCODE -ne 0) { throw "Runtime build failed" }
     Push-Location (Join-Path $Source "launcher")
     try {
-        & $Bun run build
+        & $Bun run typecheck
+        if ($LASTEXITCODE -ne 0) { throw "Electron renderer typecheck failed" }
+        # Vite's config bundle loader asks esbuild to scan Windows profile
+        # ancestors. The runner loads the same TS config without that traversal.
+        & node "node_modules/vite/bin/vite.js" build --configLoader runner
         if ($LASTEXITCODE -ne 0) { throw "Electron renderer build failed" }
         $env:CODEX_WEB_GPT_BUN = $Bun
         & $Bun run build:runtime
         if ($LASTEXITCODE -ne 0) { throw "Electron runtime build failed" }
-        & $Bun x --no-install electron-builder --dir --win --publish never "--config.directories.output=$Output"
+        & $Bun x --no-install electron-builder --dir --win --publish never "--config.directories.output=$Output" "--config.electronDownload.cache=$ElectronDownloadCache"
         if ($LASTEXITCODE -ne 0) { throw "Electron directory packaging failed" }
     } finally {
         Pop-Location

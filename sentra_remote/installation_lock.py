@@ -4,14 +4,15 @@ from functools import wraps
 import hashlib
 import os
 from pathlib import Path
+from .windows_paths import filesystem_path, resolved_path
 
 @contextmanager
 def installation_lock(path):
-    path = Path(path).resolve()
+    path = resolved_path(Path(path))
     digest = hashlib.sha256(os.path.normcase(str(path)).encode()).hexdigest()
     lock = path.parent / (".sentra-install-" + digest + ".lock")
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with lock.open("a+b") as stream:
+    Path(filesystem_path(lock.parent)).mkdir(parents=True, exist_ok=True)
+    with Path(filesystem_path(lock)).open("a+b") as stream:
         stream.seek(0, os.SEEK_END)
         if not stream.tell():
             stream.write(b"0"); stream.flush()

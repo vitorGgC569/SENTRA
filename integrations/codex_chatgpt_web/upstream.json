@@ -7,6 +7,7 @@
   "runtime_root": ".sentra/integrations/codex-chatgpt-web/runtime/6.1.1",
   "integration_patch": "integrations/codex_chatgpt_web/sentra-upstream.patch",
   "patch_files": [
+    "launcher/electron/browser-helper-verifier.cjs",
     "launcher/electron/browser-host.cjs",
     "launcher/electron/connector-identity.cjs",
     "launcher/electron/control-server.cjs",
@@ -20,6 +21,8 @@
     "launcher/src/App.tsx",
     "launcher/src/i18n.ts",
     "launcher/src/types.ts",
+    "launcher/tests/browser-helper-verifier.test.cjs",
+    "launcher/tests/browser-host.test.cjs",
     "launcher/tests/packaging-contract.test.cjs",
     "launcher/tests/runtime-install-orphan.test.cjs",
     "launcher/tests/saved-conversations.test.cjs",
@@ -32,6 +35,7 @@
     "src/adapters/chatgpt-web/markdown.ts",
     "src/adapters/chatgpt-web/model-selection.ts",
     "src/adapters/chatgpt-web/model.ts",
+    "src/adapters/chatgpt-web/prompt.ts",
     "src/adapters/chatgpt-web/turn-broker.ts",
     "src/adapters/chatgpt-web/turn-execution.ts",
     "src/adapters/chatgpt-web/usage.ts",
@@ -56,6 +60,7 @@
     "tests/gemini-web.test.ts",
     "tests/generated-asset.test.ts",
     "tests/model-catalog.test.ts",
+    "tests/prompt-contract.test.ts",
     "tests/runtime-layout.test.ts",
     "tests/server-lifecycle.test.ts",
     "tests/server-models.test.ts"

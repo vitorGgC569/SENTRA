@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-import git
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    import git
 from .patch_manager import PatchManager
 from .paths import iter_workspace_files, resolve_workspace_path
 
@@ -16,6 +18,7 @@ class GitManager:
 
     def _ensure_git_repo(self) -> None:
         try:
+            import git
             self.repo = git.Repo(self.repo_path, search_parent_directories=False)
         except Exception:
             self.repo = None

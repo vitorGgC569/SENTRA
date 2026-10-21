@@ -200,6 +200,8 @@ class SentraDesktop:
         start_hidden: bool = False,
         initial_view: str | None = None,
     ) -> None:
+        from .gui_runtime import prepare_gui_runtime
+        prepare_gui_runtime()
         import tkinter as tk
         from tkinter import ttk
 
@@ -1092,8 +1094,9 @@ class SentraDesktop:
             return
         allowed = getattr(self, "_openai_enrollment_approved", False) or consume_installer_enrollment(self.paths) or messagebox.askyesno(
             "SENTRA — OpenAI browser enrollment",
-            "Open a separate temporary Edge browser for OpenAI Platform?\n\n"
-            "Sign in directly in that window. SENTRA will create or select a "
+            "Configure OpenAI Platform through your browser?\n\n"
+            "SENTRA first looks for an existing local DOM connection to reuse your session. "
+            "Otherwise, sign in in the setup browser. SENTRA will create or select a "
             "tunnel, create a NEW API key with All permissions and no expiration, capture its "
             "one-time reveal, protect it with Windows DPAPI, and start and "
             "verify the local MCP and secure tunnel.\n\n"
@@ -1122,14 +1125,14 @@ class SentraDesktop:
         ttk.Label(
             view,
             text=(
-                "Sign in to OpenAI Platform in the temporary Edge window. "
+                "SENTRA reuses an available browser DOM connection. If sign-in is required, complete it in the browser. "
                 "SENTRA automatically configures the tunnel and a new API key "
                 "with All permissions, then verifies the connection."
             ),
             wraplength=610,
         ).pack(anchor="w", pady=(0, 12))
 
-        status = tk.StringVar(value="Opening a temporary, unshared Edge session…")
+        status = tk.StringVar(value="Checking existing browser DOM connections…")
         ttk.Label(
             view, textvariable=status, wraplength=605,
         ).pack(anchor="w", pady=(2, 12))
@@ -1159,7 +1162,7 @@ class SentraDesktop:
                     self.quick_status.configure(text="OpenAI tunnel connected")
                     self.quick_detail.configure(text=message)
                     self.refresh_async()
-                elif event in {"opened", "progress", "workspace_required"}:
+                elif event in {"opened", "progress", "workspace_required", "browser_session"}:
                     status.set(message)
                 elif event == "closed":
                     pass  # Keep the final success/failure visible after cleanup.
@@ -1189,6 +1192,36 @@ class SentraDesktop:
                         "platform_ui_needs_attention":
                             "Platform controls changed or access is unavailable. Check the browser and use manual setup.",
                         "login_required": "Sign in to Platform, then restart automatic setup.",
+                        "browser_account_selection_required":
+                            "More than one connected browser can contain your account. Keep the intended Platform session connected and retry.",
+                        "browser_extension_required":
+                            "Enable the private SENTRA Setup DOM extension in your signed-in browser. Firefox requires a Mozilla-signed package, including private installations.",
+                        "browser_enrollment_already_running":
+                            "Another browser setup is active. Finish or close that Setup before retrying.",
+                        "bridge_navigation_failed":
+                            "The browser did not finish navigating the SENTRA setup tab. Check that tab and retry.",
+                        "browser_dom_needs_attention":
+                            "The browser could not complete a setup DOM operation. Keep the Platform session and SENTRA extension connected, then retry.",
+                        "bridge_origin_changed":
+                            "The setup tab left the official Platform settings page. Complete sign-in in the browser, then retry.",
+                        "bridge_selector_ambiguous":
+                            "Platform has more than one matching setup control. Check the open form before retrying.",
+                        "bridge_element_missing":
+                            "A required Platform control is missing. Check the setup form before retrying.",
+                        "bridge_element_disabled":
+                            "A required Platform control is disabled. Complete any required form selection before retrying.",
+                        "browser_bridge_disconnected":
+                            "The browser connection closed. Click the SENTRA Setup DOM extension, then retry.",
+                        "browser_bridge_timeout":
+                            "The browser did not answer in time. Check the Platform tab and retry.",
+                        "browser_closed":
+                            "The SENTRA setup tab closed before configuration finished. Retry automatic setup.",
+                        "project_selection_required":
+                            "Select the intended API key project in the Platform form before continuing.",
+                        "expiry_selection_required":
+                            "Platform could not confirm a unique no-expiration option. Check the key expiration field.",
+                        "saved_tunnel_not_visible":
+                            "The previously selected SENTRA tunnel is not visible in this organization. Check the account and tunnel before retrying; no replacement tunnel was created.",
                         "chatgpt_workspace_required":
                             "Select the ChatGPT workspace in Platform. Organization access alone is insufficient for ChatGPT.",
                         "workspace_association_unverified":
@@ -1221,7 +1254,7 @@ class SentraDesktop:
             panel.destroy()
 
         ttk.Button(
-            view, text="Close temporary browser and return",
+            view, text="Close setup tab and return",
             command=close_enrollment,
         ).pack(anchor="w")
         panel.protocol("WM_DELETE_WINDOW", close_enrollment)
@@ -1273,7 +1306,7 @@ class SentraDesktop:
         ).pack(side="left", padx=(0, 8))
         ttk.Button(
             tutorial_actions,
-            text="Auto-configure in Edge (with consent)",
+            text="Auto-configure with connected browser (with consent)",
             command=self.start_openai_browser_enrollment,
         ).pack(side="left")
 
@@ -2002,7 +2035,21 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sentra-desktop")
     parser.add_argument("--hidden", action="store_true")
     parser.add_argument("--open-url", default="")
+    parser.add_argument("--gui-check", action="store_true")
+    parser.add_argument("--gui-check-report", type=Path)
+    parser.add_argument("--shortcuts-check", action="store_true")
+    parser.add_argument("--shortcuts-check-report", type=Path)
     args = parser.parse_args(argv)
+    if args.gui_check_report and not args.gui_check:
+        parser.error("--gui-check-report requires --gui-check")
+    if args.shortcuts_check_report and not args.shortcuts_check:
+        parser.error("--shortcuts-check-report requires --shortcuts-check")
+    if args.shortcuts_check:
+        from .windows_integration import check_shortcuts_runtime
+        return 0 if check_shortcuts_runtime(args.shortcuts_check_report)["ok"] else 2
+    if args.gui_check:
+        from .gui_runtime import check_gui_runtime
+        return 0 if check_gui_runtime(args.gui_check_report)["ok"] else 2
     initial_view = None
     if args.open_url:
         initial_view = _internal_deep_link_target(args.open_url)

@@ -12,7 +12,7 @@ from sentra_remote.installer_preflight import inspect_payload, write_payload_man
 
 
 @pytest.fixture
-def payload(tmp_path):
+def payload(tmp_path, monkeypatch):
     source, extension, docs = [tmp_path / name for name in ("payload", "edge_extension", "docs")]
     paths = [source / "sentra-canvas.exe", source / "sentra-cli.exe",
              source / "web-models/win-unpacked/Codex Web GPT.exe",
@@ -25,7 +25,18 @@ def payload(tmp_path):
     for path in paths:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"test fixture - not a runnable release")
+    from sentra_remote import codex_registration_runtime as registration
+    fixture_files = {name: hashlib.sha256(("fixture-" + name).encode()).hexdigest()
+                     for name in registration.FILES}
+    monkeypatch.setattr(registration, "FILES", fixture_files)
+    registration_dir = source / "prerequisites/codex-registration"
+    registration_dir.mkdir()
+    for name in fixture_files:
+        (registration_dir / name).write_bytes(("fixture-" + name).encode())
+    (registration_dir / "provenance.json").write_text(json.dumps(registration.provenance()))
     products = ("sentra-canvas.exe", "sentra-cli.exe")
+    from sentra_remote.enrollment_extension import stage_extensions
+    stage_extensions(Path(installer.__file__).parent / "enrollment_extension", source / "prerequisites/browser-enrollment")
     write_payload_manifest(source, extension, docs, "1.0.0", products)
     return source, extension, docs, products
 
@@ -34,6 +45,22 @@ def test_complete_manifest_verifies_without_client_python(payload):
     result = inspect_payload(*payload, version="1.0.0", require_manifest=True)
     assert result["ok"] and result["verified"]
     assert result["python_required_on_client"] is False
+
+
+def test_rehashed_manifest_cannot_approve_changed_codex_registration(payload):
+    source, extension, docs, products = payload
+    (source / "prerequisites/codex-registration/codex.exe").write_bytes(b"changed CLI")
+    write_payload_manifest(source, extension, docs, "1.0.0", products)
+    with pytest.raises(ValueError, match="checksum"):
+        inspect_payload(*payload, version="1.0.0", require_manifest=True)
+
+
+def test_rehashed_manifest_cannot_approve_changed_firefox_signed_bridge(payload):
+    source, extension, docs, products = payload
+    (source / "prerequisites/browser-enrollment/firefox-signed.xpi").write_bytes(b"changed XPI")
+    write_payload_manifest(source, extension, docs, "1.0.0", products)
+    with pytest.raises(ValueError, match="checksum"):
+        inspect_payload(*payload, version="1.0.0", require_manifest=True)
 
 
 @pytest.mark.parametrize("change", ["tamper", "missing", "extra", "version"])
@@ -113,6 +140,8 @@ def test_download_retries_transport_and_reuses_verified_cache(tmp_path, monkeypa
 
 @pytest.mark.parametrize("ready", [False, True])
 def test_install_journal_tracks_verified_readiness_without_secrets(tmp_path, monkeypatch, ready):
+    from sentra_remote import openai_auto_setup
+    monkeypatch.setattr(openai_auto_setup, "verify_credential_protection", lambda: None)
     monkeypatch.setattr(installer, "check_install_payload", lambda _: {"ok": True})
     monkeypatch.setattr(installer, "prepare_tunnel_archive", lambda *_: tmp_path / "archive")
     monkeypatch.setattr(installer, "_install_product", lambda **_: {
@@ -134,6 +163,74 @@ def test_check_is_read_only_and_does_not_launch_installer(monkeypatch):
     start.assert_not_called()
 
 
+def test_windowed_check_writes_a_report_without_a_console(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "check_install_payload", lambda _: {"ok": True, "verified": True})
+    monkeypatch.setattr(installer.sys, "stdout", None)
+    report = tmp_path / "evidence/check.json"
+    assert installer.main(["--check", "--report-file", str(report)]) == 0
+    data = json.loads(report.read_text())
+    assert data["operation"] == "check" and data["payload_verified"]
+    assert not data["ready"] and not data["homologated"]
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_silent_report_records_health_but_never_provider_secrets(tmp_path, monkeypatch, ready):
+    verification = {
+        "core_ready": ready, "chatgpt_onboarding": {"ready": ready},
+        "web_models_required": True,
+        "status": {"mcp": {"ok": ready}, "tunnel": {"ok": ready, "api_key": "private-key"},
+                   "web_models": {k: ready for k in ("payload_complete", "ready", "catalog_ready", "turn_ready")}},
+    }
+    monkeypatch.setattr(installer, "install", lambda **_: {
+        "connect_verify": verification, "runtime_key": "private-key", "preflight": {"ok": True, "verified": True}})
+    report = tmp_path / "install.json"
+    assert installer.main(["--silent", "--report-file", str(report)]) == (0 if ready else 2)
+    raw = report.read_text()
+    assert "private-key" not in raw
+    data = json.loads(raw)
+    assert data["ready"] == ready
+    assert data["checks"]["mcp"] == ready
+    assert not data["account_authorization_verified"] and not data["homologated"]
+
+
+def test_failed_install_report_cannot_pass_qa(tmp_path, monkeypatch):
+    def fail(**_):
+        raise OSError("api_key=private-key")
+    monkeypatch.setattr(installer, "install", fail)
+    report = tmp_path / "failure.json"
+    assert installer.main(["--silent", "--state-dir", str(tmp_path / "state"),
+                           "--report-file", str(report)]) == 2
+    raw = report.read_text()
+    assert "private-key" not in raw
+    data = json.loads(raw)
+    assert data["exit_code"] == 2 and not data["ready"]
+    assert data["failure"] == {"error_type": "OSError", "stage": "install"}
+
+
+@pytest.mark.parametrize("kind,expected,stage", [
+    ("TimeoutExpired", "TimeoutExpired", "install"),
+    ("ShortcutRegistrationError", "ShortcutRegistrationError", "windows_shortcuts"),
+    ("CredentialProtectionUnavailable", "CredentialProtectionUnavailable", "credential_protection"),
+    ("PRIVATE_CLASS_CANARY", "installation_error", "install"),
+])
+def test_setup_failure_report_identifies_safe_category_without_command_or_provider_data(tmp_path,kind,expected,stage):
+    report=tmp_path/"failure.json"
+    installer._write_setup_report(report,"install",{
+        "error_type":kind,"message":"PRIVATE_MESSAGE_CANARY",
+        "command":["PRIVATE_COMMAND_CANARY"],"provider_response":{"api_key":"PRIVATE_KEY_CANARY"},
+    },2)
+    raw=report.read_text()
+    assert "CANARY" not in raw
+    data=json.loads(raw)
+    assert data["failure"]=={"error_type":expected,"stage":stage}
+    assert data["ready"] is False and data["local_ready"] is False
+
+
+def test_unwritable_report_does_not_return_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer, "check_install_payload", lambda _: {"ok": True, "verified": True})
+    assert installer.main(["--check", "--report-file", str(tmp_path)]) == 2
+
+
 @pytest.mark.parametrize("ready", [False, True])
 def test_retry_verifies_without_reinstalling_or_stopping_sessions(tmp_path, monkeypatch, ready):
     target = tmp_path / "Commander"
@@ -142,8 +239,9 @@ def test_retry_verifies_without_reinstalling_or_stopping_sessions(tmp_path, monk
     runtime = Mock()
     runtime.connect_and_verify.return_value = {"core_ready": ready, "chatgpt_onboarding": {"ready": ready},
                                               "status": {"mcp": {"ok": ready}, "tunnel": {"ok": ready}, "web_models": {key: ready for key in ("payload_complete", "ready", "catalog_ready", "turn_ready")}}}
-    monkeypatch.setattr(installer, "configure_codex", lambda *_: {"ready": True})
+    monkeypatch.setattr(installer, "configure_codex", lambda *_, **__: {"ready": True})
     monkeypatch.setattr(installer, "LocalRuntime", Mock(return_value=runtime))
+    monkeypatch.setattr("sentra_remote.display_probe.probe_installed_display", lambda *_: {"ok": True})
     copy = Mock(side_effect=AssertionError("retry must not recopy binaries"))
     monkeypatch.setattr(installer, "_copy_product_files", copy)
     launch = Mock()

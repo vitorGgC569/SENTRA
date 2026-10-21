@@ -6,10 +6,10 @@ import signal
 import threading
 from pathlib import Path
 
-from native_bridge.relay import RelayServer
-from sentra_mcp.services.context import ContextBusService
-from sentra_mcp.services.control_plane import ControlPlaneService
-from sentra_mcp.services.durable import DurableRunService
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from native_bridge.relay import RelayServer
+    from sentra_mcp.services.control_plane import ControlPlaneService
 
 from .product import ProductPaths, ensure_browser_token
 
@@ -22,6 +22,10 @@ def create_relay(*, state_dir: Path, extension_dir: Path, host: str = "127.0.0.1
     opens the same state root, never a detached BrowserEvidence database.
     Construction does not enroll a collector, grant permission or dispatch jobs.
     """
+    from native_bridge.relay import RelayServer
+    from sentra_mcp.services.context import ContextBusService
+    from sentra_mcp.services.control_plane import ControlPlaneService
+    from sentra_mcp.services.durable import DurableRunService
     state_dir = Path(state_dir).expanduser().resolve()
     extension_dir = Path(extension_dir).expanduser().resolve()
     if not extension_dir.is_dir():
@@ -39,6 +43,11 @@ def create_relay(*, state_dir: Path, extension_dir: Path, host: str = "127.0.0.1
 
 
 def main(argv: list[str] | None = None) -> int:
+    import sys
+    from .enrollment_native import is_native_invocation, run_native
+    native_args = list(sys.argv[1:] if argv is None else argv)
+    if is_native_invocation(native_args):
+        return run_native(native_args)
     parser = argparse.ArgumentParser(prog="sentra-browser-relay")
     parser.add_argument("--state-dir", default=str(Path.home() / ".sentra"))
     parser.add_argument("--extension-dir", required=True)

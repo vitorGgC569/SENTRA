@@ -11,8 +11,16 @@ import pytest
 from sentra_remote.codex_setup import configure_codex, find_codex
 
 
-def test_real_codex_plugin_install_and_health(tmp_path):
-    cli = find_codex()
+@pytest.mark.parametrize("component", ["host", "bundled"])
+def test_real_codex_plugin_install_and_health(tmp_path, component):
+    if component == "bundled":
+        folder = Path(__file__).resolve().parents[2] / "dist/prerequisites/codex-registration"
+        if not folder.exists():
+            pytest.skip("Prepared offline Codex registration component is absent")
+        from sentra_remote.codex_registration_runtime import validate_registration_runtime
+        cli = validate_registration_runtime(folder)
+    else:
+        cli = find_codex()
     if cli is None:
         pytest.skip("Codex CLI not installed on this host")
     profile = tmp_path / "isolated-codex"
@@ -25,6 +33,8 @@ def test_real_codex_plugin_install_and_health(tmp_path):
     # Codex also discovers personal marketplaces from the user's home, not
     # only CODEX_HOME. Isolate both, otherwise a real plugin may shadow ours.
     env = dict(os.environ, CODEX_HOME=str(profile), USERPROFILE=str(tmp_path), HOME=str(tmp_path))
+    if component == "bundled" and os.name == "nt":
+        env["PATH"] = str(Path(os.environ["SystemRoot"]) / "System32")
     with (tmp_path / "mcp.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen([
             sys.executable, "-B", "-m", "sentra_mcp", "--transport", "streamable-http",

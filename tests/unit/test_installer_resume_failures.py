@@ -29,12 +29,9 @@ def test_marker_with_partial_payload_repairs_instead_of_reopening(tmp_path, miss
     assert wizard._installed is False
 
 
-@pytest.mark.parametrize("failure", ["authorization", "launch", "missing_desktop"])
-def test_scheduled_handoff_failure_unlocks_and_offers_retry(tmp_path, monkeypatch, failure):
+def test_browser_setup_stays_in_installer_without_a_desktop_handoff(tmp_path, monkeypatch):
     folder = tmp_path / "Commander"
     folder.mkdir()
-    if failure != "missing_desktop":
-        (folder / "sentra-desktop.exe").write_bytes(b"installed")
     wizard = object.__new__(installer.InstallerWizard)
     for name, value in {"install_dir": str(folder), "workspace": "", "profile": "Full",
                         "access_scope": "computer", "tunnel_id": "", "runtime_key": "",
@@ -48,11 +45,12 @@ def test_scheduled_handoff_failure_unlocks_and_offers_retry(tmp_path, monkeypatc
     wizard.root = Mock()
     callbacks = []
     wizard.root.after.side_effect = lambda _delay, callback: callbacks.append(callback)
-    monkeypatch.setattr(installer, "install", lambda **_: {"connect_verify": {"core_ready": True}})
-    authorize = Mock(side_effect=PermissionError("authorization file locked") if failure == "authorization" else None)
-    launch = Mock(side_effect=OSError("desktop launch failed") if failure == "launch" else None)
+    monkeypatch.setattr(installer, "install", lambda **_: {"connect_verify": {"core_ready": True, "onboarding_required": True}})
+    authorize = Mock(side_effect=AssertionError("must not delegate consent to Desktop"))
+    launch = Mock(side_effect=AssertionError("must not launch Desktop for enrollment"))
     monkeypatch.setattr(installer, "authorize_installer_enrollment", authorize)
     monkeypatch.setattr(installer.subprocess, "Popen", launch)
+    wizard._start_browser_setup = Mock()
     from tkinter import messagebox
     error = Mock()
     monkeypatch.setattr(messagebox, "showerror", error)
@@ -69,9 +67,8 @@ def test_scheduled_handoff_failure_unlocks_and_offers_retry(tmp_path, monkeypatc
     assert callbacks
     for callback in callbacks:
         callback()
-    assert wizard.install_button.configure.call_args.kwargs["state"] == "normal"
-    assert wizard.install_button.configure.call_args.kwargs["command"] == wizard._primary_action
-    error.assert_called_once()
+    wizard._start_browser_setup.assert_called_once()
+    error.assert_not_called()
     wizard.root.destroy.assert_not_called()
-    if failure == "authorization":
-        launch.assert_not_called()
+    authorize.assert_not_called()
+    launch.assert_not_called()

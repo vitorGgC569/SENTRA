@@ -241,7 +241,8 @@ def collect_pub(source: Path, toolchains: Path, artifact: Path, archive: Archive
     import yaml
     config = owned_file(source, "flutter/.dart_tool/package_config.json")
     lock = yaml.safe_load(owned_file(source, "flutter/pubspec.lock").read_text(encoding="utf-8"))["packages"]
-    cache = (Path(os.environ["LOCALAPPDATA"]) / "Pub/Cache").resolve(strict=True)
+    cache = (Path(os.environ["PUB_CACHE"]) if os.environ.get("PUB_CACHE") else
+             Path(os.environ["LOCALAPPDATA"]) / "Pub/Cache").resolve(strict=True)
     components = []
     for package in load_json(config)["packages"]:
         name = package["name"]

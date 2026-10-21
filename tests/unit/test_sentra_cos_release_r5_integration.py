@@ -229,8 +229,13 @@ def test_second_upgrade_retains_first_immutable_rollback_snapshot(tmp_path, monk
     state_data = json.loads((state / "update-state.json").read_text())
     newest = Path(state_data["previous_backup"])
     assert newest.name.startswith("previous-")
-    assert (newest / "sentra-desktop.exe").read_bytes() == b"v2"
+    from sentra_remote.windows_paths import filesystem_path
+    assert Path(filesystem_path(newest / "sentra-desktop.exe")).read_bytes() == b"v2"
     assert (install / "sentra-desktop.exe").read_bytes() == b"v3"
+    monkeypatch.setenv("SENTRA_STATE_DIR", str(state))
+    assert update_helper.rollback_update(install, parent_pid=0, restart_desktop=False) == 0
+    assert (install / "sentra-desktop.exe").read_bytes() == b"v2"
+    assert (root / "previous" / "sentra-desktop.exe").read_bytes() == b"v1"
 
 
 def test_interrupted_setup_journal_blocks_restart_before_process_stop(tmp_path, monkeypatch):

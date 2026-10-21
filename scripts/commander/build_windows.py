@@ -15,7 +15,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 _LOCALAPPDATA = os.environ.get("LOCALAPPDATA", "").strip()
+_BUILD_ROOT_OVERRIDE = os.environ.get("SENTRA_BUILD_ROOT", "").strip()
 LOCAL_BUILD_ROOT = (
+    Path(_BUILD_ROOT_OVERRIDE).expanduser().resolve() if _BUILD_ROOT_OVERRIDE else
     Path(_LOCALAPPDATA) / "SENTRA" / "Build" / "commander"
     if _LOCALAPPDATA
     else ROOT / ".tmp" / "local-build" / "commander"
@@ -25,6 +27,14 @@ if str(ROOT) not in sys.path:
 
 BUILD_STATUS_PATH = ROOT / ".tmp" / "build-windows-status.json"
 _RUNTIME_BINDING = ContextVar('sentra_build_runtime_binding', default=None)
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 class _RuntimeBinding:
@@ -77,7 +87,7 @@ def _source_fingerprint(root: Path | None = None) -> dict[str, str]:
     # The pinned Web Models patch is a product input just like its PowerShell
     # builder; both must invalidate provenance before a new Setup is accepted.
     # Packaged license/notice text is part of the distributed artifact too.
-    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".cs", ".h", ".go", ".mod", ".sum", ".sh", ".wasm", ".rs", ".toml", ".lock", ".mjs"}
+    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".cs", ".h", ".go", ".mod", ".sum", ".sh", ".wasm", ".rs", ".toml", ".lock", ".mjs", ".xpi"}
     files = {root / name for name in ("main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt", "LICENSE")}
     # The Setup bundles this onboarding guide, while the vendored xterm
     # licenses have no suffix and would otherwise be missed by the scan.
@@ -122,7 +132,7 @@ def _write_build_provenance(dist: Path, phase: str, expected: tuple[str, ...], s
     result = {
         "schema_version": 1, "phase": phase, "python": sys.version.split()[0],
         "sources": sources,
-        "executables": {name: {"sha256": hashlib.sha256((dist / name).read_bytes()).hexdigest(),
+        "executables": {name: {"sha256": _file_sha256(dist / name),
                                "bytes": (dist / name).stat().st_size} for name in expected},
     }
     binding = _RUNTIME_BINDING.get()
@@ -256,6 +266,32 @@ UPDATE_HELPER_TIMEOUT_S = 600
 WEB_MODELS_TIMEOUT_S = 600
 
 
+def _run_gui_check(command: list[str], label: str, *, frozen_required: bool) -> None:
+    checks = LOCAL_BUILD_ROOT / "gui-checks"
+    checks.mkdir(parents=True, exist_ok=True)
+    report = checks / (label + ".json")
+    report.unlink(missing_ok=True)
+    args = [*command, "--gui-check", "--gui-check-report", str(report)] if frozen_required else [*command, "--report", str(report)]
+    proc = subprocess.Popen(args, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        code = proc.wait(timeout=180)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        raise RuntimeError("GUI runtime check timed out: " + label) from None
+    result = json.loads(report.read_text(encoding="utf-8")) if report.is_file() else {}
+    required = ("ok", "tk_window_created", "ttk_widgets_created", "window_destroyed")
+    if code != 0 or not all(result.get(key) is True for key in required) or (frozen_required and result.get("frozen") is not True):
+        raise RuntimeError("GUI runtime is incomplete; Tcl/Tk window check failed: " + label)
+
+
+def _verify_build_gui_runtime() -> None:
+    _run_gui_check([sys.executable, "-m", "sentra_remote.gui_runtime"], "build-python", frozen_required=False)
+
+
+def _verify_frozen_gui(executable: Path) -> None:
+    _run_gui_check([str(executable)], executable.stem, frozen_required=True)
+
+
 def _terminate_process_tree(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
@@ -333,6 +369,9 @@ def _build(
             prefix += ["--add-data", f"{ROOT / 'sentra_canvas/desktop_ui/src/assets/opendots/blue.png'}{os.pathsep}sentra_canvas/assets"]
     if mcp_payload:
         prefix += ["--collect-all", "playwright", "--hidden-import", "pyarrow.parquet"]
+    elif name == "SENTRA-Setup":
+        # Setup owns DOM enrollment, including the driver, on clean machines.
+        prefix += ["--collect-all", "playwright"]
     if mcp_payload or name in {'sentra-canvas', 'sentra-cli', 'sentra-update-helper'}:
         from scripts.commander.runtime_dependencies import require_wasmtime_pin
         require_wasmtime_pin()
@@ -598,6 +637,8 @@ def build_launcher(dist: Path) -> None:
 
 
 def build_payload(dist: Path, work: Path, spec: Path) -> None:
+    from scripts.commander.build_canvas import validate_canvas_inputs
+    validate_canvas_inputs()
     for path in (dist, work, spec):
         path.mkdir(parents=True, exist_ok=True)
 
@@ -651,6 +692,8 @@ def build_payload(dist: Path, work: Path, spec: Path) -> None:
         build_canvas(build_staging, work, spec)
         from scripts.commander.build_desktop_launcher import build_desktop_launcher
         build_desktop_launcher(build_staging / "sentra-launcher.exe")
+
+        _verify_frozen_gui(build_staging / "sentra-desktop.exe")
 
         # Copy only finalized one-file executables back into the OneDrive tree.
         # The heavy PyInstaller work/cache stays under LOCALAPPDATA.
@@ -721,7 +764,7 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
         except (OSError, ValueError, TypeError):
             continue
     for name in PAYLOAD_NAMES:
-        digest = hashlib.sha256((dist / name).read_bytes()).hexdigest()
+        digest = _file_sha256(dist / name)
         if not any(proof.get('executables', {}).get(name, {}).get("sha256") == digest for proof in proofs):
             raise RuntimeError("stale or unverified installer payload: " + name + "; rebuild payload")
     web_models = dist / "web-models" / "win-unpacked"
@@ -747,10 +790,14 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     for name in PAYLOAD_NAMES:
         if name == 'sentra-launcher.exe':
             continue  # C# launcher delegates to the pinned Python executables.
-        digest = hashlib.sha256((dist / name).read_bytes()).hexdigest()
+        digest = _file_sha256(dist / name)
         if not any(proof.get('runtime_pins_sha256') == binding['sha256'] and
                    proof.get('executables', {}).get(name, {}).get('sha256') == digest for proof in proofs):
             raise RuntimeError('payload lacks current embedded runtime pins: ' + name)
+    from sentra_remote.codex_registration_runtime import validate_registration_runtime
+    validate_registration_runtime(dist / 'prerequisites/codex-registration')
+    from sentra_remote.enrollment_extension import stage_extensions
+    stage_extensions(ROOT / 'sentra_remote/enrollment_extension', dist / 'prerequisites/browser-enrollment')
     # Reject incomplete or stale binaries before staging assets or downloading.
     import tempfile
     work.mkdir(parents=True, exist_ok=True)
@@ -814,6 +861,7 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
         windowed=True,
         extra=installer_extra,
     )
+    _verify_frozen_gui(dist / "SENTRA-Setup.exe")
 
 
 def build(dist: Path, work: Path, spec: Path, sources: dict[str, str] | None = None) -> None:
@@ -846,6 +894,8 @@ def main() -> int:
         default="all",
     )
     args = parser.parse_args()
+    if args.phase in {"all", "payload", "installer"}:
+        _verify_build_gui_runtime()
     dist = Path(args.dist).resolve()
     work = Path(args.work).resolve()
     spec = Path(args.spec).resolve()

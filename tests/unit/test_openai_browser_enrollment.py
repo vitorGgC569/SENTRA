@@ -91,25 +91,19 @@ def test_isolated_session_does_not_emit_api_key_or_write_unapproved(
     observed: list[tuple[str, str]] = []
     browser_events: list[str] = []
 
-    class Browser:
-        def new_context(self, **kwargs):
-            assert kwargs["accept_downloads"] is False
-            assert kwargs["service_workers"] == "block"
-            browser_events.append("context")
-            return Context()
-        def close(self):
-            browser_events.append("browser_closed")
-
     class Context:
         def new_page(self):
             return page
         def close(self):
             browser_events.append("context_closed")
+            browser_events.append("browser_closed")
 
     class BrowserType:
-        def launch(self, *, channel, headless):
+        def launch_persistent_context(self, profile, *, channel, headless, accept_downloads, args):
             assert channel == "msedge" and not headless
-            return Browser()
+            assert accept_downloads is False
+            browser_events.append("context")
+            return Context()
 
     class Playwright:
         chromium = BrowserType()
@@ -127,6 +121,16 @@ def test_isolated_session_does_not_emit_api_key_or_write_unapproved(
         "playwright.sync_api",
         SimpleNamespace(sync_playwright=lambda: Playwright()),
     )
+    from sentra_remote import enrollment_bridge
+    class EnabledBridge:
+        def __init__(self, paths): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def context(self):
+            context = Context()
+            context.browser_name = "firefox"
+            return context
+    monkeypatch.setattr(enrollment_bridge, "EnrollmentBridge", EnabledBridge)
     monkeypatch.setattr(
         en, "configure_tunnel",
         lambda paths, tunnel, key: stored.append((tunnel, key)),
@@ -149,7 +153,7 @@ def test_isolated_session_does_not_emit_api_key_or_write_unapproved(
     assert secret not in repr(observed)
     assert any(name == "configured" for name, _ in observed)
     assert browser_events[-2:] == ["context_closed", "browser_closed"]
-    assert not (tmp_path / "state").exists()
+    assert not session.paths.tunnel_config.exists()
 
 def test_real_dom_selectors_in_ephemeral_edge_without_openai_access():
     from playwright.sync_api import sync_playwright
@@ -201,6 +205,35 @@ def test_invalid_port_does_not_crash_origin_guard():
         "https://platform.openai.com:invalid/settings/organization/tunnels",
         kind="tunnel",
     )
+
+
+@pytest.mark.parametrize("reason,expected", [
+    ("bridge_navigation_failed", "bridge_navigation_failed"),
+    ("browser_dom_needs_attention", "browser_dom_needs_attention"),
+    ("private provider detail sk-DO_NOT_EXPORT_0123456789", "ValueError"),
+])
+def test_startup_errors_disclose_only_fixed_codes(tmp_path, monkeypatch, reason, expected):
+    from sentra_remote import enrollment_bridge
+    observed = []
+    class Bridge:
+        def __init__(self, paths): pass
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def context(self): return SimpleNamespace(browser_name="chromium", new_page=fail, close=lambda: None)
+    def fail():
+        raise ValueError(reason)
+    class Playwright:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+    monkeypatch.setattr(enrollment_bridge, "EnrollmentBridge", Bridge)
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", SimpleNamespace(sync_playwright=Playwright))
+    session = en.OpenAIConsentBrowser(ProductPaths(tmp_path / "install", tmp_path / "state"),
+                                     lambda event, message: observed.append((event, message)))
+    session.start(approved=True, automatic=True)
+    session._thread.join(timeout=3)
+    assert not session._thread.is_alive()
+    assert ("attention", expected) in observed
+    assert "DO_NOT_EXPORT" not in repr(observed)
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows DPAPI-only test")
 def test_browser_enrollment_key_is_dpapi_protected_at_rest(tmp_path):

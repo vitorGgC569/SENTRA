@@ -12,7 +12,7 @@ def _fixture(root: Path) -> Path:
         (binary / folder).mkdir()
     for name in ("electron.exe", "LICENSE", "LICENSES.chromium.html"):
         (binary / name).write_bytes(b"isolated-fixture")
-    for name in ("main.cjs", "policy.cjs", "SENTRA.ico", "SENTRA-DOT.ico", "THIRD_PARTY_NOTICES.md"):
+    for name in ("main.cjs", "policy.cjs", "healthcheck.cjs", "SENTRA.ico", "SENTRA-DOT.ico", "THIRD_PARTY_NOTICES.md"):
         (root / name).write_bytes(b"fixture-" + name.encode("ascii"))
     (root / "package.json").write_text(
         json.dumps({"devDependencies": {"electron": "44.0.0"}}), encoding="utf-8")

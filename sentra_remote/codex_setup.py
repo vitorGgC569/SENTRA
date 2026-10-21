@@ -11,12 +11,18 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 PLUGIN_ID = "sentra-commander@sentra-local"
 MARKETPLACE = "sentra-local"
 
 
-def find_codex() -> Path | None:
+def find_codex(registration_root: Path | None = None) -> Path | None:
+    if registration_root is None and getattr(sys, "frozen", False):
+        registration_root = Path(sys.executable).parent / "runtime/codex-registration"
+    if registration_root is not None:
+        from .codex_registration_runtime import validate_registration_runtime
+        return validate_registration_runtime(registration_root)
     found = shutil.which("codex.exe" if os.name == "nt" else "codex")
     candidate = Path(found) if found else Path(os.environ.get("LOCALAPPDATA", "")) / "Programs/OpenAI/Codex/bin/codex.exe"
     return candidate.resolve() if candidate.is_file() else None
@@ -115,11 +121,12 @@ def probe_mcp(port: int) -> bool:
         return False
 
 
-def configure_codex(state_dir: Path, port: int, *, cli: Path | None = None, env=None) -> dict:
+def configure_codex(state_dir: Path, port: int, *, cli: Path | None = None, env=None,
+                    registration_root: Path | None = None) -> dict:
     result = {"plugin_id": PLUGIN_ID, "installed": False, "enabled": False, "mcp_verified": False,
               "ready": False, "host_reload_required": False, "chatgpt_authorization": "unverified"}
     try:
-        cli = cli or find_codex()
+        cli = cli or (find_codex(registration_root) if registration_root is not None else find_codex())
         if cli is None:
             stage_plugin(state_dir, port)
             return dict(result, reason="Instale ou abra o Codex e execute Verificar novamente para registrar o plugin.")

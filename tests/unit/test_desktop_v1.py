@@ -117,8 +117,11 @@ def test_connect_installed_openai_reuses_existing_payload(
         def __init__(self, _paths, _settings) -> None:
             pass
 
-        def connect_and_verify(self, timeout_s: float = 12.0):
-            assert timeout_s == 12.0
+        def refresh_verification(self, verification):
+            return verification
+
+        def connect_and_verify(self, timeout_s: float):
+            assert timeout_s == installer_mod.SERVICE_STARTUP_TIMEOUT_S
             return {
                 "core_ready": True,
                 "chatgpt_onboarding": {"ready": True},
@@ -134,13 +137,20 @@ def test_connect_installed_openai_reuses_existing_payload(
             }
 
     monkeypatch.setattr(installer_mod, "configure_tunnel", fake_configure)
-    monkeypatch.setattr(installer_mod, "configure_codex", lambda *_: {"ready": True})
+    monkeypatch.setattr(installer_mod, "configure_codex", lambda *_, **__: {"ready": True})
     monkeypatch.setattr(
         installer_mod,
         "_enable_web_models_autostart",
         lambda _paths, _install_dir: {"ok": True, "autostart": True},
     )
     monkeypatch.setattr(installer_mod, "LocalRuntime", FakeRuntime)
+
+    def fake_display(directory):
+        assert directory == install_dir
+        return {"ok": True}
+
+    from sentra_remote import display_probe
+    monkeypatch.setattr(display_probe, "probe_installed_display", fake_display)
 
     result = installer_mod.connect_installed_openai(
         install_dir=install_dir,
@@ -521,6 +531,8 @@ def test_upgrade_cli_preserves_existing_profile_and_ports(monkeypatch: pytest.Mo
 def test_install_defaults_full_computer_and_preserves_existing_settings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, existing: bool,
 ) -> None:
+    # This unit test covers settings; real DPAPI is tested separately.
+    monkeypatch.setattr("sentra_remote.openai_auto_setup.verify_credential_protection", lambda: None)
     install_dir = tmp_path / "Commander"
     state_dir = tmp_path / "state"
     workspace = tmp_path / "repo"
@@ -537,6 +549,9 @@ def test_install_defaults_full_computer_and_preserves_existing_settings(
     class Runtime:
         def __init__(self, _paths, settings):
             captured["settings"] = settings
+
+        def refresh_verification(self, verification):
+            return verification
 
         def connect_and_verify(self, timeout_s):
             return {
@@ -751,6 +766,7 @@ def test_local_runtime_stop_adopts_verified_persisted_pid_after_desktop_restart(
     from sentra_remote import local_runtime as local_runtime_mod
     from sentra_remote.local_runtime import LocalRuntime
 
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
     install = tmp_path / "install"
     state = tmp_path / "state"
     install.mkdir()
@@ -851,6 +867,9 @@ def test_failed_web_models_start_restores_codex_route_and_closes_gateway() -> No
     class FakeGateway:
         launcher = FakeLauncher()
 
+        def stop_upstream_watchdog(self):
+            events.append("watchdog:stop")
+
         def shutdown(self):
             events.append("gateway:shutdown")
 
@@ -867,6 +886,7 @@ def test_failed_web_models_start_restores_codex_route_and_closes_gateway() -> No
     assert events == [
         "route:status",
         "route:disconnect",
+        "watchdog:stop",
         "launcher:stop",
         "gateway:shutdown",
         "gateway:close",

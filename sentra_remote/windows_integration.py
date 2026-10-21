@@ -1,93 +1,121 @@
 """Per-user launch shortcuts with target ownership checks and literal paths."""
 import json
 import os
+import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import shutil
-import subprocess
 import tempfile
 
 
-SCRIPT=r'''
-param([string]$PayloadPath)
-$ErrorActionPreference='Stop'
-[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
-$data=Get-Content -LiteralPath $PayloadPath -Raw | ConvertFrom-Json
-$shell=New-Object -ComObject WScript.Shell
-$programs=[Environment]::GetFolderPath('Programs')
-$desktop=[Environment]::GetFolderPath('DesktopDirectory')
-if($data.programs_dir) {$programs=$data.programs_dir}
-if($data.desktop_dir) {$desktop=$data.desktop_dir}
-$folder=Join-Path $programs 'SENTRA'
-$items=@(
- @{path=(Join-Path $folder 'SENTRA Desktop.lnk'); exe='sentra-human.exe'},
- @{path=(Join-Path $folder 'SENTRA Canvas.lnk'); exe='sentra-canvas.exe'}
-)
-if(-not $data.desktop_executable) {
- $items+=@{path=(Join-Path $desktop 'SENTRA.lnk'); exe='sentra-canvas.exe'}
-} elseif($data.action -eq 'register') {
- $legacy=Join-Path $desktop 'SENTRA.lnk'
- if(Test-Path -LiteralPath $legacy -PathType Leaf) {
-  $link=$shell.CreateShortcut($legacy)
-  $owned=[IO.Path]::GetFullPath((Join-Path $data.install_dir 'sentra-canvas.exe'))
-  if([string]::Equals($link.TargetPath,$owned,[StringComparison]::OrdinalIgnoreCase)) {
-   Remove-Item -LiteralPath $legacy
-  }
- }
-}
-$changed=@()
-foreach($item in $items) {
- $target=[IO.Path]::GetFullPath((Join-Path $data.install_dir $item.exe))
- if($data.action -eq 'register') {
-  if(-not (Test-Path -LiteralPath $target -PathType Leaf)) {throw 'Shortcut target is missing'}
-  $parent=[IO.Path]::GetDirectoryName($item.path)
-  [IO.Directory]::CreateDirectory($parent) | Out-Null
-  $link=$shell.CreateShortcut($item.path)
-  $link.TargetPath=$target
-  $link.WorkingDirectory=$data.install_dir
-  $link.IconLocation=$target+',0'
-  $link.Description='SENTRA'
-  $link.Save()
-  $changed+=$item.path
- } elseif($data.action -eq 'unregister') {
-  if(Test-Path -LiteralPath $item.path -PathType Leaf) {
-   $link=$shell.CreateShortcut($item.path)
-   if([string]::Equals($link.TargetPath,$target,[StringComparison]::OrdinalIgnoreCase)) {
-    $resolved=[IO.Path]::GetFullPath($item.path)
-    Remove-Item -LiteralPath $resolved -Force
-    $changed+=$resolved
-   }
-  }
- } else {throw 'Unsupported shortcut action'}
-}
-@{paths=@($changed);action=$data.action;desktop_dir=$desktop} | ConvertTo-Json -Compress
-'''
+class ShortcutRegistrationError(RuntimeError):
+    """The Windows Shell could not persist a per-user launch shortcut."""
 
 
-def shortcuts(install_dir:Path,*,remove=False,programs_dir:Path|None=None,desktop_dir:Path|None=None,desktop_executable=False):
-    if os.name!="nt":return {"paths":[],"supported":False}
-    shell=shutil.which("powershell") or shutil.which("pwsh")
-    if shell is None:raise RuntimeError("Windows PowerShell is unavailable for shortcuts")
-    install_dir=Path(install_dir).resolve()
-    with tempfile.TemporaryDirectory(prefix="sentra-shortcuts-") as temporary:
-        root=Path(temporary)
-        script=root/"shortcuts.ps1";payload=root/"payload.json"
-        script.write_text(SCRIPT,encoding="utf-8-sig")
-        payload.write_text(json.dumps({"install_dir":str(install_dir),
-            "action":"unregister" if remove else "register",
-            "desktop_executable": desktop_executable,
-            "programs_dir":str(Path(programs_dir).resolve()) if programs_dir else None,
-            "desktop_dir":str(Path(desktop_dir).resolve()) if desktop_dir else None}),encoding="utf-8-sig")
-        result=subprocess.run([shell,"-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass",
-            "-File",str(script),str(payload)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-            timeout=30,creationflags=getattr(subprocess,"CREATE_NO_WINDOW",0))
-        if result.returncode:
-            raise RuntimeError("Windows shortcut registration failed")
-        value = json.loads(result.stdout.decode("utf-8-sig"))
-        if desktop_executable:
-            entry = install_desktop_executable(install_dir, Path(value["desktop_dir"]), remove=remove)
-            if entry:
-                value["paths"].append(str(entry))
-        return value
+def _shortcut_items(install_dir: Path, programs: Path, desktop: Path, desktop_executable: bool):
+    items = [(programs / "SENTRA/SENTRA Desktop.lnk", install_dir / "sentra-human.exe"),
+             (programs / "SENTRA/SENTRA Canvas.lnk", install_dir / "sentra-canvas.exe")]
+    if not desktop_executable:
+        items.append((desktop / "SENTRA.lnk", install_dir / "sentra-canvas.exe"))
+    return items
+
+
+def _native_shortcuts(install_dir, remove, programs_dir, desktop_dir, desktop_executable):
+    # Every call owns its STA. A caller's GUI/COM apartment is left unchanged.
+    import pythoncom
+    # GetPath returns native file timestamps. pywin32 loads this helper by
+    # name; the explicit import also includes it in the frozen executable.
+    import win32timezone  # noqa: F401
+    from win32com.shell import shell, shellcon
+
+    def apply():
+        programs = Path(programs_dir) if programs_dir is not None else Path(shell.SHGetFolderPath(0, shellcon.CSIDL_PROGRAMS, 0, 0))
+        desktop = Path(desktop_dir) if desktop_dir is not None else Path(shell.SHGetFolderPath(0, shellcon.CSIDL_DESKTOPDIRECTORY, 0, 0))
+
+        def link():
+            return pythoncom.CoCreateInstance(shell.CLSID_ShellLink, None, pythoncom.CLSCTX_INPROC_SERVER, shell.IID_IShellLink)
+
+        def target_of(path):
+            shortcut = link()
+            shortcut.QueryInterface(pythoncom.IID_IPersistFile).Load(str(path), 0)  # STGM_READ
+            # Read the stored target; never resolve/search for it or launch it.
+            return shortcut.GetPath(shell.SLGP_RAWPATH)[0]
+
+        if desktop_executable and not remove:
+            legacy = desktop / "SENTRA.lnk"
+            if legacy.is_file() and os.path.normcase(target_of(legacy)) == os.path.normcase(str(install_dir / "sentra-canvas.exe")):
+                legacy.unlink()
+        changed = []
+        for path, target in _shortcut_items(install_dir, programs, desktop, desktop_executable):
+            if remove:
+                if path.is_file() and os.path.normcase(target_of(path)) == os.path.normcase(str(target)):
+                    path.unlink()
+                    changed.append(str(path))
+            else:
+                if not target.is_file():
+                    raise FileNotFoundError("Shortcut target is missing: " + target.name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                shortcut = link()
+                shortcut.SetPath(str(target))
+                shortcut.SetWorkingDirectory(str(install_dir))
+                shortcut.SetIconLocation(str(target), 0)
+                shortcut.SetDescription("SENTRA")
+                shortcut.QueryInterface(pythoncom.IID_IPersistFile).Save(str(path), 1)
+                changed.append(str(path))
+        return {"paths": changed, "action": "unregister" if remove else "register", "desktop_dir": str(desktop)}
+
+    pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+    try:
+        return apply()
+    except pythoncom.com_error as exc:
+        raise ShortcutRegistrationError("Windows Shell shortcut registration failed (HRESULT " + str(exc.hresult) + ")") from None
+    finally:
+        pythoncom.CoUninitialize()
+
+
+def shortcuts(install_dir: Path, *, remove=False, programs_dir: Path | None = None, desktop_dir: Path | None = None, desktop_executable=False):
+    if os.name != "nt":
+        return {"paths": [], "supported": False}
+    install_dir = Path(install_dir).resolve()
+    programs_dir = Path(programs_dir).resolve() if programs_dir is not None else None
+    desktop_dir = Path(desktop_dir).resolve() if desktop_dir is not None else None
+    # IShellLink/IPersistFile are in-process Shell APIs. PowerShell startup and
+    # WScript activation are no longer part of unattended installation.
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="SENTRA-shortcuts") as worker:
+        value = worker.submit(_native_shortcuts, install_dir, remove, programs_dir, desktop_dir, desktop_executable).result()
+    if desktop_executable:
+        entry = install_desktop_executable(install_dir, Path(value["desktop_dir"]), remove=remove)
+        if entry:
+            value["paths"].append(str(entry))
+    return value
+
+
+def check_shortcuts_runtime(report: Path | None = None) -> dict:
+    """Exercise frozen native dependencies only in a private disposable folder."""
+    result = {"schema": 1, "ok": False, "frozen": bool(getattr(sys, "frozen", False)),
+              "backend": "IShellLink/IPersistFile", "created": False,
+              "idempotent": False, "removed": False, "starts_product_services": False,
+              "accesses_browser_or_account": False, "changes_user_shortcut_folders": False}
+    try:
+        with tempfile.TemporaryDirectory(prefix="sentra-native-shortcuts-check-") as temporary:
+            root = Path(temporary).resolve()
+            assert root.parent == Path(tempfile.gettempdir()).resolve() and not root.is_symlink() and not root.is_junction()
+            install = root / "installed"
+            install.mkdir()
+            for name in ("sentra-human.exe", "sentra-canvas.exe"):
+                (install / name).write_bytes(b"owned shortcut fixture; never executed")
+            options = {"programs_dir": root / "programs", "desktop_dir": root / "desktop"}
+            initial = shortcuts(install, **options)
+            result["created"] = len(initial["paths"]) == 3 and all(Path(p).is_file() for p in initial["paths"])
+            result["idempotent"] = shortcuts(install, **options)["paths"] == initial["paths"]
+            removed = shortcuts(install, remove=True, **options)
+            result["removed"] = removed["paths"] == initial["paths"] and not any(Path(p).exists() for p in initial["paths"])
+        result["ok"] = all(result[k] for k in ("created", "idempotent", "removed"))
+    except Exception as exc:
+        result["error_type"] = type(exc).__name__
+    if report is not None:
+        report.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    return result
 
 
 def install_desktop_executable(install_dir: Path, desktop_dir: Path, *, remove=False):

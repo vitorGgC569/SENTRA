@@ -20,7 +20,13 @@ cd build-tmp
 
 # 1. Pinned upstream source (fail closed on any byte difference).
 if [ ! -f quickjs-2026-06-04.tar.xz ]; then
-  curl -sSL --retry 2 -o quickjs-2026-06-04.tar.xz "$UPSTREAM_URL"
+  # Python is already required by this driver. Its TLS implementation works in
+  # clean build contexts where Windows curl/Schannel has no user credentials.
+  python3 - "$UPSTREAM_URL" quickjs-2026-06-04.tar.xz <<'DOWNLOAD'
+import shutil, sys, urllib.request
+with urllib.request.urlopen(sys.argv[1], timeout=60) as source, open(sys.argv[2], 'wb') as target:
+    shutil.copyfileobj(source, target)
+DOWNLOAD
 fi
 echo "$UPSTREAM_SHA256  quickjs-2026-06-04.tar.xz" | sha256sum -c -
 [ "$(stat -c%s quickjs-2026-06-04.tar.xz)" = "$UPSTREAM_SIZE" ]
