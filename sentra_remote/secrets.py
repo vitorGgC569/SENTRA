@@ -45,7 +45,7 @@ def protect_secret(value: str) -> str:
     raw = value.encode("utf-8")
     in_blob, _buffer = _blob(raw)
     out_blob = _DATA_BLOB()
-    crypt32 = ctypes.windll.crypt32
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
     kernel32 = ctypes.windll.kernel32
     ok = crypt32.CryptProtectData(
         ctypes.byref(in_blob),
@@ -90,7 +90,7 @@ def unprotect_secret(value: str) -> str:
     protected = base64.b64decode(value[len(_PREFIX_DPAPI):], validate=True)
     in_blob, _buffer = _blob(protected)
     out_blob = _DATA_BLOB()
-    crypt32 = ctypes.windll.crypt32
+    crypt32 = ctypes.WinDLL("crypt32", use_last_error=True)
     kernel32 = ctypes.windll.kernel32
     ok = crypt32.CryptUnprotectData(
         ctypes.byref(in_blob),

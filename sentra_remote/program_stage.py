@@ -11,7 +11,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
-from .windows_paths import filesystem_path
+from .windows_paths import filesystem_path, resolved_path
 
 INSTALL_MARKER = ".sentra-install.json"
 TERMINAL = frozenset({"COMMITTED", "RESTORED"})
@@ -35,6 +35,9 @@ def _write(path: Path, data: dict) -> None:
 
 
 def _load(path: Path) -> dict:
+    # Use the same Win32 API namespace as the writer. Preserve the final link
+    # for inspection rather than resolving it before the safety check.
+    path = Path(filesystem_path(path, resolve=False))
     if path.is_symlink() or not path.is_file() or path.stat().st_size > 8192:
         raise PermissionError("unsafe or oversized program stage journal")
     obj = json.loads(path.read_text(encoding="utf-8"))
@@ -44,6 +47,7 @@ def _load(path: Path) -> dict:
 
 
 def require_no_interrupted_stage(namespace: Path) -> None:
+    namespace = Path(filesystem_path(namespace, resolve=False))
     if namespace.is_symlink() or namespace.parent.is_symlink():
         raise PermissionError("rollback namespace cannot be a symlink")
     if not namespace.is_dir():
@@ -55,25 +59,26 @@ def require_no_interrupted_stage(namespace: Path) -> None:
 
 def stage_program_backup(install: Path, namespace: Path, installation_id: str) -> tuple[Path, Path]:
     """Journal first, then enable Setup; incomplete copy never becomes rollback."""
-    install = install.resolve(strict=True)
-    if namespace.is_symlink() or namespace.parent.is_symlink():
+    install = resolved_path(install, strict=True)
+    checked_namespace = Path(filesystem_path(namespace, resolve=False))
+    if checked_namespace.is_symlink() or checked_namespace.parent.is_symlink():
         raise PermissionError("unsafe rollback namespace")
-    namespace = namespace.resolve()
+    namespace = resolved_path(namespace)
     if namespace.is_relative_to(install) or install.is_relative_to(namespace):
         raise ValueError("backup may not nest in installation directory")
     require_no_interrupted_stage(namespace)
-    marker = install / INSTALL_MARKER
+    marker = Path(filesystem_path(install / INSTALL_MARKER, resolve=False))
     if marker.is_symlink() or not marker.is_file():
         raise PermissionError("unowned installation")
     observed = json.loads(marker.read_text(encoding="utf-8"))
     if observed.get("product") != "SENTRA Desktop" or observed.get("installation_id") != installation_id:
         raise PermissionError("backup installation identity mismatch")
-    if any(child.is_symlink() for child in install.rglob("*")):
+    if any(child.is_symlink() for child in Path(filesystem_path(install)).rglob("*")):
         raise PermissionError("symlinks in installation cannot be backed up safely")
-    _checkpoint(); namespace.mkdir(parents=True, exist_ok=True)
+    _checkpoint(); Path(filesystem_path(namespace)).mkdir(parents=True, exist_ok=True)
     transaction_id = uuid.uuid4().hex
     original_backup = namespace / "previous"
-    backup = original_backup if not original_backup.exists() else namespace / ("previous-" + transaction_id)
+    backup = original_backup if not Path(filesystem_path(original_backup)).exists() else namespace / ("previous-" + transaction_id)
     pending = namespace / (".staging-" + transaction_id)
     journal = namespace / ("txn-" + transaction_id + ".json")
     try:
@@ -89,7 +94,7 @@ def stage_program_backup(install: Path, namespace: Path, installation_id: str) -
         })
         return backup, journal
     finally:
-        if pending.exists():
+        if Path(filesystem_path(pending)).exists():
             shutil.rmtree(filesystem_path(pending))
 
 
@@ -124,8 +129,8 @@ def restore_failed_program_tree(install: Path, backup: Path, installation_id: st
     process-stop gate. Return the quarantine for independent owner inspection.
     """
     install = Path(install).resolve()
-    backup = Path(backup).resolve(strict=True)
-    if backup.is_symlink() or install == backup or backup.is_relative_to(install):
+    backup = resolved_path(Path(backup), strict=True)
+    if Path(filesystem_path(backup, resolve=False)).is_symlink() or install == backup or backup.is_relative_to(install):
         raise PermissionError("unsafe program rollback roots")
     old_marker = json.loads(Path(filesystem_path(backup / INSTALL_MARKER)).read_text(encoding="utf-8"))
     if old_marker.get("product") != "SENTRA Desktop" or old_marker.get("installation_id") != installation_id:
@@ -141,6 +146,7 @@ def restore_failed_program_tree(install: Path, backup: Path, installation_id: st
         # Retain only unknown new files, without overwriting restored media.
         owned: set[str] = set(old_marker.get("owned_files") or [])
         newer_marker = quarantine / INSTALL_MARKER
+        newer_marker = Path(filesystem_path(newer_marker, resolve=False))
         if newer_marker.is_file() and not newer_marker.is_symlink():
             try:
                 updated = json.loads(Path(filesystem_path(newer_marker)).read_text(encoding="utf-8"))
@@ -159,7 +165,7 @@ def restore_failed_program_tree(install: Path, backup: Path, installation_id: st
             if relative.as_posix() in owned:
                 continue
             target = install / relative
-            if target.exists():
+            if Path(filesystem_path(target)).exists():
                 continue
             parent = Path(filesystem_path(target.parent))
             parent.mkdir(parents=True, exist_ok=True)

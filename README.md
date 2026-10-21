@@ -1,6 +1,25 @@
 # SENTRA
 
-> **Checkpoint para reinstalação em 17/10/2026 — versão em desenvolvimento.**
+**Orquestração auditável de implementação de código com agentes de IA.**
+LLMs propõem; software verifica as evidências e controla o fluxo.
+Consenso entre modelos não é prova de correção — teste verde + quorum é.
+
+> **Validação de Windows e Web atualizada em 20/10/2026:** o instalador r16 passou
+> pelo teste de instalação em Windows limpo e pela atualização no usuário existente.
+> O componente Web r18 foi aplicado à base nativa r16 e entregou ao Codex respostas
+> reais de listagem, continuidade da conversa e leitura limitada do `README.md`.
+> Esses resultados cobrem o cenário testado; outros modelos, contas e rollback
+> completo exigem validação própria. Consulte o [escopo e os resultados atuais](docs/VALIDACAO_WINDOWS_E_WEB_20261019.md).
+> Os checkpoints de 13 a 17/10 abaixo são históricos.
+
+> **Setup automático em desenvolvimento (17/10/2026):** a configuração DOM agora
+> permanece no Setup e pode reutilizar uma conexão local de navegador já disponível.
+> Isso ainda não cobre todos os perfis/navegadores. QuickJS, HCS, RustDesk, Web Models e o
+> auxiliar de atualização foram compilados; o Setup integral continua pendente,
+> sem homologação de instalação limpa. Estado e pendências:
+> [validação atual do Setup](docs/SETUP_AUTOMATICO_EM_VALIDACAO_20261017.md).
+
+> **Checkpoint anterior para reinstalação em 17/10/2026 — versão em desenvolvimento.**
 > O candidato completo de 15/10 inclui 14 executáveis, Electron, Web Models e
 > componentes QuickJS/HCS/RustDesk. Os hashes e o `--check` do Setup foram
 > revalidados em 17/10. Não houve nova compilação nesta rodada.
@@ -15,10 +34,6 @@
 ![Tests pytest](https://img.shields.io/badge/tests-pytest-green)
 ![Stdlib dashboard](https://img.shields.io/badge/dashboard-stdlib-lightgrey)
 ![CI](https://github.com/vitorGgC569/SENTRA/actions/workflows/ci.yml/badge.svg)
-
-**Orquestração auditável de implementação de código com agentes de IA.**
-LLMs propõem; software verifica as evidências e controla o fluxo.
-Consenso entre modelos não é prova de correção — teste verde + quorum é.
 
 > Leia também: [`skills/oma_operator/SKILL.md`](skills/oma_operator/SKILL.md)
 > (runbook do operador) · [`docs/traps.md`](docs/traps.md) (armadilhas reais) ·

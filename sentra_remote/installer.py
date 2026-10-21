@@ -39,15 +39,26 @@ DEFAULT_MANIFEST_URL = (
     "https://github.com/vitorGgC569/SENTRA/releases/latest/download/release-manifest.json"
 )
 INSTALL_MARKER = ".sentra-install.json"
+# Frozen components can take tens of seconds on a clean, memory-limited VM.
+# Keep health/instance/policy checks authoritative, with a bounded cold-start wait.
+SERVICE_STARTUP_TIMEOUT_S = 120.0
 
 ProgressCallback = Callable[[str, int], None]
 
 
+def _display_ready(verification: dict[str, Any]) -> bool:
+    return not verification.get("display_required") or ((verification.get("status") or {}).get("display") or {}).get("ok") is True
+
+
 def _installation_ready(verification: dict[str, Any], *, openai_required: bool = True) -> bool:
     """Setup requires the GPT-WEB tunnel; local health alone is not completion."""
+    if not _display_ready(verification):
+        return False
     local_ready = bool(verification.get("core_ready") and not verification.get("onboarding_required"))
     if not openai_required:
-        return local_ready
+        # Fresh machines have no account enrollment yet. Local service health
+        # must allow Setup to reach that step instead of waiting for itself.
+        return bool(verification.get("core_ready"))
     status = verification.get("status") or {}
     web = status.get('web_models') or {}
     if verification.get('web_models_required') and not all(web.get(key) is True for key in ('payload_complete', 'ready', 'catalog_ready', 'turn_ready')):
@@ -60,11 +71,22 @@ def _installation_ready(verification: dict[str, Any], *, openai_required: bool =
                      (verification.get("codex_plugin") or {}).get("ready") is True))
 
 
+def _verify_installed_display(verification: dict[str, Any], install_dir: Path) -> None:
+    from .display_probe import probe_installed_display
+    display = probe_installed_display(install_dir)
+    verification["display_required"] = True
+    verification["status"] = {**(verification.get("status") or {}), "display": display}
+    verification["checks"] = [*(verification.get("checks") or []),
+                              {"id": "display", "required": True, "ok": display.get("ok") is True}]
+
+
 def _friendly_install_error(exc: BaseException) -> str:
     """Translate common setup failures into a concrete next action."""
     detail = str(exc).strip() or exc.__class__.__name__
     lowered = detail.lower()
-    if "sha-256" in lowered or "checksum" in lowered:
+    if "credential_protection_unavailable" in lowered:
+        action = "A proteção de credenciais do Windows não está disponível nesta sessão. Execute o Setup na sessão do usuário conectado. A instalação anterior foi preservada."
+    elif "sha-256" in lowered or "checksum" in lowered:
         action = "Baixe novamente o instalador oficial. A verificação de integridade falhou; nenhum arquivo não verificado será instalado."
     elif "payload" in lowered and ("missing" in lowered or "stale" in lowered):
         action = "Este pacote está incompleto ou desatualizado. Use uma versão completa do SENTRA Setup. A instalação anterior foi preservada."
@@ -291,6 +313,26 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         owned.append(runtime_record.name)
     folders = [(ext_source, "edge_extension"), (source / "web-models", "web-models"),
                (runtime_source, "runtime"), (docs, "docs")]
+    bridge_source = source / "prerequisites/browser-enrollment"
+    bridge_target = install_dir / "browser-enrollment"
+    if bridge_source.is_dir():
+        shutil.copytree(_filesystem_path(bridge_source), _filesystem_path(bridge_target), dirs_exist_ok=True)
+        folders.append((bridge_source, "browser-enrollment"))
+    elif not getattr(sys, "frozen", False):
+        from .enrollment_extension import stage_extensions
+        stage_extensions(Path(__file__).parent / "enrollment_extension", bridge_target)
+        folders.append((bridge_target, "browser-enrollment"))
+    else:
+        raise FileNotFoundError("packaged Setup DOM bridge is missing")
+    registration_source = source / "prerequisites/codex-registration"
+    if registration_source.exists():
+        from .codex_registration_runtime import validate_registration_runtime
+        validate_registration_runtime(registration_source)
+        registration_target = install_dir / "runtime/codex-registration"
+        shutil.copytree(_filesystem_path(registration_source), _filesystem_path(registration_target),
+                        dirs_exist_ok=True)
+        validate_registration_runtime(registration_target)
+        folders.append((registration_source, "runtime/codex-registration"))
     if electron_source.exists():
         folders.append((electron_source, "sentra-electron"))
     for folder, prefix in folders:
@@ -624,6 +666,11 @@ def install(**options) -> dict[str, Any]:
         preflight = check_install_payload(install_dir)
         if not preflight["ok"]:
             raise FileNotFoundError("installer payload missing: " + ", ".join(preflight["missing"]))
+        if options.get("offline_handoff") is None:
+            from .openai_auto_setup import verify_credential_protection
+            # Check before downloads, ownership changes, copying or stopping
+            # services. An offline update remains deferred to its restart user.
+            verify_credential_protection()
         state = (Path(options["state_dir"]).expanduser().resolve() if options.get("state_dir")
                  else ProductPaths.default(install_dir).state_dir)
         if progress:
@@ -775,6 +822,10 @@ def _install_product(
         configure_tunnel(paths, tunnel_id, runtime_key)
     if register_system:
         notify("Registering SENTRA for this Windows user", 80)
+        from .enrollment_extension import register_native_host
+        result["browser_bridge"] = register_native_host(install_dir, paths.state_dir)
+        _write_install_marker(install_dir, ["browser-enrollment/native-config.json",
+            "browser-enrollment/native-chromium.json", "browser-enrollment/native-firefox.json"])
         if settings.autostart_desktop:
             _register_startup(install_dir)
         else:
@@ -790,7 +841,9 @@ def _install_product(
     runtime = None
     if offline_handoff is None:
         runtime = LocalRuntime(paths, settings)
-        verification = runtime.connect_and_verify(timeout_s=12.0)
+        verification = runtime.connect_and_verify(timeout_s=SERVICE_STARTUP_TIMEOUT_S)
+        notify("Verificando a interface instalada…", 89)
+        _verify_installed_display(verification, install_dir)
     else:
         # Coordinated apply keeps the installation quiesced. Starting services
         # here would invalidate the helper's actual offline proof and rollback.
@@ -800,7 +853,10 @@ def _install_product(
     verification['web_models_required'] = True
     if register_system and offline_handoff is None:
         notify("Registrando o plugin SENTRA no Codex…", 90)
-        verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port)
+        verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port,
+            registration_root=install_dir / "runtime/codex-registration")
+    if runtime is not None:
+        runtime.refresh_verification(verification)
     result["connect_verify"] = verification
     result["doctor"] = verification["status"]
     # The native Canvas and CLI are shipped regardless of OpenAI login.
@@ -825,7 +881,7 @@ def _install_product(
 
     human = install_dir / "sentra-human.exe"
     control = install_dir / "sentra-desktop.exe"
-    if launch and not stop_after_doctor and offline_handoff is None:
+    if launch and not stop_after_doctor and offline_handoff is None and _display_ready(verification):
         launch_result: dict[str, Any] = {
             "requested": True,
             "deep_link": verification.get("next_url"),
@@ -863,20 +919,27 @@ def _install_product(
     return result
 
 
-def verify_installed_local(*, install_dir: Path, launch: bool = True,
+def verify_installed_local(*, install_dir: Path, launch: bool = True, state_dir: Path | None = None,
+                           stop_after_doctor: bool = False,
                            progress: ProgressCallback | None = None) -> dict[str, Any]:
     """Retry required tunnel/plugin readiness without reinstalling or stopping work."""
     install_dir = install_dir.expanduser().resolve()
     _validate_sentra_install(install_dir)
-    paths = ProductPaths.default(install_dir)
+    paths = ProductPaths(install_dir, state_dir.expanduser().resolve()) if state_dir is not None else ProductPaths.default(install_dir)
     if progress:
         progress("Verificando os serviços do SENTRA…", 88)
     settings = ProductSettings.load(paths.settings)
-    verification = LocalRuntime(paths, settings).connect_and_verify(timeout_s=30.0)
+    runtime = LocalRuntime(paths, settings)
+    verification = runtime.connect_and_verify(timeout_s=SERVICE_STARTUP_TIMEOUT_S)
+    _verify_installed_display(verification, install_dir)
     verification['web_models_required'] = True
-    verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port)
+    verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port,
+        registration_root=install_dir / "runtime/codex-registration")
+    runtime.refresh_verification(verification)
     ready = _installation_ready(verification)
-    if ready and launch:
+    if stop_after_doctor:
+        runtime.stop_all()
+    if ready and launch and not stop_after_doctor:
         subprocess.Popen([str(install_dir / "sentra-canvas.exe")], cwd=install_dir,
                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     return {"version": PRODUCT_VERSION, "install_dir": str(install_dir),
@@ -916,9 +979,12 @@ def connect_installed_openai(
     web_models = _enable_web_models_autostart(paths, install_dir)
     notify("Connecting OpenAI secure tunnel", 72)
     runtime = LocalRuntime(paths, settings)
-    verification = runtime.connect_and_verify(timeout_s=12.0)
+    verification = runtime.connect_and_verify(timeout_s=SERVICE_STARTUP_TIMEOUT_S)
+    _verify_installed_display(verification, install_dir)
     verification['web_models_required'] = True
-    verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port)
+    verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port,
+        registration_root=install_dir / "runtime/codex-registration")
+    runtime.refresh_verification(verification)
     ready = _installation_ready(verification, openai_required=True)
     notify("Túnel verificado; autorize o plugin no ChatGPT" if ready else "Connection needs attention", 95 if ready else 85)
 
@@ -932,7 +998,7 @@ def connect_installed_openai(
         "reused_install": True,
     }
 
-    if launch:
+    if launch and _display_ready(verification):
         control = install_dir / "sentra-desktop.exe"
         human = install_dir / "sentra-human.exe"
         launch_result: dict[str, Any] = {
@@ -979,6 +1045,8 @@ def uninstall(
     _validate_sentra_install(install_dir)
     _stop_installed_processes(install_dir)
     if unregister_system:
+        from .enrollment_extension import unregister_native_host
+        unregister_native_host(install_dir)
         _unregister_startup(install_dir)
         _unregister_user_path(install_dir)
         _unregister_url_protocol(install_dir)
@@ -1027,6 +1095,8 @@ def uninstall(
 
 class InstallerWizard:
     def __init__(self) -> None:
+        from .gui_runtime import prepare_gui_runtime
+        prepare_gui_runtime()
         import tkinter as tk
         from tkinter import ttk
 
@@ -1223,7 +1293,7 @@ class InstallerWizard:
                     verification = result["connect_verify"]
                     install_dir = selected["install_dir"].expanduser().resolve()
                     control = install_dir / "sentra-desktop.exe"
-                    if control.is_file():
+                    if control.is_file() and _display_ready(verification):
                         ready = _installation_ready(verification, openai_required=True)
                         command = [str(control), "--hidden"] if ready else [
                             str(control), "--open-url", str(verification.get("next_url") or "sentra://onboarding")
@@ -1250,7 +1320,9 @@ class InstallerWizard:
                     def installed() -> None:
                         self._installed = True
                         if not _installation_ready(verification, openai_required=False):
-                            self.status.set("Instalado. A verificação dos serviços ainda precisa de atenção.")
+                            display_failed = not _display_ready(verification)
+                            self.status.set("Instalado. A interface não passou na verificação." if display_failed else
+                                            "Instalado. A verificação dos serviços ainda precisa de atenção.")
                             self.progress_value.set(90)
                             self.connect_hint.configure(text="Seus arquivos foram preservados. Tente verificar novamente.")
                             self.install_button.configure(state="normal", text="Verificar novamente  →",
@@ -1262,31 +1334,8 @@ class InstallerWizard:
                         self.status.set("Etapa 2 de 3 — configure o túnel obrigatório para GPT6-WEB.")
                         self.progress_value.set(85)
                         if browser_setup and enroll:
-                            desktop = Path(self.install_dir.get()).expanduser().resolve() / "sentra-desktop.exe"
-                            try:
-                                if not desktop.is_file():
-                                    raise FileNotFoundError("SENTRA Desktop launcher is missing; repair Setup first")
-                                authorize_installer_enrollment(ProductPaths.default(desktop.parent))
-                                subprocess.Popen(
-                                    [str(desktop), "--open-url", "sentra://openai-enroll"],
-                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                                )
-                                self._connection_deadline = time.monotonic() + 600
-                            except (OSError, ValueError, RuntimeError) as exc:
-                                error = _friendly_install_error(exc)
-                                self.status.set("SENTRA local instalado. A configuração automática precisa de atenção.")
-                                self.connect_hint.configure(text=error.replace("\n\n", " — "))
-                                # This callback executes after the worker's try
-                                # block. Always unlock before showing the error.
-                                self.install_button.configure(
-                                    state="normal", text="Tentar configuração novamente  →",
-                                    command=self._primary_action,
-                                )
-                                messagebox.showerror("SENTRA Setup", error)
-                                return
-                            self.connect_hint.configure(
-                                text="Abrindo o Edge para configurar e verificar a conexão. Entre na sua conta quando solicitado."
-                            )
+                            self._start_browser_setup()
+                            return
                         else:
                             self.connect_hint.configure(
                                 text="Conecte o túnel e entre nos modelos WEB em Abrir Web Models. Depois, verifique novamente. "
@@ -1306,6 +1355,8 @@ class InstallerWizard:
                     text = (
                         "MCP e túnel verificados. Falta autorizar o plugin no ChatGPT e confirmar uma chamada de ferramenta pela conta."
                     )
+                elif not _display_ready(verification):
+                    text = "A interface instalada não passou na verificação. Reabra o Setup para reparar e verificar novamente."
                 elif verification.get("core_ready"):
                     text = (
                         "SENTRA local instalado. A conexão obrigatória para GPT6-WEB ainda precisa de atenção."
@@ -1349,6 +1400,74 @@ class InstallerWizard:
                 self.root.after(0, failed)
 
         __import__("threading").Thread(target=worker, daemon=True).start()
+
+    def _start_browser_setup(self) -> None:
+        """Own the browser step inside Setup instead of handing it to Desktop."""
+        from .openai_auto_setup import run_setup_enrollment
+        if getattr(self, "_browser_setup_running", False):
+            return
+        self._browser_setup_running = True
+        install_dir = Path(self.install_dir.get()).expanduser().resolve()
+        self.install_button.configure(state="disabled")
+        self.status.set("Configurando a conexão pelo navegador neste Setup…")
+        self.connect_hint.configure(text="Usando uma conexão DOM disponível. Conclua login ou consentimento no navegador se solicitado.")
+
+        def notify(event: str, message: str) -> None:
+            if event in {"browser_session", "opened", "progress", "workspace_required"}:
+                self.root.after(0, lambda text=message: self.connect_hint.configure(text=text))
+
+        def worker() -> None:
+            try:
+                result = run_setup_enrollment(ProductPaths.default(install_dir), notify)
+            except Exception:
+                result = {"ok": False, "reason": "browser_enrollment_needs_attention"}
+
+            def finished() -> None:
+                self._browser_setup_running = False
+                if result.get("ok"):
+                    self._install(require_openai=False, verify_only=True, enroll=False)
+                    return
+                messages = {
+                    "credential_protection_unavailable": "O Windows não disponibilizou a proteção de credenciais. A configuração da conta não foi iniciada.",
+                    "browser_enrollment_timeout": "A conexão não foi concluída no prazo. Verifique o navegador antes de tentar novamente.",
+                    "manual_recovery_required": "Existe uma configuração anterior que precisa ser recuperada antes de continuar.",
+                    "browser_account_selection_required": "Mais de um navegador está conectado. Mantenha conectada a sessão Platform desejada e tente novamente.",
+                    "browser_extension_required": "Habilite a ponte DOM no navegador com a conta já conectada. O Setup inclui a extensão Firefox assinada pela Mozilla para uso privado. A confirmação de instalação pertence ao navegador.",
+                    "browser_enrollment_already_running": "Há outra configuração pelo navegador em andamento. Conclua ou feche o outro Setup antes de tentar novamente.",
+                    "login_required": "Entre na conta Platform no navegador para continuar a configuração.",
+                    "chatgpt_workspace_required": "Selecione o workspace ChatGPT desejado no formulário do navegador.",
+                    "workspace_association_unverified": "O provedor não confirmou a associação do workspace. Verifique essa etapa na Platform.",
+                }
+                self.status.set("A configuração automática precisa de atenção.")
+                self.connect_hint.configure(text=messages.get(result.get("reason"), "Verifique a etapa indicada no navegador e tente novamente pelo Setup."))
+                self.install_button.configure(state="normal", text="Tentar configuração novamente  →", command=self._start_browser_setup)
+                if result.get("reason") == "browser_extension_required":
+                    from .enrollment_extension import installed_firefox_package
+                    try:
+                        installed_firefox_package(install_dir)
+                    except (OSError, ValueError):
+                        pass
+                    else:
+                        self.install_button.configure(text="Habilitar ponte no Firefox  →", command=self._open_firefox_bridge)
+
+            self.root.after(0, finished)
+
+        __import__("threading").Thread(target=worker, daemon=True).start()
+
+    def _open_firefox_bridge(self) -> None:
+        from tkinter import messagebox
+        from .enrollment_extension import open_firefox_bridge_installation
+        try:
+            open_firefox_bridge_installation(Path(self.install_dir.get()).expanduser().resolve())
+        except (OSError, ValueError):
+            messagebox.showerror("SENTRA Setup", "Não foi possível abrir o pacote assinado do Firefox. Verifique ou repare a instalação.")
+            return
+        messagebox.showinfo("Habilitar no Firefox",
+            "No Firefox, em Extensões, abra a engrenagem e escolha Instalar extensão de um arquivo. "
+            "Selecione firefox-signed.xpi na pasta que foi aberta e confirme a instalação no navegador. "
+            "Mantenha aberta a sessão Platform que deseja usar. "
+            "Quando concluir, feche este aviso: o Setup continuará automaticamente.")
+        self._start_browser_setup()
 
     def _show_tunnel_verified(self, verification: dict) -> None:
         self._connection_deadline = 0
@@ -1396,6 +1515,70 @@ class InstallerWizard:
         return 0
 
 
+def _write_setup_report(path: Path, operation: str, result: dict[str, Any], code: int) -> None:
+    """Persist fixed verification axes even when the windowed EXE has no console.
+
+    Provider responses and configuration are deliberately excluded: a report
+    must be safe to attach to clean-machine QA without exporting credentials.
+    """
+    verification = result.get("connect_verify") or {}
+    status = verification.get("status") or {}
+    preflight = result if operation == "check" else result.get("preflight") or {}
+    browser = result.get("browser_automation") or {}
+    failure_type = result.get("error_type")
+    known_failures = {"TimeoutExpired", "TimeoutError", "PermissionError", "FileNotFoundError",
+                      "FileExistsError", "ValueError", "RuntimeError", "OSError",
+                      "CredentialProtectionUnavailable", "ShortcutRegistrationError"}
+    failure = None
+    if failure_type:
+        safe_type = failure_type if failure_type in known_failures else "installation_error"
+        failure = {"error_type": safe_type, "stage": (
+            "windows_shortcuts" if safe_type == "ShortcutRegistrationError" else
+            "credential_protection" if safe_type == "CredentialProtectionUnavailable" else operation)}
+    browser_reason = browser.get("reason")
+    if browser_reason not in {"credential_protection_unavailable", "manual_recovery_required",
+                              "browser_extension_required", "browser_account_selection_required", "browser_enrollment_already_running",
+                              "browser_enrollment_needs_attention", "browser_enrollment_incomplete",
+                              "browser_enrollment_timeout", "tunnel_verified"}:
+        browser_reason = None
+    report = {
+        "schema": 1, "version": PRODUCT_VERSION, "operation": operation,
+        "exit_code": code, "recorded_at": time.time(),
+        "failure": failure,
+        "payload_ok": preflight.get("ok") is True,
+        "payload_verified": preflight.get("verified") is True,
+        "preflight_failure": ("credential_protection_unavailable"
+                              if result.get("reason") == "credential_protection_unavailable" else None),
+        "local_ready": verification.get("core_ready") is True,
+        "ready": code == 0 and operation == "install" and _installation_ready(verification),
+        "verification_deferred": verification.get("deferred") == "post_update_restart",
+        "browser_enrollment": {"attempted": "browser_automation" in result,
+                               "ok": browser.get("ok") is True, "reason": browser_reason},
+        "checks": {
+            name: (status.get(name) or {}).get("ok") is True
+            for name in ("mcp", "tunnel", "display")
+        },
+        "display_required": verification.get("display_required") is True,
+        "web_models": {
+            name: (status.get("web_models") or {}).get(name) is True
+            for name in ("payload_complete", "ready", "catalog_ready", "turn_ready")
+        },
+        "account_authorization_verified": False,
+        "homologated": False,
+    }
+    target = Path(_filesystem_path(path))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as stream:
+            json.dump(report, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     parser = argparse.ArgumentParser(prog="sentra-installer")
@@ -1419,9 +1602,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--tunnel-archive")
     parser.add_argument("--silent", action="store_true")
+    parser.add_argument("--report-file", type=Path,
+                        help="Write a credential-free JSON verification report (check/silent mode).")
     parser.add_argument("--browser-setup", action="store_true",
-                        help="Enable Edge automation in a profile with no signed-in account.")
+                        help="Complete account enrollment through DOM inside Setup, reusing an available browser connection.")
     parser.add_argument("--check", action="store_true", help="Verify this Setup payload without installing or starting services.")
+    parser.add_argument("--gui-check", action="store_true", help="Create and destroy a hidden Tk/ttk window without installing or starting services.")
+    parser.add_argument("--gui-check-report", type=Path)
     parser.add_argument("--install-git", action="store_true")
     parser.add_argument("--install-docker", action="store_true")
     parser.add_argument(
@@ -1437,6 +1624,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upgrade", action="store_true")
     parser.add_argument("--offline-handoff", type=Path)
     args = parser.parse_args(argv)
+    if args.gui_check_report and not args.gui_check:
+        parser.error("--gui-check-report requires --gui-check")
+    if args.gui_check:
+        from .gui_runtime import check_gui_runtime
+        return 0 if check_gui_runtime(args.gui_check_report)["ok"] else 2
+    if args.browser_setup and (args.offline_handoff or args.uninstall):
+        parser.error("browser enrollment requires an online installation")
+    if args.report_file and not (args.check or args.silent):
+        parser.error("--report-file requires --check or --silent")
+
+    def finish(operation: str, result: dict[str, Any], code: int) -> int:
+        if args.report_file:
+            try:
+                _write_setup_report(args.report_file, operation, result, code)
+            except OSError:
+                # Unrecorded runs cannot pass an unattended evidence gate.
+                return 2
+        return code
     if args.check:
         try:
             result = check_install_payload(Path(args.install_dir))
@@ -1444,15 +1649,16 @@ def main(argv: list[str] | None = None) -> int:
             result = {"ok": False, "error_type": type(exc).__name__, "message": str(exc)}
         if sys.stdout is not None:
             print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0 if result.get("ok") else 2
+        return finish("check", result, 0 if result.get("ok") else 2)
     if args.uninstall:
-        print(json.dumps(uninstall(
+        result = uninstall(
             Path(args.install_dir),
             keep_config=args.keep_config,
             state_dir=Path(args.state_dir) if args.state_dir else None,
             unregister_system=not args.no_system_registration,
-        )))
-        return 0
+        )
+        print(json.dumps(result))
+        return finish("uninstall", result, 0)
     if not args.silent:
         return InstallerWizard().run()
     try:
@@ -1466,7 +1672,7 @@ def main(argv: list[str] | None = None) -> int:
             tunnel_archive=Path(args.tunnel_archive) if args.tunnel_archive else None,
             install_git=args.install_git and not args.no_git,
             install_docker=args.install_docker,
-            launch=not args.no_launch,
+            launch=not args.no_launch and not args.browser_setup,
             state_dir=Path(args.state_dir) if args.state_dir else None,
             register_system=not args.no_system_registration,
             mcp_port=args.mcp_port,
@@ -1478,6 +1684,9 @@ def main(argv: list[str] | None = None) -> int:
         from sentra_mcp.errors import sanitize_error
         failure = {"ok": False, "error_type": type(exc).__name__,
                    "message": sanitize_error(_friendly_install_error(exc))[:2000]}
+        from .openai_auto_setup import CredentialProtectionUnavailable
+        if isinstance(exc, CredentialProtectionUnavailable):
+            failure["reason"] = "credential_protection_unavailable"
         print(json.dumps(failure), file=sys.stderr)
         # Windowed PyInstaller has no stderr. Persist a bounded diagnostic and
         # return normally so --silent never leaves an unattended error dialog.
@@ -1487,21 +1696,33 @@ def main(argv: list[str] | None = None) -> int:
             (error_root / "installer-error.json").write_text(json.dumps(failure), encoding="utf-8")
         except OSError:
             pass
-        return 2
+        return finish("install", failure, 2)
     if args.browser_setup:
-        from .openai_auto_setup import authorize_installer_enrollment, edge_automation_profile
+        if not _installation_ready(result.get("connect_verify") or {}, openai_required=False):
+            return finish("install", result, 2)
+        from .openai_auto_setup import run_setup_enrollment
         enrolled = ProductPaths(
             Path(args.install_dir),
             Path(args.state_dir) if args.state_dir else ProductPaths.default(Path(args.install_dir)).state_dir,
         )
-        edge_automation_profile(enrolled.state_dir)
-        authorize_installer_enrollment(enrolled)
-        result["browser_automation"] = {"enabled": True, "signed_in_edge_profile": False}
+        try:
+            browser_result = run_setup_enrollment(enrolled, lambda *_: None)
+            result["browser_automation"] = browser_result
+            if not browser_result.get("ok"):
+                return finish("install", result, 2)
+            checked = verify_installed_local(
+                install_dir=enrolled.install_dir, state_dir=enrolled.state_dir,
+                launch=not args.no_launch, stop_after_doctor=args.stop_after_doctor,
+            )
+            result["connect_verify"] = checked["connect_verify"]
+        except Exception:
+            result["browser_automation"] = {"ok": False, "reason": "browser_enrollment_needs_attention"}
+            return finish("install", result, 2)
     print(json.dumps(result, indent=2))
     verification = result.get("connect_verify") or {}
     if args.offline_handoff and verification.get("deferred") == "post_update_restart":
-        return 0  # The authenticated update helper verifies after restart.
-    return 0 if _installation_ready(verification) else 2
+        return finish("install", result, 0)  # The authenticated update helper verifies after restart.
+    return finish("install", result, 0 if _installation_ready(verification) else 2)
 
 
 

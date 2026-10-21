@@ -6,10 +6,75 @@ import os
 import re
 import time
 import uuid
+import threading
 from typing import Any, Callable
 
 from .product import ProductPaths, configure_tunnel, tunnel_credential_storage, tunnel_key_update
 from .secrets import protect_secret, unprotect_secret
+
+
+class CredentialProtectionUnavailable(RuntimeError):
+    """Fixed failure without OS/provider diagnostics that could contain a secret."""
+
+
+def verify_credential_protection() -> None:
+    """Prove the current OS user can protect and recover a disposable probe."""
+    probe = "sentra-setup-" + uuid.uuid4().hex
+    try:
+        protected = protect_secret(probe)
+        try:
+            if unprotect_secret(protected) != probe:
+                raise RuntimeError("protection round-trip failed")
+        finally:
+            if protected.startswith("keyring:"):
+                import keyring
+                keyring.delete_password("SENTRA Commander", protected[len("keyring:"):])
+    except Exception:
+        raise CredentialProtectionUnavailable("credential_protection_unavailable") from None
+
+
+def run_setup_enrollment(paths: ProductPaths, notify: Callable, *, timeout_s: float = 650) -> dict:
+    """Keep enrollment in Setup, with verified recovery before browser effects."""
+    # Repeat immediately before account effects; pre-install success may be old.
+    try:
+        verify_credential_protection()
+    except CredentialProtectionUnavailable:
+        return {"ok": False, "reason": "credential_protection_unavailable"}
+    from .local_runtime import LocalRuntime
+    from .product import ProductSettings
+    runtime = LocalRuntime(paths, ProductSettings.load(paths.settings))
+    recovered = recover_enrollment(paths, runtime)
+    if recovered.get("ok"):
+        return recovered
+    if not recovered.get("enrollment_needed"):
+        return {"ok": False, "reason": "manual_recovery_required"}
+    from .openai_browser_enrollment import OpenAIConsentBrowser
+    closed = threading.Event()
+    result = {"ok": False, "reason": "browser_enrollment_incomplete"}
+
+    def on_event(event: str, message: str) -> None:
+        if event == "ready":
+            result.update(ok=True, reason="tunnel_verified")
+        elif event == "attention":
+            known = {"browser_account_selection_required", "login_required",
+                     "browser_extension_required", "browser_enrollment_already_running",
+                     "all_permissions_unavailable", "platform_ui_needs_attention",
+                     "chatgpt_workspace_required", "workspace_association_unverified",
+                     "manual_recovery_required", "tunnel_verification_failed"}
+            result.update(ok=False, reason=message if message in known else "browser_enrollment_needs_attention")
+        elif event == "closed":
+            closed.set()
+        # The tunnel identifier is not needed by Setup; all credentials stay
+        # within enrollment and Windows-protected product storage.
+        if event != "tunnel":
+            notify(event, message)
+
+    session = OpenAIConsentBrowser(paths, on_event, runtime=runtime)
+    session.start(approved=True, automatic=True)
+    if not closed.wait(timeout_s):
+        session.close()
+        return {"ok": False, "reason": "browser_enrollment_timeout"}
+    return result
 
 
 def edge_automation_profile(state_dir) -> Path:
@@ -86,6 +151,66 @@ def _protected_config(raw: bytes) -> bool:
                     and RUNTIME_KEY_PATTERN.fullmatch(unprotect_secret(protected)))
     except Exception:
         return False
+
+
+def remember_enrollment_tunnel(paths: ProductPaths, tunnel_id: str, *, name: str = "") -> None:
+    """Retain only the selected resource ID for an authorized retry, never a key."""
+    from .openai_browser_enrollment import TUNNEL_PATTERN
+    if not TUNNEL_PATTERN.fullmatch(tunnel_id):
+        raise ValueError("tunnel_not_found")
+    if name and not re.fullmatch(r"SENTRA-[0-9a-f]{10}", name):
+        raise ValueError("saved_tunnel_not_visible")
+    protected = protect_secret(json.dumps({"version": 1,
+        "install_dir": str(paths.install_dir.resolve()), "tunnel_id": tunnel_id, "name": name}))
+    if os.name == "nt" and not protected.startswith("dpapi:"):
+        raise RuntimeError("credential_protection_unavailable")
+    target = paths.state_dir / "openai-enrollment-tunnel.dpapi"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary = target.with_suffix(".tmp")
+    with temporary.open("x", encoding="utf-8") as stream:
+        stream.write(protected)
+        stream.flush()
+        os.fsync(stream.fileno())
+    temporary.replace(target)
+
+
+def remembered_enrollment_tunnel(paths: ProductPaths) -> str:
+    """A checkpoint supplies no consent and is bound to this Windows user/install."""
+    return _remembered_enrollment_tunnel(paths).get("tunnel_id", "")
+
+
+def remembered_enrollment_tunnel_name(paths: ProductPaths, tunnel_id: str) -> str:
+    data = _remembered_enrollment_tunnel(paths)
+    return data.get("name", "") if data.get("tunnel_id") == tunnel_id else ""
+
+
+def _remembered_enrollment_tunnel(paths: ProductPaths) -> dict:
+    from .openai_browser_enrollment import TUNNEL_PATTERN
+    target = paths.state_dir / "openai-enrollment-tunnel.dpapi"
+    if not target.exists():
+        return {}
+    try:
+        if target.is_symlink() or target.stat().st_size > 16384:
+            raise ValueError()
+        protected = target.read_text(encoding="utf-8")
+        if os.name == "nt" and not protected.startswith("dpapi:"):
+            raise ValueError()
+        data = json.loads(unprotect_secret(protected))
+        identifier = data.get("tunnel_id")
+        if (data.get("version") != 1
+                or data.get("install_dir") != str(paths.install_dir.resolve())
+                or not isinstance(identifier, str) or not TUNNEL_PATTERN.fullmatch(identifier)
+                or not isinstance(data.get("name", ""), str)
+                or (data.get("name") and not re.fullmatch(r"SENTRA-[0-9a-f]{10}", data["name"]))):
+            raise ValueError()
+        return data
+    except Exception:
+        raise ValueError("manual_recovery_required") from None
+
+
+def clear_remembered_enrollment_tunnel(paths: ProductPaths, tunnel_id: str) -> None:
+    if remembered_enrollment_tunnel(paths) == tunnel_id:
+        (paths.state_dir / "openai-enrollment-tunnel.dpapi").unlink(missing_ok=True)
 
 
 def recover_enrollment(paths: ProductPaths, runtime: Any) -> dict:
@@ -208,10 +333,14 @@ def _configure_and_verify(paths: ProductPaths, tunnel_id: str, key: str, runtime
 class AutomaticEnrollment:
     """Create through visible official UI; login stays in the user's browser."""
 
-    def __init__(self, page: Any, notify: Callable, cancelled: Any, *, existing_tunnel_id: str = "") -> None:
+    def __init__(self, page: Any, notify: Callable, cancelled: Any, *, existing_tunnel_id: str = "",
+                 existing_tunnel_name: str = "",
+                 on_tunnel_selected: Callable[[str], None] | None = None) -> None:
         self.page, self.notify, self.cancelled = page, notify, cancelled
         self.name = "SENTRA-" + uuid.uuid4().hex[:10]
         self.existing_tunnel_id = existing_tunnel_id
+        self.existing_tunnel_name = existing_tunnel_name
+        self.on_tunnel_selected = on_tunnel_selected
 
     def guard(self, kind: str) -> None:
         from .openai_browser_enrollment import _trusted_platform_location
@@ -292,6 +421,184 @@ class AutomaticEnrollment:
                 raise ValueError("chatgpt_workspace_required") from None
             raise
 
+    @staticmethod
+    def native_option_labels(selector: Any, *, enabled_only: bool = False) -> list[str]:
+        options = selector.locator("option:not([disabled])" if enabled_only else "option")
+        return [options.nth(i).inner_text().strip() for i in range(options.count())]
+
+    @staticmethod
+    def native_selected_label(selector: Any) -> str:
+        selected = selector.locator("option:checked")
+        return selected.inner_text().strip() if selected.count() == 1 else ""
+
+    def select_native_project(self, dialog: Any) -> bool:
+        placeholder = re.compile(r"^(?:Select project|Selecionar projeto)[\s.…]*$", re.I)
+        defaults = re.compile(r"^(?:Default project|Projeto padrão)$", re.I)
+        selectors = dialog.locator("select:visible")
+        candidates = [selectors.nth(i) for i in range(selectors.count())
+                      if any(placeholder.fullmatch(text) for text in self.native_option_labels(selectors.nth(i)))]
+        if not candidates:
+            return False
+        if len(candidates) != 1:
+            raise ValueError("project_selection_required")
+        selector = candidates[0]
+        def choice():
+            if not selector.is_enabled():
+                return None
+            labels = [text for text in self.native_option_labels(selector, enabled_only=True)
+                      if text and not placeholder.fullmatch(text)]
+            preferred = [text for text in labels if defaults.fullmatch(text)]
+            return preferred[0] if len(preferred) == 1 else labels[0] if len(labels) == 1 else False if labels else None
+        label = self.wait(choice, kind="key")
+        if label is False:
+            self.notify("progress", "Choose the API key project in the open Platform form. Automatic setup resumes after selection.")
+            self.wait(lambda: True if self.native_selected_label(selector)
+                      and not placeholder.fullmatch(self.native_selected_label(selector)) else None,
+                      kind="key", timeout=600)
+        else:
+            self.guard("key")
+            selector.select_option(label=label, timeout=5000)
+            self.wait(lambda: True if self.native_selected_label(selector) == label else None, kind="key")
+        return True
+
+    def select_native_expiry(self, dialog: Any) -> bool:
+        never = re.compile(r"^(?:Never|Nunca|No expiration|Sem expiração)$", re.I)
+        placeholder = re.compile(r"^(?:Select (?:an? )?(?:expiration|expiry)(?: date)?|Selecione uma validade|Expiração|Expiration)[\s.…]*$", re.I)
+        selectors = dialog.locator("select:visible")
+        candidates = [selectors.nth(i) for i in range(selectors.count())
+                      if any(never.fullmatch(text) or placeholder.fullmatch(text)
+                             for text in self.native_option_labels(selectors.nth(i)))
+                      and not any(re.fullmatch(r"(?:Select project|Selecionar projeto)[\s.…]*", text, re.I)
+                                  for text in self.native_option_labels(selectors.nth(i)))]
+        if not candidates:
+            return False
+        if len(candidates) != 1:
+            raise ValueError("expiry_selection_required")
+        selector = candidates[0]
+        def choice():
+            if not selector.is_enabled():
+                return None
+            labels = [text for text in self.native_option_labels(selector, enabled_only=True) if never.fullmatch(text)]
+            return labels[0] if len(labels) == 1 else None
+        label = self.wait(choice, kind="key")
+        self.guard("key")
+        selector.select_option(label=label, timeout=5000)
+        self.wait(lambda: True if self.native_selected_label(selector) == label else None, kind="key")
+        return True
+
+    @staticmethod
+    def expiry_control_value(text: str) -> str:
+        """Some Platform triggers include both their field label and value."""
+        text = " ".join(text.split())
+        return re.sub(r"^(?:Expiration|Expiry|Expiração|Validade)\s*:?\s+", "", text, flags=re.I)
+
+    def custom_key_control(self, dialog: Any, field: str) -> Any:
+        """Resolve visible custom selectors by their displayed text or label."""
+        if field == "project":
+            displayed = re.compile(r"^(?:Select project|Selecionar projeto)[\s.…]*$", re.I)
+            labelled = re.compile(r"^(?:Project|Projeto|Select project|Selecionar projeto)[\s:*.…]*$", re.I)
+        else:
+            displayed = re.compile(r"^(?:Expiration|Expiração|Select (?:an? )?(?:expiration|expiry)(?: date)?|Selecione uma validade|Never|Nunca|No expiration|Sem expiração)[\s.…]*$", re.I)
+            labelled = re.compile(r"^(?:Expiration|Expiry|Expiração|Validade)[\s:*.…]*$", re.I)
+        matches = []
+        for role in ("combobox", "button"):
+            controls = dialog.get_by_role(role)
+            text_matches = [controls.nth(i) for i in range(controls.count())
+                            if controls.nth(i).is_visible()
+                            and displayed.fullmatch(self.expiry_control_value(controls.nth(i).inner_text())
+                                if field == "expiry" else controls.nth(i).inner_text().strip())]
+            if text_matches:
+                matches.extend(text_matches)
+            else:
+                controls = dialog.get_by_role(role, name=labelled)
+                matches.extend(controls.nth(i) for i in range(controls.count()) if controls.nth(i).is_visible())
+        if len(matches) > 1:
+            raise ValueError(field + "_selection_required")
+        return matches[0] if len(matches) == 1 and matches[0].is_enabled() else None
+
+    def select_custom_project(self, dialog: Any) -> None:
+        try:
+            control = self.wait(lambda: self.custom_key_control(dialog, "project"), kind="key")
+            self.guard("key")
+            self.click_custom_selector(control)
+            def project_option():
+                default = self.page.get_by_role("option", name=re.compile(r"^(?:Default project|Projeto padrão)$", re.I))
+                if default.count() == 1 and default.is_visible():
+                    return default
+                options = self.page.get_by_role("option").filter(visible=True)
+                return options if options.count() == 1 else None
+            project = self.wait(project_option, kind="key")
+            selected_label = project.inner_text().strip()
+            self.guard("key")
+            self.click_custom_selector(project)
+            self.wait(lambda: True if control.inner_text().strip() == selected_label else None, kind="key")
+        except ValueError as exc:
+            if str(exc) == "platform_ui_needs_attention":
+                raise ValueError("project_selection_required") from None
+            raise
+
+    def select_custom_expiry(self, dialog: Any) -> None:
+        never = re.compile(r"^(?:Never|Nunca|No expiration|Sem expiração)$", re.I)
+        try:
+            control = self.wait(lambda: self.custom_key_control(dialog, "expiry"), kind="key")
+            self.guard("key")
+            self.click_custom_selector(control)
+            def never_option():
+                options = self.page.get_by_role("option", name=never)
+                return options if options.count() == 1 and options.is_visible() else None
+            option = self.wait(never_option, kind="key")
+            self.guard("key")
+            self.click_custom_selector(option)
+            self.wait(lambda: True if never.fullmatch(self.expiry_control_value(control.inner_text())) else None, kind="key")
+        except ValueError as exc:
+            if str(exc) == "platform_ui_needs_attention":
+                raise ValueError("expiry_selection_required") from None
+            raise
+
+    @staticmethod
+    def click_custom_selector(control: Any) -> None:
+        # Playwright's normal click already generates the pointer sequence.
+        # The extension needs the corresponding fixed, packaged DOM action.
+        action = getattr(control, "pointer_click", None) or control.click
+        action(timeout=5000)
+
+    def select_existing_tunnel(self) -> str:
+        """Open an observed resource, then verify its ID; never create on retry."""
+        from .openai_browser_enrollment import _TUNNEL_DOM, TUNNEL_PATTERN
+        identifier = self.existing_tunnel_id
+        name = self.existing_tunnel_name
+        if not TUNNEL_PATTERN.fullmatch(identifier) or (name and not re.fullmatch(r"SENTRA-[0-9a-f]{10}", name)):
+            raise ValueError("saved_tunnel_not_visible")
+        def locate():
+            if identifier in set(self.page.evaluate(_TUNNEL_DOM)):
+                return True
+            # IDs may occur only in detail views. Select an actual observed
+            # link, or the exact protected name, without constructing a URL.
+            links = self.page.locator('a[href*=' + json.dumps(identifier) + ']:visible')
+            if links.count() == 1:
+                return links
+            if name:
+                exact = re.compile('^' + re.escape(name) + '$')
+                links = self.page.get_by_role('link', name=exact)
+                if links.count() == 1 and links.is_visible():
+                    return links
+                labels = self.page.get_by_text(exact)
+                if labels.count() == 1 and labels.is_visible():
+                    return labels
+            return None
+        try:
+            selected = self.wait(locate, kind="tunnel")
+            if selected is not True:
+                self.guard("tunnel")
+                selected.click(timeout=5000)
+                self.wait(lambda: True if set(self.page.evaluate(_TUNNEL_DOM)) == {identifier}
+                          else None, kind="tunnel")
+        except ValueError as exc:
+            if str(exc) == "platform_ui_needs_attention":
+                raise ValueError("saved_tunnel_not_visible") from None
+            raise
+        return identifier
+
     def run(self) -> tuple[str, str]:
         from .onboarding import OPENAI_API_KEYS_URL
         from .openai_browser_enrollment import _TUNNEL_DOM, capture_new_key_in_page, _trusted_platform_location
@@ -303,11 +610,8 @@ class AutomaticEnrollment:
             if time.monotonic() >= deadline:
                 raise ValueError("login_required")
             self.page.wait_for_timeout(250)
-        # Wait for hydrated controls before deciding that a tunnel is absent.
-        self.wait(lambda: self.button(self.page, r"^(?:\+\s*)?(?:create|new|add|criar|novo|adicionar) tunnel$"), kind="tunnel")
-        visible = set(self.page.evaluate(_TUNNEL_DOM))
-        if self.existing_tunnel_id and self.existing_tunnel_id in visible:
-            tunnel = self.existing_tunnel_id
+        if self.existing_tunnel_id:
+            tunnel = self.select_existing_tunnel()
         else:
             self.notify("progress", "Creating the SENTRA tunnel…")
             self.click(self.page, r"^(?:\+\s*)?(?:create|new|add|criar|novo|adicionar) tunnel$", "tunnel")
@@ -326,8 +630,11 @@ class AutomaticEnrollment:
                 values = list(set(self.page.evaluate(_TUNNEL_DOM)) - before)
                 return _single_identifier(values, TUNNEL_PATTERN, label="tunnel") if values else None
             tunnel = self.wait(new_tunnel, kind="tunnel")
+        if self.on_tunnel_selected is not None:
+            self.on_tunnel_selected(tunnel)
         self.notify("tunnel", tunnel)
         self.guard("tunnel")
+        self.notify("progress", "Opening the API key form…")
         self.page.goto(OPENAI_API_KEYS_URL, wait_until="domcontentloaded", timeout=30000)
         self.click(self.page, r"^(?:\+\s*)?(?:create new secret key|create secret key|create api key|criar nova chave secreta)$", "key")
         dialog = self.dialog("key")
@@ -343,30 +650,16 @@ class AutomaticEnrollment:
             raise
         # Organization keys still require a project. Prefer the account's
         # Default project; never silently pick one of several custom projects.
-        select_project = dialog.get_by_role("button", name=re.compile(r"^(?:Select project|Selecionar projeto)", re.I))
-        if select_project.count() == 1:
-            self.click(dialog, r"^(?:Select project|Selecionar projeto).*", "key")
-            def project_option():
-                default = self.page.get_by_role("option", name=re.compile(r"^(?:Default project|Projeto padrão)$", re.I))
-                if default.count() == 1 and default.is_visible():
-                    return default
-                options = self.page.get_by_role("option").filter(visible=True)
-                return options if options.count() == 1 else None
-            project = self.wait(project_option, kind="key")
-            self.guard("key")
-            project.click(timeout=5000)
+        self.notify("progress", "Selecting the API key project…")
+        native_project = self.select_native_project(dialog)
+        if not native_project:
+            self.select_custom_project(dialog)
         self.guard("key")
         self.wait(all_radio, kind="key")
-        expiry = dialog.get_by_role("button", name=re.compile(r"^(?:Expiration|Expiração)", re.I))
-        if expiry.count() == 1:
-            self.click(dialog, r"^(?:Expiration|Expiração).*", "key")
-            def never_option():
-                option = self.page.get_by_role("option", name=re.compile(r"^(?:Never|Nunca|No expiration)$", re.I))
-                return option if option.count() == 1 and option.is_visible() else None
-            option = self.wait(never_option, kind="key")
-            self.guard("key")
-            option.click(timeout=5000)
-            self.wait(lambda: True if re.search(r"Never|Nunca|No expiration", expiry.inner_text(), re.I) else None, kind="key")
+        self.notify("progress", "Selecting API key expiration…")
+        native_expiry = self.select_native_expiry(dialog)
+        if not native_expiry:
+            self.select_custom_expiry(dialog)
         # Project/expiry changes can rerender or reset permissions. Confirm All
         # immediately before the final Create action.
         radio = self.wait(all_radio, kind="key")

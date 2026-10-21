@@ -189,7 +189,7 @@ def build(wizard):
     label(connection_header, "OBRIGATÓRIO", size=8, muted=True).pack(side="left", padx=12)
     wizard.openai_toggle = ttk.Button(connection_header, text="Configuração manual  ⌄", style="Setup.TButton", command=wizard._toggle_openai)
     wizard.openai_toggle.pack(side="right")
-    label(connection.body, "O GPT6-WEB precisa do túnel conectado. Autorize a configuração pelo Edge ou informe suas chaves. Login e autorização do plugin são feitos na sua conta.", muted=True, wrap=True).pack(anchor="w", pady=(4, 0))
+    label(connection.body, "O GPT6-WEB precisa do túnel conectado. O Setup configura a conexão pelo DOM do navegador. Login e autorização do plugin são feitos na sua conta.", muted=True, wrap=True).pack(anchor="w", pady=(4, 0))
     details = tk.Frame(connection.body, background=BG)
     fields = tk.Frame(details, background=BG)
     fields.pack(fill="x")
@@ -215,7 +215,7 @@ def build(wizard):
     from sentra_remote.onboarding import OPENAI_TUNNELS_URL, OPENAI_API_KEYS_URL
     ttk.Button(links, text="↗  OpenAI Tunnels", style="Setup.TButton", command=lambda: webbrowser.open(OPENAI_TUNNELS_URL)).pack(side="left", padx=(0, 8))
     ttk.Button(links, text="↗  Runtime API Keys", style="Setup.TButton", command=lambda: webbrowser.open(OPENAI_API_KEYS_URL)).pack(side="left")
-    consent = ttk.Checkbutton(connection.body, text="Conectar minha conta automaticamente pelo Edge", variable=wizard.browser_setup_var)
+    consent = ttk.Checkbutton(connection.body, text="Conectar minha conta automaticamente pelo navegador", variable=wizard.browser_setup_var)
     consent.pack(anchor="w")
     connect_button = ttk.Button(connection.body, text="Configurar / verificar conexão", style="Setup.TButton",
                                 command=wizard._primary_action)

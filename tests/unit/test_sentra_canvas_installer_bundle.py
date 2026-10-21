@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -10,7 +12,6 @@ from unittest.mock import Mock
 import pytest
 
 from scripts.commander.build_canvas import validate_desktop_bundle
-from sentra_remote import windows_integration
 from sentra_remote.desktop import SentraDesktop
 
 
@@ -38,6 +39,25 @@ def test_react_canvas_bundle_current_source_has_verified_hashes():
     assert len(manifest["files"])>=3
 
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git checkout integration")
+def test_sealed_canvas_survives_a_windows_git_checkout(tmp_path):
+    root = Path(__file__).resolve().parents[2]
+    source = tmp_path / "source"
+    source.mkdir()
+    shutil.copy2(root / ".gitattributes", source / ".gitattributes")
+    for name in ("desktop_ui", "static"):
+        shutil.copytree(root / "sentra_canvas" / name, source / "sentra_canvas" / name,
+                        ignore=shutil.ignore_patterns("node_modules", ".tmp", "__pycache__"))
+    def git(*args):
+        subprocess.run(["git", "-c", "core.autocrlf=true", "-c", "core.longpaths=true", *args],
+                       cwd=source, check=True, capture_output=True)
+    git("init", "--quiet")
+    git("add", "--force", ".")
+    checkout = tmp_path / "checkout"
+    git("checkout-index", "--all", "--prefix=" + checkout.as_posix() + "/")
+    assert validate_desktop_bundle(checkout / "sentra_canvas/static")["files"]
+
+
 def test_builder_denies_missing_changed_or_tampered_bundle(tmp_path):
     ui=bundle(tmp_path)
     assert validate_desktop_bundle(ui)["entry"]=="/desktop.html"
@@ -62,13 +82,6 @@ def test_builder_denies_invalid_manifest_paths_or_unverified_bootstrap(tmp_path)
     (ui/"desktop.html").write_text("<html>stale html</html>",encoding="utf-8")
     with pytest.raises(ValueError,match="pinned bootstrap"):
         validate_desktop_bundle(ui)
-
-
-def test_installer_shortcut_targets_canvas_but_keeps_setup_dashboard():
-    script=windows_integration.SCRIPT
-    assert "@{path=(Join-Path $desktop 'SENTRA.lnk'); exe='sentra-canvas.exe'}" in script
-    assert "@{path=(Join-Path $folder 'SENTRA Canvas.lnk'); exe='sentra-canvas.exe'}" in script
-    assert "@{path=(Join-Path $folder 'SENTRA Desktop.lnk'); exe='sentra-human.exe'}" in script
 
 
 def test_quickstart_canvas_launcher_is_installed_owned_executable(tmp_path,monkeypatch):

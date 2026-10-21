@@ -21,3 +21,24 @@
 *.exe binary
 *.msi binary
 *.zip binary
+
+# These inputs and emitted assets are sealed by byte-level SHA-256 manifests.
+# Preserve text bytes on Windows checkouts while keeping images binary.
+/sentra_canvas/desktop_ui/** text=auto eol=lf
+/sentra_canvas/static/desktop-assets/** text=auto eol=lf
+/sentra_canvas/static/desktop.html text eol=lf
+
+# Guest sources must run in Bash on Windows; upstream legal files are byte pins.
+/sentra_code_mode/guest/*.sh text eol=lf
+/sentra_code_mode/guest/*.c text eol=lf
+/sentra_code_mode/guest/*.h text eol=lf
+/sentra_code_mode/guest/licenses/** -text
+# Preserve the final blank line required by the immutable upstream license hash.
+/sentra_code_mode/guest/licenses/LICENSE-wasi-libc-APACHE-LLVM whitespace=-blank-at-eof
+
+# Official Codex notices are also pinned as exact upstream bytes.
+/sentra_remote/provider_notices/codex-registration/** -text
+
+# npm terminal CSS and notices must retain the upstream manifest's exact bytes.
+/sentra_canvas/static/vendor/xterm.css -text
+/sentra_canvas/static/vendor/*-LICENSE -text

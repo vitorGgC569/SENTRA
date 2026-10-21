@@ -1,4 +1,4 @@
-"""Authorized Platform enrollment in an ephemeral Edge session.
+"""Authorized DOM enrollment using a connected session or a setup Edge profile.
 
 Installer consent covers creation with All permissions, capture and storage.
 Only redacted status reaches the UI; login happens directly in the browser.
@@ -129,8 +129,9 @@ def capture_new_key_in_page(page: Any) -> str:
 class OpenAIConsentBrowser:
     """User-controlled browser with serialized Playwright operations.
 
-    An ephemeral Edge profile prevents access to cookies from other browser
-    sessions. This worker never reads or forwards credentials to callbacks.
+    An existing DOM connection retains its browser-owned authenticated session.
+    Without one, a separate setup profile requires sign-in. This worker never
+    reads cookies or forwards credentials to callbacks.
     """
 
     def __init__(self, paths: ProductPaths, notify: Notify, *, runtime: Any = None) -> None:
@@ -186,33 +187,29 @@ class OpenAIConsentBrowser:
         try:
             from playwright.sync_api import sync_playwright
 
-            with sync_playwright() as playwright:
-                # Dedicated empty profile. The signed-in Edge user is never reused.
-                # The person signs in on this window; SENTRA does not handle login.
-                from .openai_auto_setup import edge_automation_profile
-                profile = edge_automation_profile(self.paths.state_dir)
-                context = playwright.chromium.launch_persistent_context(
-                    str(profile),
-                    channel="msedge",
-                    headless=False,
-                    accept_downloads=False,
-                    args=[
-                        "--no-first-run",
-                        "--no-default-browser-check",
-                        "--disable-sync",
-                    ],
-                )
+            from .enrollment_bridge import EnrollmentBridge
+            with EnrollmentBridge(self.paths) as bridge, sync_playwright() as playwright:
+                from .browser_enrollment_session import enrollment_context
+                context = enrollment_context(playwright, self.paths.state_dir, self._emit, bridge=bridge)
                 try:
                         page = context.new_page()
                         page.goto(OPENAI_TUNNELS_URL, wait_until="domcontentloaded", timeout=30000)
                         self._running.set()
                         if self._automatic:
-                            from .openai_auto_setup import AutomaticEnrollment, configure_and_verify
+                            from .openai_auto_setup import (AutomaticEnrollment, configure_and_verify,
+                                remembered_enrollment_tunnel, remembered_enrollment_tunnel_name, remember_enrollment_tunnel,
+                                clear_remembered_enrollment_tunnel)
                             from .product import load_tunnel_config
-                            tunnel_id, secret = AutomaticEnrollment(
+                            existing_id = str(load_tunnel_config(self.paths).get("tunnel_id")
+                                              or remembered_enrollment_tunnel(self.paths))
+                            existing_name = remembered_enrollment_tunnel_name(self.paths, existing_id)
+                            enrollment = AutomaticEnrollment(
                                 page, self._emit, self._cancelled,
-                                existing_tunnel_id=str(load_tunnel_config(self.paths).get("tunnel_id") or ""),
-                            ).run()
+                                existing_tunnel_id=existing_id, existing_tunnel_name=existing_name,
+                                on_tunnel_selected=lambda identifier: remember_enrollment_tunnel(
+                                    self.paths, identifier, name=existing_name if existing_id else enrollment.name),
+                            )
+                            tunnel_id, secret = enrollment.run()
                             try:
                                 if self._cancelled.is_set():
                                     raise RuntimeError("enrollment_cancelled")
@@ -225,6 +222,7 @@ class OpenAIConsentBrowser:
                             finally:
                                 secret = ""
                             if result.get("ok"):
+                                clear_remembered_enrollment_tunnel(self.paths, tunnel_id)
                                 self._emit("ready", "SENTRA configured. MCP and the authenticated OpenAI tunnel are verified.")
                             else:
                                 self._emit("attention", "tunnel_verification_failed" if result.get("rollback_restored") else "manual_recovery_required")
@@ -300,6 +298,13 @@ class OpenAIConsentBrowser:
                 "open_official_api_keys_page",
                 "chatgpt_workspace_required",
                 "workspace_association_unverified",
+                "browser_account_selection_required",
+                "browser_extension_required", "browser_enrollment_already_running",
+                "browser_closed", "bridge_origin_changed", "bridge_selector_ambiguous",
+                "bridge_element_missing", "bridge_element_disabled", "bridge_navigation_failed",
+                "browser_bridge_disconnected", "browser_dom_needs_attention", "browser_bridge_timeout",
+                "project_selection_required", "expiry_selection_required",
+                "saved_tunnel_not_visible",
             }
             self._emit("attention", (
                 "playwright_or_edge_unavailable"

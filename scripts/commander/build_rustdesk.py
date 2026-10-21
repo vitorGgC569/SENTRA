@@ -218,6 +218,7 @@ def run_native_profile_probe(source: Path, output: Path, env: dict, vcpkg: Path)
     native_dirs.add(vcpkg / "installed/x64-windows-static/lib")
     cargo_home = Path(env.get("CARGO_HOME", str(Path.home() / ".cargo")))
     native_dirs.update(path for path in (cargo_home / "registry/src").glob("*/windows_x86_64_msvc-*/lib"))
+    native_dirs.update(path for path in (cargo_home / "vendor").glob("windows_x86_64_msvc-*/lib"))
     command = ["rustc", "--edition=2021", "-C", "panic=abort", "--crate-name", "sentra_profile_probe",
                str(probe_source), "--extern", "hbb_common=" + str(library),
                "-L", "dependency=" + str(source / "target/release/deps"), "-o", str(executable)]
@@ -288,6 +289,9 @@ def _build_phase_locked(args) -> dict:
         raise RuntimeError("vcpkg differs from the pinned RustDesk baseline")
     before = source_inputs(source)
     if args.phase == "codegen":
+        # The pinned generator accepts only info/debug and panics on inherited
+        # RUST_LOG=warn. This changes the build child, never the user's settings.
+        env["RUST_LOG"] = "info"
         command = [codegen / "flutter_rust_bridge_codegen.exe", "--rust-input", "./src/flutter_ffi.rs",
             "--dart-output", "./flutter/lib/generated_bridge.dart", "--c-output", "./flutter/macos/Runner/bridge_generated.h",
             "--llvm-path", str(libclang / "libclang.dll"), "--skip-add-mod-to-lib"]
@@ -325,7 +329,8 @@ def _build_phase_locked(args) -> dict:
                     raise RuntimeError("native release outputs changed during the profile probe; rebuild their proof")
             else:
                 from scripts.commander.flutter_plugin_links import prepare_flutter_plugin_links
-                prepare_flutter_plugin_links(source / "flutter", Path(os.environ["LOCALAPPDATA"]) / "Pub/Cache")
+                pub_cache = Path(env["PUB_CACHE"]) if env.get("PUB_CACHE") else Path(env["LOCALAPPDATA"]) / "Pub/Cache"
+                prepare_flutter_plugin_links(source / "flutter", pub_cache)
                 scratch = Path(tempfile.mkdtemp(prefix="srd-"))
                 flutter_env = flutter_build_environment(source / "flutter", scratch, env)
                 print(json.dumps({"flutter_scratch": str(scratch), "user_flutter_config_changed": False}), flush=True)

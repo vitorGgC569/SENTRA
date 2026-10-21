@@ -45,7 +45,9 @@ for (const [name, info] of Object.entries(lock.packages)) {
     } catch (e) { if (e.code !== 'ENOENT') throw e; }
   }
 }
-await writeFile(resolve(assets, 'THIRD_PARTY_NOTICES.txt'), licenses);
+// Git preserves these sealed text assets as LF on every platform. npm legal
+// files can contain CRLF even on a Unix build; canonicalize before hashing.
+await writeFile(resolve(assets, 'THIRD_PARTY_NOTICES.txt'), licenses.replace(/\r\n/g, '\n'));
 const files = {};
 const emitted = JSON.parse(await readFile(resolve(assets, '.vite/manifest.json'), 'utf8'));
 const outputNames = new Set(['desktop.js', 'desktop.css', 'bootstrap.js', 'THIRD_PARTY_NOTICES.txt', 'index.html']);

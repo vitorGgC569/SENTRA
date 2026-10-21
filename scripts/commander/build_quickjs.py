@@ -49,7 +49,9 @@ def build_quickjs(destination: Path, sdk: Path, *, bash=None, root=ROOT):
         (copied / name).parent.mkdir(parents=True, exist_ok=True)
         (copied / name).write_bytes(data)
     artifact = destination / "artifact"
-    env = dict(os.environ, WASI_SDK=sdk.as_posix(), OUT_DIR=artifact.as_posix(), PYTHONIOENCODING="utf-8")
+    # The driver runs from this owned build directory. A relative output avoids
+    # MSYS walking restricted Windows profile ancestors for mkdir -p.
+    env = dict(os.environ, WASI_SDK=sdk.as_posix(), OUT_DIR="artifact", PYTHONIOENCODING="utf-8")
     with (destination / "build.log").open("w", encoding="utf-8") as log:
         process = subprocess.Popen([str(bash), str(copied / "build.sh")], cwd=destination, env=env,
             stdout=log, stderr=subprocess.STDOUT, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))

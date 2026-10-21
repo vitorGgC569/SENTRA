@@ -44,6 +44,19 @@ def test_canvas_builder_fails_closed_without_ui_assets(tmp_path, monkeypatch):
         bc.build_canvas(tmp_path / "dist", tmp_path / "work", tmp_path / "spec")
 
 
+def test_payload_checks_canvas_dependencies_before_building_any_executable(tmp_path, monkeypatch):
+    def reject_inputs():
+        raise ValueError('missing pinned Canvas dependency')
+
+    calls = []
+    monkeypatch.setattr(bc, 'validate_canvas_inputs', reject_inputs)
+    monkeypatch.setattr(bw, '_build', lambda *args, **kwargs: calls.append(args))
+    with pytest.raises(ValueError, match='missing pinned Canvas dependency'):
+        bw.build_payload(tmp_path / 'dist', tmp_path / 'work', tmp_path / 'spec')
+    assert calls == []
+    assert not (tmp_path / 'dist').exists()
+
+
 def test_canvas_is_required_in_unified_windows_payload():
     from sentra_remote.installer import PRODUCTS
     assert "sentra-canvas.exe" in PRODUCTS

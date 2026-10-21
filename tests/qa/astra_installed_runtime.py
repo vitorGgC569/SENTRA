@@ -7,7 +7,25 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def run_frozen(executable, *, cwd, env):
+    from sentra_canvas.owned_process import TaskProcess
+    task = TaskProcess([str(executable)], cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    try:
+        out, err = task.communicate(timeout=90)
+        return subprocess.CompletedProcess([str(executable)], task.returncode, out, err)
+    finally:
+        task.terminate_tree()
+        task.communicate(timeout=5)
 
 
 def digest(path):
@@ -34,10 +52,10 @@ def main():
     environment = os.environ.copy()
     for key in ('WASM_PATH', 'SBOM_PATH', 'WASM_SHA256', 'SBOM_SHA256'):
         environment.pop('SENTRA_QUICKJS_' + key, None)
-    completed = subprocess.run([str(executable)], cwd=staging, env=environment, capture_output=True, timeout=90,
-        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    completed = run_frozen(executable, cwd=staging, env=environment)
     if completed.returncode:
-        raise RuntimeError('Frozen probe failed: ' + completed.stderr.decode('utf-8', errors='replace')[-2000:])
+        raise RuntimeError('Frozen probe failed (' + str(completed.returncode) + '): ' +
+                           completed.stderr.decode('utf-8', errors='replace')[-2000:])
     positive = json.loads(completed.stdout)
     if positive.get('frozen') is not True or positive.get('quickjs', {}).get('enabled') is not True:
         raise RuntimeError('Actual frozen readiness was not proven')
@@ -60,8 +78,7 @@ def main():
         altered['components']['quickjs']['files'][wasm_relative] = digest(negative_root / wasm_relative)
         (negative_root / 'runtime-components.json').write_text(json.dumps(altered), encoding='utf-8')
         (negative_root / 'sentra-runtime-pins.json').write_text(json.dumps(altered), encoding='utf-8')
-        negative = subprocess.run([str(negative_root / executable.name)], cwd=negative_root, env=environment,
-            capture_output=True, timeout=90, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        negative = run_frozen(negative_root / executable.name, cwd=negative_root, env=environment)
         if negative.returncode == 0 or b'CodeModeUnavailable' not in negative.stderr:
             raise RuntimeError('Changed artifact unexpectedly selected by frozen runtime')
     report = {'frozen_probe': positive, 'build_proof_sha256': digest(proof_file), 'executable_sha256': digest(executable),

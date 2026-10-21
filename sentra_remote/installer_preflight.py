@@ -59,10 +59,22 @@ def inspect_payload(source, extension, docs, products, *, version, require_manif
         ("Onboarding guide", docs / "SENTRA_PRIMEIRA_INSTALACAO_CANVAS_PLUGIN_2026-10-09.md"),
     ]
     if require_manifest:
+        from .codex_registration_runtime import FILES
         required += [("Bundled desktop", source / "sentra-electron/electron.exe"),
                      ("Runtime components", source / "runtime-components.json"),
                      ("Offline tunnel client", source / "prerequisites/tunnel-client.zip")]
+        required.extend(("Setup DOM bridge " + family, source / "prerequisites/browser-enrollment" / family / "manifest.json")
+                        for family in ("chromium", "firefox"))
+        required.append(("Signed Firefox Setup DOM bridge", source / "prerequisites/browser-enrollment/firefox-signed.xpi"))
+        required.extend(("Offline Codex registration " + name, source / "prerequisites/codex-registration" / name)
+                        for name in (*FILES, "provenance.json"))
     missing = [name for name, path in required if not path.is_file() or path.stat().st_size == 0]
+    if require_manifest and "Signed Firefox Setup DOM bridge" not in missing:
+        from .enrollment_extension import verified_firefox_package
+        verified_firefox_package(source / "prerequisites/browser-enrollment/firefox-signed.xpi")
+    if require_manifest and not any(name.startswith("Offline Codex registration ") for name in missing):
+        from .codex_registration_runtime import validate_registration_runtime
+        validate_registration_runtime(source / "prerequisites/codex-registration")
     manifest = source / MANIFEST
     verified = False
     byte_count = sum(p.stat().st_size for _, p in required if p.is_file())

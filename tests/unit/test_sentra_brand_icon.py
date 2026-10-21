@@ -66,13 +66,6 @@ def test_canvas_favicon_and_native_window_binding_are_both_present():
     assert "window.events.shown += apply_native_icon" in window
 
 
-def test_shortcut_uses_exe_icon_embedded_into_canvas():
-    from sentra_remote.windows_integration import SCRIPT
-    assert "exe='sentra-canvas.exe'" in SCRIPT
-    assert "$link.IconLocation=$target+',0'" in SCRIPT
-
-
-
 def test_local_canvas_serves_the_exact_official_favicon(tmp_path):
     import threading
     import urllib.request

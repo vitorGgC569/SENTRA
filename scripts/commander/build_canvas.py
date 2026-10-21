@@ -93,8 +93,8 @@ def validate_shell_bundle(ui: Path) -> dict:
     return {"schema": 1, "status": "shell_ready", "files": len(manifest["files"])}
 
 
-def build_canvas(dist: Path, work: Path, spec: Path) -> None:
-    from scripts.commander.build_windows import _build
+def validate_canvas_inputs() -> Path:
+    """Check mandatory assets and native dependency before a long payload build."""
     from scripts.commander.pdfium_pin import require_pdfium
 
     ui = ROOT / "sentra_canvas" / "static"
@@ -108,6 +108,13 @@ def build_canvas(dist: Path, work: Path, spec: Path) -> None:
     validate(ui / "vendor")
     validate_desktop_bundle(ui)
     require_pdfium()
+    return ui
+
+
+def build_canvas(dist: Path, work: Path, spec: Path) -> None:
+    from scripts.commander.build_windows import _build
+
+    ui = validate_canvas_inputs()
     _build(
         "sentra-canvas",
         "canvas_entry.py",

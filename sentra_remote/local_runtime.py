@@ -513,12 +513,30 @@ class LocalRuntime:
         credential = tunnel_credential_storage(self.paths)
         deadline = time.monotonic() + max(0.1, float(timeout_s))
         status: dict[str, Any] = {}
+        resumed_tunnel = False
         while True:
             status = self.status()
             mcp_ok = bool(status.get("mcp", {}).get("ok"))
             relay_ok = bool(status.get("relay", {}).get("ok"))
             tunnel_ok = bool(status.get("tunnel", {}).get("ok"))
             credential_ok = bool(credential.get("ok")) if tunnel_configured else True
+            # Cold Windows startup may outlast start_all's initial MCP wait.
+            # Resume that deferred start once, after authoritative health and
+            # protected credentials are verified. start_tunnel retains its
+            # instance/policy and singleton checks; no credential is recreated.
+            if (not resumed_tunnel and mcp_ok and credential_ok
+                    and tunnel_configured and self.settings.autostart_tunnel
+                    and not tunnel_ok and not status.get("tunnel", {}).get("reauth_required")
+                    and started.get("tunnel", {}).get("reason") == "mcp_not_ready"
+                    and time.monotonic() < deadline):
+                resumed_tunnel = True
+                try:
+                    started["tunnel"] = self.start_tunnel()
+                except Exception as exc:
+                    started["tunnel"] = {"ok": False, "reason": "tunnel_start_failed",
+                                         "error_type": type(exc).__name__}
+                # Read health again; spawning a process is not tunnel readiness.
+                continue
             # The browser relay is an optional Edge surface. Connect & Verify
             # must validate the core MCP/tunnel path without blocking first-run
             # completion when the browser extension has not connected yet.
@@ -526,8 +544,29 @@ class LocalRuntime:
                 break
             if time.monotonic() >= deadline:
                 break
-            time.sleep(0.2)
+            time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
+        return self._verification_snapshot(started, status, credential, tunnel_configured)
+
+    def refresh_verification(self, verification: dict[str, Any]) -> None:
+        """Refresh the final verdict without starting/stopping any service.
+
+        Installer GUI and plugin checks take time. Their results are preserved,
+        while service health is sampled again immediately before reporting.
+        """
+        fresh = self._verification_snapshot(
+            verification.get("started") or {}, self.status(),
+            tunnel_credential_storage(self.paths), bool(load_tunnel_config(self.paths)),
+        )
+        fresh["status"] = {**(verification.get("status") or {}), **fresh["status"]}
+        service_ids = {check["id"] for check in fresh["checks"]}
+        fresh["checks"].extend(check for check in verification.get("checks", [])
+                               if check.get("id") not in service_ids)
+        verification.update(fresh)
+
+    @staticmethod
+    def _verification_snapshot(started: dict[str, Any], status: dict[str, Any],
+                               credential: dict[str, Any], tunnel_configured: bool) -> dict[str, Any]:
         mcp_ok = bool(status.get("mcp", {}).get("ok"))
         relay_ok = bool(status.get("relay", {}).get("ok"))
         tunnel_ok = bool(status.get("tunnel", {}).get("ok"))

@@ -11,7 +11,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
-from .windows_paths import filesystem_path
+from .windows_paths import filesystem_path, resolved_path
 from .installation_lock import serialized_update
 
 INSTALL_MARKER = ".sentra-install.json"
@@ -39,12 +39,12 @@ def _wait_pid(pid: int, timeout_s: float = 60.0) -> None:
     raise TimeoutError(f"process {pid} did not exit")
 
 def _validate_install_dir(path: Path, *, require_marker: bool = False) -> Path:
-    root = path.expanduser().resolve()
+    root = resolved_path(path.expanduser())
     anchor = Path(root.anchor)
     if root == anchor or root == Path.home().resolve() or len(root.parts) < 3:
         raise ValueError("refusing unsafe install directory")
     if require_marker:
-        marker = root / INSTALL_MARKER
+        marker = Path(filesystem_path(root / INSTALL_MARKER))
         if not marker.is_file():
             raise ValueError("refusing operation without SENTRA install marker")
         try:
@@ -113,7 +113,7 @@ def _start_desktop(install_dir: Path) -> None:
 
 def _write_state(payload: dict[str, Any], *, install_dir: Path | None = None,
                  state_dir: Path | None = None) -> None:
-    path = _state_file(install_dir, state_dir)
+    path = Path(filesystem_path(_state_file(install_dir, state_dir)))
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(".tmp")
     with temp.open("w", encoding="utf-8") as out:
@@ -221,9 +221,9 @@ def _apply_update(
         # Setup merges owned files; unrelated files remain in the destination.
         # Keep installation identity across update, while retaining state outside
         # the replaceable program tree (credentials and protected conversations).
-        if (backup / INSTALL_MARKER).is_file():
+        if Path(filesystem_path(backup / INSTALL_MARKER)).is_file():
             install_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(backup / INSTALL_MARKER, install_dir / INSTALL_MARKER)
+            shutil.copy2(filesystem_path(backup / INSTALL_MARKER), filesystem_path(install_dir / INSTALL_MARKER))
         command = [
             str(installer), "--silent", "--install-dir", str(install_dir),
             "--upgrade", "--no-launch", "--no-git",
@@ -278,7 +278,7 @@ def _apply_update(
         # Crash recovery is an explicit owner action; never auto-run Setup again.
         mark_program_stage(stage_journal, "RECOVERY_REQUIRED", identity)
         from .program_stage import restore_failed_program_tree
-        if backup.is_dir():
+        if Path(filesystem_path(backup)).is_dir():
             # Preserve a quarantined copy of the interrupted installer tree;
             # never erase unknown user files or silently retry Setup.
             restore_failed_program_tree(install_dir, backup, identity)
@@ -300,23 +300,23 @@ def rollback_update(
     restart_desktop: bool = True,
 ) -> int:
     install_dir = _validate_install_dir(install_dir, require_marker=True)
-    state_path = _state_file(install_dir)
+    state_path = Path(filesystem_path(_state_file(install_dir)))
     if not state_path.is_file():
         raise FileNotFoundError("no update rollback metadata is available")
     state = json.loads(state_path.read_text(encoding="utf-8-sig"))
     if Path(str(state.get("install_dir") or "")).resolve() != install_dir:
         raise ValueError("rollback metadata belongs to another installation")
-    backup = Path(str(state.get("previous_backup") or "")).expanduser().resolve()
+    backup = resolved_path(Path(str(state.get("previous_backup") or "")).expanduser())
     expected = (install_dir.parent / "Rollback").resolve()
     current_marker = json.loads((install_dir / INSTALL_MARKER).read_text(encoding="utf-8"))
     identity = str(current_marker.get("installation_id") or "")
     if not identity:
         raise ValueError("rollback requires a verified installation identity")
     expected /= hashlib.sha256(identity.encode()).hexdigest()
-    if backup.parent.resolve() != expected or not backup.is_dir():
+    if resolved_path(backup.parent) != expected or not Path(filesystem_path(backup)).is_dir():
         raise FileNotFoundError("previous release backup is missing or outside rollback root")
     _validate_install_dir(backup, require_marker=True)
-    backup_marker = json.loads((backup / INSTALL_MARKER).read_text(encoding="utf-8"))
+    backup_marker = json.loads(Path(filesystem_path(backup / INSTALL_MARKER)).read_text(encoding="utf-8"))
     if backup_marker.get("installation_id") != current_marker.get("installation_id"):
         raise ValueError("rollback backup belongs to another installation identity")
     _wait_pid(parent_pid)
@@ -342,7 +342,7 @@ def rollback_update(
             destination = (install_dir / relative).resolve()
             if not destination.is_relative_to(install_dir):
                 raise ValueError("rollback content escaped installation directory")
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            Path(filesystem_path(destination.parent)).mkdir(parents=True, exist_ok=True)
             shutil.copy2(filesystem_path(file), filesystem_path(destination))
         _write_state({
             "rolled_back_at": time.time(),
@@ -356,7 +356,7 @@ def rollback_update(
         if saved_original:
             if install_dir.exists():
                 shutil.rmtree(filesystem_path(install_dir))
-            if replaced.is_dir():
+            if Path(filesystem_path(replaced)).is_dir():
                 os.rename(filesystem_path(replaced), filesystem_path(install_dir))
         raise
 

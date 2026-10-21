@@ -78,9 +78,10 @@ if (handoff && primary) {
     win.webContents.on('will-navigate', (event, url) => {
       if (!isAllowedResource(url, handoff.port)) event.preventDefault();
     });
+    win.webContents.on('render-process-gone', () => app.exit(4));
     win.once('ready-to-show', () => { win.show(); if (bounds.restored) win.focus(); });
     win.loadURL(displayAddress(handoff.address))
-      .catch(() => app.quit());
+      .catch(() => app.exit(4));
   }).catch(() => app.exit(3));
 }
 app.on('window-all-closed', () => app.quit());
