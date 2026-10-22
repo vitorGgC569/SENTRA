@@ -71,6 +71,8 @@ jobs:
           printf '%s' "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/sentra-preview.p12"
           chmod 600 "$RUNNER_TEMP/sentra-preview.p12"
           python scripts/site/android_preview.py
+          keytool -exportcert -keystore "$RUNNER_TEMP/sentra-preview.p12" -storetype PKCS12 -storepass:env STORE_PASSWORD -alias "$KEY_ALIAS" -file "$RUNNER_TEMP/sentra-preview-certificate.der"
+          python -c 'import hashlib,json,os; from pathlib import Path; actual=hashlib.sha256((Path(os.environ["RUNNER_TEMP"])/"sentra-preview-certificate.der").read_bytes()).hexdigest(); expected=json.loads(Path("scripts/site/android-preview-signing.json").read_text())["certificate_sha256"]; print("Public keystore certificate SHA-256:",actual); assert actual==expected,"CI signing key differs from the published preview key"'
       - name: Build self-contained APK
         working-directory: integrations/orca-mobile/app/android
         env:
@@ -89,6 +91,7 @@ jobs:
           mkdir -p .tmp
           tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
           "$tools/apksigner" verify --verbose --print-certs "$APK_PATH" > .tmp/mobile-signature.txt
+          python -c 'import re; from pathlib import Path; print("Public APK certificate SHA-256:", re.findall(r"certificate SHA-256 digest:\s*([a-fA-F0-9]{64})", Path(".tmp/mobile-signature.txt").read_text()))'
           "$tools/aapt" dump badging "$APK_PATH" > .tmp/mobile-badging.txt
           python scripts/site/verify_android.py --apk "$APK_PATH" --signature .tmp/mobile-signature.txt --badging .tmp/mobile-badging.txt --policy scripts/site/android-preview-signing.json --run "$RUN_NUMBER" --out "$VERIFIED_ANDROID_REPORT"
           python scripts/site/package_android.py
@@ -102,3 +105,4 @@ jobs:
         if: always()
         run: |
           if [ -f "$RUNNER_TEMP/sentra-preview.p12" ]; then rm -- "$RUNNER_TEMP/sentra-preview.p12"; fi
+          if [ -f "$RUNNER_TEMP/sentra-preview-certificate.der" ]; then rm -- "$RUNNER_TEMP/sentra-preview-certificate.der"; fi

@@ -8,7 +8,11 @@ ROOT=Path(__file__).resolve().parents[2]
 def verify(apk,signing_report,badging_report,run,policy):
     signers=re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([a-fA-F0-9]{64})\s*$',signing_report,re.MULTILINE)
     if len(signers)!=1 or signers[0].lower()!=policy['certificate_sha256']:
-        raise ValueError('Android preview signing identity differs from the preserved key')
+        # Certificate digests are public. Retain a useful diagnostic without
+        # exposing a keystore, password, alias or private signing material.
+        reported=re.findall(r'certificate SHA-256 digest:\s*([a-fA-F0-9]{64})',signing_report)
+        raise ValueError('Android preview signing identity differs from the preserved key; '
+                         +json.dumps({'parsed_signer_count':len(signers),'public_certificate_sha256':reported}))
     package=re.search(r"^package: name='([^']+)' versionCode='([0-9]+)'",badging_report,re.MULTILINE)
     if not package or package[1]!=policy['package'] or int(package[2])!=int(run) or int(run)<policy['minimum_version_code']:
         raise ValueError('Android package/versionCode does not match the approved preview update')
