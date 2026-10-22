@@ -2,6 +2,10 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { api, route } from './api';
 import { shouldPollTerminalOutput, terminalReconcileAction } from './shell-terminal-gate.js';
+import { resetForOutput } from './terminal-history-state';
+import {restoreCheckpoint,mayWriteTerminal} from './terminal-checkpoint';
+import {Unicode11Addon} from '@xterm/addon-unicode11';
+import {activateOrcaTerminalUnicodeProvider} from '../../../integrations/orca-terminal/vendor/orca/src/shared/terminal-unicode-provider';
 
 // Owns terminal VIEWs, never starts, closes or reconnects a backend PTY.
 // A stable (workspace, terminal ID) has exactly one xterm and input writer.
@@ -12,12 +16,20 @@ export class TerminalPool {
   outputEnabled = false;
   heldWorkspace = null;
   heldResources = null;
-  constructor(report, changed) { this.report = report; this.changed = changed; }
+  listeners = new Set();
+  revision = 0;
+  subscribe = listener => { this.listeners.add(listener); return () => this.listeners.delete(listener); };
+  snapshot = () => this.revision;
+  constructor(report, changed) {
+    this.report = report;
+    this.changed = () => { this.revision++; changed(); for (const listener of this.listeners) listener(); };
+  }
   setOutputEnabled(enabled) {
     const next = enabled === true;
     this.outputEnabled = next;
     if (!next) {
       for (const entry of this.entries.values()) {
+        entry.inputEpoch++;
         clearTimeout(entry.timer);
         clearTimeout(entry.resizeTimer);
         entry.timer = null;
@@ -48,15 +60,16 @@ export class TerminalPool {
     host.className = 'pty-emulator';
     const term = new Terminal({
       fontFamily: '"Cascadia Mono", Consolas, monospace', fontSize: 13,
-      scrollback: 6000, screenReaderMode: true, allowProposedApi: false,
+      scrollback: 6000, screenReaderMode: true, allowProposedApi: true,vtExtensions:{kittyKeyboard:true},
       disableStdin: resource.status !== 'running', cursorBlink: false,
       theme: { background: '#1b1b1e', foreground: '#d4d4d8', cursor: '#d4d4d8',
         selectionBackground: '#51515b99' },
     });
     const fit = new FitAddon(); term.loadAddon(fit);
+    term.loadAddon(new Unicode11Addon());activateOrcaTerminalUnicodeProvider(term);
     entry = { key, ws, id: resource.id, resource, host, term, fit,
       cursor: 0, slots: new Map(), queue: Promise.resolve(), opened: false,
-      polling: false, status: resource.status, alive: true, retry: 0 };
+      polling: false, status: resource.status, alive: true, retry: 0,inputEpoch:0 };
     this.entries.set(key, entry);
     term.onData(data => this.send(entry, data));
     entry.observer = new ResizeObserver(() => this.scheduleFit(entry));
@@ -81,6 +94,7 @@ export class TerminalPool {
     clearTimeout(entry.resizeTimer);
     entry.resizeTimer = setTimeout(() => {
       if (!entry.opened || !entry.host.isConnected || !entry.host.clientHeight) return;
+      if(entry.replaying||entry.status==='history_restored')return;
       const dims = entry.fit.proposeDimensions(); if (!dims) return;
       const cols = Math.max(20, Math.min(500, dims.cols));
       const rows = Math.max(5, Math.min(200, dims.rows));
@@ -97,11 +111,12 @@ export class TerminalPool {
     }, 120);
   }
   send(entry, data) {
-    if (!entry.alive || entry.term.options.disableStdin) return;
+    if (!mayWriteTerminal(entry)) return;
+    const epoch=entry.inputEpoch;
     entry.queue = entry.queue.catch(() => {}).then(async () => {
       const characters = Array.from(data);
       for (let offset = 0; offset < characters.length; offset += 1024) {
-        if (!entry.alive) return;
+        if (!mayWriteTerminal(entry,epoch)) return;
         await api('/api/terminal/input', { ws: entry.ws, id: entry.id,
           data: characters.slice(offset, offset + 1024).join('') });
       }
@@ -115,7 +130,9 @@ export class TerminalPool {
   state(ws, id) {
     const e = this.entries.get(this.key(ws, id));
     return e ? { status: e.status, recoverable: e.recoverable, persisted: e.persisted,
-      transportUnavailable: e.transportUnavailable } : null;
+      transportUnavailable: e.transportUnavailable, persistenceState: e.persistenceState,
+      persistenceGap: e.persistenceGap, tailUncertain: e.tailUncertain,checkpointUnavailable:e.checkpointUnavailable,
+      scrollbackOmitted:e.scrollbackOmitted } : null;
   }
   reconcile(ws, resources) {
     this.activeWorkspace = ws;
@@ -150,19 +167,34 @@ export class TerminalPool {
         ws: entry.ws, id: entry.id, cursor: String(entry.cursor),
       }));
       if (!entry.alive) return;
+      if(value.checkpoint_supported&&!entry.checkpointUnavailable&&(!entry.snapshotRestored||value.truncated||value.geometry_sequence!==entry.geometrySequence)){
+        const checkpoint=await api(route('/api/terminal/checkpoint',{ws:entry.ws,id:entry.id}));
+        if(!entry.alive)return;
+        if(checkpoint.available){await restoreCheckpoint(entry,checkpoint);this.changed();return;}
+        if(checkpoint.retryable){entry.term.options.disableStdin=true;return;}
+        entry.checkpointUnavailable=true;
+      }
+      if (resetForOutput(value,entry.cursor)) entry.term.reset();
       if (value.text) {
-        if (value.truncated) entry.term.reset();
         await new Promise(resolve => entry.term.write(value.text, resolve));
       }
       if (value.cursor !== undefined) entry.cursor = value.cursor;
       const change = entry.transportUnavailable || entry.status !== value.status || entry.recoverable !== value.recoverable ||
-        entry.persisted !== value.persisted;
+        entry.persisted !== value.persisted || entry.persistenceState !== value.persistence_state ||
+        entry.persistenceGap !== !!(value.persistence_gap||value.truncated);
       entry.status = value.status; entry.recoverable = value.recoverable;
       entry.persisted = value.persisted; entry.retry = 0; entry.transportUnavailable = false;
+      entry.persistenceState = value.persistence_state;
+      entry.persistenceGap = !!(value.persistence_gap||value.truncated);
+      entry.tailUncertain = value.tail_uncertain === true;
       entry.term.options.disableStdin = value.status !== 'running' || value.recoverable === false;
       if (entry.needsServerResize && !entry.term.options.disableStdin) this.scheduleFit(entry);
-      if (value.persisted === false && !entry.warned) {
+      if (value.persisted === false && (!value.persistence_state || value.persistence_state === 'failed') && !entry.warned) {
         entry.warned = true; this.report('O histórico da sessão não está sendo salvo.', 'error');
+      }
+      if (entry.persistenceGap && !entry.warnedGap) {
+        entry.warnedGap = true;
+        this.report('Parte do histórico de '+entry.resource.name+' não está disponível. O processo não foi recriado.', 'error');
       }
       if (change) this.changed();
     } catch (e) {
@@ -170,6 +202,8 @@ export class TerminalPool {
       entry.retry++;
       if (entry.retry === 1) this.report(e.message, 'error');
       if (!entry.transportUnavailable) { entry.transportUnavailable = true; this.changed(); }
+      entry.inputEpoch++;
+      entry.checkpointUnavailable=false;entry.snapshotRestored=false;
       entry.term.options.disableStdin = true;
       // Loss of transport is not a successful or ready process state.
     } finally {

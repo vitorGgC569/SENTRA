@@ -33,6 +33,9 @@ def _redact_guest_secret(value, secret):
 def _vm_input_identity(arguments):
     """Identity of one VM click or key chord. A different chord is a different effect."""
     action = arguments.get("action") if isinstance(arguments, dict) else None
+    if action=='input.tap':
+        if set(arguments)!={'action','x','y'} or any(type(arguments.get(k)) is not int for k in ('x','y')):return None
+        return 'mouse',f"tap:{arguments['x']}:{arguments['y']}",None
     if action == "input.mouse":
         x, y, buttons = arguments.get("x"), arguments.get("y"), arguments.get("buttons")
         wheel = arguments.get("wheel", 0)
@@ -106,6 +109,9 @@ class ShellActorService:
                     or process is None or process.poll() is not None):
                 raise Denied("shell capability is expired or outside the live project turn")
         work = self.control.work_item_info(message["work_item_id"], self.owner)
+        from .shell_access import AccessStore
+        if AccessStore(self.control, self.owner).profile(message['conversation_id']).get('delegation_revoked'):
+            raise Denied('full-access delegation was revoked')
         operation = self.control.durable.operation_status(oid, self.owner)
         run = self.control.durable.run_status(message["run_id"], self.owner, include_details=False)
         agent = self.control.durable.agent_info(dot["agent_id"], self.owner)
@@ -604,6 +610,18 @@ class ShellActorService:
         record = self.subject(token, payload)
         message, dot = record["message"], record["dot"]
         action = payload["action"]
+        if action == 'isolate_work':
+            from .task_workspace import isolate
+            return isolate(self,message,dot,payload)
+        if action == 'review_worktrees':
+            from .task_workspace import review
+            spec=json.loads(payload.get('value',''))
+            if not isinstance(spec,dict) or set(spec)!={'conversation_ids'}:raise ValueError('conversation_ids required')
+            return review(self.canvas,message['project_id'],{**spec,'dot_id':dot['dot_id'],'space_id':message['space_id']},
+                allowed_dot_ids={d['dot_id'] for d in self._dots(message)})
+        if action == 'verify_result':
+            from .task_verification import verify
+            return verify(self,message,dot,payload)
         if action == "checkpoint":
             # subject() just checked the process, protected queue, current
             # binding and central Run/WorkItem/operation. ModelInvocationFence
@@ -620,12 +638,17 @@ class ShellActorService:
             context = self.canvas._working_context_snapshot(message["project_id"], {dot["agent_id"]}, origins, graph)
             from .shell_access import AccessStore
             access = AccessStore(self.control, self.owner).profile(message['conversation_id'])
+            from .task_workspace import for_work_item
+            execution_workspace=for_work_item(self.control,self.owner,message['work_item_id'],dot['agent_id'])
             machines = self.canvas._agent_machine_control(token, {'action': 'machine_list', 'workspace': payload['workspace']})
             return {**context, "conversation_access": access, "machine_catalog": machines,
+                'execution_workspace':execution_workspace,'coding_isolation_available':True,
                 "conversation_goal": goal_context(self.control, self.owner, message["conversation_id"]),
                 "canvas_root_dot_id": graph["canvas_root_dot_id"], "shell_scope": self._scope(message, dot),
                 "dots": [{key: d.get(key) for key in ("dot_id", "agent_id", "name", "role", "model")} for d in self._dots(message)],
                 "coordination_requires_grant": True, "child_execution_requires_own_grant": True,
+                "automatic_permission_management": access.get('mode')=='full',
+                "result_verification_available": True,
                 "automatic_coordination_available": dot_manages_canvas(dot)}
         if action == "list":
             return [{key: d.get(key) for key in ("dot_id", "agent_id", "name", "role", "model")}

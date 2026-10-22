@@ -1,0 +1,112 @@
+{
+  "repository": "https://github.com/stablyai/orca",
+  "commit": "70b2197c97b164b16c618736a107967295e5af92",
+  "license": "MIT",
+  "source_hash_mode": "git-blob-sha256",
+  "transport_files": {
+    "src/shared/e2ee-crypto.ts": "4afedec023059d68f432ae447ccc91c08aee6ec80b007ab16f046c21a84092ff",
+    "src/shared/mobile-e2ee-v2-contract.ts": "038fb782cd7eb86de5b7e5709467fbc7d8a1b731d748a45bbbabeef9d700f534",
+    "src/shared/mobile-e2ee-v2-framing.ts": "49681ecd7c139faa55543dda290e12fccd86808d4367abfdb7ccba9c45a2d518",
+    "src/shared/mobile-e2ee-v2-node-key-schedule.ts": "98a39728b4661f4cff6d35a4bba6f5f2771c38e1be27347379f2cab1c91c3ce8",
+    "src/shared/paired-e2ee-node-primitives.ts": "8583f5087585543881d711803988c4b5b913f14f7f9cfe79cd3d1d5dfa800565",
+    "src/shared/paired-e2ee-primitives.ts": "360532941c07b4240c773954adbe173bb4db56fd6a89a7cfbc47262dde29a9b0",
+    "src/shared/paired-e2ee-v2-client-session.ts": "3286a282c4790d6f58ce1433ce6b8b0906832380bfdb815d567d81f1b47fbe9c",
+    "src/shared/paired-e2ee-v2-key-schedule.ts": "5deb4fd7c74e6424669444045e8949aca93acd47dfccd370e097718dd7cea722"
+  },
+  "terminal_files": {
+    "src/main/daemon/headless-emulator.ts": "723bdc95107260b15447bda0cf13982a8a43df5e7a9235135c181328ad6d65b2",
+    "src/main/daemon/headless-terminal-rows.ts": "2ee314dd5a2959f367aa63755867f59c0ee23d890bd64e245160a8f9dcee8ccf",
+    "src/shared/terminal-cursor-line-context.ts": "b654cb62db02c983d06aead30afdb9a0dee5565a024caeda79504ec178ac2064",
+    "src/main/daemon/startup-device-attributes-responder.ts": "de1092ba15ec03cdd2fb08b33cd5ba5a04f26b19616476e3c7f717e54d337b7b",
+    "src/main/daemon/terminal-view-attribute-responder.ts": "63c2d5141685c970e5a7fb63e9625c16eaf24605458c6bf0d8b194f3da4dea0c",
+    "src/shared/program-status/query-responder.ts": "747be2ea194acaab541ff836f1a5de3cc02da0263141243bdbf1dfede37b20f7",
+    "src/shared/program-status/protocol.ts": "5b5d91ee73d7377473b9c58fdd95119c44f3e053fb4bc91ba88655eade7e3633",
+    "src/shared/terminal-view-attributes.ts": "632fe5ace22913033ffcdd6608729864414c4922d9d5b2b64fae8d73f5ac84ef",
+    "src/main/daemon/terminal-snapshot-ansi-buffers.ts": "7378da91a4927927a5b5db8ae14115475c1fb887715da151dcc3299cb997e50e",
+    "src/shared/terminal-alternate-screen-split.ts": "236708acab4423ec331e554db78be5d6db16543f3431ef4cd1871568c73f2b4c",
+    "src/main/daemon/terminal-frame-restore-sequences.ts": "828285b5e5ca54ba59e6756d2fc6f89e468016ed3a7595775c6dedd08b2c57c7",
+    "src/shared/terminal-serialize-absolute-cursor.ts": "257b0cdd0aa965e00def10c73381c39e0eca1d07313d238ac5d8ba0d3abeaa8d",
+    "src/shared/terminal-mouse-encoding.ts": "ff14326073915947a2385704a7fcb0b8993a14510e9f62a99cc260b75de49d3d",
+    "src/main/daemon/terminal-osc-cwd-title-scanner.ts": "77145544a185fd5a6007e415ed4c9b7f7bb3f6009c96391a72253f3550b2ea6d",
+    "src/main/daemon/osc7-uri-extraction.ts": "6be83d04eef8a38c65df5b8e20513526936a47d2e095e71a0df1269ad93567a7",
+    "src/main/daemon/osc7-file-uri.ts": "a09f7b8f2bd73a7d547e5c5eecdaa62e23716a16da05fe082041e771ae8dbe9a",
+    "src/shared/wsl-paths.ts": "8271d75fb65b85b6bfd279f2a12636f79ddeb3ffe4d9d409dd77f5cce2a46219",
+    "src/shared/agent-detection.ts": "52f801b1ed8a96a10af46b0c2544cdcf13eda3ae0c9d7cd84a4146a6e50d9fb8",
+    "src/main/daemon/terminal-mode-rehydrate-sequences.ts": "2dc9fcabd061c4d45dcb3143da437e589e5cef8e5c8fba841b7583fdbc554467",
+    "src/shared/terminal-mode-reset-profiles.ts": "476dfa44acd3862aeabddb233c239fdea34dcf588802e5222a6d4168fa598b32",
+    "src/main/daemon/headless-emulator-modes.ts": "e11cc995ac2c0d71e67546ce4a52935d671012273539ef2742da8a5f2a1a785d",
+    "src/main/daemon/headless-osc-link-ranges.ts": "604d634de22bcd2fd25485b38db576f225f89b72d2e6d6b84da4ff575cb5067b",
+    "src/shared/terminal-partial-escape-tail.ts": "2b2b49502f0dd7cfa8ed4a9706bb6386badc7fc166ccc635b2b7c0ea3943c1e0",
+    "src/shared/terminal-escape-introducer.ts": "399406e19ea928d9905fe08a7aaa81807c436cda7f55e459293e94e868b43fc5",
+    "src/shared/terminal-unicode-provider.ts": "eae524000d37c01ff9818ebe822dff4c12a3479b9a97370414a928cabb3d948f",
+    "src/main/daemon/xterm-env-polyfill.ts": "83a5c2f6386d27c9895699fd3dfd1c6bfdb38c6ae24948ea07d75e24c213e6e9",
+    "config/patches/@xterm__addon-serialize@0.15.0-beta.301.patch": "b35533fe252e7e45433150170348889f4e08a6c17f7017ac34ea694d831fec7f",
+    "src/shared/osc-title-extraction.ts": "673e65d68af18fb50ebe92c96e67480e43f5d71740398ee2e5a4ff5cdb011c9a"
+  },
+  "adapted": [
+    {
+      "source": "src/renderer/src/components/tab-bar/SortableTab.tsx",
+      "target": "sentra_canvas/desktop_ui/src/workspace/OrcaTabStrip.jsx",
+      "source_sha256": "35a4d2732175911c415284e64da906d21e707695110919236c355110c807ea04"
+    },
+    {
+      "source": "src/renderer/src/components/tab-bar/tab-bar-surface.tsx",
+      "target": "sentra_canvas/desktop_ui/src/workspace/OrcaTabStrip.jsx",
+      "source_sha256": "0f111c29d701ecd64d810b8d876a65ceeb090e9b97d251f7d9db5ad6305c1981"
+    },
+    {
+      "source": "src/renderer/src/components/tab-bar/tab-width-rules.ts",
+      "target": "sentra_canvas/desktop_ui/src/workspace/OrcaTabStrip.jsx",
+      "source_sha256": "86d792ede9665569fd9acc8bc3674cc1c4c32c75391e03486cc374da0569a74d"
+    },
+    {
+      "source": "src/renderer/src/components/right-sidebar/FileExplorerRow.tsx",
+      "target": "sentra_canvas/desktop_ui/src/workspace/WorkspaceExplorer.jsx",
+      "source_sha256": "04f1cd97d5a3d382a64c9b84e155c4a296c0c284552f879487ea04bfa7b02b44"
+    },
+    {
+      "source": "src/renderer/src/assets/main.css",
+      "target": "sentra_canvas/desktop_ui/src/workspace/workspace.css",
+      "source_sha256": "144736d3a3bc065d2fda3761b2e81c2ae8e8368ba125da5e0c4bea1be1f8d1a7"
+    },
+    {
+      "source": "src/renderer/src/components/tab-group/TabGroupSplitNodeTree.tsx",
+      "target": "sentra_canvas/desktop_ui/src/workspace/OrcaSplit.jsx",
+      "source_sha256": "3491623255d9ad417cef3c6d5d43305fe96378866ef95b478ded0d84e5ad1918"
+    },
+    {
+      "source": "src/shared/tab-types.ts",
+      "target": "sentra_canvas/desktop_ui/src/workspace/layout.js",
+      "source_sha256": "95fa6bc4eac1e39445994167e5d5625cfc241c7bead98facc11ff3cf34426752"
+    },
+    {
+      "source": "src/main/runtime/orchestration/coordinator-dag-convergence.ts",
+      "target": "sentra_runtime/orchestration_observation.py",
+      "source_sha256": "455e21d23add8d01ca6f3f9f3fd6a9561100f4a8d565a5755d9c82a14a136eb5"
+    },
+    {
+      "source": "src/main/acp/acp-dialects/opencode-dialect.ts",
+      "target": "sentra_interop/acp_dialects.py",
+      "source_sha256": "175081722b8bab0ffae3f062d2a21c8f352baa9f17b568a6c431b367a8453632"
+    },
+    {
+      "source": "mobile/src/transport/pairing-keychain.ts",
+      "target": "integrations/orca-mobile/app/App.tsx",
+      "source_sha256": "f18cf0b12c181e7e765805d3ed053d235498f27977a07bdb9753659fb0759d81"
+    },
+    {
+      "source": "mobile/src/session/MobileNativeChatCardHeaderAction.tsx",
+      "target": "integrations/orca-mobile/app/components/CardHeaderAction.tsx",
+      "source_sha256": "1ccac43b26ce467396726cc73da7bfef0c11af3efb312ed11a28d2d22acef091"
+    }
+  ],
+  "assets_imported": [],
+  "excluded": [
+    "branding",
+    "cloud accounts",
+    "telemetry",
+    "updater",
+    "global store",
+    "grant authority"
+  ]
+}

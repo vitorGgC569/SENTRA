@@ -30,10 +30,12 @@ function presentationState(status, execution) { return mascotMotionState(status,
 export function DotMascot({ identity, mascot, name = 'Dot', status, execution, size = 'small', decorative = false }) {
   const source = DOT_MASCOTS.find(item => item.id === mascot)?.image || characterFor(identity);
   const [failedSource, setFailedSource] = useState(null);
+  const [retry, setRetry] = useState(null);
+  const retrying=retry===source;
   return <span className={'shell-mascot ' + size + ' ' + presentationState(status, execution)} data-state={presentationState(status, execution)}>
     {failedSource === source ? <span className="shell-mascot-fallback" aria-hidden={decorative || undefined}
       role={decorative ? undefined : 'img'} aria-label={decorative ? undefined : name}>D</span> :
-      <img src={source} alt={decorative ? '' : name + (status ? ' · ' + status : '')}
-        onError={() => setFailedSource(source)} width={512} height={512} draggable={false} />}
+      <img src={retrying?source+(source.includes('?')?'&':'?')+'sentra-image-retry=1':source} alt={decorative ? '' : name + (status ? ' · ' + status : '')}
+        onError={() => {if(!retrying)setRetry(source);else setFailedSource(source)}} width={512} height={512} draggable={false} />}
   </span>;
 }

@@ -6,7 +6,7 @@ and durable physical-effect fence. Paths are relative to the host-owned root.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass,replace
 from pathlib import Path
 
 from ._base import GuardedExecutor
@@ -26,6 +26,7 @@ class WorkspaceFilesBinding:
     actions: tuple[str, ...]
     timeout_seconds: float = 30.0
     max_file_bytes: int = 1_048_576
+    resolve_paths: object = None
 
     def __post_init__(self):
         if (self.capability_id not in FILE_CAPABILITIES or
@@ -41,6 +42,9 @@ class WorkspaceFilesExecutor(GuardedExecutor):
     def __init__(self, *, machine_id, owner_principal_id, bindings, policy):
         super().__init__(machine_id=machine_id, owner_principal_id=owner_principal_id,
                          bindings={binding.capability_id: binding for binding in bindings}, policy=policy)
+
+    def _request_binding(self,request,binding):
+        return replace(binding,paths=binding.resolve_paths(request),resolve_paths=None) if binding.resolve_paths else binding
 
     def resolve_requested_output(self, request):
         """Host-only capture binding; never accept an arbitrary output root."""

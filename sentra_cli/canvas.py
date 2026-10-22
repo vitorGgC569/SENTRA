@@ -23,12 +23,29 @@ class CanvasBridge:
         self.port = int(port) if port.isdigit() and 1 <= int(port) <= 65535 else None
         self.is_available = bool(self.port and len(self._token) >= 32)
         self.is_shell_scope = os.environ.get('SENTRA_CANVAS_AGENT_SCOPE', '') == 'shell'
+        self._binding_path = os.environ.get('SENTRA_CANVAS_AGENT_BINDING_FILE', '') if not self.is_shell_scope else ''
 
     def execute(self, raw_args, request_key):
         if not self.is_available:
             raise RuntimeError("SENTRA Canvas connection is unavailable")
         action, _, value = raw_args.partition("|")
         action=action.strip().lower()
+        if self.is_shell_scope and action=='isolate_work':
+            if value.strip():raise ValueError('isolate_work takes no arguments')
+            return json.dumps(self._request({'action':action,'workspace':self.workspace,
+                'value':'','request_key':request_key}),ensure_ascii=False)
+        if self.is_shell_scope and action=='review_worktrees':
+            spec=json.loads(value)
+            if not isinstance(spec,dict) or set(spec)!={'conversation_ids'} or len(value)>4000:
+                raise ValueError('bounded conversation selection required')
+            return json.dumps(self._request({'action':action,'workspace':self.workspace,
+                'value':value,'request_key':request_key}),ensure_ascii=False)
+        if self.is_shell_scope and action=='verify_result':
+            spec=json.loads(value)
+            if not isinstance(spec,dict) or set(spec)!={'operation_ids'} or len(value)>4000:
+                raise ValueError('verification requires file-read operation_ids')
+            return json.dumps(self._request({'action':action,'workspace':self.workspace,
+                'value':value,'request_key':request_key}),ensure_ascii=False)
         if action in {'vm_create', 'vm_status', 'vm_frame', 'vm_input'}:
             body = {'action': action, 'workspace': self.workspace}
             if action == 'vm_input':
@@ -48,7 +65,10 @@ class CanvasBridge:
                     raise ValueError('bounded persistent VM configuration required')
                 body.update(value=value, request_key=request_key)
             return json.dumps(self._request(body), ensure_ascii=False)
-        if self.is_shell_scope and action in {'create_agent', 'create_terminal', 'create_team', 'connect', 'dispatch', 'network_whitelist'}:
+        # The shell host translates these aliases into the same typed central
+        # coordinator intents, with live binding, directed scope and Grants.
+        # Terminal bootstrap/network configuration still have no shell alias.
+        if self.is_shell_scope and action in {'create_terminal', 'network_whitelist'}:
             raise PermissionError('shell coordination requires the central coordinator_intent protocol')
         if action in {'children', 'child_reply'}:
             if not self.is_shell_scope:
@@ -148,13 +168,27 @@ class CanvasBridge:
                        "handoff_id":ident,"receipt_status":status})
 
     def _request(self, body):
+        if self._binding_path:
+            from .canvas_binding import read_binding
+            binding=read_binding(self._binding_path,self._token,self.workspace)
+            self.port=binding['port']
         request = urllib.request.Request(
             f"http://127.0.0.1:{self.port}/api/agent/control",
             data=json.dumps(body).encode("utf-8"),
             headers={"Authorization":"Bearer "+self._token,
                      "Content-Type":"application/json"})
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),_NoRedirect())
-        timeout = 130 if body.get("action") in {"machine_execute", "vm_create", "vm_frame", "vm_input"} else 8
+        timeout = 130 if body.get("action") in {"machine_execute", "vm_create", "vm_frame", "vm_input", "verify_result", "isolate_work", "review_worktrees"} else 8
+        if body.get('action') in {'context','machine_list'}:
+            # These reads enumerate several independently authorized resources.
+            # Parallel Windows worktrees can exceed the old eight-second bound.
+            # This widens one read deadline; no request is retried.
+            timeout=30
+        if self.is_shell_scope and body.get('action') in {
+                'dispatch','coordinator_intent','create_agent','create_team','connect','child_reply'}:
+            # Admission may prepare several scoped child resources. The original
+            # identity remains journaled; a timeout still must never resend it.
+            timeout=130
         intent = body.get('intent')
         if body.get('action') == 'coordinator_intent' and intent is None:
             intent = json.loads(body.get('value') or '{}')

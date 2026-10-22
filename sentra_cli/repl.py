@@ -839,13 +839,17 @@ class SentraREPL:
             preview.activity("tool_result")
             self.on_tool_result(result_preview)
 
+        def committed_receipts():
+            # Consumed after step_stream finishes; a pre-stream tuple is stale.
+            yield from self._stream_receipts()
+
         visible = stream_turn(
             self.agent.step_stream(
                 prompt,
                 on_tool_call=live_tool_call,
                 on_tool_result=live_tool_result,
             ),
-            receipts=self._stream_receipts(),
+            receipts=committed_receipts(),
             on_delta=preview.send,
             on_phase=preview.activity,
             announce=not slash_announced,
@@ -1093,6 +1097,10 @@ class SentraREPL:
         from .__main__ import stream_turn
         from .shell_live_preview import LivePreviewWriter
         preview = LivePreviewWriter()
+        def committed_receipts():
+            # Consumed after step_stream finishes; a pre-stream tuple is stale.
+            yield from self._stream_receipts()
+
         visible = stream_turn(
             self.agent.step_stream(
                 "",
@@ -1100,7 +1108,7 @@ class SentraREPL:
                 on_tool_result=self.on_tool_result,
                 continue_previous=True,
             ),
-            receipts=self._stream_receipts(),
+            receipts=committed_receipts(),
             on_delta=preview.send,
             on_phase=preview.activity,
         )

@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "observed_utc": "2026-10-21T17:44:15.160729+00:00",
+  "build_id": "sentra-orca-experimental-1a724e4b6a1f",
+  "python_final_passed": 21,
+  "node_desktop_passed": 145,
+  "renderer": {
+    "passed": true,
+    "initial": {
+      "mode": "simple",
+      "members": false,
+      "explorer": false,
+      "tabs": "none",
+      "files": 0,
+      "effects": 0,
+      "styled": "flex",
+      "mascot": 512
+    },
+    "recipe_calls": 1,
+    "layout_modes_preserved": true,
+    "keyboard_end_moves_tab": true,
+    "narrow": {
+      "width": 660,
+      "scroll": 660
+    },
+    "light": {
+      "background": "rgb(255, 255, 255)",
+      "color": "rgb(10, 10, 10)"
+    }
+  },
+  "live_evaluation_readiness": {
+    "styled": true,
+    "mascotCount": 3,
+    "mascotsReady": true,
+    "loadError": false,
+    "mobileButton": true
+  },
+  "live_evaluation_title": "SENTRA \u00b7 Modo Simples",
+  "evaluation_assets_updated_for_next_reload": true,
+  "evaluation_resource_hashes_match": true,
+  "installed_ui_replaced": false,
+  "physical_mobile_homologation": false,
+  "source_count": 145,
+  "output_count": 261,
+  "hash_mismatches": 0,
+  "access_recipe_scope": "conversation-local-files-and-commands",
+  "new_self_grant_authority": false,
+  "native_signed_installers": false
+}

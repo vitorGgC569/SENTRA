@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "build_id": "sentra-orca-experimental-3352f532435f",
+  "observed_utc": "2026-10-21T16:14:38.206429+00:00",
+  "python_passed": 19,
+  "renderer_readiness": {
+    "styled": true,
+    "mascotCount": 3,
+    "mascotsReady": true,
+    "loadError": false,
+    "mobileButton": true
+  },
+  "gzip_content_hashes_verified": true,
+  "slow_reader_seconds": 6.2,
+  "sources": 127,
+  "outputs": 261,
+  "hash_mismatches": 0,
+  "installed_ui_replaced": false,
+  "physical_mobile_homologation": false
+}

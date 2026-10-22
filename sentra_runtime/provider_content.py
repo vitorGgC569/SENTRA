@@ -5,7 +5,11 @@ import time
 import uuid
 
 from sentra_core.conversations import _encode,_decode
-from sentra_interop.gate import _fingerprint
+def _fingerprint(request):
+    # Interop machines import this store during package initialization. Resolve
+    # the canonical fingerprint only when an operation is actually inspected.
+    from sentra_interop.gate import _fingerprint as canonical_fingerprint
+    return canonical_fingerprint(request)
 
 
 def text_digest(text):

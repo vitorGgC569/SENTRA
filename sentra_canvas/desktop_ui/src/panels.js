@@ -1,4 +1,5 @@
 import { api, route } from './api';
+import { accountSection } from './web-models-account.js';
 
 const element = (tag, text, cls) => {
   const el = document.createElement(tag);
@@ -53,6 +54,7 @@ export async function openInspector(kind, { bridge, actions, notify, generation,
   };
   if (kind === 'registry') {
     title.textContent = 'Ambientes e modelos'; label.textContent = 'REGISTRY LOCAL';
+    content.append(accountSection({ alive, button }));
     for (const i of integrations) row(i.name || i.id, (i.installed ? 'Instalado' : 'Não instalado') +
       (i.native_model_authenticated === true ? ' · autenticação nativa verificada' : ' · acesso ao modelo não verificado'));
     const section = element('section', undefined, 'inspect-field');

@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "build_id": "sentra-orca-experimental-dd1a15aecf6b",
+  "python_p0_cli_passed": 41,
+  "python_mobile_receipts_passed": 20,
+  "repeated_p0_tests_passed": 6,
+  "repeated_tests_overlap": true,
+  "node_desktop_passed": 14,
+  "desktop_isolated_builds": 2,
+  "real_windows_conpty": true,
+  "real_windows_dpapi": true,
+  "real_production_canvas_bridge_child": true,
+  "full_model_turn_homologation": false,
+  "full_ansi_tui_snapshots": false,
+  "physical_mobile_homologation": false,
+  "native_signed_installers": false,
+  "production_activated": false
+}

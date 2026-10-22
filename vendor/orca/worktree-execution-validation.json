@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "checkpoint_date": "2026-10-22",
+  "scope": "Experimental task-bound Git worktrees and read-only conflict rehearsal",
+  "python_unique_passed": 97,
+  "python_reports": ["worktree-final.xml", "worktree-last.xml", "worktree-context-fix.xml", "worktree-deadlines.xml", "worktree-files.xml"],
+  "reports_directory": ".tmp",
+  "desktop_node_passed": 152,
+  "electron_fixture_passed": true,
+  "electron_fixture_report": ".tmp/worktree-workspace-ux-final/result.json",
+  "controlled_real_resources": ["central admission and grants", "Git", "three concurrent worktrees", "relative file reads and writes", "atomic writes and durable captures", "PowerShell cwd", "ConPTY", "persistent assignment reopen", "conflict rehearsal without live publication"],
+  "real_model_homologation": "pending",
+  "real_model_latest_attempt": ".tmp/real-dot-worktrees-v6/report.json",
+  "real_model_latest_limitation": "Provider generation ended with category quota; uncertain effects were not replayed",
+  "earlier_attempts": {"v1": "Conversation versus CLI routing ambiguity", "v2_v3": "Git inventory actions field missing", "v4": "Delegation confirmation timeout", "v5": "Files and integrity proofs produced; eight-round ceiling prevented final completion"},
+  "publication_performed_by_worktree_review": false,
+  "installed_application_replaced": false,
+  "new_installer_claimed": false,
+  "remaining": ["complete real-model three-worker acceptance", "versioned file editor", "untracked and binary review", "structured cleanup and Git publication", "guest worktree mapping", "installed product qualification"]
+}

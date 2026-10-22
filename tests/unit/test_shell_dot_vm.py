@@ -21,6 +21,9 @@ LIMITS = {'logical_cpus': 12, 'physical_memory_mb': 32768, 'available_memory_mb'
 @pytest.fixture
 def vm_scope(shell, monkeypatch):
     monkeypatch.setattr('sentra_canvas.shell_dot_vm.host_resources', lambda: dict(LIMITS))
+    # This fixture simulates the provider's commands, so its availability must
+    # also be simulated; it must not depend on a host VirtualBox installation.
+    monkeypatch.setattr('sentra_executors.virtualbox_vm.executable',lambda:'fixture-VBoxManage')
     monkeypatch.setattr(VirtualBoxClient, 'run', lambda self, *args, **kwargs: '')
     app, server, scope, call = shell
     root, other = dot(call, 'VM owner'), dot(call, 'Other VM')

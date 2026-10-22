@@ -1,0 +1,1231 @@
+{
+  "schema": 1,
+  "build_id": "sentra-orca-experimental-a49e17694d07",
+  "created_utc": "2026-10-22T07:29:49.502703+00:00",
+  "base_commit": "07df23c45f605a056ece92d51f6e34e133e28012",
+  "orca_commit": "70b2197c97b164b16c618736a107967295e5af92",
+  "sources": {
+    "integrations/opencode/acp_host.py": "7c8d51e697616ed56e2c1229ab5bdc672bb3ea2efc4735fac2151141531a3eee",
+    "integrations/opencode/package-lock.json": "b42af4c04f643e1be6ac9ae63f4ff6be09a4e8d1c15704c9b925668af5f9fede",
+    "integrations/orca-mobile/app/app.json": "8dd110a54b265b4ccd01dd10a84eebbfae410f54d12f2a08fb9c16b5da7337b3",
+    "integrations/orca-mobile/app/App.tsx": "04f8653bb29553e3930e07c2ab636f4013d93f95e960ee3498b675dca937716c",
+    "integrations/orca-mobile/app/components/BrowserWorkspace.tsx": "af276a388f739f3ba97d9e666a74841c8bf7c797a2310975debc437dafbcca3a",
+    "integrations/orca-mobile/app/components/CardHeaderAction.tsx": "900d24fdf96e2434ece72abc105f831bee40e51b841aad0f341743af398e9fd9",
+    "integrations/orca-mobile/app/components/TerminalWorkspace.tsx": "82e1e342361caef222aeeb6ce95db780cfb0a842c17980f1328a1e3610d43c67",
+    "integrations/orca-mobile/app/metro.config.js": "fb52b8c5062c4f5a1743cdd3b4859697f41d3813cba2eaa5c44ce452bdbd5d66",
+    "integrations/orca-mobile/app/package-lock.json": "c7c42e852379f95d37343a40e64e7f6945ac7d46137067192b74f19ce0874303",
+    "integrations/orca-mobile/app/package.json": "b249695c0dffc0b9f009778312e39fe7dd28664f1529e8d4ff68534ac1807ce9",
+    "integrations/orca-mobile/app/scripts/build-terminal.mjs": "437dd04f88b8bbde0ce1d1f061defca1eb09d8d7400257c43e742de086aec434",
+    "integrations/orca-mobile/app/terminal/document-build.json": "bae4f6168a48dfb2b896534c112b5a8e1a4795dd3456f52b85d7f3b8b9361450",
+    "integrations/orca-mobile/app/terminal/document.ts": "64965ddf970fe74656f8a39d7f1b4b7ec8a44202823086d4eaff332f3c798d1a",
+    "integrations/orca-mobile/app/terminal/renderer.js": "0dc229b6e1531932e19eb84d33b985e14e0428ff1c907d9a60b03c390f467387",
+    "integrations/orca-mobile/transport/package-lock.json": "fd472f7e606104ebca137cf9c15988e42fd68acebf7b1218d181370fdc6c41e9",
+    "integrations/orca-mobile/transport/package.json": "86cda164ae5b858826224de5ddc1392e0d7e8fb9c9a41ee0feade455bb56be68",
+    "integrations/orca-mobile/transport/src/client.ts": "50f7da5e35a99cc8309958adf8ae8fc2c3e9c7f40f6c08c0e5419aedc720db6c",
+    "integrations/orca-mobile/transport/src/contracts.ts": "2963e3b7fd308058203492e4c5d9d7e4ea6ec37f22adaa0eecac64fd0c44146e",
+    "integrations/orca-mobile/transport/src/effect-journal.ts": "aafde8ee820ee20775c84f4a525d2c54dcc27ddeadc0d5dbef901534f81332e9",
+    "integrations/orca-mobile/transport/src/gateway.ts": "8d35f39c33da2fe4e4a1c796ebd373c3ccffab62fae11b39ecc4b525e943510e",
+    "integrations/orca-mobile/transport/src/intent-fingerprint.d.ts": "41ae0b04e83d4faf02bac96a2fa02a5176ff4202867170edb8c5044d657b2079",
+    "integrations/orca-mobile/transport/src/intent-fingerprint.js": "47205bf8d56ef0779bdfe2203a95a5934cac7e8056ac6c074ff4d5aa26f723b0",
+    "integrations/orca-mobile/transport/src/lan-address.ts": "4371d246b7149643e1a85086a29cb04314118dcfe33a8261e453f79ab8ef947b",
+    "integrations/orca-mobile/transport/src/pairing-state.ts": "7ff4f846c0c11fe765215b8a8be76826c5e5c2b6dec4508f383123e6147c763e",
+    "integrations/orca-mobile/transport/src/primitives.ts": "584e650c82ca3e070ce370089845fdfe50f192d0e4c76e298382b210ef36e808",
+    "integrations/orca-mobile/transport/src/request-context.ts": "d0b2f2c1341ca64a32204bbc828d0365e60107a89d41cdd266a88650e9fa6757",
+    "integrations/orca-mobile/transport/src/server-session.ts": "105021f2c26fc4ea8bc83fbf0b2aa81b00d6207c265bb2604f791f8463963d35",
+    "integrations/orca-mobile/transport/src/terminal-feed.ts": "61b7a8d9ea0115b21dc1bc2745540376ddf785a9a3b3d2023f96b592261907d0",
+    "integrations/orca-mobile/transport/src/vendor/e2ee-crypto.ts": "4afedec023059d68f432ae447ccc91c08aee6ec80b007ab16f046c21a84092ff",
+    "integrations/orca-mobile/transport/src/vendor/mobile-e2ee-v2-contract.ts": "038fb782cd7eb86de5b7e5709467fbc7d8a1b731d748a45bbbabeef9d700f534",
+    "integrations/orca-mobile/transport/src/vendor/mobile-e2ee-v2-framing.ts": "49681ecd7c139faa55543dda290e12fccd86808d4367abfdb7ccba9c45a2d518",
+    "integrations/orca-mobile/transport/src/vendor/mobile-e2ee-v2-node-key-schedule.ts": "98a39728b4661f4cff6d35a4bba6f5f2771c38e1be27347379f2cab1c91c3ce8",
+    "integrations/orca-mobile/transport/src/vendor/paired-e2ee-node-primitives.ts": "8583f5087585543881d711803988c4b5b913f14f7f9cfe79cd3d1d5dfa800565",
+    "integrations/orca-mobile/transport/src/vendor/paired-e2ee-primitives.ts": "360532941c07b4240c773954adbe173bb4db56fd6a89a7cfbc47262dde29a9b0",
+    "integrations/orca-mobile/transport/src/vendor/paired-e2ee-v2-client-session.ts": "3286a282c4790d6f58ce1433ce6b8b0906832380bfdb815d567d81f1b47fbe9c",
+    "integrations/orca-mobile/transport/src/vendor/paired-e2ee-v2-key-schedule.ts": "5deb4fd7c74e6424669444045e8949aca93acd47dfccd370e097718dd7cea722",
+    "integrations/orca-terminal/package-lock.json": "b74b6649d27a3ac632e3dcf132a1c4f6e62e68d434fb06e937afb9a2635d8aeb",
+    "integrations/orca-terminal/package.json": "cc82174aa384a1e68ae1cefb633f4e50a394cc7f7671595e636e712dcd86a4a8",
+    "integrations/orca-terminal/provenance.json": "f9b915feb589c21f13474deeccb93ab60606e726e6f5b6f10e02240488e3d65f",
+    "integrations/orca-terminal/scripts/build.mjs": "eaa5a5dfce2c41e0ee3d2bb04fbb59bf8d96a738aca0ef0d23bc2bf0c5b574fb",
+    "integrations/orca-terminal/src/engine.ts": "cc015ab2292c2585c321ad5b20e4a64e4429d725103c04b30cc7b1514c13f76c",
+    "integrations/orca-terminal/src/saved-register.mjs": "fc6a6e862b45562adfd8b2111ea6d0b8ef279cba30ffc3cb2c595162b04576ed",
+    "integrations/orca-terminal/src/worker.mjs": "48aff184864296cd79c632a07a01ac04220e6f3465fc075501c2245d3304103e",
+    "integrations/orca-terminal/vendor/orca/config/patches/@xterm__addon-serialize@0.15.0-beta.301.patch": "b35533fe252e7e45433150170348889f4e08a6c17f7017ac34ea694d831fec7f",
+    "integrations/orca-terminal/vendor/orca/LICENSE": "ff1b611f80580d49f4b97e93a97b24eb050b0671b26b8afe16341fab699112f3",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/headless-emulator-modes.ts": "e11cc995ac2c0d71e67546ce4a52935d671012273539ef2742da8a5f2a1a785d",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/headless-emulator.ts": "723bdc95107260b15447bda0cf13982a8a43df5e7a9235135c181328ad6d65b2",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/headless-osc-link-ranges.ts": "604d634de22bcd2fd25485b38db576f225f89b72d2e6d6b84da4ff575cb5067b",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/headless-terminal-rows.ts": "2ee314dd5a2959f367aa63755867f59c0ee23d890bd64e245160a8f9dcee8ccf",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/osc7-file-uri.ts": "a09f7b8f2bd73a7d547e5c5eecdaa62e23716a16da05fe082041e771ae8dbe9a",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/osc7-uri-extraction.ts": "6be83d04eef8a38c65df5b8e20513526936a47d2e095e71a0df1269ad93567a7",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/startup-device-attributes-responder.ts": "de1092ba15ec03cdd2fb08b33cd5ba5a04f26b19616476e3c7f717e54d337b7b",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/terminal-frame-restore-sequences.ts": "828285b5e5ca54ba59e6756d2fc6f89e468016ed3a7595775c6dedd08b2c57c7",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/terminal-mode-rehydrate-sequences.ts": "2dc9fcabd061c4d45dcb3143da437e589e5cef8e5c8fba841b7583fdbc554467",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/terminal-osc-cwd-title-scanner.ts": "77145544a185fd5a6007e415ed4c9b7f7bb3f6009c96391a72253f3550b2ea6d",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/terminal-snapshot-ansi-buffers.ts": "7378da91a4927927a5b5db8ae14115475c1fb887715da151dcc3299cb997e50e",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/terminal-view-attribute-responder.ts": "63c2d5141685c970e5a7fb63e9625c16eaf24605458c6bf0d8b194f3da4dea0c",
+    "integrations/orca-terminal/vendor/orca/src/main/daemon/xterm-env-polyfill.ts": "83a5c2f6386d27c9895699fd3dfd1c6bfdb38c6ae24948ea07d75e24c213e6e9",
+    "integrations/orca-terminal/vendor/orca/src/shared/agent-detection.ts": "52f801b1ed8a96a10af46b0c2544cdcf13eda3ae0c9d7cd84a4146a6e50d9fb8",
+    "integrations/orca-terminal/vendor/orca/src/shared/osc-title-extraction.ts": "673e65d68af18fb50ebe92c96e67480e43f5d71740398ee2e5a4ff5cdb011c9a",
+    "integrations/orca-terminal/vendor/orca/src/shared/program-status/protocol.ts": "5b5d91ee73d7377473b9c58fdd95119c44f3e053fb4bc91ba88655eade7e3633",
+    "integrations/orca-terminal/vendor/orca/src/shared/program-status/query-responder.ts": "747be2ea194acaab541ff836f1a5de3cc02da0263141243bdbf1dfede37b20f7",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-alternate-screen-split.ts": "236708acab4423ec331e554db78be5d6db16543f3431ef4cd1871568c73f2b4c",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-cursor-line-context.ts": "b654cb62db02c983d06aead30afdb9a0dee5565a024caeda79504ec178ac2064",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-escape-introducer.ts": "399406e19ea928d9905fe08a7aaa81807c436cda7f55e459293e94e868b43fc5",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-mode-reset-profiles.ts": "476dfa44acd3862aeabddb233c239fdea34dcf588802e5222a6d4168fa598b32",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-mouse-encoding.ts": "ff14326073915947a2385704a7fcb0b8993a14510e9f62a99cc260b75de49d3d",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-partial-escape-tail.ts": "2b2b49502f0dd7cfa8ed4a9706bb6386badc7fc166ccc635b2b7c0ea3943c1e0",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-serialize-absolute-cursor.ts": "257b0cdd0aa965e00def10c73381c39e0eca1d07313d238ac5d8ba0d3abeaa8d",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-unicode-provider.ts": "eae524000d37c01ff9818ebe822dff4c12a3479b9a97370414a928cabb3d948f",
+    "integrations/orca-terminal/vendor/orca/src/shared/terminal-view-attributes.ts": "632fe5ace22913033ffcdd6608729864414c4922d9d5b2b64fae8d73f5ac84ef",
+    "integrations/orca-terminal/vendor/orca/src/shared/wsl-paths.ts": "8271d75fb65b85b6bfd279f2a12636f79ddeb3ffe4d9d409dd77f5cce2a46219",
+    "sentra_canvas/__main__.py": "4f85a71b25bb9dc44e73b9356083e4934f685a05d6be19e924b7a4c54f9f8460",
+    "sentra_canvas/agent_bindings.py": "a63dab412a5972b609920d7a5e62861ef0a295e080b2462e1dd0d6aca5f1b49c",
+    "sentra_canvas/conversation_permission_status.py": "8073f3b8b430b4b61948dc5bdd6c81d76052741c2ddfdf8c9ceae374a112f2b4",
+    "sentra_canvas/desktop_ui/package-lock.json": "84d3b56929c48699bfced201a2bcdd13c538275309a9a0425ee9c25b7408b35f",
+    "sentra_canvas/desktop_ui/package.json": "da6d20df94186ef6d521aeddd4817a7480ddb1b23792eed28c60938542c570a8",
+    "sentra_canvas/desktop_ui/qa/orca-preview-api.js": "addae8fa3b2adaf4cf31cd80e87f5c5c20118aaba93e13e94fcb731589602b88",
+    "sentra_canvas/desktop_ui/qa/orca-workspace.html": "7bb47376032a603bb97fb486dc4258d272714882c3f4fa655c7a4f9fc47f0d52",
+    "sentra_canvas/desktop_ui/qa/orca-workspace.jsx": "ad97712bfa25dc70ab4c701c7cca14b6eb3dcf3c7ec249301927353c09be6cc3",
+    "sentra_canvas/desktop_ui/src/nodes.jsx": "0bebcb6d5b35651e0e0b5d4cf168caba70c3e358a24a776f6bd2e67d42e3c9f0",
+    "sentra_canvas/desktop_ui/src/shell-access.jsx": "706c09dec40b3fd9eb3b7e0ed47cc88d66aed6fab8279673dde7e7583da5c2c4",
+    "sentra_canvas/desktop_ui/src/shell-app.jsx": "32baccbd0db0dff1a561afda7b93c561642f3c2063a91a14c8bc400247d5428d",
+    "sentra_canvas/desktop_ui/src/shell-approval-notifications.jsx": "f6e05be10157d9a9d491a2745835ece092c0aa9a6732ff248bbac7cc312e830a",
+    "sentra_canvas/desktop_ui/src/shell-bridge.js": "1c1e94c5d023d4cfa9a7e796e91c3fe18c463413381ae9a80428d7e51e5a580a",
+    "sentra_canvas/desktop_ui/src/shell-conversation-tools.jsx": "493e46ffb32151c6cfb829594edf16e27ff9820c507679be7a5242e591104640",
+    "sentra_canvas/desktop_ui/src/shell-conversation.jsx": "96a1ea7732344f8b2b8f65df19a694ceb366842af6d73013f6b271899b9ba346",
+    "sentra_canvas/desktop_ui/src/shell-dot-computer.jsx": "11d6072c8f3cce14316f82ad97265183921f8d6bf44783f8ffb281cc9ac67a08",
+    "sentra_canvas/desktop_ui/src/shell-dot-vm.jsx": "b2dd7dd20f70e46ef7c9c19e1060c1ada391d6e65d86ffa2adf130a3584a0bf9",
+    "sentra_canvas/desktop_ui/src/shell-draft-staging.js": "4ce661176d3764595425ed850642616a163fe203fe672f7a1e56c9664c06e63c",
+    "sentra_canvas/desktop_ui/src/shell-mascot.jsx": "433e483b9d0fcdc0d726cac1d4abbdb31a9a5624c0ba5d88d19d0bdb1d49869e",
+    "sentra_canvas/desktop_ui/src/shell-permission-cards.jsx": "bc3230bcbd602ae13fd2743835f66c52f0c08427873a694de63a2a3569cde8bc",
+    "sentra_canvas/desktop_ui/src/shell-receipts.jsx": "595c07d473da34b25dc7c3010ffc16bec17a24012037e55db4f130507433df90",
+    "sentra_canvas/desktop_ui/src/terminal-checkpoint.js": "ce9fc254dc0adb495cb0d7faa0365558765bcfe040d3d933542839c702eb3029",
+    "sentra_canvas/desktop_ui/src/terminal-history-state.js": "f1ceeddd12990be5a049cffff575ee47df3bdcc0a19f6707921ab7eed47e18b6",
+    "sentra_canvas/desktop_ui/src/terminal-pool.js": "07b9376a9d8e94687326a684302a778ad76c66d79c978d2018779c107da093c0",
+    "sentra_canvas/desktop_ui/src/workspace/BrowserPane.jsx": "c1c4ed59af3e74aad1b1327fcd139251d577a28e4ff7e0d50ac262a87906a623",
+    "sentra_canvas/desktop_ui/src/workspace/continuity.js": "0fafb7f5de7bdd9fd0d8c222aed5676b86a44bdaa47d556fa7b2244248e1669b",
+    "sentra_canvas/desktop_ui/src/workspace/contracts.ts": "8d732069481e7f282287d0b9bc29370bd144cfe82b872971bc22579a25390d28",
+    "sentra_canvas/desktop_ui/src/workspace/conversation-resources.js": "3886ca203d332c4e7cfdaf6aaea7f86a4a942b0d9dc425bc16a232a4701f7dd8",
+    "sentra_canvas/desktop_ui/src/workspace/ConversationResource.jsx": "d1e5715f926ae49b7d776bdc1501f09e70eefa298d13f824934eae3b204abafb",
+    "sentra_canvas/desktop_ui/src/workspace/DotWorkspace.jsx": "695c4dad248955c97b08cca5ed6057b991853cc13539dd1bfeeb2ffe6642863c",
+    "sentra_canvas/desktop_ui/src/workspace/layout.js": "0f77af7c2d0bfd5c6f576b13c4786b2710d38bcccb2752205dd9042e702712d4",
+    "sentra_canvas/desktop_ui/src/workspace/MobileDevices.jsx": "37dedece874930163276bf405e266dcf33c128aeac884d81eb2e61cdc82f83f4",
+    "sentra_canvas/desktop_ui/src/workspace/NewSession.jsx": "59f528a17ff47defca0913803b9ddb11ac39fdc28dd6411f27c8fdc5bd3d7dd3",
+    "sentra_canvas/desktop_ui/src/workspace/OrcaSplit.jsx": "465bfe04f77477cf7ff0e632665320fe497cfe4013fb9dfc04af173d692c0918",
+    "sentra_canvas/desktop_ui/src/workspace/OrcaTabStrip.jsx": "9d7b0da273d645b8e27783644d4658a665e67cf9b31f07b8b4f6d1a62ac7c387",
+    "sentra_canvas/desktop_ui/src/workspace/presentation.js": "715c9a774ce03e7db2475e28e7512259c7c21481b9466ccf051b3be402359292",
+    "sentra_canvas/desktop_ui/src/workspace/request-journal.js": "ae374ccf9d4b6489606e519b5ae5d143a985cdb9e6b269df6faa2b5869e8b77c",
+    "sentra_canvas/desktop_ui/src/workspace/useWorkspaceEffects.jsx": "24751fcf736f1f6a09995f81abebd4635dd4b14da6586a04fde5fad98aab7330",
+    "sentra_canvas/desktop_ui/src/workspace/workspace.css": "7e52d34165474596d93de59bd87075f2e0baa8378c8a7b647db913bdfdce3177",
+    "sentra_canvas/desktop_ui/src/workspace/WorkspaceExplorer.jsx": "c59cd4a99bf29c6d7fa6f17c72ed8d9ec7a4f738433bda1e0078a78555a3ce2e",
+    "sentra_canvas/desktop_ui/src/workspace/WorkspaceTerminal.jsx": "e39513286774479aa849bf8f54255a5ee9e568b04bbfe3aedb3d40d577ec21d2",
+    "sentra_canvas/desktop_ui/src/workspace/WorktreeReview.jsx": "be6bbb0afa1a6032b27b4ffc0500036e45eabc356bb62e1f4cf4be0b133653b8",
+    "sentra_canvas/desktop_ui/vite.orca-preview.config.js": "990ecdb93779eb37bd42b15b954c8c280c557f27a9d41902635301fb5d22a25d",
+    "sentra_canvas/dot_tool_receipts.py": "df213c55c65d661a76c7b8e0bcc4a74df040d020d32f4d23e9da7a4096e5c3b6",
+    "sentra_canvas/electron_host.py": "07ec3a1ea3769049ad60d5e8700ebde6bfe6b29dc54d29f07afdadf14c3bd20d",
+    "sentra_canvas/evaluation.py": "4cc41ee38722ea5f681f13782cb0a20bd3d0e7825e7037e8905d9b27caf8b213",
+    "sentra_canvas/full_access.py": "c2b13573ec4b129f9f259cb7b06231be262c578d889c85a21cf93c56f9f7aa21",
+    "sentra_canvas/mobile_devices.py": "6d223ae23d73fd3781c5fb7d00f0b12ecfc03a313a6bcd797ccee88f44bd28b8",
+    "sentra_canvas/mobile_host.py": "53909ca604bc52024ccaefeb485459bcea539f82b10947f2a9ac14c801bc1301",
+    "sentra_canvas/mobile_network.py": "80d3bebb14e46eb7f321241ca8e86e3fd94feb37e697443b4677171288c640b3",
+    "sentra_canvas/native_entry.py": "5a3af14e3af110054fef44b090367068a0674a69310717de5a07a22bf28958c1",
+    "sentra_canvas/permission_presentation.py": "e11a2baaedb7d98e14bcbf241d68719419cce89dc4fcbbf52f9c75701d56355b",
+    "sentra_canvas/pty_client.py": "89a7fd03b722ec002d2ac3c8cbbd0baeb0fabbe551ff7de7659b72811da8d985",
+    "sentra_canvas/pty_daemon.py": "3e06a88108b85baaf397a86544f96146f261cc8d52363b48e4ceb8f73c925075",
+    "sentra_canvas/pty_history.py": "6a32fd59c84a25ea7c026128ef464d6b1f2c4e3cff10fe4a42cefa25b307bc6e",
+    "sentra_canvas/service.py": "bf129c8f3cad626267b3cf40fee277e72e172108bb16b7681a81b953cb99526e",
+    "sentra_canvas/shell_access.py": "fea0c61a969b2433f5cd969b4a79d160ff8c77138fc7227094eff1cade2a2eb5",
+    "sentra_canvas/shell_actor.py": "329e8fc6a4f52c8c4e1b61dcf20b749a6fe1bb8aa8199c7daa121bab8b59ae23",
+    "sentra_canvas/shell_approval_inbox.py": "0c265d59b26b8bc9bc0bacce52f9289f1607a43234f5fe3727bfedc57e46a9c7",
+    "sentra_canvas/shell_dot_canvas.py": "92f1e001c815daa0ad05ed93c2332eacdbeecefbe2a9b73a05212fc125445948",
+    "sentra_canvas/shell_dot_computer.py": "cf0b66d8531e8d3d0b6dc4d523b417ec0e1720eeffce6680d234753cdb56698b",
+    "sentra_canvas/shell_dot_vm.py": "73468ba090d521b5afe859cc8fdc253c378dbdaea85fd70304bf9b2b252c7ef1",
+    "sentra_canvas/shell_environment.py": "e7aec09691776515599bf23e210c9ac032bff0008aa161fdb6195f4db8f4dff1",
+    "sentra_canvas/shell_machines.py": "07d76c7751bef4d494914272d987b0872669e2f5f5313963091060a356242c56",
+    "sentra_canvas/shell_requests.py": "8a9a3051e398650c0cd42ec0e824c9175b8ef3c9a3d0a9f116ac9cc948e7fb40",
+    "sentra_canvas/shell_runtime.py": "1d952f385a5da924eeb8109fe4eb8b25ee675d4eaebd6317a795fd78427cb8bd",
+    "sentra_canvas/store.py": "000f12599ad608922f0bd1689be4032012037ecb546d1d984a21c701f8b86cf7",
+    "sentra_canvas/task_presentation.py": "c91de1f7a46c1c5515fb40320726f7783e2aa7a3ef29f7817a6d3fea00eedd82",
+    "sentra_canvas/task_runtime.py": "7edd57dcfb2ca49bef92922ef9dd30859bace9c0e6ebce8f645f549b2395a499",
+    "sentra_canvas/task_verification.py": "64740b9fe9a780e38fe45209ece5e9b9ad6e54544958daf13129f6f4c59b3a11",
+    "sentra_canvas/task_workspace.py": "de7d16b4b45734b47e39bc98cbca225e536aeae9d2d50efc5f031ddf3b756fbe",
+    "sentra_canvas/terminal.py": "efb1d108feef733f78ecee7ad27d7a51c66b31944330862ef74fe1e2cc504cc0",
+    "sentra_canvas/terminal_observation.py": "8b5e3385e338a511a3ad483dcc3b1df1bab496d976d76cb805d0b486cf7b0595",
+    "sentra_canvas/terminal_snapshots.py": "e07a756ecae43e53b2af8df829c9c6004459ca71ce055f022bff84c87565c41e",
+    "sentra_canvas/workspace_access.py": "e353b04498d95f53695175d9caed7803e570338cc115130cc138287a32d0f48f",
+    "sentra_canvas/workspace_contract.py": "2d3151a11f18577e1fd65c4548d8a5bfcf9e0bf9ad1fd06b417e0bff66fa79e0",
+    "sentra_canvas/workspace_presentation.py": "a3a5c9a00742836b1c540071a4f22223d9b6718faa384338770aea022429a805",
+    "sentra_canvas/workspace_requests.py": "218a357b7c94e1844e05e02b1d15cddbbac98eedccbe53a47e28131c5a6cca6a",
+    "sentra_cli/agent.py": "bd5c08a05d909cbf2f3c566157e0f27ef1bc146e9638234f7c05c73ce523d42f",
+    "sentra_cli/authority_environment.py": "c102e42a0edd13db9cc0dd69e0fc1aa857eae4475ad7c514b522ab5cf4e78f95",
+    "sentra_cli/canvas.py": "6b6fa51a9ece23545b13700ce6cdb2dadb7a893ed7bcba75e36e23ac372692d0",
+    "sentra_cli/canvas_binding.py": "f3b3c00bddc7e9220f4086936b107f59ad57ace23c5ca0382f9c1c33b12ea7bb",
+    "sentra_electron/evaluation_diagnostics.cjs": "f45e6ccbadbd3e225ed0da28a11651f553aa865b0b41475be13c0172f2760c44",
+    "sentra_electron/main.cjs": "020421581f08d87ba51f2808b33a0611fd7bf85c4f625ec73b42034f38084c67",
+    "sentra_electron/policy.cjs": "d85495aea3d1ad3409b30999dac0896aa866f414afc5d4834b2af0637259271c",
+    "sentra_executors/_base.py": "aca20b0932cb82e588eb3fa0716612c83e80b35c0d7b82956f75966695f553dc",
+    "sentra_executors/git_worktrees.py": "45b26a9a6549a99c074a22b31243406b2a699a23d9e8a84fa7626ac921c1c5eb",
+    "sentra_executors/input_control.py": "5f31c3fa2c5ef5e86d93a2d3b0100210c09e316dccce7eef79fd1fe9be8299b5",
+    "sentra_executors/local_computer.py": "e16c7e06c699d684d66e90e0004328ba4ecdd148deb63678346a20e7e75236b5",
+    "sentra_executors/playwright_browser.py": "fd46b94207ed54e6665dfaae2d1bd7d51470e2f1553f9c3cf38ccd8c37798fed",
+    "sentra_executors/virtualbox_vm.py": "0ba47f69465c776e8c2e9211f25f3298931749992cd0d551a47f116f6c12f4dc",
+    "sentra_executors/workspace_files.py": "cc1bda08a6ed5ba9f6e9131dbb2de44db7f94a36cc06f0873edd3a3be89efbd5",
+    "sentra_interop/acp_dialects.py": "b29c471d67d5618226c449ee360f8fedf3861609b1c405fb67c9678de9b0de08",
+    "sentra_interop/acp_provider.py": "aff0e264f9fead616ed15471ddc2703a0c9373e8d0e4f17a70c6e1dd56e318f3",
+    "sentra_runtime/machine_host.py": "77f032756ec5418a2e7b9ae8e27697b37f9e6a373df38ae9e8650cb9434c1058",
+    "sentra_runtime/orchestration_observation.py": "68fec4ac95f3bb89326d9bf06a9d1677f4d15dde06da626868195281fa36a22e",
+    "sentra_runtime/task_lifecycle.py": "49e4dde727232e27428199647e19df8930ae9fba2cfc73cdc42596c5351e4778",
+    "vendor/orca/provenance.json": "1ff8977c212b7d5b755f9ed1e3c46573b39b7933bed43eb364a674221b02e4f7",
+    "vendor/orca/upstream-review.json": "027a819e432711a00827a5b274b3bb703c379e9b82c8f8c6f6d682ee824e0eb9",
+    "workspace/worktree_review.py": "1a738f48b5379a694a31e805f775c10a686a900ac8817ec66b0dd72be660b8d1",
+    "workspace/worktrees.py": "9aadde942d74781c0364ccf2293ba7557da19bad1b9f5ce2334504e14ebd6efe"
+  },
+  "outputs": {
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/bootstrap.js": {
+      "sha256": "b4b79dd3babf2bf9df1370cb97f6f4dc003921939d1a8fa8cfd3518262ddcc24",
+      "bytes": 1240
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-2b4Gb5sE.js": {
+      "sha256": "ac7fc0a6da171cc715153f966c7907e688604a7e78cc00db914af119e976eb68",
+      "bytes": 4096
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-84nbDH0I.js": {
+      "sha256": "b04b2d247760958ea0055bc5f2e6b71768ce16eb6c4c9ef107f9756832a49fbf",
+      "bytes": 757
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-8H7HVH4w.js": {
+      "sha256": "2a52b1abff5c4f9cf1f947a23d2d810f69f5dc602ab9b715a0676b8faf7576e9",
+      "bytes": 7407
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-AF4Hwhju.js": {
+      "sha256": "fff5fffe6757c1708a03dec395f9b3bd038d30fce56b70e00960da5ea203c78e",
+      "bytes": 2513
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-B0MGmaEv.js": {
+      "sha256": "14e3ea0361bec4aa254716f0691281f3e051d765df29532517ffebe7c82bda14",
+      "bytes": 2482
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-B2r4Cu8j.js": {
+      "sha256": "ac44ba68eb7f4aaf1b126fa4e9755cdceb6645c1c62dec23cbe9352c8e4b11ab",
+      "bytes": 47725
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-B45xgp2S.js": {
+      "sha256": "0530b163f7297af3234377ec8d70cc26919c6e38f3dd34c8069a30387ff666a0",
+      "bytes": 4823
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-B4SKHCfn.js": {
+      "sha256": "81c3d900510dc5e1874e1b2518aa5ba6f5c94b6078fc176ea2b78fcc8c2b3f2d",
+      "bytes": 1900
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-B78wSQJQ.js": {
+      "sha256": "b3d8aa05e7f39b5b77c41817b02ff8f0e8ec11e6b8f3a91a8ae260f91dd3b01a",
+      "bytes": 861
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-B9NhS7L_.js": {
+      "sha256": "b1aacfc6dada3beff2530353c44dbd3b7c9fa39f6c315e27de6b44825fcd7cb4",
+      "bytes": 3691
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BdH9P7JN.js": {
+      "sha256": "82cc9001377c005820abe139872f78a200c69363186f2d39bacfb1ccf92cf059",
+      "bytes": 98130
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BEjRio4Q.js": {
+      "sha256": "df2f416a891d40045c83ff1900af1cb87f72695ad4d87c50682738624c38a266",
+      "bytes": 1692
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BEMVcqjs.js": {
+      "sha256": "44dc8f20f0534aa78d31245211628291e31351f36bee1ac1d7aeb8a59a11d254",
+      "bytes": 1386
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BEn0Cwpx.js": {
+      "sha256": "2a2f286533f7527943a00fba13a31187ca2ddfdd1d8dac717175eb734f0dd14e",
+      "bytes": 4059
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BflJGmDX.js": {
+      "sha256": "3ccea67a7d55baa7ada3701e3382834b1c4b98caad17385635495df8ecf1b075",
+      "bytes": 9406
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BGfruO1u.js": {
+      "sha256": "3e07cc02b94880557cd297c19f467421a7f452c8240534e7e9e7dbc4607b1813",
+      "bytes": 2353
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BHEdbvp9.js": {
+      "sha256": "72ce032bf8e2f97291cb8070c844d7a36255c89a0b32f65d8f2865b9344ef472",
+      "bytes": 4550
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BKJx4mf9.js": {
+      "sha256": "852b1dc43c633b82ad40b05b4175872080ca8df85e84b39a6005a55dbdb23c49",
+      "bytes": 6159
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BkSkiI9m.js": {
+      "sha256": "efd47f9ae8043b2e00b8ac2ecf12d5b3916d049fd230d4e2de748e79c633d125",
+      "bytes": 9733
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BLp5-jwC.js": {
+      "sha256": "559d0a977880456b4f916cf9b1592b375c96047cd9dd0a13b3598b4369072553",
+      "bytes": 1996
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BOmg50Wh.js": {
+      "sha256": "ce1c974116a2ac4f83529aaac820555e7925ab99d14762203105564d47db8925",
+      "bytes": 3324
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BOVgKnng.js": {
+      "sha256": "8522dc37629aa3153da10fac7505ac8f289219c3eb79246bc6d9e05f1a5ed148",
+      "bytes": 23515
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BPTmHmyx.js": {
+      "sha256": "55c50c3d69b919264e6f1d9e6d9279d381d88c1c9a9e1cd4a75c82abe9680de8",
+      "bytes": 1045
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BQ3jk683.js": {
+      "sha256": "d957da0d4a5a64c9b2e2ec9a9caca1e89688a159d142a83606eb7d491951cbbd",
+      "bytes": 16230
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BRsoo5mP.js": {
+      "sha256": "868e8b21da5021140b51775df3d9ebb51bf5aa0925b2dba75b9923e71a717e6d",
+      "bytes": 4159
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Bsdphhtm.js": {
+      "sha256": "13bbc57de4aebda33b48734f2b181e8f46383f7f4cd991c854fa30c3b63cf15a",
+      "bytes": 5019
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Bsn9Q0LE.js": {
+      "sha256": "26f2284ce51a80fd522a97064e7001869eba033c21f87bc916e663f513ab4360",
+      "bytes": 26815
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BSzj6Xyz.js": {
+      "sha256": "b74f315529764ac8bd1dc5de0000a81e8ec336ca167b130a9380af3f8e2c2527",
+      "bytes": 1822
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Bt6PBEDR.js": {
+      "sha256": "0ee1b38b1c87eddf928e6d11929c96ad15d006d477182f4d6fb181475cbaaa25",
+      "bytes": 3862
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BthdM_4N.js": {
+      "sha256": "e025945bc97ae2640b26c11b737636cc735b0600387077412dbbae1e488d2686",
+      "bytes": 3650
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Bu8mWwtz.js": {
+      "sha256": "df00507e8e79bde38a22326c6071437adceafe4b032ff92910b7ae51aaca5036",
+      "bytes": 16963
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BUZw3wgd.js": {
+      "sha256": "438714d3559726d0a0a3ac7a0a08267c929d0bb690fa2eef514b82322be2f6a4",
+      "bytes": 9826
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BV0c4Hdn.js": {
+      "sha256": "17d201413a70fc04906b3d0265bc6b80e7d8f176c38f46979c366ecbea144e77",
+      "bytes": 7846
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BVIeWmwY.js": {
+      "sha256": "fa4f1534359480b3174b2ca9ff915972f9475bdaa74aab645bfda1eca46074e9",
+      "bytes": 5110
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BwTct_5T.js": {
+      "sha256": "122d799c67d18e54c5ef26e7786f81ae0fc4ce2dbdeb57aa2ff4b2e5f23fb0a8",
+      "bytes": 2881
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BxlDAfKz.js": {
+      "sha256": "99b13acfe5aa9e28b8556b8b6fac33b1aefcda5fdf9ae193e4bb6ed0c1385804",
+      "bytes": 30709
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BXxG0Yva.js": {
+      "sha256": "fe8dcb554ae3e959a556e5e0d4c1d6b186818e451a4269ae603062c478094f96",
+      "bytes": 4081
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BypO90EA.js": {
+      "sha256": "7f2b1dd1819bc8f115c96c9e1779e229c6845e9a0f86f0e4eae04203e7a7c92c",
+      "bytes": 83678
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-BZyAS7I4.js": {
+      "sha256": "a600a4c00b1745a13b1e619a137f2c67ae87352aa1ab57dad71cf94d633265a7",
+      "bytes": 2517
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-B_1Jd8HM.js": {
+      "sha256": "8e6518c2f97a6057d9801d6401b2da865382f8d54b8e718c794e011b74f3a53a",
+      "bytes": 6272
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-C2dAgh7P.js": {
+      "sha256": "46bba1f3f4223fd204bf913bbeebdbc0256db1e69bd9a2e804175c5841ec8fe5",
+      "bytes": 957
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-C2OyD2Y6.js": {
+      "sha256": "9c51535bc98848d00a7a16101ad2ff162cb44106468b7a7d595f04719e082cab",
+      "bytes": 9331
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-C2YCEjRU.js": {
+      "sha256": "d1afbce06285cff3fef570f9b753e77942c8a32deb8c0f517fbfcfe8c9ebfa17",
+      "bytes": 14290
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-C357ku5U.js": {
+      "sha256": "265cd5a3bc8e8e1426825db6da7dfd6398db08f4ca5dc266b3f432a982868452",
+      "bytes": 664
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-C4jVoHG1.js": {
+      "sha256": "87165770d704543ebf20f4da7f1a84f4c97bd43dc707f71759b32239f9516f9e",
+      "bytes": 6745
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-C9zpzAZU.js": {
+      "sha256": "edc1c63e88e0942b88240b589af3bc3e6ada91a4996eb5eff61d64d069d8085a",
+      "bytes": 5917
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CDXbQho_.js": {
+      "sha256": "517a9a5c9ce13c1f2387db83ca6b2946f5259db11b419e9d4ab7438b88f4cac6",
+      "bytes": 84615
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-ChfNwlCY.js": {
+      "sha256": "bf7640300ec2fcda90331b55594a232b76d5a3542be898d4b6565b6cb3a61ce7",
+      "bytes": 5077
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-ChtP43wD.js": {
+      "sha256": "cf4c32c773b4aec08498fd170b7f74733a695fdbcbb18170413e05c8d64d4848",
+      "bytes": 302
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CjI9Y6RI.js": {
+      "sha256": "1b2591bfbefcfda9f59a0657cec762e2eae0fe3adb897dce65a68e119be58b9d",
+      "bytes": 8182
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CJVEvuVg.js": {
+      "sha256": "8477e1a848a72342c5be881acd32b6d672cc5af101395f43a980c3fb12da09d5",
+      "bytes": 44573
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-cKJt0ICv.js": {
+      "sha256": "295d760baf13896e46c76e87d6150931b000f2f1242d32d25ca1e2aaa6fc3a15",
+      "bytes": 103892
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-ClOhbFR7.js": {
+      "sha256": "08ce5e646edb4d614970bead56bd5b06f14093bc904af846e33b1d60fa142052",
+      "bytes": 2029
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CLVgA2GD.js": {
+      "sha256": "94a0d68f2fa36fd78ed3f3c9483b33062fee90c694f4e70797d9cc5a6715b914",
+      "bytes": 845
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CnaYoQib.js": {
+      "sha256": "196216d43c6f0da651aed4b274a684b1ccb5b693a057e26e01ac66002f5434f6",
+      "bytes": 24664
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Co3PbHdE.js": {
+      "sha256": "8d4374929f96885f45950a5964b6aec62e4b769e2c62d2d76535b74b833330f9",
+      "bytes": 1756
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CQfgDRfP.js": {
+      "sha256": "0c2cf72d1ac90213c3b42a91c800c587f75ee81e2bcde2712dddfd386d8967eb",
+      "bytes": 5263
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CqftRsjg.js": {
+      "sha256": "73fe5a94c56d83b21ad4bca500a377e32d2ecaab55df875ecae446a65a680cbe",
+      "bytes": 2703
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CqHI_q-D.js": {
+      "sha256": "e620fa810ea18a71a5d491ea8da8638f6113f1ae435c7300b9a2f2d332c5691f",
+      "bytes": 2795
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CsGzmbHs.js": {
+      "sha256": "0e6051765a2cb7ec75aae37e40d033b5409080d4b14205072d015504356d0616",
+      "bytes": 1986
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Cshzl8qu.js": {
+      "sha256": "7dc9b8c8a1289df3800c9ca773519840019d47deefb03dca7f7302b9882f12e9",
+      "bytes": 1866
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CTIncYxj.js": {
+      "sha256": "d3af197570b0a504e7c45dcd619b58422c5cb2f54b9028e556768e2213b070f6",
+      "bytes": 1135
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CUpZ7dEl.js": {
+      "sha256": "3864499821a78f46e62c21582deb146e1bda1128068faca178f7b2d5a952397f",
+      "bytes": 4122
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Cx3rYX2g.js": {
+      "sha256": "ceb6ee2aef9f2a911bd3d33a4913af35ce960f77ce309d0e3173e5f257c50afc",
+      "bytes": 1955
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CxDmU1I4.js": {
+      "sha256": "ce1385db9dc69828b103ea845015e5ebdad1b624eef79f4c9f5dc56d5d23a7ad",
+      "bytes": 2920
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CXXgtw0p.js": {
+      "sha256": "717ca22d8f94a5a221635a01bc506c11f0fe36088ed98f3a08532a7da9297831",
+      "bytes": 2141
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CypMflHO.js": {
+      "sha256": "4409594bd91d5368d2a6fad13f2e3bad0efff4dde6275c48633af032f6311320",
+      "bytes": 43925
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-CzMBulkp.js": {
+      "sha256": "cfc533a57da0f333fdb2ffe1b9371eef808de4f72917a34140bdaf4caf88dab4",
+      "bytes": 2057
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-C_eisQCp.js": {
+      "sha256": "d0d548398b732306f912bbd8cd04486543520e3882a05e98b20a86bfa2b70089",
+      "bytes": 777
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D-_bu6Cm.js": {
+      "sha256": "5d28ab2c545df62b10f61d76048494c30ecb2348aa9d0063a7e111c62b8230ca",
+      "bytes": 72370
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D1ij_kNL.js": {
+      "sha256": "7c936836371bd94a649f756e6c07bb3f3139555c4a2c18c0ac6060ca26332d77",
+      "bytes": 802
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D2Q8cUp1.js": {
+      "sha256": "435819b2e5cd3263138c94a8970bb09101e4c3f186594eb4649f8bc604eecad9",
+      "bytes": 2101
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D3A-2wxB.js": {
+      "sha256": "e4c8c4e847320fc64ebeeacf05a813636d4984da59392a7cf3b5f75016e2d225",
+      "bytes": 32144
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D4c0_ac3.js": {
+      "sha256": "e39d883c18e1d0436f36926b7b46617128b40cfd7ed0a10bd66af695fcadfe97",
+      "bytes": 1979
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D5EjA2JK.js": {
+      "sha256": "5475a1a35d2dd641d8cd989a938161509774ccd2b76150b09c4058185476df6e",
+      "bytes": 599
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D5jiJvOU.js": {
+      "sha256": "fc2dfdc276c574d2bbda79a675c05f6cebc4a24313b1c3a5743ef0b31290e05e",
+      "bytes": 2449
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D6RzAl64.js": {
+      "sha256": "89cdf42385551ba2c763602802e59a86ec8587db8f43527160095244e48552cd",
+      "bytes": 2539
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D8mJGfID.js": {
+      "sha256": "4cb6d7533898ebbc63c3cbfdb242e561ba09088a31a34034d70905320277ca31",
+      "bytes": 26885
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D8WpQPaX.js": {
+      "sha256": "19fed4e3b21edac914eba6a26cbc7e476a94ea6028dcc22e9b77600f4a618f8f",
+      "bytes": 7689
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D9f6rSsU.js": {
+      "sha256": "17756f99b070ecf14eb93e21030c15c6fb5f483d189b18d34943ebef3802b173",
+      "bytes": 5431
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-D9qYN0V5.js": {
+      "sha256": "92e00992b5c67b8d38c35f9088b09ee58175c3dd1ea45f9d135fd95269bb0dbe",
+      "bytes": 6357
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DCl_8MCW.js": {
+      "sha256": "ecd2d25e2e3152f480db9d3e698b2ac94f01fc3dc90d7f51d53d71f5c2a0db33",
+      "bytes": 3974
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-De_zI4J0.js": {
+      "sha256": "036cefc2b4652f1513a94c360f9131b00d05c2b91f8d1e1de998075eb2bb802c",
+      "bytes": 3847
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DgAKBe0r.js": {
+      "sha256": "a5cf5425784f04223503bbebd02c95a25190604640b15c238143c65585dd3146",
+      "bytes": 2314
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DHLQUbN7.js": {
+      "sha256": "dbabfa9a971f5684d1ec67be806185042bec8f381ddc8d72f29671d403741e3d",
+      "bytes": 6195
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DIREOWxE.js": {
+      "sha256": "01c691a08db141b1085193694cd9daef38462d7f7a093d8612d351161a533190",
+      "bytes": 21711
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DjVOVvNP.js": {
+      "sha256": "d82d48ac4fdb69dd2dca969ecfb5e59dca97e15d10ec4872afe73d5ac1253325",
+      "bytes": 7862
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DKB6_1j6.js": {
+      "sha256": "f0835c04896ba11cf7884b2175e31574762723655d4e6461ce6ec7046479eaa3",
+      "bytes": 3762
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DNzd62Q_.js": {
+      "sha256": "f12ad11c2bff04c45c80f79d02250c76f0b1d01b254d04da7b195f4ad15b556f",
+      "bytes": 3092
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DPCEkfD_.js": {
+      "sha256": "2f4183f6b44b5ad6d9e5fe805a843c7d9336a4e95ef811b7bff81a03562295d6",
+      "bytes": 3128
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DPeRJTgX.js": {
+      "sha256": "90cdcf8a503f53a1201b5b7c44134431860e9237ffcf3fbcd4649dd6ee1de668",
+      "bytes": 1663
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Dp_KdFgX.js": {
+      "sha256": "2d5e3c493596b6ffcc688ab63c6501d11be92ccb669d92b5c2a36cc876b7acdd",
+      "bytes": 2256
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DR3xfYX8.js": {
+      "sha256": "a4838b5ee487e39729050b07901eba26e1fe6a643ff22d90aaf1dff553dc825c",
+      "bytes": 22952
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DSc-FFfx.js": {
+      "sha256": "f7ae1456ac336c6c23f733d98cb1ffa1a6d604ae53ccfbf3c3d6b40f12c4fa06",
+      "bytes": 2604
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DTF72YNO.js": {
+      "sha256": "8f289b3c0a603c2de057f44cfb513dcb9e24dfeff1ac299a0acde4f1279385a9",
+      "bytes": 2092
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DTszW0OQ.js": {
+      "sha256": "b506c07933e46fc031a5711d284c722630c91a35ba96e2a2b87726726a76f330",
+      "bytes": 3220
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DtTzTFiu.js": {
+      "sha256": "f1da163ae2aacfb632b2c4dc585a295c597d3b1e6f606b730da13993ea73f3cb",
+      "bytes": 11553
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DuQMFDvy.js": {
+      "sha256": "648b34cda3d7da91025ed7ec142ffbd5bf26528407740383bdf690643a16c73c",
+      "bytes": 36836
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Dw8rdalz.js": {
+      "sha256": "ce4996eb8f005f8d609a9f9598d3635bcdc9898986030a26e5f9f5b19534367a",
+      "bytes": 7055
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DwEmtXUh.js": {
+      "sha256": "c866fa8871457e0a09930768b3f738f963fb18dc075656c0d8951addf2f589ab",
+      "bytes": 28369
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DWkQyNnU.js": {
+      "sha256": "eb4116d03dcda3c7dcb1f8681fe9858eb6f7c7b24213a8397c4862151627d532",
+      "bytes": 3691
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DwuoZtxw.js": {
+      "sha256": "eada594fb1134cc2dfb8874e055a8db889b2685fa6aa6342841343be30038937",
+      "bytes": 2434
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-DXiLM1-G.js": {
+      "sha256": "1da2ff3f952ded0f8e8080499e58b44d3b22bc7c5e2ae8db2f99a3a6105310b2",
+      "bytes": 2275
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Dz-mlCAC.js": {
+      "sha256": "02e59f6539d324beb643eee727f0b4356549cafe15f7aaceb3d3c34ee5bdad0d",
+      "bytes": 3331
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-gfMMiTNf.js": {
+      "sha256": "9619f3fb6609168d82b468b6f950530bd23fafbc261f7b56696b10c483522d93",
+      "bytes": 2290
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-gpDK5sbt.js": {
+      "sha256": "5ad9e795d1d7fe0390cc015a03d54aef739a2244340e2deaf5df4f6ed013a8df",
+      "bytes": 1597
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Jk7HA9cy.js": {
+      "sha256": "ad5f66505e42475a11a1a869245afe14649fa1f06cba4b795f86f380a933f169",
+      "bytes": 6608
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-k9Cc-WVi.js": {
+      "sha256": "4dc636b91b71533129a161da6338be9190f3164c8d180a5b097b8c178fb15634",
+      "bytes": 8425
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-kS471soi.js": {
+      "sha256": "dcbd07bcd5b806eee08ab28b0b0819438abebb9b05aee10a5b983fec08e5b828",
+      "bytes": 3315
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-oBAE_ms0.js": {
+      "sha256": "ca63055e8d4e39e3280607c357763a89ff08c3e719f48a2749f3d8cde1fea56d",
+      "bytes": 10156
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-p9eYesGn.js": {
+      "sha256": "cd05736f31fba1aa9830d94e6b3799236e0b8cd2b989674fb9b074532a8bb42c",
+      "bytes": 3182
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-PPSTk1ow.js": {
+      "sha256": "6d53eb1b3bceb8f3a212937286bfdaeed42149560fa0e815d735527686a7f6d2",
+      "bytes": 4842
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-qgSLujhx.js": {
+      "sha256": "53b24ee7c56bc57af791aed5bc20b0cf51333dd20c6f48eb9dd7d7a222a4d96b",
+      "bytes": 3499
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-S7ucR4pR.js": {
+      "sha256": "00102c7a939f9bd81c23d292bf4bb6a3d657e722db0bffcd85ff9401730c849a",
+      "bytes": 4033
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-tLWDfEkZ.js": {
+      "sha256": "9e46e1396212c04e17b36ef6995ccff254c31c158ee297a17dce13a027cc968f",
+      "bytes": 1613
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-u8YMmbU0.js": {
+      "sha256": "84ae4ba6bf879a4608696af785e17cedd8b581bdbea0c90f856585d451b34190",
+      "bytes": 1899
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-VlUiK86J.js": {
+      "sha256": "1bd675104bdfd2ac7ec250cefe80d8f48581bf103519f1c7407b2a4e3502da93",
+      "bytes": 2760
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-xvONpD0Z.js": {
+      "sha256": "bd8b29f1100faa6548bf4e1fd9270feccb476af74862a06cb0ed267c067683b9",
+      "bytes": 22040
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/chunk-Znus0BXT.js": {
+      "sha256": "45bb8e19b050395d7ad96bf7ad1e228e09cec5e46fcda6ed68173e6bd784f180",
+      "bytes": 4930
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/desktop.css": {
+      "sha256": "504a0fd4699784426398aa2ba4cec43d064ccea645b376b5e9ba6c874cf9f5eb",
+      "bytes": 172314
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/desktop.js": {
+      "sha256": "d1b61c00d1e79931c1c3f68c50097c38ff759acecc561c21683a978c0bda1dcc",
+      "bytes": 2223595
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/desktop.png": {
+      "sha256": "9fb3e53fc90b4fe881e1c1f8121dd32fbe9882dbc989156c40b0a8fadc348441",
+      "bytes": 380879
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/desktop2.png": {
+      "sha256": "bf8ef19c7b7d753c11ba05e411f15a0733bcb810541bc88fb34c38427c6a6040",
+      "bytes": 415250
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/desktop3.png": {
+      "sha256": "bf9a2f9f6859c2931b9a4062117deb7d06fba77b190b5ad52a90587f368b34a7",
+      "bytes": 343513
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/desktop4.png": {
+      "sha256": "aebbd4a27e346b7a2f41976bcdae4b144e42219cce77182053cfe4140bb6486f",
+      "bytes": 320726
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/index.html": {
+      "sha256": "97ffba8b5f9d5c053d1670d37dcc8891dc9477f06332fd35f841e6d0e671a2a6",
+      "bytes": 1084
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-workspace-build/.vite/manifest.json": {
+      "sha256": "5373c9767bb972f8e081a8e4ace5d0b4ff1c0c5e90d379622363652d48d35bfe",
+      "bytes": 34640
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/bootstrap.js": {
+      "sha256": "b4b79dd3babf2bf9df1370cb97f6f4dc003921939d1a8fa8cfd3518262ddcc24",
+      "bytes": 1240
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-2b4Gb5sE.js": {
+      "sha256": "ac7fc0a6da171cc715153f966c7907e688604a7e78cc00db914af119e976eb68",
+      "bytes": 4096
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-84nbDH0I.js": {
+      "sha256": "b04b2d247760958ea0055bc5f2e6b71768ce16eb6c4c9ef107f9756832a49fbf",
+      "bytes": 757
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-8H7HVH4w.js": {
+      "sha256": "2a52b1abff5c4f9cf1f947a23d2d810f69f5dc602ab9b715a0676b8faf7576e9",
+      "bytes": 7407
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-AF4Hwhju.js": {
+      "sha256": "fff5fffe6757c1708a03dec395f9b3bd038d30fce56b70e00960da5ea203c78e",
+      "bytes": 2513
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-B0MGmaEv.js": {
+      "sha256": "14e3ea0361bec4aa254716f0691281f3e051d765df29532517ffebe7c82bda14",
+      "bytes": 2482
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-B2r4Cu8j.js": {
+      "sha256": "ac44ba68eb7f4aaf1b126fa4e9755cdceb6645c1c62dec23cbe9352c8e4b11ab",
+      "bytes": 47725
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-B45xgp2S.js": {
+      "sha256": "0530b163f7297af3234377ec8d70cc26919c6e38f3dd34c8069a30387ff666a0",
+      "bytes": 4823
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-B4SKHCfn.js": {
+      "sha256": "81c3d900510dc5e1874e1b2518aa5ba6f5c94b6078fc176ea2b78fcc8c2b3f2d",
+      "bytes": 1900
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-B78wSQJQ.js": {
+      "sha256": "b3d8aa05e7f39b5b77c41817b02ff8f0e8ec11e6b8f3a91a8ae260f91dd3b01a",
+      "bytes": 861
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-B9NhS7L_.js": {
+      "sha256": "b1aacfc6dada3beff2530353c44dbd3b7c9fa39f6c315e27de6b44825fcd7cb4",
+      "bytes": 3691
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BdH9P7JN.js": {
+      "sha256": "82cc9001377c005820abe139872f78a200c69363186f2d39bacfb1ccf92cf059",
+      "bytes": 98130
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BEjRio4Q.js": {
+      "sha256": "df2f416a891d40045c83ff1900af1cb87f72695ad4d87c50682738624c38a266",
+      "bytes": 1692
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BEMVcqjs.js": {
+      "sha256": "44dc8f20f0534aa78d31245211628291e31351f36bee1ac1d7aeb8a59a11d254",
+      "bytes": 1386
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BEn0Cwpx.js": {
+      "sha256": "2a2f286533f7527943a00fba13a31187ca2ddfdd1d8dac717175eb734f0dd14e",
+      "bytes": 4059
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BflJGmDX.js": {
+      "sha256": "3ccea67a7d55baa7ada3701e3382834b1c4b98caad17385635495df8ecf1b075",
+      "bytes": 9406
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BGfruO1u.js": {
+      "sha256": "3e07cc02b94880557cd297c19f467421a7f452c8240534e7e9e7dbc4607b1813",
+      "bytes": 2353
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BHEdbvp9.js": {
+      "sha256": "72ce032bf8e2f97291cb8070c844d7a36255c89a0b32f65d8f2865b9344ef472",
+      "bytes": 4550
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BKJx4mf9.js": {
+      "sha256": "852b1dc43c633b82ad40b05b4175872080ca8df85e84b39a6005a55dbdb23c49",
+      "bytes": 6159
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BkSkiI9m.js": {
+      "sha256": "efd47f9ae8043b2e00b8ac2ecf12d5b3916d049fd230d4e2de748e79c633d125",
+      "bytes": 9733
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BLp5-jwC.js": {
+      "sha256": "559d0a977880456b4f916cf9b1592b375c96047cd9dd0a13b3598b4369072553",
+      "bytes": 1996
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BOmg50Wh.js": {
+      "sha256": "ce1c974116a2ac4f83529aaac820555e7925ab99d14762203105564d47db8925",
+      "bytes": 3324
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BOVgKnng.js": {
+      "sha256": "8522dc37629aa3153da10fac7505ac8f289219c3eb79246bc6d9e05f1a5ed148",
+      "bytes": 23515
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BPTmHmyx.js": {
+      "sha256": "55c50c3d69b919264e6f1d9e6d9279d381d88c1c9a9e1cd4a75c82abe9680de8",
+      "bytes": 1045
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BQ3jk683.js": {
+      "sha256": "d957da0d4a5a64c9b2e2ec9a9caca1e89688a159d142a83606eb7d491951cbbd",
+      "bytes": 16230
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BRsoo5mP.js": {
+      "sha256": "868e8b21da5021140b51775df3d9ebb51bf5aa0925b2dba75b9923e71a717e6d",
+      "bytes": 4159
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Bsdphhtm.js": {
+      "sha256": "13bbc57de4aebda33b48734f2b181e8f46383f7f4cd991c854fa30c3b63cf15a",
+      "bytes": 5019
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Bsn9Q0LE.js": {
+      "sha256": "26f2284ce51a80fd522a97064e7001869eba033c21f87bc916e663f513ab4360",
+      "bytes": 26815
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BSzj6Xyz.js": {
+      "sha256": "b74f315529764ac8bd1dc5de0000a81e8ec336ca167b130a9380af3f8e2c2527",
+      "bytes": 1822
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Bt6PBEDR.js": {
+      "sha256": "0ee1b38b1c87eddf928e6d11929c96ad15d006d477182f4d6fb181475cbaaa25",
+      "bytes": 3862
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BthdM_4N.js": {
+      "sha256": "e025945bc97ae2640b26c11b737636cc735b0600387077412dbbae1e488d2686",
+      "bytes": 3650
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Bu8mWwtz.js": {
+      "sha256": "df00507e8e79bde38a22326c6071437adceafe4b032ff92910b7ae51aaca5036",
+      "bytes": 16963
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BUZw3wgd.js": {
+      "sha256": "438714d3559726d0a0a3ac7a0a08267c929d0bb690fa2eef514b82322be2f6a4",
+      "bytes": 9826
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BV0c4Hdn.js": {
+      "sha256": "17d201413a70fc04906b3d0265bc6b80e7d8f176c38f46979c366ecbea144e77",
+      "bytes": 7846
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BVIeWmwY.js": {
+      "sha256": "fa4f1534359480b3174b2ca9ff915972f9475bdaa74aab645bfda1eca46074e9",
+      "bytes": 5110
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BwTct_5T.js": {
+      "sha256": "122d799c67d18e54c5ef26e7786f81ae0fc4ce2dbdeb57aa2ff4b2e5f23fb0a8",
+      "bytes": 2881
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BxlDAfKz.js": {
+      "sha256": "99b13acfe5aa9e28b8556b8b6fac33b1aefcda5fdf9ae193e4bb6ed0c1385804",
+      "bytes": 30709
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BXxG0Yva.js": {
+      "sha256": "fe8dcb554ae3e959a556e5e0d4c1d6b186818e451a4269ae603062c478094f96",
+      "bytes": 4081
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BypO90EA.js": {
+      "sha256": "7f2b1dd1819bc8f115c96c9e1779e229c6845e9a0f86f0e4eae04203e7a7c92c",
+      "bytes": 83678
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-BZyAS7I4.js": {
+      "sha256": "a600a4c00b1745a13b1e619a137f2c67ae87352aa1ab57dad71cf94d633265a7",
+      "bytes": 2517
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-B_1Jd8HM.js": {
+      "sha256": "8e6518c2f97a6057d9801d6401b2da865382f8d54b8e718c794e011b74f3a53a",
+      "bytes": 6272
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-C2dAgh7P.js": {
+      "sha256": "46bba1f3f4223fd204bf913bbeebdbc0256db1e69bd9a2e804175c5841ec8fe5",
+      "bytes": 957
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-C2OyD2Y6.js": {
+      "sha256": "9c51535bc98848d00a7a16101ad2ff162cb44106468b7a7d595f04719e082cab",
+      "bytes": 9331
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-C2YCEjRU.js": {
+      "sha256": "d1afbce06285cff3fef570f9b753e77942c8a32deb8c0f517fbfcfe8c9ebfa17",
+      "bytes": 14290
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-C357ku5U.js": {
+      "sha256": "265cd5a3bc8e8e1426825db6da7dfd6398db08f4ca5dc266b3f432a982868452",
+      "bytes": 664
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-C4jVoHG1.js": {
+      "sha256": "87165770d704543ebf20f4da7f1a84f4c97bd43dc707f71759b32239f9516f9e",
+      "bytes": 6745
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-C9zpzAZU.js": {
+      "sha256": "edc1c63e88e0942b88240b589af3bc3e6ada91a4996eb5eff61d64d069d8085a",
+      "bytes": 5917
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CDXbQho_.js": {
+      "sha256": "517a9a5c9ce13c1f2387db83ca6b2946f5259db11b419e9d4ab7438b88f4cac6",
+      "bytes": 84615
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-ChfNwlCY.js": {
+      "sha256": "bf7640300ec2fcda90331b55594a232b76d5a3542be898d4b6565b6cb3a61ce7",
+      "bytes": 5077
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-ChtP43wD.js": {
+      "sha256": "cf4c32c773b4aec08498fd170b7f74733a695fdbcbb18170413e05c8d64d4848",
+      "bytes": 302
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CjI9Y6RI.js": {
+      "sha256": "1b2591bfbefcfda9f59a0657cec762e2eae0fe3adb897dce65a68e119be58b9d",
+      "bytes": 8182
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CJVEvuVg.js": {
+      "sha256": "8477e1a848a72342c5be881acd32b6d672cc5af101395f43a980c3fb12da09d5",
+      "bytes": 44573
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-cKJt0ICv.js": {
+      "sha256": "295d760baf13896e46c76e87d6150931b000f2f1242d32d25ca1e2aaa6fc3a15",
+      "bytes": 103892
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-ClOhbFR7.js": {
+      "sha256": "08ce5e646edb4d614970bead56bd5b06f14093bc904af846e33b1d60fa142052",
+      "bytes": 2029
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CLVgA2GD.js": {
+      "sha256": "94a0d68f2fa36fd78ed3f3c9483b33062fee90c694f4e70797d9cc5a6715b914",
+      "bytes": 845
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CnaYoQib.js": {
+      "sha256": "196216d43c6f0da651aed4b274a684b1ccb5b693a057e26e01ac66002f5434f6",
+      "bytes": 24664
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Co3PbHdE.js": {
+      "sha256": "8d4374929f96885f45950a5964b6aec62e4b769e2c62d2d76535b74b833330f9",
+      "bytes": 1756
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CQfgDRfP.js": {
+      "sha256": "0c2cf72d1ac90213c3b42a91c800c587f75ee81e2bcde2712dddfd386d8967eb",
+      "bytes": 5263
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CqftRsjg.js": {
+      "sha256": "73fe5a94c56d83b21ad4bca500a377e32d2ecaab55df875ecae446a65a680cbe",
+      "bytes": 2703
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CqHI_q-D.js": {
+      "sha256": "e620fa810ea18a71a5d491ea8da8638f6113f1ae435c7300b9a2f2d332c5691f",
+      "bytes": 2795
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CsGzmbHs.js": {
+      "sha256": "0e6051765a2cb7ec75aae37e40d033b5409080d4b14205072d015504356d0616",
+      "bytes": 1986
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Cshzl8qu.js": {
+      "sha256": "7dc9b8c8a1289df3800c9ca773519840019d47deefb03dca7f7302b9882f12e9",
+      "bytes": 1866
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CTIncYxj.js": {
+      "sha256": "d3af197570b0a504e7c45dcd619b58422c5cb2f54b9028e556768e2213b070f6",
+      "bytes": 1135
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CUpZ7dEl.js": {
+      "sha256": "3864499821a78f46e62c21582deb146e1bda1128068faca178f7b2d5a952397f",
+      "bytes": 4122
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Cx3rYX2g.js": {
+      "sha256": "ceb6ee2aef9f2a911bd3d33a4913af35ce960f77ce309d0e3173e5f257c50afc",
+      "bytes": 1955
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CxDmU1I4.js": {
+      "sha256": "ce1385db9dc69828b103ea845015e5ebdad1b624eef79f4c9f5dc56d5d23a7ad",
+      "bytes": 2920
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CXXgtw0p.js": {
+      "sha256": "717ca22d8f94a5a221635a01bc506c11f0fe36088ed98f3a08532a7da9297831",
+      "bytes": 2141
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CypMflHO.js": {
+      "sha256": "4409594bd91d5368d2a6fad13f2e3bad0efff4dde6275c48633af032f6311320",
+      "bytes": 43925
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-CzMBulkp.js": {
+      "sha256": "cfc533a57da0f333fdb2ffe1b9371eef808de4f72917a34140bdaf4caf88dab4",
+      "bytes": 2057
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-C_eisQCp.js": {
+      "sha256": "d0d548398b732306f912bbd8cd04486543520e3882a05e98b20a86bfa2b70089",
+      "bytes": 777
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D-_bu6Cm.js": {
+      "sha256": "5d28ab2c545df62b10f61d76048494c30ecb2348aa9d0063a7e111c62b8230ca",
+      "bytes": 72370
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D1ij_kNL.js": {
+      "sha256": "7c936836371bd94a649f756e6c07bb3f3139555c4a2c18c0ac6060ca26332d77",
+      "bytes": 802
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D2Q8cUp1.js": {
+      "sha256": "435819b2e5cd3263138c94a8970bb09101e4c3f186594eb4649f8bc604eecad9",
+      "bytes": 2101
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D3A-2wxB.js": {
+      "sha256": "e4c8c4e847320fc64ebeeacf05a813636d4984da59392a7cf3b5f75016e2d225",
+      "bytes": 32144
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D4c0_ac3.js": {
+      "sha256": "e39d883c18e1d0436f36926b7b46617128b40cfd7ed0a10bd66af695fcadfe97",
+      "bytes": 1979
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D5EjA2JK.js": {
+      "sha256": "5475a1a35d2dd641d8cd989a938161509774ccd2b76150b09c4058185476df6e",
+      "bytes": 599
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D5jiJvOU.js": {
+      "sha256": "fc2dfdc276c574d2bbda79a675c05f6cebc4a24313b1c3a5743ef0b31290e05e",
+      "bytes": 2449
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D6RzAl64.js": {
+      "sha256": "89cdf42385551ba2c763602802e59a86ec8587db8f43527160095244e48552cd",
+      "bytes": 2539
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D8mJGfID.js": {
+      "sha256": "4cb6d7533898ebbc63c3cbfdb242e561ba09088a31a34034d70905320277ca31",
+      "bytes": 26885
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D8WpQPaX.js": {
+      "sha256": "19fed4e3b21edac914eba6a26cbc7e476a94ea6028dcc22e9b77600f4a618f8f",
+      "bytes": 7689
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D9f6rSsU.js": {
+      "sha256": "17756f99b070ecf14eb93e21030c15c6fb5f483d189b18d34943ebef3802b173",
+      "bytes": 5431
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-D9qYN0V5.js": {
+      "sha256": "92e00992b5c67b8d38c35f9088b09ee58175c3dd1ea45f9d135fd95269bb0dbe",
+      "bytes": 6357
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DCl_8MCW.js": {
+      "sha256": "ecd2d25e2e3152f480db9d3e698b2ac94f01fc3dc90d7f51d53d71f5c2a0db33",
+      "bytes": 3974
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-De_zI4J0.js": {
+      "sha256": "036cefc2b4652f1513a94c360f9131b00d05c2b91f8d1e1de998075eb2bb802c",
+      "bytes": 3847
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DgAKBe0r.js": {
+      "sha256": "a5cf5425784f04223503bbebd02c95a25190604640b15c238143c65585dd3146",
+      "bytes": 2314
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DHLQUbN7.js": {
+      "sha256": "dbabfa9a971f5684d1ec67be806185042bec8f381ddc8d72f29671d403741e3d",
+      "bytes": 6195
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DIREOWxE.js": {
+      "sha256": "01c691a08db141b1085193694cd9daef38462d7f7a093d8612d351161a533190",
+      "bytes": 21711
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DjVOVvNP.js": {
+      "sha256": "d82d48ac4fdb69dd2dca969ecfb5e59dca97e15d10ec4872afe73d5ac1253325",
+      "bytes": 7862
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DKB6_1j6.js": {
+      "sha256": "f0835c04896ba11cf7884b2175e31574762723655d4e6461ce6ec7046479eaa3",
+      "bytes": 3762
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DNzd62Q_.js": {
+      "sha256": "f12ad11c2bff04c45c80f79d02250c76f0b1d01b254d04da7b195f4ad15b556f",
+      "bytes": 3092
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DPCEkfD_.js": {
+      "sha256": "2f4183f6b44b5ad6d9e5fe805a843c7d9336a4e95ef811b7bff81a03562295d6",
+      "bytes": 3128
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DPeRJTgX.js": {
+      "sha256": "90cdcf8a503f53a1201b5b7c44134431860e9237ffcf3fbcd4649dd6ee1de668",
+      "bytes": 1663
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Dp_KdFgX.js": {
+      "sha256": "2d5e3c493596b6ffcc688ab63c6501d11be92ccb669d92b5c2a36cc876b7acdd",
+      "bytes": 2256
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DR3xfYX8.js": {
+      "sha256": "a4838b5ee487e39729050b07901eba26e1fe6a643ff22d90aaf1dff553dc825c",
+      "bytes": 22952
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DSc-FFfx.js": {
+      "sha256": "f7ae1456ac336c6c23f733d98cb1ffa1a6d604ae53ccfbf3c3d6b40f12c4fa06",
+      "bytes": 2604
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DTF72YNO.js": {
+      "sha256": "8f289b3c0a603c2de057f44cfb513dcb9e24dfeff1ac299a0acde4f1279385a9",
+      "bytes": 2092
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DTszW0OQ.js": {
+      "sha256": "b506c07933e46fc031a5711d284c722630c91a35ba96e2a2b87726726a76f330",
+      "bytes": 3220
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DtTzTFiu.js": {
+      "sha256": "f1da163ae2aacfb632b2c4dc585a295c597d3b1e6f606b730da13993ea73f3cb",
+      "bytes": 11553
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DuQMFDvy.js": {
+      "sha256": "648b34cda3d7da91025ed7ec142ffbd5bf26528407740383bdf690643a16c73c",
+      "bytes": 36836
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Dw8rdalz.js": {
+      "sha256": "ce4996eb8f005f8d609a9f9598d3635bcdc9898986030a26e5f9f5b19534367a",
+      "bytes": 7055
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DwEmtXUh.js": {
+      "sha256": "c866fa8871457e0a09930768b3f738f963fb18dc075656c0d8951addf2f589ab",
+      "bytes": 28369
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DWkQyNnU.js": {
+      "sha256": "eb4116d03dcda3c7dcb1f8681fe9858eb6f7c7b24213a8397c4862151627d532",
+      "bytes": 3691
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DwuoZtxw.js": {
+      "sha256": "eada594fb1134cc2dfb8874e055a8db889b2685fa6aa6342841343be30038937",
+      "bytes": 2434
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-DXiLM1-G.js": {
+      "sha256": "1da2ff3f952ded0f8e8080499e58b44d3b22bc7c5e2ae8db2f99a3a6105310b2",
+      "bytes": 2275
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Dz-mlCAC.js": {
+      "sha256": "02e59f6539d324beb643eee727f0b4356549cafe15f7aaceb3d3c34ee5bdad0d",
+      "bytes": 3331
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-gfMMiTNf.js": {
+      "sha256": "9619f3fb6609168d82b468b6f950530bd23fafbc261f7b56696b10c483522d93",
+      "bytes": 2290
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-gpDK5sbt.js": {
+      "sha256": "5ad9e795d1d7fe0390cc015a03d54aef739a2244340e2deaf5df4f6ed013a8df",
+      "bytes": 1597
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Jk7HA9cy.js": {
+      "sha256": "ad5f66505e42475a11a1a869245afe14649fa1f06cba4b795f86f380a933f169",
+      "bytes": 6608
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-k9Cc-WVi.js": {
+      "sha256": "4dc636b91b71533129a161da6338be9190f3164c8d180a5b097b8c178fb15634",
+      "bytes": 8425
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-kS471soi.js": {
+      "sha256": "dcbd07bcd5b806eee08ab28b0b0819438abebb9b05aee10a5b983fec08e5b828",
+      "bytes": 3315
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-oBAE_ms0.js": {
+      "sha256": "ca63055e8d4e39e3280607c357763a89ff08c3e719f48a2749f3d8cde1fea56d",
+      "bytes": 10156
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-p9eYesGn.js": {
+      "sha256": "cd05736f31fba1aa9830d94e6b3799236e0b8cd2b989674fb9b074532a8bb42c",
+      "bytes": 3182
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-PPSTk1ow.js": {
+      "sha256": "6d53eb1b3bceb8f3a212937286bfdaeed42149560fa0e815d735527686a7f6d2",
+      "bytes": 4842
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-qgSLujhx.js": {
+      "sha256": "53b24ee7c56bc57af791aed5bc20b0cf51333dd20c6f48eb9dd7d7a222a4d96b",
+      "bytes": 3499
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-S7ucR4pR.js": {
+      "sha256": "00102c7a939f9bd81c23d292bf4bb6a3d657e722db0bffcd85ff9401730c849a",
+      "bytes": 4033
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-tLWDfEkZ.js": {
+      "sha256": "9e46e1396212c04e17b36ef6995ccff254c31c158ee297a17dce13a027cc968f",
+      "bytes": 1613
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-u8YMmbU0.js": {
+      "sha256": "84ae4ba6bf879a4608696af785e17cedd8b581bdbea0c90f856585d451b34190",
+      "bytes": 1899
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-VlUiK86J.js": {
+      "sha256": "1bd675104bdfd2ac7ec250cefe80d8f48581bf103519f1c7407b2a4e3502da93",
+      "bytes": 2760
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-xvONpD0Z.js": {
+      "sha256": "bd8b29f1100faa6548bf4e1fd9270feccb476af74862a06cb0ed267c067683b9",
+      "bytes": 22040
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/chunk-Znus0BXT.js": {
+      "sha256": "45bb8e19b050395d7ad96bf7ad1e228e09cec5e46fcda6ed68173e6bd784f180",
+      "bytes": 4930
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/desktop.css": {
+      "sha256": "504a0fd4699784426398aa2ba4cec43d064ccea645b376b5e9ba6c874cf9f5eb",
+      "bytes": 172314
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/desktop.js": {
+      "sha256": "8297c21895614ddabe04289e751335f7f833d39e2f46a02dd74290ba64bf8103",
+      "bytes": 2141940
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/desktop.png": {
+      "sha256": "bf8ef19c7b7d753c11ba05e411f15a0733bcb810541bc88fb34c38427c6a6040",
+      "bytes": 415250
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/desktop2.png": {
+      "sha256": "9fb3e53fc90b4fe881e1c1f8121dd32fbe9882dbc989156c40b0a8fadc348441",
+      "bytes": 380879
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/desktop3.png": {
+      "sha256": "aebbd4a27e346b7a2f41976bcdae4b144e42219cce77182053cfe4140bb6486f",
+      "bytes": 320726
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/desktop4.png": {
+      "sha256": "bf9a2f9f6859c2931b9a4062117deb7d06fba77b190b5ad52a90587f368b34a7",
+      "bytes": 343513
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/sentra-logo.png": {
+      "sha256": "1e41d9c3aebd8e7deaf1aed99d417fd1b7daeb3a8c836df2d2121a4900fa14d9",
+      "bytes": 13586
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/.vite/manifest.json": {
+      "sha256": "6176971ec8a53b6bb412605ae7eab789089f2e35b841f80d257dd9b01fbf78b6",
+      "bytes": 34937
+    },
+    "sentra_canvas/desktop_ui/.tmp/orca-visual-preview/qa/orca-workspace.html": {
+      "sha256": "de7abcfd4d7657b5f28f6505e09bf9ea5454be432fb7bf9ef0d99993f2480578",
+      "bytes": 393
+    },
+    "integrations/orca-terminal/dist/engine.cjs": {
+      "sha256": "921025ef8e254a9478ea97b5a106fd4da9300a9882ae9330a7e5dd06717a2e0f",
+      "bytes": 55710
+    },
+    "integrations/orca-terminal/dist/manifest.json": {
+      "sha256": "eeff79b2416d331944df3d3a9b8753945ca36d997ff48ac5b0bf62b6fc066b33",
+      "bytes": 4577
+    },
+    "integrations/orca-mobile/app/dist/_expo/static/js/android/index-526c154d4b7a82ba8f760d709b805dc5.hbc": {
+      "sha256": "2654079a3af147f1e9188b8e8184f7cfc13dacca03423a4e79f955b07887105a",
+      "bytes": 4404201
+    },
+    "integrations/orca-mobile/app/dist/_expo/static/js/ios/index-f5e882335b3d14cb499b549f05614fe0.hbc": {
+      "sha256": "f715125a33b069d8f4e868f642117c925d9e50c18913bbb4c6a52e9691d14f59",
+      "bytes": 4391295
+    }
+  },
+  "native_signed_installers": false,
+  "physical_mobile_homologation": false,
+  "production_activated": false
+}

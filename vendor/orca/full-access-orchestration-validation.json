@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "observed_utc": "2026-10-21T23:27:19.149588+00:00",
+  "build_id": "sentra-orca-experimental-cffb8f3284b3",
+  "python_passed": 79,
+  "node_desktop_passed": 151,
+  "renderer_fixtures_passed": 2,
+  "real_model_workflow": {
+    "status": "passed",
+    "model": "sentra/codex/current",
+    "real_model": true,
+    "manual_grant_calls": 0,
+    "automatic_effect_retry": false,
+    "final_verification": {
+      "version": 1,
+      "verified": true,
+      "scope": "file_integrity",
+      "verified_at": 1792625061.9635253,
+      "receipt_id": "task-verification:23f99f2181c12e5116efd801b54d2b7c2c97a4eec05157b03359ef20f629030b",
+      "work_item_id": "work-4a878332a27f123b53098158059f57c2",
+      "operation_id": "op-5076c6ffcb045300ab559579d744e92e",
+      "files": [
+        {
+          "path": "C:\\Users\\vitor\\Desktop\\SENTRA\\.tmp\\full-dot-recovery-v4\\state\\canvas\\projects\\Full_Dot_recovery\\agregacao.json",
+          "sha256": "91feab1f884fdef6ec8d3905201c7b2ba2f3cda055109252acbd041b7b6ac13e",
+          "source_operation_id": "op-canvas-2bb817f74f0d7da483397a58be17036c75109d02",
+          "verification_operation_id": "verify-read-100431549cbb8f62eda01ebf7c56fa443b63d0ce",
+          "final_observation_operation_id": "verify-final-929f2d740ab8a1382931bbd79becdeaac7503691"
+        },
+        {
+          "path": "C:\\Users\\vitor\\Desktop\\SENTRA\\.tmp\\full-dot-recovery-v4\\state\\canvas\\projects\\Full_Dot_recovery\\auditoria.json",
+          "sha256": "2653b4bd75893a7fdfe8e66a3e5ad4673d6b775d9a2fa6e80ce68f5dc0cf8651",
+          "source_operation_id": "op-canvas-8d689eb380e6b72e0978094b418fd4d30ea5fee7",
+          "verification_operation_id": "verify-read-04d1e783a02c52dc758246bb5d20a372bafcbf92",
+          "final_observation_operation_id": "verify-final-e431f603aeeb17c386068ff339484c49693412d2"
+        },
+        {
+          "path": "C:\\Users\\vitor\\Desktop\\SENTRA\\.tmp\\full-dot-recovery-v4\\state\\canvas\\projects\\Full_Dot_recovery\\vendas.csv",
+          "sha256": "db89b6b3b0f870ecd4aad829107f5c440bf79d462991e7e10ad72a27c75be795",
+          "source_operation_id": "op-canvas-8c40baa071d132aeb105c7b7b19fc3be57f5be4e",
+          "verification_operation_id": "verify-read-9fb4ead1158817b00123e172ca6ef7837b635bd0",
+          "final_observation_operation_id": "verify-final-acd64033a0c547e52f1e2c21c5cb3bf56ec8f6ae"
+        },
+        {
+          "path": "C:\\Users\\vitor\\Desktop\\SENTRA\\.tmp\\full-dot-recovery-v4\\state\\canvas\\projects\\Full_Dot_recovery\\conciliacao.json",
+          "sha256": "4aa6c87d6c73d06ca84aeb345890bbfed8d2b42ae9fddab58fb171e94ac24920",
+          "source_operation_id": "op-canvas-61243e77583db765b8ceeeec89ff79f2d181aa94",
+          "verification_operation_id": "verify-read-d50b6a90c54f7729910853e88b341495ea73c7da",
+          "final_observation_operation_id": "verify-final-a7a3bbc4a9c1b82161013104f7fa8b51048d977a"
+        }
+      ],
+      "semantic_correctness_claimed": false,
+      "finalized": true,
+      "published_check_at": 1792625073.7721043
+    },
+    "owner_full_selections": 1,
+    "agent_created_dots": 2,
+    "permanent_conversations": [
+      "conversation-4258311650c0ddddd6cf6b0ee0883fe4",
+      "conversation-d37a061c4ce05a60d7f2dcd99f41f09a",
+      "conversation-bd87d32e1baeef3af3371bf8544e1070"
+    ],
+    "broker_reopened": true,
+    "interruption_checkpoint": "awaiting_consolidation",
+    "interrupted_inflight_effect_replayed": false,
+    "child_instructions": 2,
+    "children_duplicated": false,
+    "expected": {
+      "total": 594,
+      "rows": 60,
+      "by_region": {
+        "Norte": 191,
+        "Sul": 198,
+        "Leste": 205
+      }
+    },
+    "verified_artifacts": {
+      "agregacao.json": "91feab1f884fdef6ec8d3905201c7b2ba2f3cda055109252acbd041b7b6ac13e",
+      "auditoria.json": "2653b4bd75893a7fdfe8e66a3e5ad4673d6b775d9a2fa6e80ce68f5dc0cf8651",
+      "conciliacao.json": "4aa6c87d6c73d06ca84aeb345890bbfed8d2b42ae9fddab58fb171e94ac24920"
+    },
+    "own_processes_closed": true
+  },
+  "completed_provider_calls": 21,
+  "unfinished_provider_or_tool_calls": 0,
+  "live_evaluation_readiness": {
+    "styled": true,
+    "title": "SENTRA Â· OrquestraÃ§Ã£o",
+    "workspaceMode": "simple",
+    "workspaceReady": true,
+    "welcomeVisible": true,
+    "explorerVisible": false,
+    "membersVisible": false,
+    "mascotCount": 3,
+    "mascotsReady": true,
+    "loadError": false,
+    "hasLocalCredential": true,
+    "projectOptions": 0,
+    "mobileButton": true
+  },
+  "hashes_verified": true,
+  "source_count": 168,
+  "output_count": 261,
+  "evidence": {
+    ".tmp/full-access-final.xml": "7b9e845a8457070d9165f4cf5f1a635b7d44edcf8fade6475f90020d4d1ea7e2",
+    ".tmp/full-dot-recovery-v4/report.json": "70dba113ceee167e8a8f74bcabd3ecd9d242528366575a44a9b12e4e0caefeb4",
+    ".tmp/full-dot-recovery-v4/checkpoint.json": "f922ea8b8138effe7054252fbd90d4e0fc247e346415fbc6d15d0fd8313e8047",
+    ".tmp/full-workspace-ux/result.json": "302190ef537739e6058a9a54665471b95ea6e476108ea98a1eabb12dfb0b581c",
+    ".tmp/full-shell-flow/result.json": "aa4120f5b20a28b02ae3185fa1e16ed015167396808fce7c619536eeb8c8df54",
+    "sentra_canvas/desktop_ui/.tmp/full-lifecycle-node.log": "c274159df996ceb47b2e09bdeb8f9ec2c0fd93335e6af40f5568bc3f188a5fbc"
+  },
+  "installed_ui_replaced": false,
+  "physical_mobile_homologation": false,
+  "full_orca_migration_complete": false
+}

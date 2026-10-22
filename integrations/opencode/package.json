@@ -1,0 +1,7 @@
+{
+  "name": "sentra-opencode-validation",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Pinned OpenCode ACP provider for isolated SENTRA validation",
+  "dependencies": {"opencode-ai": "1.19.3"}
+}

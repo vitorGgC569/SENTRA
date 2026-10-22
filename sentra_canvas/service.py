@@ -79,11 +79,19 @@ class Canvas:
         self.state_dir=Path(state_dir).resolve() if state_dir is not None else root/".sentra"/"canvas"
         self.state_dir.mkdir(parents=True,exist_ok=True)
         self.instance_lock=InstanceLock(self.state_dir/"owner.lock")
+        self._pty_client=None
+        self._durable_inventory=[]
         try:
             projects=self.state_dir/"projects"
             projects.mkdir(exist_ok=True)
+            if os.environ.get("SENTRA_PTY_DAEMON") == "1":
+                from .pty_client import PtyDaemonClient
+                self._pty_client=PtyDaemonClient.connect_or_start(self.state_dir/"pty-host")
+                self._durable_inventory=self._pty_client.call("inventory", {"include_history": True})
             self.store=Store(db_path or self.state_dir/"canvas.sqlite3",
-                             projects,principal=principal,telemetry_root=self.state_dir.parent)
+                             projects,principal=principal,telemetry_root=self.state_dir.parent,
+                             live_terminal_ids={r["terminal_id"] for r in self._durable_inventory
+                                                if r.get("process_live", r["exit_code"] is None)})
         except BaseException:
             self.instance_lock.close()
             raise
@@ -92,6 +100,21 @@ class Canvas:
         self._lock=threading.RLock()
         self._shutdown_lock=threading.Lock()
         self._sessions={}
+        self._pty_histories={}
+        if self._pty_client is not None:
+            from .pty_client import DaemonPTY
+            for row in self._durable_inventory:
+                try:
+                    restored = self.store.resource("terminals",row["terminal_id"],row["workspace_id"])
+                except (Denied,KeyError,ValueError,FileNotFoundError):
+                    continue
+                if not row.get('process_live', row['exit_code'] is None):
+                    self._pty_histories[row['terminal_id']] = row
+                    continue
+                session=Session()
+                session.exit_input = b"/exit\r" if restored.get('shell') == "sentra-cli" else b"\x03" if restored.get('shell') == "codex" else b"exit\r"
+                session.pty=DaemonPTY(self._pty_client,row["workspace_id"],row["terminal_id"],pid=row["pid"],runtime_id=row["runtime_id"])
+                self._sessions[row["terminal_id"]]=session
         self._jobs={}
         self._task_threads={}
         self._task_processes={}
@@ -100,6 +123,20 @@ class Canvas:
         self._closed=False
         self._agent_tokens={}
         self._agent_port=None
+        self._agent_runtime_id=None
+        self._durable_agent_bindings=set()
+        from .agent_bindings import AgentBindings
+        self._agent_bindings=AgentBindings(self.state_dir,self.store.principal)
+        if self._pty_client is not None and self._pty_client.capabilities.get('agent_binding_proof'):
+            for row in self._durable_inventory:
+                if row['terminal_id'] not in self._sessions:
+                    continue
+                terminal=self.store.resource('terminals',row['terminal_id'],row['workspace_id'])
+                if terminal.get('shell')=='sentra-cli':
+                    token=self._agent_bindings.recover(row)
+                    if token:
+                        self._agent_tokens[token]=(row['workspace_id'],row['terminal_id'])
+                        self._durable_agent_bindings.add(row['terminal_id'])
         self.max_terminals=max_terminals
         self.max_task_workers=max_task_workers
         self.max_pending_tasks=max_pending_tasks
@@ -373,7 +410,7 @@ class Canvas:
                         "authoritative": False, "closes_trio": False, "persisted": True}
         return observed if observed.get('content') or (native['status'] == 'idle' and observed['status'] != 'idle') else native
 
-    def shell_bridge(self, payload):
+    def shell_bridge(self, payload, *, input_client_id=''):
         """Authenticated owner entry point; renderer inputs never select authority."""
         if not isinstance(payload, dict):
             raise ValueError("shell envelope must be an object")
@@ -391,6 +428,18 @@ class Canvas:
         control = self._shell_service()
         request_key = payload.get("request_key")
         params = {k: v for k, v in payload.items() if k not in {"action", "project_id", "ws", "request_key"}}
+        if action == "workspace_inventory":
+            from .workspace_contract import inventory
+            return {"ok": True, "value": inventory(self, project_id, params)}
+        if action in {'workspace_presentation_get','workspace_presentation_save'}:
+            from .workspace_presentation import dispatch_presentation
+            return {'ok':True,'value':dispatch_presentation(self,project_id,action,params)}
+        if action == "workspace_request_status":
+            from .workspace_requests import inspect_request
+            return {"ok": True, "value": inspect_request(self, project_id, params, exact_dot=bool(input_client_id))}
+        if action=='conversation_permission_status':
+            from .conversation_permission_status import inspect_decision
+            return {'ok':True,'value':inspect_decision(self,project_id,params)}
         if action == "attachment_upload_status" and request_key is not None:
             # This read uses the original mutation key as a reconciliation selector.
             params["request_key"] = request_key
@@ -430,7 +479,14 @@ class Canvas:
                     interaction_id=params["interaction_id"], answer=params["answer"], request_key=request_key)
             return {"ok": True, "value": value, "request_key": request_key}
         from .project_review import PROJECT_REVIEW_ACTIONS, ProjectReviewService
+        if action=='dot_worktree_review':
+            from .task_workspace import review
+            return {'ok':True,'value':review(self,project_id,params),'request_key':request_key}
         if action in PROJECT_REVIEW_ACTIONS:
+            if params.get('dot_id') or params.get('conversation_id'):
+                from .task_workspace import file_service
+                service,fields,identity=file_service(self,project_id,params)
+                return {'ok':True,'value':{**service.dispatch(action,fields,project_id=project_id),**identity},'request_key':request_key}
             if payload.get("space_id"):
                 control.shell.get_space(payload["space_id"], self._runtime().owner, project_id=project_id)
             with self._lock:
@@ -480,7 +536,7 @@ class Canvas:
                 from sentra_executors.virtualbox_storage_enrollment import dispatch_owner_storage_enrollment
                 value = dispatch_owner_storage_enrollment(self._shell_dot_vm, project_id, params, request_key)
             else:
-                value = self._shell_dot_vm.dispatch(project_id, action, params, request_key)
+                value = self._shell_dot_vm.dispatch(project_id, action, params, request_key,input_client_id=input_client_id)
             return {'ok': True, 'value': value, 'request_key': request_key}
         if action in DOT_LIFECYCLE_ACTIONS:
             with self._lock:
@@ -546,6 +602,9 @@ class Canvas:
             from .shell_generated_media import ShellGeneratedMedia
             result['value']['items'] = ShellGeneratedMedia(self._shell_runtime).messages(project_id,
                 params['conversation_id'], result['value']['items'])
+            from .task_presentation import decorate_messages
+            result['value']['items']=decorate_messages(control,self._runtime().owner,project_id,
+                params['space_id'],params['conversation_id'],result['value']['items'])
         if action == 'conversation_create':
             # An owner-created conversation starts with the visible default:
             # project reads, with approval required before edits or commands.
@@ -555,7 +614,7 @@ class Canvas:
             if conversation.get('conversation_id') and not AccessStore(control, self._runtime().owner).profile(conversation['conversation_id']).get('work_item_id'):
                 dispatch_access(self, project_id, 'access_set', {'space_id': conversation['space_id'],
                     'conversation_id': conversation['conversation_id'], 'mode': 'ask'},
-                    'default-access-' + hashlib.sha256(request_key.encode()).hexdigest())
+                    'default-access-' + hashlib.sha256(request_key.encode()).hexdigest(),default_profile=True)
         if action in {"dot_create", "dot_update"} and result.get("ok") is True:
             # The shell picker posts an id it already read from /api/models.
             # Accepting that id does not run a turn and does not prove access.
@@ -1008,6 +1067,11 @@ class Canvas:
         workspace = self.store.workspace(ws)
         self.store.resource("agents", agent_id, ws)
         host = self._machine_service()
+        if kind == 'git-worktrees':
+            if not isinstance(provider_config,dict) or set(provider_config)!={'dot_id'}:
+                raise ValueError('explicit Dot binding required for Git worktrees')
+            return host.configure_worktrees(workspace_id=ws,workspace_root=workspace['path'],
+                agent_id=agent_id,dot_id=provider_config['dot_id'])
         if kind == "workspace-files":
             return host.configure_workspace_files(workspace_id=ws,
                 workspace_root=workspace["path"], agent_id=agent_id)
@@ -1683,7 +1747,7 @@ class Canvas:
         self.store.workspace(ws)
         if action not in {"pause","resume","cancel"}:raise ValueError("invalid run control")
         with self._lock:
-            result=self._runtime().control(ws,action)
+            result=self._runtime().control_project(ws,action)
             if action=="cancel":
                 for ident,(workspace,_) in self._job_tasks.items():
                     if workspace==ws:
@@ -1692,7 +1756,7 @@ class Canvas:
             self._dispatch_wake.set()
             return result
 
-    def _start(self,ws,name,shell,argv):
+    def _start(self,ws,name,shell,argv,*,execution_scope=None):
         with self._lock:
             if self._closing:
                 raise RuntimeError("Canvas runtime is shutting down")
@@ -1701,6 +1765,17 @@ class Canvas:
             if active>=self.max_terminals:
                 raise ValueError("terminal concurrency quota reached")
             workspace=self.store.workspace(ws)
+            execution_directory=Path(workspace['path'])
+            from sentra_runtime.effect_boundary import current_effect_context
+            effect=current_effect_context.get()
+            if effect is not None and effect.request.capability_id=='terminal:start':
+                from .task_workspace import directory
+                execution_directory=directory(self._shell_service(),self._runtime().owner,effect.request,execution_directory)
+            elif execution_scope:
+                from .task_workspace import binding
+                cid,agent_id=execution_scope
+                assigned=binding(self._shell_service(),self._runtime().owner,ws,cid,agent_id)
+                if assigned:execution_directory=Path(assigned['path'])
             record=self.store.create_terminal(ws,name,shell)
             session=Session(
                 lambda text: self.store.append_terminal_output(ws,record["id"],text),
@@ -1709,18 +1784,36 @@ class Canvas:
             self._sessions[record["id"]]=session
             try:
                 options={}
+                if shell in {'powershell','pwsh'}:
+                    from .shell_environment import shell_child_environment
+                    options['env']=shell_child_environment(shell,os.environ)
                 if shell=="sentra-cli" and self._agent_port is not None:
                     token=secrets.token_urlsafe(36)
                     self._agent_tokens[token]=(ws,record["id"])
                     environment=os.environ.copy()
                     for key in list(environment):
-                        if key.startswith("MAESTRI_"):
+                        if key.startswith(("MAESTRI_","SENTRA_CANVAS_AGENT_")):
                             environment.pop(key)
                     # This capability cannot use the UI/runtime bearer routes.
                     environment.update(SENTRA_CANVAS_AGENT_TOKEN=token,
                                        SENTRA_CANVAS_AGENT_PORT=str(self._agent_port))
+                    if (self._agent_runtime_id and self._pty_client is not None
+                            and self._pty_client.capabilities.get('agent_binding_proof')):
+                        path=self._agent_bindings.reserve(ws,record['id'],token)
+                        self._durable_agent_bindings.add(record['id'])
+                        self._agent_bindings.publish(record['id'],token,ws,workspace['path'],
+                            self._agent_port,self._agent_runtime_id)
+                        environment['SENTRA_CANVAS_AGENT_BINDING_FILE']=str(path.resolve())
                     options["env"]=environment
-                session.pty=WindowsPTY(argv,Path(workspace["path"]),session.append,**options)
+                if self._pty_client is not None:
+                    from .pty_client import DaemonPTY
+                    session.pty=DaemonPTY.create(self._pty_client,ws,record["id"],argv,execution_directory,**options)
+                else:
+                    session.pty=WindowsPTY(argv,execution_directory,session.append,**options)
+                if options.get('env',{}).get('SENTRA_CANVAS_AGENT_BINDING_FILE'):
+                    self._agent_bindings.recover({'process_live':True,'terminal_id':record['id'],'workspace_id':ws,
+                        'runtime_id':session.pty.runtime_id,'pid':session.pty.pid,
+                        'agent_token_sha256':hashlib.sha256(token.encode()).hexdigest()})
                 self.store.terminal_state(ws,record["id"],"running",session.pty.pid)
                 record.update(status="running",pid=session.pty.pid)
             except Exception:
@@ -1735,6 +1828,16 @@ class Canvas:
             for token,(_,ident) in list(self._agent_tokens.items()):
                 if ident==terminal:
                     self._agent_tokens.pop(token,None)
+            self._agent_bindings.revoke(terminal)
+            self._durable_agent_bindings.discard(terminal)
+
+    def bind_agent_endpoint(self,port,runtime_id):
+        with self._lock:
+            self._agent_port=port;self._agent_runtime_id=runtime_id
+            for token,(ws,terminal) in self._agent_tokens.items():
+                session=self._sessions.get(terminal)
+                if terminal in self._durable_agent_bindings and session and getattr(session.pty,'durable',False):
+                    self._agent_bindings.publish(terminal,token,ws,self.store.workspace(ws)['path'],port,runtime_id)
 
     def _coordination_tables(self):
         # Additive service-owned tables; preserve the Store/graph schema versions.
@@ -2229,13 +2332,29 @@ class Canvas:
         return {"started":True,"pid":proc.pid,"mode":"external-app",
                 "agent_api_connected":False}
 
+    def terminal_checkpoint(self,ws,terminal):
+        self.store.resource('terminals',terminal,ws)
+        if self._pty_client is None or terminal not in self._sessions and terminal not in self._pty_histories:
+            return {'available':False,'retryable':False,'reason':'durable_checkpoint_unavailable'}
+        if not self._pty_client.capabilities.get('ansi_tui_snapshots') and terminal not in self._pty_histories:
+            return {'available':False,'retryable':False,'reason':'daemon_checkpoint_unsupported'}
+        return self._pty_client.call('checkpoint',{'workspace_id':ws,'terminal_id':terminal})
+
     def terminal_output(self,ws,terminal,cursor=0):
         record=self.store.resource("terminals",terminal,ws)
         session=self._sessions.get(terminal)
         if not session:
+            if terminal in self._pty_histories and self._pty_client is not None:
+                data=self._pty_client.call('output',{'workspace_id':ws,'terminal_id':terminal,'cursor':int(cursor)})
+                return {**data,'status':'history_restored','recoverable':False}
             return {**self.store.terminal_output(ws,terminal,cursor),
                     "status":record["status"],"recoverable":False,
                     "persisted":True}
+        if getattr(session.pty,"durable",False):
+            data=session.pty.output(cursor)
+            code=data.pop("exit_code")
+            return {**data,"status":"running" if data.get('process_live',code is None) else "exited",
+                    "exit_code":code,"recoverable":data.get('process_live',code is None)}
         data=session.output(cursor)
         state=session.pty.poll()
         if state is not None:
@@ -2520,7 +2639,7 @@ class Canvas:
                 process.poll() is None for process in self._task_processes.values()):
                 raise RuntimeError("Canvas workers have not stopped; runtime ownership retained")
         for sess in list(self._sessions.values()):
-            if sess.pty:
+            if sess.pty and not getattr(sess.pty,"durable",False):
                 try: sess.pty.close(exit_input=sess.exit_input)
                 except (OSError,TerminalError): pass
         if self._machine_host is not None:

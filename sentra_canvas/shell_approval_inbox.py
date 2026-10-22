@@ -22,31 +22,22 @@ def dispatch_coordinator_approval(canvas, project_id, action, params, request_ke
     row = inbox.get(project_id, approval_id)
     if params.get('space_id') is not None and params['space_id'] != row['space_id']:
         raise Denied('approval belongs to another Space')
-    if row['state'] != 'pending':
-        return {'approval_id':approval_id, 'state':row['state'], 'automatic_execution':False}
-    if answer == 'reject':
-        return ShellHostRequests(control, owner).invoke(project_id, action, params, request_key,
-            lambda: inbox.mark(project_id, approval_id, 'rejected'))
-    # Do not accept a stale parent turn or a user-supplied capability: recover
-    # exact Dot, conversation, WorkItem and capability from the protected record.
-    permissions = ShellTurnPermissions(canvas)
-    scope = {'space_id':row['space_id'], 'conversation_id':row['conversation_id'],
-             'work_item_id':row['work_item_id']}
-    dot, item, operation = permissions._scope(project_id, scope)
-    if (item is None or dot['agent_id'] != row['agent_id'] or
-            operation['operation_id'] != row['parent_operation_id'] or
-            row['capability'] not in permissions._allowed(dot, item, operation)):
-        raise Denied('coordinator request no longer matches its original turn')
-    if item['state'] not in {'PENDING','QUEUED','BLOCKED','RUNNING'} or operation['state'] not in {
-            'QUEUED','STARTING','RUNNING','WAITING_EXTERNAL'}:
-        return {'approval_id': approval_id, 'state':'expired',
-                'reason':'Original turn is no longer live; no Grant was created.',
-                'automatic_execution':False}
-    grant = permissions.dispatch(project_id, 'turn_permission_grant',
-        {**scope, 'capabilities':[row['capability']], 'ttl_seconds':300},
-        'coordinator-grant:' + request_key)
-    if grant.get('grant_created') is not True:
-        return {'approval_id': approval_id, 'state':'uncertain', 'automatic_execution':False}
-    return {**inbox.mark(project_id, approval_id, 'approved'),
-            'grant_created':True, 'permission_operation_id':grant.get('permission_operation_id'),
-            'original_intent_replayed':False}
+    requests=ShellHostRequests(control,owner)
+    def decide():
+        requests.note_before_admission(project_id,request_key)
+        current=inbox.get(project_id,approval_id)
+        if current['state']!='pending':return {'approval_id':approval_id,'state':current['state'],'automatic_execution':False}
+        if answer=='reject':return inbox.mark(project_id,approval_id,'rejected')
+        # Exact protected parent scope; no user-selected capability or replay.
+        permissions=ShellTurnPermissions(canvas)
+        scope={'space_id':row['space_id'],'conversation_id':row['conversation_id'],'work_item_id':row['work_item_id']}
+        dot,item,operation=permissions._scope(project_id,scope)
+        if (item is None or dot['agent_id']!=row['agent_id'] or operation['operation_id']!=row['parent_operation_id'] or row['capability'] not in permissions._allowed(dot,item,operation)):
+            raise Denied('coordinator request no longer matches its original turn')
+        if item['state'] not in {'PENDING','QUEUED','BLOCKED','RUNNING'} or operation['state'] not in {'QUEUED','STARTING','RUNNING','WAITING_EXTERNAL'}:
+            return {'approval_id':approval_id,'state':'expired','reason':'Original turn is no longer live; no Grant was created.','automatic_execution':False}
+        requests.note_effect_possible(project_id,request_key)
+        grant=permissions.dispatch(project_id,'turn_permission_grant',{**scope,'capabilities':[row['capability']],'ttl_seconds':300},'coordinator-grant:'+request_key)
+        if grant.get('grant_created') is not True:return {'approval_id':approval_id,'state':'uncertain','automatic_execution':False}
+        return {**inbox.mark(project_id,approval_id,'approved'),'grant_created':True,'permission_operation_id':grant.get('permission_operation_id'),'original_intent_replayed':False,'ttl_seconds':300}
+    return requests.invoke(project_id,action,params,request_key,decide)

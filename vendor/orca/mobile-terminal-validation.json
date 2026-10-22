@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "observed_utc": "2026-10-21T17:05:45.794877+00:00",
+  "build_id": "sentra-orca-experimental-0840b51b0deb",
+  "python_passed": 19,
+  "node_transport_passed": 15,
+  "node_native_config_passed": 1,
+  "app_types": true,
+  "transport_types": true,
+  "hermes_platforms": [
+    "android",
+    "ios"
+  ],
+  "physical_mobile_homologation": false,
+  "native_signed_installers": false,
+  "installed_ui_replaced": false,
+  "tests_use_own_state": true,
+  "terminal_lost_ack_reconciled_without_replay": true,
+  "physical_file_effect_count": 1,
+  "grant_revocation_denied_next_read": true,
+  "renderer_test_surface": "disposable Electron fixture",
+  "android_native_mod_cleartext_lan": true,
+  "ios_native_mod_local_networking": true,
+  "ios_arbitrary_loads": false,
+  "source_count": 138,
+  "output_count": 261,
+  "hash_mismatches": 0,
+  "junit_path": ".tmp/orca-mobile-terminal-validation.xml",
+  "live_evaluation_backend_updated_this_round": false
+}

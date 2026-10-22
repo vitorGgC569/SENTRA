@@ -8,7 +8,7 @@ from sentra_runtime.contracts import OperationRequest
 from .store import Denied
 from .shell_requests import ShellHostRequests
 
-MACHINE_READS = frozenset({"machine_list", "input_status", "machine_observe"})
+MACHINE_READS = frozenset({"machine_list", "input_status", "machine_observe", "terminal_output", "terminal_checkpoint"})
 MACHINE_ACTIONS = MACHINE_READS | frozenset({"input_handoff", "remote_viewer_open",
     "remote_viewer_close", "machine_execute"})
 _FIELDS = {
@@ -21,6 +21,8 @@ _FIELDS = {
     "remote_viewer_close": {"viewer_id"},
     "machine_execute": {"machine_id", "work_item_id", "capability_id", "arguments"},
     "machine_observe": {"target_operation_id"},
+    "terminal_output": {"machine_id", "work_item_id", "capability_id", "terminal_id", "cursor"},
+    "terminal_checkpoint": {"machine_id", "work_item_id", "capability_id", "terminal_id"},
 }
 
 
@@ -84,6 +86,9 @@ class ShellMachineServices:
                 "restore_errors": self.host.restore_errors}
         if action == "machine_observe":
             return self.host.observe(workspace_id=pid, operation_id=p["target_operation_id"], as_owner=True)
+        if action in {'terminal_output','terminal_checkpoint'}:
+            from .terminal_observation import observe_terminal
+            return observe_terminal(self,pid,action,p)
         if action == "input_status":
             return {**self.host.input_status(workspace_id=pid, **p), "machine_id": p["machine_id"]}
         if action == "remote_viewer_close":

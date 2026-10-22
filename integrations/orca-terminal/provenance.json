@@ -1,0 +1,46 @@
+{
+  "repository": "https://github.com/stablyai/orca",
+  "commit": "70b2197c97b164b16c618736a107967295e5af92",
+  "license": "MIT",
+  "hash_mode": "git-blob-sha256",
+  "copied_files": {
+    "src/main/daemon/headless-emulator.ts": "723bdc95107260b15447bda0cf13982a8a43df5e7a9235135c181328ad6d65b2",
+    "src/main/daemon/headless-terminal-rows.ts": "2ee314dd5a2959f367aa63755867f59c0ee23d890bd64e245160a8f9dcee8ccf",
+    "src/shared/terminal-cursor-line-context.ts": "b654cb62db02c983d06aead30afdb9a0dee5565a024caeda79504ec178ac2064",
+    "src/main/daemon/startup-device-attributes-responder.ts": "de1092ba15ec03cdd2fb08b33cd5ba5a04f26b19616476e3c7f717e54d337b7b",
+    "src/main/daemon/terminal-view-attribute-responder.ts": "63c2d5141685c970e5a7fb63e9625c16eaf24605458c6bf0d8b194f3da4dea0c",
+    "src/shared/program-status/query-responder.ts": "747be2ea194acaab541ff836f1a5de3cc02da0263141243bdbf1dfede37b20f7",
+    "src/shared/program-status/protocol.ts": "5b5d91ee73d7377473b9c58fdd95119c44f3e053fb4bc91ba88655eade7e3633",
+    "src/shared/terminal-view-attributes.ts": "632fe5ace22913033ffcdd6608729864414c4922d9d5b2b64fae8d73f5ac84ef",
+    "src/main/daemon/terminal-snapshot-ansi-buffers.ts": "7378da91a4927927a5b5db8ae14115475c1fb887715da151dcc3299cb997e50e",
+    "src/shared/terminal-alternate-screen-split.ts": "236708acab4423ec331e554db78be5d6db16543f3431ef4cd1871568c73f2b4c",
+    "src/main/daemon/terminal-frame-restore-sequences.ts": "828285b5e5ca54ba59e6756d2fc6f89e468016ed3a7595775c6dedd08b2c57c7",
+    "src/shared/terminal-serialize-absolute-cursor.ts": "257b0cdd0aa965e00def10c73381c39e0eca1d07313d238ac5d8ba0d3abeaa8d",
+    "src/shared/terminal-mouse-encoding.ts": "ff14326073915947a2385704a7fcb0b8993a14510e9f62a99cc260b75de49d3d",
+    "src/main/daemon/terminal-osc-cwd-title-scanner.ts": "77145544a185fd5a6007e415ed4c9b7f7bb3f6009c96391a72253f3550b2ea6d",
+    "src/main/daemon/osc7-uri-extraction.ts": "6be83d04eef8a38c65df5b8e20513526936a47d2e095e71a0df1269ad93567a7",
+    "src/main/daemon/osc7-file-uri.ts": "a09f7b8f2bd73a7d547e5c5eecdaa62e23716a16da05fe082041e771ae8dbe9a",
+    "src/shared/wsl-paths.ts": "8271d75fb65b85b6bfd279f2a12636f79ddeb3ffe4d9d409dd77f5cce2a46219",
+    "src/shared/agent-detection.ts": "52f801b1ed8a96a10af46b0c2544cdcf13eda3ae0c9d7cd84a4146a6e50d9fb8",
+    "src/main/daemon/terminal-mode-rehydrate-sequences.ts": "2dc9fcabd061c4d45dcb3143da437e589e5cef8e5c8fba841b7583fdbc554467",
+    "src/shared/terminal-mode-reset-profiles.ts": "476dfa44acd3862aeabddb233c239fdea34dcf588802e5222a6d4168fa598b32",
+    "src/main/daemon/headless-emulator-modes.ts": "e11cc995ac2c0d71e67546ce4a52935d671012273539ef2742da8a5f2a1a785d",
+    "src/main/daemon/headless-osc-link-ranges.ts": "604d634de22bcd2fd25485b38db576f225f89b72d2e6d6b84da4ff575cb5067b",
+    "src/shared/terminal-partial-escape-tail.ts": "2b2b49502f0dd7cfa8ed4a9706bb6386badc7fc166ccc635b2b7c0ea3943c1e0",
+    "src/shared/terminal-escape-introducer.ts": "399406e19ea928d9905fe08a7aaa81807c436cda7f55e459293e94e868b43fc5",
+    "src/shared/terminal-unicode-provider.ts": "eae524000d37c01ff9818ebe822dff4c12a3479b9a97370414a928cabb3d948f",
+    "src/main/daemon/xterm-env-polyfill.ts": "83a5c2f6386d27c9895699fd3dfd1c6bfdb38c6ae24948ea07d75e24c213e6e9",
+    "config/patches/@xterm__addon-serialize@0.15.0-beta.301.patch": "b35533fe252e7e45433150170348889f4e08a6c17f7017ac34ea694d831fec7f",
+    "src/shared/osc-title-extraction.ts": "673e65d68af18fb50ebe92c96e67480e43f5d71740398ee2e5a4ff5cdb011c9a"
+  },
+  "excludes": [
+    "global store",
+    "execution authority",
+    "PTY input",
+    "accounts",
+    "browser UI"
+  ],
+  "adapter_aliases": {
+    "terminal-osc-cwd-title-scanner:agent-detection": "src/shared/osc-title-extraction.ts"
+  }
+}

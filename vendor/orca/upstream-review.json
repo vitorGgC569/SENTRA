@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "repository": "https://github.com/stablyai/orca",
+  "reviewed_head": "fd8b2dc3a7c557be940e635327f461229cef1644",
+  "original_import_pin": "70b2197c97b164b16c618736a107967295e5af92",
+  "checkout_branch": "codex/sentra-upstream-review",
+  "commits_since_pin": 100,
+  "scope": "Selected adaptations; not a wholesale merge or migration of ORCA authority",
+  "adaptations": [
+    {
+      "commit": "60b8eb4a6f87ffde45f2bbf623aac8cb77ecfd72",
+      "source": "src/main/browser/paired-runtime-browser-authority-identity.ts",
+      "principle": "Durable authentication identity is independent of process, pairing revision and IP",
+      "targets": ["sentra_canvas/mobile_network.py", "integrations/orca-mobile/transport/src/pairing-state.ts", "integrations/orca-mobile/app/App.tsx"],
+      "status": "adapted_to_mobile_host_identity; existing Web Models partition retained"
+    },
+    {
+      "commit": "c7f722bbdf6bf45217fc3b7264590fd293a73236",
+      "source": "src/main/runtime/pairing-network-interfaces.ts",
+      "principle": "Advertise only network addresses the actual listener serves",
+      "targets": ["integrations/orca-mobile/transport/src/lan-address.ts", "sentra_canvas/mobile_network.py", "sentra_canvas/desktop_ui/src/workspace/MobileDevices.jsx"],
+      "status": "adapted_for_private_IPv4_and_explicit_loopback"
+    },
+    {
+      "commit": "8b9ba72c3b70e6aaeae3bbee2917d6c20a9e2563",
+      "source": "mobile/src/session/mobile-terminal-stream-subscribe.ts",
+      "principle": "Retired connection callbacks cannot alter the replacement session",
+      "targets": ["integrations/orca-mobile/transport/src/client.ts", "integrations/orca-mobile/app/App.tsx"],
+      "status": "partial: connection lifetime fencing; terminal gestures and stream-fit work remain"
+    },
+    {
+      "commit": "fd8b2dc3a7c557be940e635327f461229cef1644",
+      "source": "src/renderer/src/components/tab-group/split-group-dim.ts",
+      "principle": "Use one focus treatment for terminals, files and chats within split groups",
+      "targets": ["sentra_canvas/desktop_ui/src/workspace/workspace.css", "sentra_canvas/desktop_ui/src/workspace/DotWorkspace.jsx"],
+      "status": "adapted: 0.95 opacity in unfocused split groups; visual recheck pending"
+    }
+  ],
+  "sentra_specific_fixes": [
+    "Refresh broker credentials through the host-only pipe without reconnecting E2EE or replaying requests",
+    "Recover a lost pairing claim for 120 seconds, bound to the original device key and owner",
+    "Probe gateway identity before issuing pairing QR; fail explicitly on stale descriptor",
+    "Write host identity and public descriptors atomically; adopt existing protected key without rotation",
+    "Stop supervised gateway when its parent's private pipe closes"
+  ],
+  "still_pending": [
+    "Physical Android and iPhone LAN/login validation",
+    "Browser graphical sharing and persistent browser profile migration",
+    "Autosave/Git discard ownership coordination",
+    "Hook-derived turn completion and notifications",
+    "Authoritative hierarchy cycle checks and large-corpus history",
+    "SSH host picker, relay and signed distribution"
+  ]
+}

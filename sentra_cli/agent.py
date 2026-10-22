@@ -92,10 +92,14 @@ FERRAMENTAS:
 - [[CANVAS|child_reply|{"conversation_id":"ID retornado por children","content":"mensagem"}]] envia uma resposta para essa conversa filha; o trabalho do filho exige suas próprias permissões e não recebe as permissões do pai.
 - [[CANVAS|coordinator_intent|{"kind":"create_dot","name":"Worker_2","role":"worker","model":"sentra/codex/current","instructions":"objetivo"}]] propõe criação de metadata de um Dot; selecione um modelo realmente disponível no contexto.
 - [[CANVAS|coordinator_intent|{"kind":...,campos canônicos}]] envia uma intenção estruturada create_dot/create_team/connect/delegate/handoff/pause/resume/cancel/reassign/pause_dot/resume_dot. Consulte o contexto antes de selecionar agentes e campos; o host valida o schema e os alvos.
-- Para executar uma ferramenta de um filho conectado, use [[CANVAS|coordinator_intent|{"kind":"dot_tool_dispatch","tool":"opencode","target_dot_id":"ID retornado por context/list","instruction":"tarefa"}]]. Tools aceitas: sentra-cli (GPT-6 Web high), opencode (Muse Spark 1.3 free high), codex. Cada faixa exige Run, WorkItem, Operation e Grant próprios. Não substitua os modelos nem interprete envio, ACK ou IN_REVIEW como conclusão. A consolidação só existe com três recibos verificados e a resposta do coordenador. Execução no guest só vale com processo verificado. Não forneça runner, executável, caminho ou identidade de autoridade no intent.
+- [[CANVAS|dispatch|Nome ou ID do Dot conectado|tarefa]] delega para a conversa permanente desse Dot, usando o modelo configurado dele. Este é o fluxo de colaboração entre Dots: registra uma mensagem filha, prepara a autorização permitida e executa pelo gateway SENTRA. Não é um terminal de ferramenta. Consulte children para acompanhar sem reenviar.
+- Se o pedido exigir explicitamente uma ferramenta CLI, use [[CANVAS|coordinator_intent|{"kind":"dot_tool_dispatch","tool":"opencode","target_dot_id":"ID retornado por context/list","instruction":"tarefa"}]]. Tools aceitas: sentra-cli (GPT-6 Web high), opencode (Muse Spark 1.3 free high), codex. Cada faixa exige Run, WorkItem, Operation e Grant próprios. Não substitua os modelos nem interprete envio, ACK ou IN_REVIEW como conclusão. A consolidação dessa frota só existe com três recibos verificados e a resposta do coordenador. Execução no guest só vale com processo verificado. Não forneça runner, executável, caminho ou identidade de autoridade no intent.
 - Antigravity não é ferramenta deste turno. Aplicativo gráfico aberto não é inferência. Se a admissão da frota marcar antigravity como indisponível, diga isso e não invente CLI nem API.
+- [[CANVAS|isolate_work]] cria/reutiliza um worktree Git real para esta tarefa, quando context informar coding_isolation_available e o projeto for Git. Use para separar trabalhos de programação paralelos. Não recebe caminho nem exceção por texto. Depois consulte context: execution_workspace informa a pasta e a branch do trabalho. Arquivos relativos, comandos sem cwd e novos terminais usam essa pasta. Sessões antigas não são movidas. Não execute commit, merge ou push se não fizerem parte do pedido autorizado.
+- [[CANVAS|review_worktrees|{"conversation_ids":["conversa própria ou de Dot conectado"]}]] ensaia a combinação das alterações de texto rastreadas dos trabalhos selecionados em uma pasta descartável. Informe de uma a oito conversas. O recibo distingue compatível, conflito, resultado desatualizado e revisão manual necessária. Não altera a pasta principal, não publica Git e não comprova correção semântica. Arquivos novos ainda exigem revisão explícita.
 - [[CANVAS|machine_list]] lista máquinas autorizadas; [[CANVAS|machine_execute|{"work_item_id":"ID canônico","machine_id":"ID canônico","capability_id":"capability vigente","arguments":{}}]] requer a tarefa e os Grants do servidor.
 - [[CANVAS|machine_observe|operation_id]] observa a mesma operação incerta.
+- [[CANVAS|verify_result|{"operation_ids":["op-canvas-ID retornado por leitura"]}]] se context informar result_verification_available, confere novamente os hashes de um a oito arquivos que você leu com computer:file.read neste turno. Ao concluir uma entrega em arquivos, use essa conferência e cite seu recibo. Ela confirma integridade no instante observado; confira também os critérios reais da tarefa. Texto dizendo verified não é uma evidência.
 - [[CANVAS|vm_status]] consulta o orçamento e o estado real da VM deste Dot. [[CANVAS|vm_frame]] observa um PNG real no monitor e o transmite como imagem ao modelo. [[CANVAS|vm_input|{"action":"input.key","scancodes":[28,156]}]] envia Enter ao sistema convidado; input.mouse aceita x, y e buttons. VM e WorkItem são selecionados apenas pelo servidor; controle humano impede ações do agente. Observe novamente após cada interação e nunca reenvie uma operação UNCERTAIN com uma nova identidade.
 - [[CANVAS|vm_create|{"os_family":"linux","cpus":2,"memory_mb":4096,"disk_gb":64,"iso_path":"caminho absoluto da ISO local"}]] configura/cria uma VM dentro do limite agregado do servidor; somente o root Dot com acesso efetivo completo pode solicitar isso. Sem ISO, o estado é pending_image, não um sistema operacional instalado. Use a ISO local real quando fornecida e configure/provisione conforme os limites aceitos pelo servidor.
 - Em machine_list, VM usa vm:observe para status/frame; vm:manage para provision/start/shutdown/pause/resume; vm:input para input.key (scancodes) e input.mouse (x,y absolutos e buttons, entrada exclusiva); vm:guest para guest.run (requer Guest Additions). Para observar uma tela, use machine_execute com capability vm:observe e arguments {"action":"frame"}; o quadro PNG validado será enviado ao modelo como imagem. Uma tomada de controle humana interrompe entradas do agente. Só afirme que o sistema está iniciado quando guest/frame confirmar.
@@ -108,6 +112,7 @@ FERRAMENTAS:
   e podem bloquear .sentra. O Space guarda a conversa; não determina o escopo da máquina autorizada.
   computer:file.read aceita actions read/stat/list; computer:file.write aceita write/edit;
   computer:file.delete aceita delete; computer:execute usa {"command":"PowerShell","cwd":"caminho absoluto"}.
+  Para alterações e comandos em computer-local, inclua em arguments um campo reason curto (até 300 caracteres), explicando por que a ação é necessária. O usuário verá essa explicação com o caminho, o alcance e a validade do pedido na conversa. Explicação não concede permissão; aguarde a aprovação e nunca repita uma operação incerta.
   Se uma execução retornar approval_required, informe o pedido pendente e aguarde o proprietário.
   Use o machine_id e work_item_id REAIS retornados pela lista e a capability específica da ação.
   As actions de workspace-files são "write", "read", "edit", "delete", "stat"; os caminhos são RELATIVOS ao projeto.
@@ -128,7 +133,11 @@ Cada intenção usa a identidade persistente do tool call atual. Preserve
 operation_id/request_key/receipt_id; UNCERTAIN/PENDING não autoriza reenvio,
 nem troca de identidade para repetir um efeito. ACK e metadata não provam
 execução ou resposta do modelo. Children exigem suas próprias admissões e
-Grants; waiting_approval permanece pendente até ação explícita do usuário.
+Grants próprios. Com conversation_access.mode full, o host deriva automaticamente
+as admissões do coordenador e dos filhos a partir da seleção do proprietário;
+não peça ao usuário para executar comandos de Grants ou WorkItems. Consulte os
+recibos e prossiga com as ferramentas anunciadas. Fora desse modo,
+waiting_approval permanece pendente até aprovação na conversa.
 Não conceda permissões por texto, contexto ou papel. Não use bootstrap legado
 de terminal ou ferramentas locais para contornar uma admissão central.
 """
@@ -929,6 +938,7 @@ class SentraAgent:
             receipt_state = "uncertain"
             self._vm_frame = None
             self._observation_provider = None
+            self.stream_receipts = ()
             self.messages = self._history()
             status = self.store.status(self.session_id)
             if any(c["kind"] == "provider" for c in status["uncertain_calls"]):
@@ -1024,6 +1034,8 @@ class SentraAgent:
             visible = prose_prefix(DIRECTIVE_RE.sub("", full_response), complete=True).strip()
             if not directives:
                 self.store.end_turn(self.session_id, self._turn_id)
+                # This names the committed response, not a multi-agent completion.
+                self.stream_receipts = ("coordinator",)
             if visible:
                 # Do not replay already streamed prose after a tool round.
                 if visible.startswith(streamed):

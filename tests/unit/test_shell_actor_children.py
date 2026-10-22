@@ -57,6 +57,9 @@ def _prepare_parent_turn(app, call, root, conversation_id):
 
 def test_children_reads_only_direct_children_of_connected_agents(shell, monkeypatch):
     app, _, scope, call = shell
+    # This contract test sets parent states explicitly; a real worker thread
+    # must not race that setup or invoke an unrelated test model.
+    monkeypatch.setattr(app._shell_runtime, "_execute", lambda _: None)
     root = _dot(call, "ReplyRoot")
     child = _dot(call, "ReplyChild", "worker", canvas_root_dot_id=root["dot_id"])
     outsider = _dot(call, "ReplyOutsider", "worker", canvas_root_dot_id=root["dot_id"])

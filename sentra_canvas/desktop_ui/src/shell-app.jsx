@@ -12,7 +12,9 @@ import { ShellMachines } from './shell-machines';
 import { ShellCode } from './shell-code';
 import { ShellInteractions } from './shell-interactions';
 import { ShellApprovalNotifications } from './shell-approval-notifications';
-import { ShellDotCanvas } from './shell-dot-canvas';
+import { CanvasWorkspace } from './workspace/DotWorkspace';
+import {ConversationResource} from './workspace/ConversationResource';
+import {stageConversationDraft} from './shell-draft-staging';
 import { ShellDotComputer } from './shell-dot-computer';
 import { ShellDotContextMenu } from './shell-dot-context-menu';
 import { rowsInSpace, canvasNavigation, confirmedConversation, rememberWorkSurface, restoreWorkSurface } from './shell-navigation';
@@ -55,6 +57,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
   const [coordinationKind, setCoordinationKind] = useState('create_team');
   const [machinePanel, setMachinePanel] = useState(false);
   const [computerOpen, setComputerOpen] = useState(false);
+ const [relatedPanel,setRelatedPanel]=useState(null),lastChat=useRef(null),activeChat=useRef(null),draftProposal=useRef(null);
   const [codePanel, setCodePanel] = useState(false);
   const [codePending, setCodePending] = useState(false);
   const [eventCursor, setEventCursor] = useState(0), [hasMoreEvents, setHasMoreEvents] = useState(false);
@@ -148,6 +151,17 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
   const conversation = matchingResolution?.status === 'error' ? null : matchingResolution?.value ||
     conversations.find(row => row.conversation_id === nav.conversation_id) || rowsInSpace(home.conversations, projectId, currentSpaceId).find(row => row.conversation_id === nav.conversation_id);
   const dot = dots.find(row => row.dot_id === (conversation?.dot_id || nav.dot_id));
+  if(lastChat.current&&(lastChat.current.conversation.project_id!==projectId||lastChat.current.conversation.space_id!==currentSpaceId))lastChat.current=null;
+  if(nav.view==='chat'&&conversation&&dot)lastChat.current={conversation,dot};
+  const displayConversation=conversation||(nav.view==='canvas'?lastChat.current?.conversation:null);
+  const displayDot=displayConversation?dots.find(row=>row.dot_id===displayConversation.dot_id)||lastChat.current?.dot:dot;
+  activeChat.current=nav.view==='chat'&&conversation?conversation:null;
+  async function openRelatedPanel(resource){
+   const current=activeChat.current;
+   if(!current||['project_id','space_id','conversation_id'].some(k=>resource[k]!==current[k]))return;
+   if(!['files','terminals','browser'].includes(resource.kind))return;
+   try{const row=dots.find(d=>d.dot_id===current.dot_id);if(!row)return;const saved=await bridge({action:'workspace_presentation_get',project_id:current.project_id,space_id:current.space_id,dot_id:row.canvas_root_dot_id||row.dot_id});if(activeChat.current?.conversation_id!==current.conversation_id||activeChat.current?.project_id!==current.project_id||(resource.automatic&&saved.profile?.focusPanels===false))return;setComputerOpen(false);setRelatedPanel(resource)}catch{/* An unavailable preference must never start a resource. */}
+  }
   const preferenceMap = new Map(dotPreferences.map(item => [item.dot_id, item]));
   const rootDots = dots.filter(row => !row.canvas_root_dot_id || row.canvas_root_dot_id === row.dot_id)
     .sort((a, b) => {
@@ -598,6 +612,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
           confirmedConversation(inspected.conversation, payload)) {
         acknowledgeVerifiedPending([payload.request_key]);
         setPendingConversation(null);
+        if(draftProposal.current?.dot_id===inspected.conversation.dot_id){stageConversationDraft(sessionStorage,inspected.conversation,draftProposal.current.text);draftProposal.current=null;}
         setCollections(old => ({ ...old,
           conversation_list: mergeEntities(old.conversation_list || conversations,
             [inspected.conversation], 'conversation_list') }));
@@ -615,7 +630,8 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
         setConversationError('Não foi possível consultar o recibo original: ' + e.message);
     } finally { if (currentProject.current === payload.project_id) setCreatingConversation(false); }
   }
-  async function newConversation(selectedDot) {
+  async function newConversation(selectedDot,options) {
+    if(options?.draft&&selectedDot)draftProposal.current={dot_id:selectedDot.dot_id,text:options.draft};
     if (pendingConversation) { void inspectConversationCreation(); return; }
     if (conversationSubmission.current || !selectedDot) return;
     setCreatingConversation(true); setConversationError('');
@@ -632,6 +648,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
         return;
       }
       setPendingConversation(null);
+      if(draftProposal.current?.dot_id===value.dot_id){stageConversationDraft(sessionStorage,value,draftProposal.current.text);draftProposal.current=null;}
       setCollections(old => ({ ...old, conversation_list: mergeEntities(old.conversation_list || conversations, [value], 'conversation_list') }));
       navigate({ view: 'chat', space_id: value.space_id, conversation_id: value.conversation_id, dot_id: value.dot_id });
       void refresh();
@@ -639,7 +656,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
     finally { clearTimeout(timeout); if (conversationSubmission.current === payload.request_key) { conversationSubmission.current = null; setCreatingConversation(false); } }
   }
   function openCanvas(row) { if (row) navigate(canvasNavigation(row)); else navigate({ view:'canvas', dot_id:null, conversation_id:null }); }
-  function openConversation(row) { navigate({ view: 'chat', space_id: row.space_id, conversation_id: row.conversation_id, dot_id: row.dot_id }); }
+  function openConversation(row,options) { if(options?.draft&&stageConversationDraft(sessionStorage,row,options.draft))window.dispatchEvent(new CustomEvent('sentra:draft-staged',{detail:{project_id:row.project_id,conversation_id:row.conversation_id}}));navigate({ view: 'chat', space_id: row.space_id, conversation_id: row.conversation_id, dot_id: row.dot_id }); }
   useEffect(() => {
     const reveal = event => {
       const selected = dots.find(row => row.agent_id === event.detail?.agent_id);
@@ -730,7 +747,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
   }
   return <div className={'opendots-shell ' + (!rail ? 'shell-rail-closed' : '')} data-theme={theme} data-surface={nav.view}>
     <a className="shell-skip-link" href="#shell-main-focus">Ir ao conteúdo</a>
-    <aside className="shell-rail" hidden={!rail}><button className="shell-wordmark" aria-label="SENTRA — Home" onClick={() => navigate({ view: 'home' })}><img className="shell-logo" src="/sentra-logo.png" alt="" width="32" height="32" draggable={false} /><span>SENTRA</span></button>
+    <aside className="shell-rail" hidden={!rail}><button className="shell-wordmark" aria-label="SENTRA — Home" onClick={() => navigate({ view: 'home' })}><span>SENTRA</span></button>
       <label className="shell-project-label">Projeto<select value={projectId || ''} onChange={e => selectProject(e.target.value)}><option value="" disabled>Selecione um projeto</option>{workspaces.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>
       <nav className="shell-primary-nav" aria-label="Navegação principal">{primaryNav.map(([id, label, Icon]) => <button key={id} onClick={() => navigate({ view: id })} aria-current={nav.view === id ? 'page' : undefined}><Icon size={17} />{label}</button>)}</nav>
       {!!rootDots.length && <><div className="shell-rail-label">SEUS DOTS</div><nav className="shell-dots-nav" aria-label="Dots neste Space" aria-busy={dotPreferenceBusy}>{rootDots.map(sidebarDot)}</nav></>}
@@ -783,19 +800,19 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
           {homeReadError && <button type="button" onClick={() => { setHomeReadError(''); void refresh(); }}>Tentar novamente</button>}
         </div>}
         <div className="shell-main" id="shell-main-focus" tabIndex={-1} inert={warmVisual}>
-        <div className="shell-canvas-host" hidden={nav.view !== 'canvas'}>{nav.view === 'canvas' && canvasDot && <ShellDotCanvas key={canvasDot.dot_id} dot={canvasDot} roots={rootDots} bridge={bridge}
+        <div className="shell-canvas-host" hidden={nav.view !== 'canvas'}>{nav.view === 'canvas' && canvasDot && <CanvasWorkspace conversations={conversations} key={canvasDot.dot_id} dot={canvasDot} roots={rootDots} bridge={bridge}
           onSelect={id => openCanvas(rootDots.find(row => row.dot_id === id))}
           onCreate={root => setDialog({ kind: 'dot', canvasRoot: root.dot_id })}
-          onComputer={member => { setComputerOpen(true); const existing = conversations.find(row => row.dot_id === member.dot_id); if (existing) openConversation(existing); else void newConversation(member); }}
-          onConversation={member => { const existing = conversations.find(row => row.dot_id === member.dot_id); if (existing) openConversation(existing); else void newConversation(member); }} />}
+          onComputer={member => { setRelatedPanel(null); setComputerOpen(true); const existing = conversations.find(row => row.dot_id === member.dot_id); if (existing) openConversation(existing); else void newConversation(member); }}
+          onConversation={(member,options) => { const existing = conversations.find(row => row.dot_id === member.dot_id); if (existing) openConversation(existing,options); else void newConversation(member,options); }} />}
           {nav.view === 'canvas' && !canvasDot && nav.dot_id && <p className="shell-empty" role="status">Carregando o Canvas deste Dot…</p>}
           <div hidden={Boolean(canvasDot) || Boolean(nav.dot_id)}>{children}</div></div>
         <div className="shell-documents-host" hidden={nav.view !== 'documents'}>{space && <ProjectDocuments bridge={bridge} spaceId={space.space_id} projectId={projectId} documents={documents} onRefresh={refreshDocuments} onError={reportDocumentError} onDirtyChange={setDirty} />}
           {documentError && <div role="alert" className="shell-error">{documentError}<button onClick={refreshDocuments}>Consultar documentos</button></div>}</div>
-        <div className="shell-chat-host dot-computer-chat-host" hidden={nav.view !== 'chat'}>{conversation && <><div className="dot-computer-chat-toolbar"><button onClick={() => setComputerOpen(value => !value)} aria-expanded={computerOpen}><Monitor size={14} />{computerOpen ? 'Ocultar computador' : 'Computador'}</button></div><div className={'dot-computer-workspace' + (computerOpen && dot ? ' is-open' : '')}><div className="dot-computer-chat"><ShellConversation key={JSON.stringify([conversation.project_id, conversation.space_id, conversation.conversation_id])} conversation={conversation} dot={dot} bridge={bridge} onCoordinate={() => setCoordinate(true)}
-          onModel={argument => setDialog({ kind: 'model', dot, initialModel: models.find(item => (typeof item === 'string' ? item : item.id) === argument || (typeof item === 'string' ? item : item.id)?.endsWith('/' + argument)) })}
-          onCanvas={() => openCanvas(dot)}
-          onTools={tools} onChanged={refresh} voice={{ ...home.voice, attachments: home.attachments }} /></div>{computerOpen && dot && <ShellDotComputer key={dot.dot_id} dot={dot} conversation={conversation} bridge={bridge} visible={nav.view === 'chat'} onClose={() => setComputerOpen(false)} onConfigure={() => tools('machines')} onCanvas={() => openCanvas(dot)} />}</div></>}
+        <div className="shell-chat-host dot-computer-chat-host" hidden={nav.view !== 'chat'}>{displayConversation && <><div className="dot-computer-chat-toolbar"><button onClick={() => {if(!computerOpen)setRelatedPanel(null);setComputerOpen(value => !value)}} aria-expanded={computerOpen}><Monitor size={14} />{computerOpen ? 'Ocultar computador' : 'Computador'}</button></div><div className={'dot-computer-workspace' + ((computerOpen&&displayDot)||relatedPanel?.conversation_id===displayConversation.conversation_id ? ' is-open' : '')}><div className="dot-computer-chat"><ShellConversation key={JSON.stringify([displayConversation.project_id, displayConversation.space_id, displayConversation.conversation_id])} conversation={displayConversation} dot={displayDot} bridge={bridge} onCoordinate={() => setCoordinate(true)}
+          onModel={argument => setDialog({ kind: 'model', dot:displayDot, initialModel: models.find(item => (typeof item === 'string' ? item : item.id) === argument || (typeof item === 'string' ? item : item.id)?.endsWith('/' + argument)) })}
+          onCanvas={() => openCanvas(displayDot)}
+          onResource={openRelatedPanel} onTools={tools} onChanged={refresh} voice={{ ...home.voice, attachments: home.attachments }} /></div>{computerOpen && displayDot && <ShellDotComputer key={displayDot.dot_id} dot={displayDot} conversation={displayConversation} bridge={bridge} visible={nav.view === 'chat'} onClose={() => setComputerOpen(false)} onConfigure={() => tools('machines')} onCanvas={() => openCanvas(displayDot)} />}{relatedPanel?.conversation_id===displayConversation.conversation_id&&displayDot&&<ConversationResource key={displayConversation.conversation_id+relatedPanel.kind+relatedPanel.resourceId} resource={relatedPanel} conversation={displayConversation} dot={displayDot} bridge={bridge} visible={nav.view==='chat'} onConfigure={()=>tools('machines')} onDiagnostics={()=>tools('activity')} onClose={()=>setRelatedPanel(null)}/>}</div></>}
           {nav.view === 'chat' && !conversation && (['error', 'recovering'].includes(matchingResolution?.status) ? <div className="shell-empty" role="alert"><h2>Conversa indisponível neste Space</h2><p>{matchingResolution.error}</p><button type="button" onClick={() => setConversationLookupRevision(value => value + 1)}>Consultar conversa novamente</button><button onClick={() => navigate({ view: 'conversations' })}>Ver conversas</button></div> : <p className="shell-empty" role="status">Abrindo a conversa…</p>)}</div>
         {!['canvas', 'documents', 'chat'].includes(nav.view) && <main className="shell-content" id="shell-main-content">
           {!projectId ? <div className="shell-welcome"><h1>Um lugar para dar continuidade.</h1><p>Crie ou adicione um projeto para organizar Dots, conversas e documentos.</p><button className="shell-primary" onClick={onWorkspaceCreate}>Criar projeto</button></div> : !homeSettled ? (homeReadError && !loading ? <div className="shell-error" role="alert" data-mutation="false" data-resend="false"><strong>{explainFailure({ read: true, message: homeReadError }).headline}</strong><p>{explainFailure({ read: true, message: homeReadError }).safeNext}</p><button type="button" onClick={() => { setLoading(true); setHomeReadError(''); void refresh(); }}>Consultar de novo</button></div> : <p role="status" aria-busy="true" className="shell-empty">Consultando seu trabalho…</p>) : <>
@@ -841,7 +858,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
     </div>
     {dialog && <ShellEntityDialog key={(dialog.dot?.dot_id || dialog.kind) + ':' + currentSpaceId} kind={dialog.kind} dot={dialog.dot} canvasRoot={dialog.canvasRoot} initialModel={typeof dialog.initialModel === 'string' ? dialog.initialModel : dialog.initialModel?.id} space={space} projectId={projectId} models={models} bridge={bridge}
       onClose={() => setDialog(null)} onCreated={async value => { if (dialog.canvasRoot && value.dot_id) await bridge({ action: 'dot_canvas_terminal', space_id: space.space_id, dot_id: dialog.canvasRoot, member_dot_id: value.dot_id, request_key: crypto.randomUUID() }); await refresh(); if (dialog.kind === 'space') await selectSpace(value); else { await loadCollection('dot_list'); } }} />}
-    <ShellApprovalNotifications bridge={bridge} projectId={projectId} shellError={conversationError || error}
+    <ShellApprovalNotifications inlineConversationId={nav.view==='chat'?conversation?.conversation_id:null} bridge={bridge} projectId={projectId} shellError={conversationError || error}
       onOpenConversation={(conversationId, spaceId) => navigate({ view:'chat', space_id:spaceId, conversation_id:conversationId })} />
     {coordinate && space && <ShellCoordinateDialog initialKind={coordinationKind} space={space} conversation={conversation} dots={dots} teams={teams} bridge={bridge} onClose={() => { setCoordinate(false); setCoordinationKind('create_team'); }} onChanged={async () => { await refresh(); await loadCollection('dot_list'); }} />}
   </div>;

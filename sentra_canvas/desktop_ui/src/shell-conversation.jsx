@@ -11,6 +11,8 @@ import { ShellAttachments } from './shell-attachments';
 import { completeMessage, messageContentKey } from './shell-message-content';
 import { ShellTurnPermissions } from './shell-turn-permissions';
 import { ShellAccess } from './shell-access';
+import {ConversationPermissionCards} from './shell-permission-cards';
+import {ConversationTools} from './shell-conversation-tools';
 import { ShellGoalDialog } from './shell-goals';
 import { shellCommand } from './shell-commands';
 import { mergeMessages } from './shell-chat-state';
@@ -36,12 +38,13 @@ function downloadMarkdown(conversation, messages) {
   anchor.download = (conversation.title || 'conversa').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100) + '.md';
   anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-export function ShellConversation({ conversation, dot, bridge, onCoordinate, onModel, onCanvas, onTools, onChanged, voice }) {
+export function ShellConversation({ conversation, dot, bridge, onCoordinate, onModel, onCanvas, onTools, onChanged, voice, onResource }) {
   const scope = { project_id: conversation.project_id, space_id: conversation.space_id, conversation_id: conversation.conversation_id };
   const draftKey = 'sentra_shell_draft:' + scope.project_id + ':' + scope.conversation_id;
   const initial = useRef(readDraft(draftKey));
   const lastAutomaticInspection = useRef(null);
   const [content, setContent] = useState(initial.current.content), [pending, setPending] = useState(initial.current.pending);
+  useEffect(()=>{const staged=event=>{if(event.detail?.project_id===scope.project_id&&event.detail?.conversation_id===scope.conversation_id&&!pending)setContent(old=>old.trim()?old:readDraft(draftKey).content||'')};window.addEventListener('sentra:draft-staged',staged);return()=>window.removeEventListener('sentra:draft-staged',staged)},[draftKey,pending]);
   const [messages, setMessages] = useState([]), [page, setPage] = useState(null), [busy, setBusy] = useState(false);
   const [cachedPreview, setCachedPreview] = useState(() => conversationCache.get(scope));
   const [historyVerified, setHistoryVerified] = useState(false);
@@ -566,7 +569,7 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
   return <section className="shell-chat" aria-label={'Conversa com ' + (dot?.name || 'Dot')}>
     <header className="shell-chat-heading"><div className="shell-persona"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="small" decorative />
       <div><h2>{conversation.title || dot?.name || 'Conversa'}</h2><p title={dot?.model}>{dot?.name}</p></div></div>
-      <div className="shell-chat-actions"><button onClick={onCanvas}><Layers size={15} />Canvas</button><ActionMenu label="Opções da conversa" items={[
+      <div className="shell-chat-actions"><ConversationTools scope={scope} dot={dot} bridge={bridge} onResource={onResource}/><button onClick={onCanvas}><Layers size={15} />Canvas</button><ActionMenu label="Opções da conversa" items={[
         { label: 'Modelo e raciocínio', icon: <SlidersHorizontal size={15} />, action: () => onModel('') },
         { label: 'Definir objetivo', icon: <Flag size={15} />, action: () => setGoalDialog({ argument: '' }) },
         { label: 'Coordenar equipe', icon: <Users size={15} />, action: onCoordinate },
@@ -644,6 +647,7 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
     </div>
     {(!follow || recentPage) && <button className="shell-jump-latest" type="button" onClick={jumpLatest}>{recentPage ? 'Há novas mensagens · Ir para o mais recente' : 'Ir para o mais recente'}</button>}
     <div className="shell-composer-wrap">
+      <ConversationPermissionCards scope={scope} dot={dot} bridge={bridge} onResource={onResource}/>
       {(error || loadError) && <div className="shell-error" role="alert">{error || loadError}</div>}
       {receipt && <OperationReceipt value={receipt} />}
       {fileTest && <div className="shell-file-test" role="status" aria-live="polite">
@@ -662,7 +666,7 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
           placeholder={'Mensagem para ' + (dot?.name || 'o Dot') + '…'} aria-label="Mensagem"
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send(); } }} />
         <div className="shell-composer-bottom">
-          <ShellAccess bridge={bridge} scope={scope} onCustomize={() => setFileJobsOpen(true)} />
+          <ShellAccess inlineRequests bridge={bridge} scope={scope} onCustomize={() => setFileJobsOpen(true)} />
           <span className="shell-composer-hint">{pending ? 'Envio não confirmado' : 'Enter envia · Shift+Enter quebra linha'}</span>
           <button type="submit" className="shell-send" disabled={busy || attachmentBusy || Boolean(pending) || Boolean(pendingAttachment) || !content.trim()} aria-label="Enviar mensagem"><ArrowUp size={18} /></button>
         </div>

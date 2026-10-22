@@ -91,6 +91,10 @@ class GuardedExecutor:
     def _risk(self, capability_id: str) -> str:
         return "high"
 
+    def _request_binding(self, request: Any, binding: Any) -> Any:
+        """Trusted host may narrow a binding for this exact request only."""
+        return binding
+
     def _check_request(self, request: Any) -> tuple[Any, dict[str, Any]]:
         if (getattr(request, "machine_id", None) != self.machine_id or
                 getattr(request, "principal_id", None) != self.owner_principal_id):
@@ -105,6 +109,7 @@ class GuardedExecutor:
         arguments = getattr(request, "arguments", None)
         if not isinstance(arguments, Mapping):
             raise ValueError("invalid_arguments")
+        binding = self._request_binding(request, binding)
         return binding, self._validate(request, binding)
 
     async def _allowed(self, request: Any, args: dict[str, Any]) -> bool:

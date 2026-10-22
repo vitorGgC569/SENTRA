@@ -311,7 +311,7 @@ class _TargetChannel:
         elif method == 'Target.attachedToTarget':
             self.backend._attached(self, params, self.session)
         elif method == 'Target.detachedFromTarget':
-            self.backend._channels.pop(params['sessionId'], None)
+            self.backend._detached(params)
         elif method == 'Fetch.requestPaused':
             self.backend._intercept(self, params)
         elif method == 'Fetch.authRequired':
@@ -330,6 +330,8 @@ class PlaywrightBrowserBackend:
         self._closed = False
         self._root = None
         self._contexts, self._channels = {}, {}
+        self._manual_attaching = set()
+        self._guarded_targets = set()
         self._diagnostic_lock = threading.Lock()
         self._diagnostics = {}
         self._browser_handle = None
@@ -393,9 +395,21 @@ class PlaywrightBrowserBackend:
         self._root = browser.new_browser_cdp_session()
         self._root.on('Target.attachedToTarget', lambda p: self._attached(self._root, p))
         self._root.on('Target.receivedMessageFromTarget', self._received)
-        self._root.on('Target.detachedFromTarget', lambda p: self._channels.pop(p['sessionId'], None))
-        self._root.send('Target.setAutoAttach', {'autoAttach': True,
-            'waitForDebuggerOnStart': True, 'flatten': False})
+        self._root.on('Target.detachedFromTarget', self._detached)
+        try:
+            self._root.send('Target.setAutoAttach', {'autoAttach': True,
+                'waitForDebuggerOnStart': True, 'flatten': True})
+        except Exception as exc:
+            # Do not fall back to late page interception: targets must remain
+            # guarded before scripts/network run. New CDP requires a transport
+            # adaptation, not a silent reduction of the network policy.
+            try:browser.close()
+            finally:
+                pw.stop();self._browser=self._playwright=self._root=None
+            if 'Only flatten protocol is supported' in str(exc):
+                raise ExecutorFailure('browser_cdp_transport_incompatible',evidence={
+                    'available':False,'requires_flatten':True,'policy_bypassed':False}) from None
+            raise
         processes = self._root.send('SystemInfo.getProcessInfo')['processInfo']
         browser_pids = [int(p['id']) for p in processes if p['type'] == 'browser']
         if len(browser_pids) != 1:
@@ -407,8 +421,17 @@ class PlaywrightBrowserBackend:
         if channel:
             channel.received(json.loads(params['message']))
 
+    def _detached(self,params):
+        channel=self._channels.pop(params['sessionId'],None)
+        if channel is not None:
+            self._guarded_targets.discard(channel.target_id)
+            if channel in channel.session.channels:channel.session.channels.remove(channel)
+
     def _attached(self, parent, params, inherited=None):
         info = params['targetInfo']
+        target_id=info['targetId']
+        if target_id in self._manual_attaching or target_id in self._guarded_targets:
+            return
         session = self._contexts.get(info.get('browserContextId')) or inherited
         if session is None or len(session.channels) >= session.binding.max_frames * 2 or info['type'] == 'page' and any(
                 c.target_type == 'page' for c in session.channels):
@@ -416,7 +439,21 @@ class PlaywrightBrowserBackend:
             # their scripts run and before releasing the target debugger pause.
             self._root.send('Target.closeTarget', {'targetId': info['targetId']})
             return
+        flat_session=None
+        if parent is self._root:
+            # Browser-level auto-attach requires flatten in current Chromium.
+            # Retain that initial debugger pause while attaching the guarded
+            # child transport; Fetch is armed before either session can run JS.
+            # The extra attached event is ignored until its RPC gives the ID.
+            flat_session=params['sessionId']
+            self._manual_attaching.add(target_id)
+            try:
+                attached=self._root.send('Target.attachToTarget',{'targetId':target_id,'flatten':False})
+            finally:
+                self._manual_attaching.discard(target_id)
+            params={**params,'sessionId':attached['sessionId']}
         channel = _TargetChannel(self, parent, params['sessionId'], session, info['type'])
+        channel.target_id=target_id
         self._channels[channel.session_id] = channel
         session.channels.append(channel)
         try:
@@ -425,7 +462,14 @@ class PlaywrightBrowserBackend:
             channel.send('Fetch.enable', {'patterns': [{'urlPattern': '*', 'requestStage': 'Request'}],
                                          'handleAuthRequests': True})
             effect_checkpoint()
-            channel.send('Runtime.runIfWaitingForDebugger')
+            self._guarded_targets.add(target_id)
+            if flat_session is not None:
+                # Detaching the initial auto-attach session releases its
+                # startup pause. The child was attached without such a pause;
+                # runIfWaiting there can stall while the parent is detached.
+                self._root.send('Target.detachFromTarget',{'sessionId':flat_session})
+            else:
+                channel.send('Runtime.runIfWaitingForDebugger')
             session.record('target_guarded', target_type=info['type'])
         except Exception:
             self._root.send('Target.closeTarget', {'targetId': info['targetId']})
@@ -575,6 +619,15 @@ class PlaywrightBrowserBackend:
             effect_checkpoint()
             page = context.new_page()
             session.page = page
+            # Playwright's page attachment and the browser-wide startup pause
+            # are independent debugger sessions. Prove Fetch is armed, then
+            # release Runtime through a supported flattened page CDP session.
+            while not any(c.target_type=='page' and c.target_id in self._guarded_targets for c in session.channels):
+                if time.monotonic()>=deadline:raise ExecutorFailure('browser_target_guard_deadline')
+                self._root.send('Browser.getVersion')
+            page_control=context.new_cdp_session(page)
+            try:page_control.send('Runtime.runIfWaitingForDebugger')
+            finally:page_control.detach()
             # Only this page is actionable. HTTP routing also applies to popups.
             context.on('page', lambda popup: popup.close() if popup != page else None)
             page.on('dialog', lambda dialog: dialog.dismiss())
@@ -857,6 +910,8 @@ class PlaywrightBrowserBackend:
             self._sessions.clear()
             self._contexts.clear()
             self._channels.clear()
+            self._guarded_targets.clear()
+            self._manual_attaching.clear()
             if self._browser is not None:
                 try: self._browser.close()
                 except Exception: pass  # Watchdog may already have terminated it.

@@ -1,0 +1,9 @@
+node_modules/
+**/node_modules/
+.expo/
+**/.expo/
+dist/
+**/dist/
+android/
+ios/
+*.log

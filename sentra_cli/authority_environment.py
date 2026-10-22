@@ -8,7 +8,8 @@ def provider_child_environment(state_root, inherited):
     for name in ("SENTRA_CONTROL_DSN", "SENTRA_POSTGRES_DSN", "SENTRA_CONTROL_BACKEND",
                  "SENTRA_CONTROL_TENANT_ID", "SENTRA_CONTROL_PRINCIPAL_ID",
                  "SENTRA_CANVAS_BEARER", "SENTRA_CANVAS_AGENT_TOKEN",
-                 "SENTRA_CANVAS_AGENT_PORT", "SENTRA_CANVAS_AGENT_SCOPE"):
+                 "SENTRA_CANVAS_AGENT_PORT", "SENTRA_CANVAS_AGENT_SCOPE",
+                 "SENTRA_CANVAS_AGENT_BINDING_FILE"):
         environment.pop(name, None)
     if selector:
         binding = load_provider_binding(state_root)

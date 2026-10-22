@@ -30,7 +30,7 @@ def new_id():
     return uuid.uuid4().hex
 
 class Store:
-    def __init__(self, db_path, projects_root, principal=None, *, telemetry_root=None):
+    def __init__(self, db_path, projects_root, principal=None, *, telemetry_root=None, live_terminal_ids=frozenset()):
         self.path = Path(db_path)
         self.path.parent.mkdir(parents=True,exist_ok=True)
         self.root = Path(projects_root).resolve(strict=True)
@@ -138,8 +138,9 @@ class Store:
             interrupted = self.db.execute(
                 "SELECT id,workspace_id FROM terminals WHERE " + owned +
                 " AND status IN ('starting','running')", (self.principal,)).fetchall()
-            self.db.execute("UPDATE terminals SET status='interrupted',pid=NULL WHERE " +
-                            owned + " AND status IN ('starting','running')", (self.principal,))
+            interrupted = [row for row in interrupted if row["id"] not in live_terminal_ids]
+            for terminal in interrupted:
+                self.db.execute("UPDATE terminals SET status='interrupted',pid=NULL WHERE id=?", (terminal["id"],))
             uncertain = self.db.execute(
                 "SELECT id,workspace_id FROM tasks WHERE " + owned +
                 " AND status='running'", (self.principal,)).fetchall()

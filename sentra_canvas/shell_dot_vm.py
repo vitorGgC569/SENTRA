@@ -456,7 +456,7 @@ class DotVmServices:
                 result['input'] = {'holder': 'none', 'live': False, 'epoch': 0}
         return result
 
-    def dispatch(self, pid, action, params, key=None):
+    def dispatch(self, pid, action, params, key=None, *, input_client_id=''):
         fields = {'dot_id', 'space_id', 'conversation_id'} | {
             'dot_vm_configure': {'os_family', 'cpus', 'memory_mb', 'disk_gb', 'iso_path', 'username'},
             'dot_vm_execute': {'arguments'}, 'dot_vm_reconcile': {'original_request_key', 'blocked_start_key'}, 'dot_vm_reconcile_status': {'original_request_key', 'blocked_start_key'}, 'dot_vm_input': {'arguments', 'expected_epoch'},
@@ -528,7 +528,7 @@ class DotVmServices:
                     work_item_id=wid, capability_id='vm:input', holder=holder,
                     expected_epoch=params.get('expected_epoch'), ttl_seconds=300,
                     operation_id=common['operation_id'], request_key=key,
-                    arguments={'action': 'input.key', 'scancodes': [0xAA]})
+                    arguments={'action': 'input.key', 'scancodes': [0xAA]},client_id=input_client_id)
                 return {**result, 'input': self.status(pid, root, convo['conversation_id'])['input']}
             if not isinstance(arguments, dict):
                 raise ValueError('VM action arguments required')
@@ -549,7 +549,7 @@ class DotVmServices:
                             'reason': 'uncertain VM input is not sent again',
                             'fenced_by': prior['operation_id']}
                 result = self.host.dispatch_human(**common, capability_id='vm:input', arguments=arguments,
-                    expected_epoch=params.get('expected_epoch'))
+                    expected_epoch=params.get('expected_epoch'),client_id=input_client_id)
                 if isinstance(result, dict) and result.get('state') == 'UNCERTAIN' and fence_key is not None:
                     kind, selector, text = fence_key
                     operation_id = result.get('operation_id') or common['operation_id']

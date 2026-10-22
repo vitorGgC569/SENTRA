@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import hmac
+import gzip
 import json
 import os
 import mimetypes
@@ -38,6 +39,7 @@ class CanvasServer(ThreadingHTTPServer):
         self._stream_stopping=threading.Event()
         super().__init__(("127.0.0.1",port),CanvasHandler)
         canvas._agent_port=self.server_port
+        canvas.bind_agent_endpoint(self.server_port,self.runtime_id)
         canvas._shell_origins=(f"http://127.0.0.1:{self.server_port}",
                                f"http://localhost:{self.server_port}")
 
@@ -151,12 +153,13 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self.headers.get("Authorization",""),
             "Bearer "+self.server.secret)
 
-    def _send(self,status,body,content_type="application/json; charset=utf-8"):
+    def _send(self,status,body,content_type="application/json; charset=utf-8",headers=None):
         payload=(json.dumps(body,ensure_ascii=False).encode("utf-8")
                  if isinstance(body,(dict,list)) else body)
         self.send_response(status)
         self.send_header("Content-Type",content_type)
         self.send_header("Content-Length",str(len(payload)))
+        for name,value in (headers or {}).items():self.send_header(name,value)
         self.send_header("Cache-Control","no-store")
         self.send_header("X-Content-Type-Options","nosniff")
         self.send_header("X-Frame-Options","DENY")
@@ -166,7 +169,31 @@ class CanvasHandler(BaseHTTPRequestHandler):
             "form-action 'none'; frame-ancestors 'none'")
         self.send_header("Referrer-Policy","no-referrer")
         self.end_headers()
-        self.wfile.write(payload)
+        previous_timeout=self.connection.gettimeout()
+        try:
+            # The five-second request-read deadline must not truncate a large
+            # local bundle while Chromium is applying backpressure at startup.
+            self.connection.settimeout(30)
+            for offset in range(0,len(payload),64*1024):
+                self.wfile.write(payload[offset:offset+64*1024])
+            self.wfile.flush()
+        except OSError:
+            # Headers/body may already be on the wire. Never append a second
+            # HTTP response to a partial asset or API frame.
+            self.close_connection=True
+        finally:
+            try:self.connection.settimeout(previous_timeout)
+            except OSError:pass
+
+    def _asset(self,file):
+        payload=file.read_bytes()
+        content_type=mimetypes.guess_type(file.name)[0] or 'application/octet-stream'
+        headers={'Vary':'Accept-Encoding'}
+        accepted=[v.strip().lower() for v in self.headers.get('Accept-Encoding','').split(',')]
+        if file.suffix.lower() in {'.js','.css','.svg'} and len(payload)>1024 and 'gzip' in accepted:
+            compressed=gzip.compress(payload,compresslevel=3,mtime=0)
+            if len(compressed)<len(payload):payload=compressed;headers['Content-Encoding']='gzip'
+        self._send(200,payload,content_type,headers)
 
     def _handle(self,fn):
         try:
@@ -203,7 +230,7 @@ class CanvasHandler(BaseHTTPRequestHandler):
                     (file.suffix.lower() not in {".js",".css",".svg",".png",".woff2"}
                      and file.name != "manifest.json")):
                 self._send(404,{"error":"desktop asset unavailable"});return
-            self._send(200,file.read_bytes(),mimetypes.guess_type(file.name)[0] or "application/octet-stream");return
+            self._asset(file);return
         if path.path in ("/","/index.html","/app.js","/app.css",
                           "/desktop.html","/native.html","/canvas","/native.js","/native.css","/sentra-logo.png","/rope-physics.js","/fractal-grid.js","/machine-panel.js",
                           "/sentra-collab.js","/collaboration-panel.js","/graph-view.js","/workflow-panel.js","/center-panel.js","/remote-panel.js","/vendor/sentra-collab-runtime.js",
@@ -286,6 +313,9 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.shell_live_preview(qs["project_id"][0],
                 qs["space_id"][0],qs["conversation_id"][0]))
             return
+        if path.path == "/api/web-models/account":
+            from .web_models_account import account_control
+            self._send(200, account_control());return
         if path.path=="/api/health":
             self._send(200,{"ok":True,"provider_ready":"unverified",
                            "terminal_backend":"Windows ConPTY",
@@ -370,6 +400,8 @@ class CanvasHandler(BaseHTTPRequestHandler):
         if path.path=="/api/terminal/output":
             self._send(200,a.terminal_output(ws,(qs.get("id") or [""])[0],
                               (qs.get("cursor") or ["0"])[0]));return
+        if path.path=='/api/terminal/checkpoint':
+            self._send(200,a.terminal_checkpoint(ws,(qs.get('id') or [''])[0]));return
         if path.path=="/api/team":
             self._send(200,a.team_members(ws,(qs.get("id") or [""])[0]));return
         if path.path=="/api/task":
@@ -404,6 +436,13 @@ class CanvasHandler(BaseHTTPRequestHandler):
             return
         agent_route=route=="/api/agent/control"
         if not agent_route and not self._auth():
+            # Closing a Windows socket with an unread POST body can reset it
+            # before Chromium receives the 401. Discard bounded bytes without
+            # parsing or dispatching anything; the request-read deadline stays.
+            size=self.headers.get('Content-Length','0')
+            if size.isascii() and size.isdecimal() and len(size)<9 and int(size)<=2_010_000:
+                try:self.rfile.read(int(size))
+                except OSError:pass
             self._send(401,{"error":"local bearer token required"});return
         if self.headers.get("Content-Type","").split(";")[0]!="application/json":
             raise ValueError("JSON content type required")
@@ -425,6 +464,15 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.agent_control(authorization[7:],p))
             return
         ws=p.get("ws","")
+        if route in {"/api/mobile/control", "/api/mobile/rpc"}:
+            from .mobile_devices import owner_control, gateway_call
+            value=owner_control(a,p) if route.endswith("control") else gateway_call(a,p)
+            self._send(200,{"ok":True,"value":value});return
+        if route == "/api/web-models/account":
+            if p != {"action": "login"}:
+                raise ValueError("explicit login action required")
+            from .web_models_account import account_control
+            self._send(200, account_control("login"));return
         if route=="/api/shell/bridge":
             try:
                 response=a.shell_bridge(p)
@@ -643,6 +691,10 @@ class CanvasHandler(BaseHTTPRequestHandler):
         self._send(200,result)
 
 def main(argv=None):
+    args = sys.argv[1:] if argv is None else argv
+    if len(args)==2 and args[0]=="--pty-daemon":
+        from .pty_daemon import serve
+        serve(args[1]);return
     p=argparse.ArgumentParser(description="SENTRA Canvas independent of Maestri")
     p.add_argument("--root",type=Path,help="authorized SENTRA root; defaults to the installed workspace")
     p.add_argument("--state-dir",type=Path,help="persisted Canvas state directory")

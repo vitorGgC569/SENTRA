@@ -14,10 +14,12 @@ def test_existing_canvas_transcript_cursor_head_tail_with_central_workitem(tmp_p
         owner=canvas.store.principal
         run=durable.create_run(owner,workspace=ws["path"],run_id=ws["run_id"])["run_id"]
         control.ensure_agent(run,owner,agent_id="conpty-agent",role="builder")
-        work=control.create_work_item(run,owner,objective="Inspect existing terminal")
+        work=control.create_work_item(run,owner,objective="Inspect existing terminal",assignee_agent_id="conpty-agent",metadata={"workspace_id":ws["id"]})
         terminal=canvas.store.create_terminal(ws["id"],"PreviouslyStarted","sentra-cli")
         canvas.store.append_terminal_output(ws["id"],terminal["id"],"line-one\nline-two\n")
         canvas.store.terminal_state(ws["id"],terminal["id"],"exited")
+        from sentra_executors.conpty_sessions import PersistentConPTYLedger
+        PersistentConPTYLedger(control).register(owner,workspace_id=ws["id"],terminal_id=terminal["id"],run_id=run,work_item_id=work["work_item_id"],principal_id="conpty-agent",name="PreviouslyStarted",shell="sentra-cli")
         adapter=ExistingConPTYSession(control=control,canvas=canvas)
         params=dict(owner=owner,run_id=run,work_item_id=work["work_item_id"],
                     principal_id="conpty-agent",workspace_id=ws["id"],
@@ -55,7 +57,7 @@ def test_conpty_requires_durable_effect_for_write_even_with_grant(tmp_path):
         owner=canvas.store.principal
         run=durable.create_run(owner,workspace=ws["path"],run_id=ws["run_id"])["run_id"]
         control.ensure_agent(run,owner,agent_id="conpty-agent",role="builder")
-        work=control.create_work_item(run,owner,objective="Write via central gate only")
+        work=control.create_work_item(run,owner,objective="Write via central gate only",assignee_agent_id="conpty-agent",metadata={"workspace_id":ws["id"]})
         terminal=canvas.store.create_terminal(ws["id"],"NotRunning","sentra-cli")
         control.authorization.grant(owner,principal_type="agent",
             principal_id="conpty-agent",capability="terminal:write",

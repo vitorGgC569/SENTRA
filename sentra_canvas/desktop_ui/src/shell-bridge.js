@@ -5,8 +5,9 @@ import { confirmedConversation } from './shell-navigation.js';
 const projectReviewActions = new Set(['project_file_list', 'project_file_preview', 'project_file_diff', 'project_file_pdf_text',
   'project_file_pdf_visual', 'project_watch_start', 'project_watch_poll', 'project_watch_close']);
 const reads = new Set(['home', 'space_list', 'space_get', 'dot_list', 'conversation_list', 'conversation_get', 'conversation_request_status', 'message_request_status', 'message_list', 'message_content', 'events',
+  'workspace_presentation_get', 'conversation_permission_status',
   'dot_preferences_get', 'dot_remove_preflight', 'dot_retire_authority_status', 'dot_retire_authority_reconcile', 'dot_vm_retire_preflight',
-  'access_status', 'goal_status', 'dot_canvas_get', 'dot_computer_get', 'dot_computer_read',
+  'access_status', 'goal_status', 'dot_canvas_get', 'workspace_inventory', 'workspace_request_status', 'dot_computer_get', 'dot_computer_read',
   'dot_vm_status', 'dot_vm_frame', 'dot_vm_images', 'dot_vm_reconcile_status',
   'network_home', 'network_status',
   'capabilities_home', 'capabilities_catalog', 'capabilities_connectors', 'capabilities_models', 'capabilities_usage',
@@ -15,6 +16,8 @@ const reads = new Set(['home', 'space_list', 'space_get', 'dot_list', 'conversat
   'skill_list', 'skill_review', 'skill_versions', 'skill_latest', 'skill_disclose', 'skill_activations', 'skill_learning_review',
   'plugin_bundle_list', 'plugin_bundle_inspect', 'plugin_supervision', 'plugin_transport_status', 'plugin_connection_proof', ...projectReviewActions]);
 const actions = new Set([...reads, 'space_create', 'dot_create', 'dot_update', 'conversation_create', 'message_send', 'coordinate',
+  'workspace_presentation_save',
+  'dot_canvas_access',
   'dot_preference_set', 'dot_order_move', 'dot_order_place', 'dot_archive_local', 'dot_restore_local',
   'dot_pause_family', 'dot_resume_family', 'dot_delete_request', 'dot_retire_authority_close',
   'dot_computer_action',
@@ -29,6 +32,7 @@ const actions = new Set([...reads, 'space_create', 'dot_create', 'dot_update', '
   'network_enable', 'network_disable', 'network_invite', 'network_revoke', 'network_converse', 'network_delegate', 'network_review',
   'capability_enable', 'capability_disable', 'capability_invoke']);
 const recoverable = new Set(['space_create', 'dot_create', 'dot_update', 'conversation_create', 'coordinate',
+  'dot_canvas_access',
   'dot_preference_set', 'dot_order_move', 'dot_order_place', 'dot_archive_local', 'dot_restore_local',
   'dot_pause_family', 'dot_resume_family', 'dot_delete_request', 'dot_retire_authority_close',
   'dot_computer_action',

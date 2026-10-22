@@ -30,7 +30,8 @@ class ACPProviderSession:
         binding=self.binding(request)
         if packet.get("sessionId")!=binding["remote_id"] or not isinstance(packet.get("update"),dict):
             raise ACPProtocolError("ACP update belongs to another session")
-        self.adapter.state.apply(packet["update"])
+        from .acp_dialects import normalize_update
+        self.adapter.state.apply(normalize_update(self.config.get('dialect'),packet['update']))
         self._event_count+=1
         self.store.ingest(request,self.local_id,event_id=digest({"operation":request.operation_id,
             "ordinal":self._event_count,"packet":packet}),payload=packet)

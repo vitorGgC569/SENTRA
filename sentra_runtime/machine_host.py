@@ -157,6 +157,34 @@ class MachineHost:
         """Owner-configured UTF-8 files machine. No WorkItems or Grants created."""
         return self._call(self._configure_workspace_files(workspace_id, workspace_root, agent_id))
 
+    def configure_worktrees(self, *, workspace_id, workspace_root, agent_id, dot_id):
+        return self._call(self._configure_worktrees(workspace_id,workspace_root,agent_id,dot_id))
+
+    async def _configure_worktrees(self,workspace_id,workspace_root,agent_id,dot_id):
+        from contextlib import closing
+        from sentra_executors.git_worktrees import GitWorktreeBinding,declare_git_worktree_machine
+        from sentra_executors.central_integration import CentralExecutorFactory
+        from workspace.worktrees import WorktreeManager
+        root=Path(workspace_root).resolve(strict=True)
+        with closing(self.control.store.connect('shell')) as db:
+            dot=self.control.shell._entity(db,self.owner,workspace_id,'dot',dot_id)
+        if dot.get('agent_id')!=agent_id:raise PermissionError('worktree configuration must match its Dot agent')
+        machine_id=self._machine_id(workspace_id,agent_id,'git-worktrees')
+        if machine_id in self._inventory:return dict(self._inventory[machine_id])
+        manager=WorktreeManager(root,self.control.durable.root/'git-worktrees'/machine_id)
+        bindings=tuple(GitWorktreeBinding(cap,manager,dot_id,control=self.control,owner=self.owner) for cap in ('git:worktree','git:worktree.inspect'))
+        factory=CentralExecutorFactory(control=self.control,owner=self.owner,agent_id=agent_id)
+        factory.register_execution(declare_git_worktree_machine(machine_id=machine_id,
+            owner_principal_id=agent_id,bindings=bindings,policy=factory.policy))
+        self._factories[machine_id]=factory
+        self._inventory[machine_id]={'machine_id':machine_id,'kind':'git-worktrees','workspace_id':workspace_id,
+            'agent_id':agent_id,'dot_id':dot_id,'capabilities':[b.capability_id for b in bindings],
+            'actions':{},  # Each Git capability is already a specific operation, with no action selector.
+            'registered':True,'grant_created':False,'publication_supported':False}
+        self.configurations.put(machine_id,{'kind':'git-worktrees','workspace_id':workspace_id,
+            'workspace_root':str(root),'agent_id':agent_id,'dot_id':dot_id})
+        return dict(self._inventory[machine_id])
+
     async def _configure_workspace_files(self, workspace_id, workspace_root, agent_id):
         from sentra_executors.central_integration import CentralExecutorFactory
         from sentra_executors.workspace_files import (FILE_CAPABILITIES, WorkspaceFilesBinding,
@@ -169,7 +197,9 @@ class MachineHost:
         if machine_id in self._inventory:
             return dict(self._inventory[machine_id])
         paths = workspace_paths(root, self.control.durable.root)
-        bindings = tuple(WorkspaceFilesBinding(capability_id=cap, paths=paths, actions=tuple(actions))
+        from sentra_canvas.task_workspace import directory
+        resolve_paths=lambda request:workspace_paths(directory(self.control,self.owner,request,root),self.control.durable.root)
+        bindings = tuple(WorkspaceFilesBinding(capability_id=cap, paths=paths, actions=tuple(actions),resolve_paths=resolve_paths)
                          for cap, actions in FILE_CAPABILITIES.items())
         factory = CentralExecutorFactory(control=self.control, owner=self.owner, agent_id=agent_id)
         declaration = declare_workspace_files_machine(machine_id=machine_id,
@@ -338,7 +368,7 @@ class MachineHost:
 
     def input_handoff(self, *, workspace_id, machine_id, holder, expected_epoch,
                       ttl_seconds=60, work_item_id=None, capability_id=None, operation_id=None, arguments=None, request_key=None,
-                      only_if_available=False):
+                      only_if_available=False, client_id=''):
         async def handoff():
             from sentra_executors.input_control import InputControl
             config = self._inventory.get(machine_id)
@@ -360,11 +390,11 @@ class MachineHost:
                     arguments=arguments or {}, idempotency_key=request_key)
             return InputControl(self.control, owner=self.owner).handoff(resource_id=resource, workspace_id=workspace_id,
                 machine_id=machine_id, holder=holder, expected_epoch=expected_epoch, request_key=request_key,
-                ttl_seconds=ttl_seconds, request=request, only_if_available=only_if_available)
+                ttl_seconds=ttl_seconds, request=request, only_if_available=only_if_available,client_id=client_id)
         return self._call(handoff(), timeout=15)
 
     def dispatch_human(self, *, workspace_id, work_item_id, machine_id, capability_id,
-                       operation_id, arguments, expected_epoch, idempotency_key=None):
+                       operation_id, arguments, expected_epoch, idempotency_key=None, client_id=''):
         async def dispatch():
             from sentra_executors.input_control import human_input_scope
             config = self._inventory.get(machine_id)
@@ -377,7 +407,7 @@ class MachineHost:
             if not isinstance(arguments, dict) or set(arguments) & {"human", "owner", "principal", "principal_id", "resource_id"}:
                 raise ValueError("human input authority is server-derived")
             with human_input_scope(self.control, owner=self.owner, workspace_id=workspace_id,
-                                   machine_id=machine_id, resource_id=resource, expected_epoch=expected_epoch):
+                                   machine_id=machine_id, resource_id=resource, expected_epoch=expected_epoch,client_id=client_id):
                 return await self._dispatch(workspace_id, work_item_id, machine_id, capability_id,
                                             operation_id, arguments, idempotency_key)
         return self._call(dispatch())
@@ -606,6 +636,9 @@ class MachineHost:
                 elif config["kind"] == "workspace-files":
                     self.configure_workspace_files(workspace_id=config["workspace_id"],
                         workspace_root=config["workspace_root"], agent_id=config["agent_id"])
+                elif config['kind']=='git-worktrees':
+                    self.configure_worktrees(workspace_id=config['workspace_id'],workspace_root=config['workspace_root'],
+                        agent_id=config['agent_id'],dot_id=config['dot_id'])
                 elif config["kind"] == "terminal":
                     if self.owner != "canvas:" + config["canvas_principal"]:
                         raise PermissionError("terminal restore principal changed")
@@ -660,7 +693,7 @@ class MachineHost:
                     if (config["workspace_id"]!=workspace_id or item.get("assignee_agent_id")!=agent
                             or item.get("metadata",{}).get("machine_id")!=ident
                             or agent_ids is not None and agent not in agent_ids):continue
-                    scoped = config['kind'] in {'workspace-files', 'terminal', 'computer-local', 'virtualbox_vm'}
+                    scoped = config['kind'] in {'workspace-files', 'terminal', 'computer-local', 'virtualbox_vm','git-worktrees'}
                     if conversation_id is not None and scoped and item.get('metadata', {}).get('conversation_id') != conversation_id:
                         continue
                     factory=self._factories[ident];caps=[]
@@ -793,7 +826,7 @@ class MachineHost:
             for factory in self._factories.values():
                 direct_shutdown=getattr(factory,"shutdown",None)
                 if callable(direct_shutdown):await direct_shutdown()
-                for declaration in factory._declarations.values():
+                for declaration in getattr(factory,'_declarations',{}).values():
                     backend = getattr(declaration.adapter, "backend", None)
                     if backend is not None and id(backend) not in seen:
                         seen.add(id(backend))

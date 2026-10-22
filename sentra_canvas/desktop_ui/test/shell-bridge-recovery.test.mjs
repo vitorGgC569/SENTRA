@@ -27,3 +27,14 @@ test('a success envelope without the intended conversation remains recoverable',
     assert.deepEqual(pendingShellMutations('project').find(row=>row.request_key==='incomplete-key'),request);
   }finally{globalThis.fetch=previous;}
 });
+
+test('workspace inventory is a scoped read and never enters pending effects',async()=>{
+ const previous=globalThis.fetch;let sent;
+ globalThis.fetch=async(path,options)=>{sent={path,body:JSON.parse(options.body)};return {ok:true,status:200,json:async()=>({ok:true,value:{protocol_version:1,layout_scope:'owner-dot'}})}};
+ try{
+  const before=pendingShellMutations('project').length;
+  const value=await shellBridge({action:'workspace_inventory',project_id:'project',space_id:'space',dot_id:'dot'});
+  assert.equal(value.protocol_version,1);assert.equal(sent.path,'/api/shell/bridge');
+  assert.equal(sent.body.request_key,undefined);assert.equal(pendingShellMutations('project').length,before);
+ }finally{globalThis.fetch=previous;}
+});

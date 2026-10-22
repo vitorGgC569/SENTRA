@@ -171,7 +171,7 @@ class TaskRuntime:
     def task_run(self,task):
         return self.durable.run_status(task["run_id"],self.owner,include_details=False)
 
-    def control(self,ws,action):
+    def control_project(self,ws,action):
         states={"pause":"PAUSED","resume":"RUNNING","cancel":"CANCELLED"}
         run=self.run(ws)
         if action=="resume" and run["state"] in {"CANCELLED","SUCCEEDED","FAILED"}:
@@ -181,6 +181,9 @@ class TaskRuntime:
         result=self.durable.transition_run(run["run_id"],self.owner,states[action],
                                           reason="explicit native Canvas control")
         return {"run_id":result["run_id"],"state":result["state"]}
+
+    def control(self,ws,action):
+        return self.control_project(ws,action)
 
     def close(self):
         self.durable.close()

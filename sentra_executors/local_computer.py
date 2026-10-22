@@ -15,27 +15,31 @@ CAPABILITIES = ('computer:file.read', 'computer:file.write', 'computer:file.dele
 class ComputerBinding:
     root: str
     timeout_seconds: float = 3610
+    resolve_root: object = None
 
 class LocalComputerExecutor(GuardedExecutor):
     kind = 'computer-local'
 
     def _validate(self, request, binding):
         args = dict(request.arguments)
+        root=binding.resolve_root(request) if binding.resolve_root else Path(binding.root)
+        if 'reason' in args and (not isinstance(args['reason'],str) or not 1<=len(args['reason'])<=300):raise ValueError('bounded explanation required')
         if request.capability_id == 'computer:execute':
-            if set(args) - {'command', 'cwd', 'timeout_seconds'} or not isinstance(args.get('command'), str) or not 1 <= len(args['command']) <= 100000:
+            if set(args) - {'command', 'cwd', 'timeout_seconds','reason'} or not isinstance(args.get('command'), str) or not 1 <= len(args['command']) <= 100000:
                 raise ValueError('command required')
             timeout = args.get('timeout_seconds', 120)
             if type(timeout) not in {int, float} or not 1 <= timeout <= 3600:
                 raise ValueError('timeout must be 1..3600 seconds')
             args['timeout_seconds'] = timeout
-            args['cwd'] = str(Path(args.get('cwd') or binding.root).resolve())
+            cwd=Path(args.get('cwd') or root)
+            args['cwd'] = str((Path(root)/cwd).resolve() if not cwd.is_absolute() else cwd.resolve())
             return args
         action = args.get('action')
         allowed = {'computer:file.read': {'read', 'stat', 'list'}, 'computer:file.write': {'write', 'edit'}, 'computer:file.delete': {'delete'}}[request.capability_id]
-        if action not in allowed or set(args) - {'action', 'path', 'content', 'base64', 'expected_sha256'} or not isinstance(args.get('path'), str):
+        if action not in allowed or set(args) - {'action', 'path', 'content', 'base64', 'expected_sha256','reason'} or not isinstance(args.get('path'), str):
             raise ValueError('invalid file operation')
         path = Path(args['path'])
-        args['path'] = str((Path(binding.root) / path).resolve() if not path.is_absolute() else path.resolve())
+        args['path'] = str((Path(root) / path).resolve() if not path.is_absolute() else path.resolve())
         if action in {'write', 'edit'} and (('content' in args) == ('base64' in args)):
             raise ValueError('provide either text content or base64 bytes')
         return args
@@ -81,7 +85,9 @@ def configure_computer(host, *, workspace_id, workspace_root, agent_id):
         return dict(host._inventory[mid])
     factory = CentralExecutorFactory(control=host.control, owner=host.owner, agent_id=agent_id)
     factory.policy = AccessStore(host.control, host.owner).policy(factory.policy, root)
-    executor = LocalComputerExecutor(machine_id=mid, owner_principal_id=agent_id, bindings={cap: ComputerBinding(root) for cap in CAPABILITIES}, policy=factory.policy)
+    from sentra_canvas.task_workspace import directory
+    resolve_root=lambda request:directory(host.control,host.owner,request,root)
+    executor = LocalComputerExecutor(machine_id=mid, owner_principal_id=agent_id, bindings={cap: ComputerBinding(root,resolve_root=resolve_root) for cap in CAPABILITIES}, policy=factory.policy)
     factory.register_execution(MachineDeclaration(Machine(mid, 'computer-local', agent_id, tuple(Capability(cap, cap, 'high') for cap in CAPABILITIES)), executor))
     value = {'machine_id': mid, 'kind': 'computer-local', 'workspace_id': workspace_id, 'agent_id': agent_id, 'capabilities': list(CAPABILITIES), 'actions': {'computer:file.read': ['read', 'stat', 'list'], 'computer:file.write': ['write', 'edit'], 'computer:file.delete': ['delete'], 'computer:execute': ['execute']}, 'registered': True}
     host._factories[mid], host._inventory[mid] = factory, value

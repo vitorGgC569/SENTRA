@@ -1,0 +1,44 @@
+{
+  "name": "sentra-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "index.js",
+  "scripts": {
+    "start": "expo start --localhost",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "typecheck": "tsc --noEmit",
+    "export": "expo export --platform all",
+    "start:lan": "expo start --lan",
+    "build:terminal": "node scripts/build-terminal.mjs",
+    "preexport": "npm run build:terminal",
+    "prestart": "npm run build:terminal",
+    "prestart:lan": "npm run build:terminal",
+    "preandroid": "npm run build:terminal",
+    "preios": "npm run build:terminal",
+    "test": "node --test test/*.test.cjs"
+  },
+  "dependencies": {
+    "@sentra/mobile-transport": "file:../transport",
+    "buffer": "6.0.3",
+    "expo": "55.0.31",
+    "expo-build-properties": "55.0.18",
+    "expo-camera": "55.0.23",
+    "expo-crypto": "55.0.19",
+    "expo-secure-store": "55.0.18",
+    "expo-status-bar": "55.0.6",
+    "lucide-react-native": "1.14.0",
+    "react": "19.2.0",
+    "react-native": "0.83.10",
+    "react-native-safe-area-context": "5.7.0",
+    "react-native-svg": "15.15.5",
+    "react-native-webview": "13.16.2"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.2",
+    "@xterm/addon-unicode11": "0.10.0-beta.301",
+    "@xterm/xterm": "6.1.0-beta.304",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  }
+}

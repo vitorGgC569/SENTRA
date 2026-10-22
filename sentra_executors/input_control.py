@@ -25,13 +25,14 @@ class _HumanInputScope:
     machine_id: str
     resource_id: str
     expected_epoch: int
+    client_id: str = ''
 
 
 _human_input = ContextVar('sentra_authenticated_human_input', default=None)
 
 
 @contextmanager
-def human_input_scope(control, *, owner, workspace_id, machine_id, resource_id, expected_epoch):
+def human_input_scope(control, *, owner, workspace_id, machine_id, resource_id, expected_epoch, client_id=''):
     """Trusted authenticated host only. Never create from an agent's boolean flag.
 
     Ordinary grants, WorkItem assignment and central effect admission remain
@@ -42,10 +43,11 @@ def human_input_scope(control, *, owner, workspace_id, machine_id, resource_id, 
     possession = InputControl(control, owner=owner)
     status = possession.status(resource_id=resource_id, workspace_id=workspace_id)
     if (not status['live'] or status['holder'] != 'human' or
-            status['epoch'] != expected_epoch or status.get('machine_id') != machine_id):
+            status['epoch'] != expected_epoch or status.get('machine_id') != machine_id or
+            status.get('client_id', '') != client_id):
         raise AuthorizationRequired('human input possession expired or handed off')
     token = _human_input.set(_HumanInputScope(control, owner, workspace_id,
-                                            machine_id, resource_id, expected_epoch))
+                                            machine_id, resource_id, expected_epoch, client_id))
     try:
         yield
     finally:
@@ -83,7 +85,7 @@ def resource_for_declaration(declaration):
 
 def needs_input(request):
     action = request.arguments.get('action')
-    return action in {'click', 'fill', 'invoke', 'set_value', 'toggle', 'select', 'input.key', 'input.mouse', 'clipboard.write',
+    return action in {'click', 'fill', 'invoke', 'set_value', 'toggle', 'select', 'input.key', 'input.mouse', 'input.tap', 'clipboard.write',
                       'computer.focus', 'computer.invoke', 'computer.set_value'} or (
         action == 'write' and request.arguments.get('opcode') in {'key', 'mouse', 'touch'})
 
@@ -95,10 +97,20 @@ class InputControl:
         db = control.store.connect('machine_input_control')
         try:
             with db:
+                db.execute('BEGIN IMMEDIATE')
+                db.execute('CREATE TABLE IF NOT EXISTS machine_input_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)')
+                version=db.execute('SELECT version FROM machine_input_schema WHERE id=1').fetchone()
+                if version is not None and version['version']>2:raise RuntimeError('input schema newer than this host')
                 db.execute('CREATE TABLE IF NOT EXISTS machine_input_leases('
                     'resource TEXT PRIMARY KEY, owner TEXT NOT NULL, workspace TEXT NOT NULL,'
                     'machine TEXT NOT NULL, holder TEXT NOT NULL, principal TEXT NOT NULL,'
                     'work_item TEXT NOT NULL, epoch INTEGER NOT NULL, expires REAL NOT NULL)')
+                # Versioned additive migration: old desktop leases retain their
+                # empty client identity; mobile identity is derived by the host.
+                columns={r['name'] for r in db.execute('PRAGMA table_info(machine_input_leases)')}
+                if 'client_id' not in columns:
+                    db.execute("ALTER TABLE machine_input_leases ADD COLUMN client_id TEXT NOT NULL DEFAULT ''")
+                db.execute('INSERT INTO machine_input_schema VALUES(1,2) ON CONFLICT(id) DO UPDATE SET version=2')
                 db.execute('CREATE TABLE IF NOT EXISTS machine_input_handoffs('
                     'owner TEXT NOT NULL, request_key TEXT NOT NULL, digest TEXT NOT NULL, result TEXT NOT NULL,'
                     'created REAL NOT NULL, PRIMARY KEY(owner,request_key))')
@@ -129,10 +141,10 @@ class InputControl:
                 'principal_id': row['principal'], 'machine_id': row['machine'],
                 'work_item_id': row['work_item'], 'expires_at': row['expires'],
                 'live': row['expires'] > self.clock() and row['holder'] != 'none',
-                'grant_created': False}
+                'grant_created': False, 'client_id': row['client_id']}
 
     def handoff(self, *, resource_id, workspace_id, machine_id, holder,
-                expected_epoch, request_key, ttl_seconds=60, request=None, only_if_available=False):
+                expected_epoch, request_key, ttl_seconds=60, request=None, only_if_available=False, client_id=''):
         """Authenticated owner host call; browser identity must be derived upstream.
 
         Agent possession requires a bound live request and capability grant. Human
@@ -143,7 +155,8 @@ class InputControl:
                 expected_epoch < 0 or type(ttl_seconds) is not int or not 1 <= ttl_seconds <= 300 or
                 not resource_id or not workspace_id or not machine_id or
                 not isinstance(request_key,str) or not 1<=len(request_key)<=128
-                or type(only_if_available) is not bool or only_if_available and holder != 'agent'):
+                or type(only_if_available) is not bool or only_if_available and holder != 'agent'
+                or not isinstance(client_id,str) or len(client_id)>128):
             raise ValueError('bounded_input_handoff_required')
         principal, work_item = self.owner, ''
         if holder == 'agent':
@@ -163,7 +176,7 @@ class InputControl:
             principal, work_item = request.principal_id, request.work_item_id
         db = self.control.store.connect('machine_input_control')
         intent=hashlib.sha256(json.dumps([resource_id,workspace_id,machine_id,holder,expected_epoch,
-            ttl_seconds,principal,work_item] + (['only_if_available'] if only_if_available else []),separators=(',',':')).encode()).hexdigest()
+            ttl_seconds,principal,work_item] + (['only_if_available'] if only_if_available else []) + ([client_id] if client_id else []),separators=(',',':')).encode()).hexdigest()
         try:
             with db:
                 db.execute('BEGIN IMMEDIATE')
@@ -179,14 +192,16 @@ class InputControl:
                     raise AuthorizationRequired('input resource outside authenticated workspace')
                 if (row['epoch'] if row else 0) != expected_epoch:
                     raise ValueError('input_handoff_revision_conflict')
+                if holder != 'human' and client_id and (row is None or row['client_id']!=client_id):
+                    raise AuthorizationRequired('device cannot release another client input possession')
                 if only_if_available and row is not None and row['holder'] != 'none' and row['expires'] > self.clock():
                     raise AuthorizationRequired('active input possession cannot be acquired automatically')
                 epoch = expected_epoch + 1
-                db.execute('INSERT INTO machine_input_leases VALUES(?,?,?,?,?,?,?,?,?) '
+                db.execute('INSERT INTO machine_input_leases(resource,owner,workspace,machine,holder,principal,work_item,epoch,expires,client_id) VALUES(?,?,?,?,?,?,?,?,?,?) '
                     'ON CONFLICT(resource) DO UPDATE SET workspace=excluded.workspace,machine=excluded.machine, holder=excluded.holder,'
-                    'principal=excluded.principal,work_item=excluded.work_item,epoch=excluded.epoch,expires=excluded.expires',
+                    'principal=excluded.principal,work_item=excluded.work_item,epoch=excluded.epoch,expires=excluded.expires,client_id=excluded.client_id',
                     (resource_id, self.owner, workspace_id, machine_id, holder, principal,
-                     work_item, epoch, self.clock() + ttl_seconds if holder != 'none' else 0))
+                     work_item, epoch, self.clock() + ttl_seconds if holder != 'none' else 0,client_id if holder=='human' else ''))
                 result={'resource_id':resource_id,'machine_id':machine_id,'work_item_id':work_item,
                     'principal_id':principal,'holder':holder,'epoch':epoch,'request_key':request_key,
                     'grant_created':False,'handoff_recorded':True,'status_requires_fresh_read':True}
@@ -220,7 +235,8 @@ class InputControl:
         status = self.status(resource_id=resource_id, workspace_id=scope.workspace_id)
         if (not status['live'] or status['holder'] != 'human' or
                 status.get('principal_id') != self.owner or
-                status.get('machine_id') != request.machine_id or status['epoch'] != scope.expected_epoch):
+                status.get('machine_id') != request.machine_id or status['epoch'] != scope.expected_epoch or
+                status.get('client_id','') != scope.client_id):
             raise AuthorizationRequired('human input possession expired or handed off')
         return status['epoch']
 

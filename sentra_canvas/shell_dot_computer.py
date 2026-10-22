@@ -54,8 +54,26 @@ class DotComputerServices:
             resources = [self.canvas.store.resource("agents", agent, project_id) for agent in agents]
             terminals = [self.canvas.store.resource("terminals", agent["terminal_id"], project_id)
                 for agent in resources if agent.get("terminal_id")]
+            from sentra_executors.conpty_sessions import PersistentConPTYLedger
+            bound=PersistentConPTYLedger(self.host.control).sessions(self.host.owner,project_id)
+            by_id={terminal['id']:terminal for terminal in terminals}
+            actors={dot['agent_id']:dot['dot_id'] for dot in dots}
+            for binding in bound:
+                if binding['principal_id'] not in agents:continue
+                try:
+                    item=self.host.control.work_item_info(binding['work_item_id'],self.host.owner)
+                    check_conversation(item)
+                    if item['run_id']!=binding['run_id'] or item.get('assignee_agent_id')!=binding['principal_id']:continue
+                    terminal=self.canvas.store.resource('terminals',binding['terminal_id'],project_id)
+                except (FileNotFoundError,KeyError,Denied):continue
+                machine=next((m for m in inventory if m['kind']=='terminal' and m['agent_id']==binding['principal_id']),None)
+                by_id[terminal['id']]={**terminal,'dot_id':actors[binding['principal_id']],
+                    'machine_id':machine['machine_id'] if machine else None,'work_item_id':binding['work_item_id']}
             return {"canvas_root_dot_id": root, "dots": dots, "machines": inventory,
-                "work_items": work_items, "agents": resources, "terminals": terminals,
+                "work_items": work_items, "agents": resources, "terminals": list(by_id.values()),
+                'terminal_catalog_limit':100,'terminal_catalog_may_have_more':len(bound)>=100,
+                'terminal_observation':{'protocol_version':1,'incremental':True,'checkpoint_query':True,
+                    'subscription':False,'automatic_input_replay':False,'max_frame_chars':16000},
                 "restore_errors": [e for e in self.host.restore_errors
                     if e.get("machine_id") in {m["machine_id"] for m in inventory}]}
         request = params.get("request")
@@ -89,6 +107,14 @@ class DotComputerServices:
             machine = next((m for m in inventory if m["machine_id"] == request.get("machine_id")), None)
             if machine is None:
                 raise Denied("machine belongs to another Dot canvas")
+            terminal_action=nested_action in {'terminal_output','terminal_checkpoint'}
+            terminal_effect=nested_action=='machine_execute' and request.get('capability_id') in {'terminal:read','terminal:write','terminal:close'}
+            if terminal_action or terminal_effect:
+                from .terminal_observation import check_dot_terminal
+                if terminal_effect and not isinstance(request.get('arguments'),dict):raise ValueError('terminal arguments must be an object')
+                terminal_id=request.get('terminal_id') if terminal_action else (request.get('arguments') or {}).get('terminal_id')
+                check_dot_terminal(self.canvas,project_id,params['dot_id'],params['space_id'],
+                    machine,terminal_id,request.get('work_item_id'))
             if request.get("work_item_id"):
                 item = self.host.control.work_item_info(request["work_item_id"], self.host.owner)
                 if item.get("assignee_agent_id") not in agents:

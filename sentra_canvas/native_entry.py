@@ -19,6 +19,8 @@ def root_dir() -> Path:
 
 def main(argv=None):
     arguments=list(sys.argv[1:] if argv is None else argv)
+    if len(arguments)==2 and arguments[0]=='--pty-daemon':
+        return canvas_main(arguments)
     if any(arg == "--root" or arg.startswith("--root=") for arg in arguments):
         return canvas_main(arguments)
     root=root_dir()

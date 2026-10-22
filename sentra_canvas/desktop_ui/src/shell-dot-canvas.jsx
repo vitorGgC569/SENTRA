@@ -135,7 +135,7 @@ function CanvasTools({ tool, onTool, grid, onGrid, onCreate, onComputer, busy })
   </Panel>;
 }
 
-export function ShellDotCanvas({ dot, roots, bridge, onSelect, onCreate, onConversation, onComputer }) {
+export function ShellDotCanvas({ dot, roots, bridge, onSelect, onCreate, onConversation, onComputer, visible = true }) {
   const [nodes, setNodes] = useState([]), [edges, setEdges] = useState([]), [error, setError] = useState('');
   const [notice, setNotice] = useState(''), [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -175,11 +175,11 @@ export function ShellDotCanvas({ dot, roots, bridge, onSelect, onCreate, onConve
   }
   useEffect(() => {
     let active = true, loading = false;
-    const load = async () => { if (!active || loading || document.hidden) return; loading = true;
+    const load = async () => { if (!active || loading || document.hidden || !visible) return; loading = true;
       try { await refresh(); } catch (e) { if (active) { setError(e.message); setLoading(false); } } finally { loading = false; } };
     void load(); const timer = setInterval(load, 4000);
     return () => { active = false; clearInterval(timer); };
-  }, [dot.dot_id, dot.project_id, dot.space_id]);
+  }, [dot.dot_id, dot.project_id, dot.space_id, visible]);
   async function mutate(action, fields) {
     setBusy(true); setNotice('');
     try {

@@ -262,6 +262,9 @@ class WindowsPTY:
         self._kernel.WaitForSingleObject(self._process, max(0, int(timeout * 1000)))
         return self.poll()
 
+    def wait_output(self, timeout: float = 2) -> bool:
+        return self._finished.wait(timeout)
+
     def close(self, graceful_seconds: float = 2, *, exit_input: bytes = b"exit\r") -> None:
         with self._lock:
             if self._closed:

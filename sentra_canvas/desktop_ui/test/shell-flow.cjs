@@ -1,0 +1,35 @@
+const {app,BrowserWindow}=require('electron'),fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
+const file=path.resolve(process.argv[2]),out=path.resolve(process.argv[3]);fs.mkdirSync(out,{recursive:true});app.setPath('userData',path.join(out,'profile-'+process.pid));
+app.whenReady().then(async()=>{const win=new BrowserWindow({show:false,width:1300,height:900,webPreferences:{sandbox:true,nodeIntegration:false,contextIsolation:true}});
+ const run=code=>win.webContents.executeJavaScript(code,true),pause=ms=>new Promise(r=>setTimeout(r,ms));
+ const wait=async code=>{const deadline=Date.now()+15000;while(Date.now()<deadline){if(await run('Boolean('+code+')'))return;await pause(80)}throw Error('Condition timed out: '+code)};
+ try{
+  await win.loadFile(file);await wait("document.querySelector('.shell-composer textarea')&&!document.querySelector('.shell-composer textarea').disabled");
+  await run(`(()=>{const t=document.querySelector('.shell-composer textarea');window.originalComposer=t;window.originalConversation=document.querySelector('.shell-chat');window.originalTranscript=document.querySelector('.shell-transcript');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t,'Rascunho preservado, ainda não enviado');t.dispatchEvent(new Event('input',{bubbles:true}));const spacer=document.createElement('div');spacer.style.height='2000px';spacer.dataset.qa='scroll';window.originalTranscript.appendChild(spacer);window.originalTranscript.scrollTop=220;window.originalTranscript.dispatchEvent(new Event('scroll',{bubbles:true}));document.querySelector('.shell-rail nav[aria-label="Vistas do Space"] button')?.focus()})()`);
+  await wait("JSON.parse(sessionStorage.getItem('sentra_shell_draft:project-preview:conversation-dot-preview')||'null')?.content==='Rascunho preservado, ainda não enviado'");
+  await run("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Canvas').click()");
+  await wait("document.querySelector('.sentra-workspace .sw-pane')");
+  assert.equal(await run("window.originalComposer===document.querySelector('.shell-composer textarea')&&window.originalConversation===document.querySelector('.shell-chat')&&window.originalTranscript===document.querySelector('.shell-transcript')"),true);
+  assert.equal(await run("document.querySelector('.shell-composer textarea').value"),'Rascunho preservado, ainda não enviado');
+  await run("document.querySelector('.shell-dots-nav .shell-dot-nav-open').click()");
+  await wait("!document.querySelector('.shell-chat-host').hidden");
+  assert.equal(await run("window.originalTranscript===document.querySelector('.shell-transcript')&&document.querySelector('.shell-composer textarea').value==='Rascunho preservado, ainda não enviado'"),true);
+  assert.equal(await run("window.originalTranscript.scrollTop"),220);
+  await wait("document.querySelector('button[aria-label=\"Ferramentas deste trabalho\"]')");
+  await run(`document.querySelector('button[aria-label="Ferramentas deste trabalho"]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,button:0,pointerType:'mouse',ctrlKey:false}))`);
+  await wait("[...document.querySelectorAll('[role=menuitem]')].find(b=>b.textContent==='Navegador deste Dot')");
+  await run("[...document.querySelectorAll('[role=menuitem]')].find(b=>b.textContent==='Navegador deste Dot').click()");
+  await wait("document.querySelector('.shell-conversation-resource .sw-browser')");
+  assert.equal(await run("getComputedStyle(document.querySelector('.shell-canvas-host')).display"),'none');
+  assert.equal(await run("window.originalComposer===document.querySelector('.shell-composer textarea')&&window.originalTranscript.scrollTop===220&&window.originalComposer.value==='Rascunho preservado, ainda não enviado'"),true);
+  assert.equal(await run("[...document.querySelectorAll('.sw-browser button')].find(b=>b.textContent==='Abrir nova sessão').disabled"),true);
+  await run('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');await pause(200);
+  assert.equal(await run("document.querySelector('.shell-conversation-resource').getBoundingClientRect().height>100"),true);
+  fs.writeFileSync(path.join(out,'context-browser.png'),(await win.webContents.capturePage()).toPNG());
+  await run("document.querySelector('button[aria-label=\"Fechar ferramenta e manter a conversa\"]').click()");
+  await wait("!document.querySelector('.shell-conversation-resource')");
+  assert.equal(await run("document.querySelectorAll('.shell-wordmark img').length"),0);
+  fs.writeFileSync(path.join(out,'result.json'),JSON.stringify({passed:true,composer_identity_preserved:true,transcript_identity_preserved:true,scroll_position_preserved:220,draft_preserved:true,context_browser_preserves_composer:true,missing_browser_grant_blocks_session:true,no_message_sent:true,legacy_logo_removed:true},null,2));
+  win.destroy();app.exit(0);
+ }catch(error){fs.writeFileSync(path.join(out,'error.txt'),String(error.stack||error));win.destroy();app.exit(1)}
+});

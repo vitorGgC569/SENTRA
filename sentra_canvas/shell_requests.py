@@ -7,6 +7,7 @@ uncertain and does not invent a phase.
 """
 from contextlib import closing
 import hashlib
+import hmac
 import json
 import re
 import threading
@@ -65,6 +66,11 @@ class ShellHostRequests:
         self.control, self.owner = control, owner
         self.lock = threading.RLock()
         with closing(control.store.connect("shell")) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("CREATE TABLE IF NOT EXISTS canvas_shell_request_schema(id INTEGER PRIMARY KEY CHECK(id=1),version INTEGER NOT NULL)")
+            version = db.execute("SELECT version FROM canvas_shell_request_schema WHERE id=1").fetchone()
+            if version is not None and version[0] > 2:
+                raise RuntimeError("host request schema is newer than this application")
             db.execute("CREATE TABLE IF NOT EXISTS canvas_shell_host_requests("
                 "owner TEXT NOT NULL,project_id TEXT NOT NULL,request_key TEXT NOT NULL,"
                 "fingerprint TEXT NOT NULL,state TEXT NOT NULL,protected_result TEXT,"
@@ -75,6 +81,9 @@ class ShellHostRequests:
                 db.execute("ALTER TABLE canvas_shell_host_requests ADD COLUMN phase TEXT")
             if "operation_id" not in cols:
                 db.execute("ALTER TABLE canvas_shell_host_requests ADD COLUMN operation_id TEXT")
+            if "protected_intent" not in cols:
+                db.execute("ALTER TABLE canvas_shell_host_requests ADD COLUMN protected_intent TEXT")
+            db.execute("INSERT INTO canvas_shell_request_schema VALUES(1,2) ON CONFLICT(id) DO UPDATE SET version=2")
 
     def operation_id(self, project_id, request_key, purpose):
         value = json.dumps([self.owner, project_id, request_key, purpose], separators=(",", ":"))
@@ -151,9 +160,10 @@ class ShellHostRequests:
                     return self._open_receipt(row)
                 now = time.time()
                 db.execute("INSERT INTO canvas_shell_host_requests("
-                    "owner,project_id,request_key,fingerprint,state,protected_result,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?)",
-                    (self.owner, project_id, request_key, fingerprint, "claimed", None, now, now))
+                    "owner,project_id,request_key,fingerprint,state,protected_result,created_at,updated_at,protected_intent) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (self.owner, project_id, request_key, fingerprint, "claimed", None, now, now,
+                     _encode({"action": action, "payload": payload})))
         # No database transaction or global lock spans provider network I/O.
         try:
             result = callback()
@@ -184,3 +194,49 @@ class ShellHostRequests:
                         (receipt["status"], _encode(receipt), time.time(),
                          self.owner, project_id, request_key))
             raise
+
+    def inspect(self, project_id, action, payload, request_key):
+        """Read an exact existing intent. Never invoke its callback or reserve it.
+
+        Absence does not authorize replay: a client may have lost the transport
+        before the host persisted a claim. Callers must validate resource scope
+        before exposing a protected result.
+        """
+        if not isinstance(request_key, str) or not 8 <= len(request_key) <= 200:
+            raise ValueError("original durable request_key required")
+        fingerprint = hashlib.sha256(json.dumps([action, payload], sort_keys=True,
+            separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+        with closing(self.control.store.connect("shell")) as db:
+            row = self._row(db, project_id, request_key)
+        if row is None:
+            return {"found": False, "resolved": False, "request_key": request_key,
+                    "automatic_retry": False, "may_resend": False}
+        if not hmac.compare_digest(row["fingerprint"], fingerprint):
+            raise ShellConflict("request_key belongs to another intent")
+        result = _decode(row["protected_result"]) if row["protected_result"] else self._open_receipt(row)
+        operation_id = row["operation_id"] or result.get("operation_id") or (result.get("diagnosis") or {}).get("operation_id")
+        operation_state = result.get("operation_state", result.get("state"))
+        operation_open = operation_state is not None and str(operation_state).upper() not in {
+            "SUCCEEDED", "FAILED", "CANCELLED"}
+        return {"found": True, "resolved": bool(row["protected_result"]) and not operation_open
+                and not result.get("effect_uncertain") and row["state"] not in
+                {"claimed", "effect_possible", "uncertain", "unconfirmed"},
+                "request_key": request_key, "journal_state": row["state"],
+                "result": result, "operation_id": operation_id,
+                "automatic_retry": False, "may_resend": False}
+
+    def intent(self, project_id, request_key, fingerprint):
+        """Host-only recovery of a protected original; never expose it to clients."""
+        if not isinstance(request_key, str) or not 8 <= len(request_key) <= 200:
+            raise ValueError("original durable request_key required")
+        if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+            raise ValueError("original request fingerprint required")
+        with closing(self.control.store.connect("shell")) as db:
+            row = self._row(db, project_id, request_key)
+        if row is None:
+            return None
+        if not hmac.compare_digest(row["fingerprint"], fingerprint):
+            raise ShellConflict("request_key belongs to another intent")
+        if not row["protected_intent"]:
+            raise ValueError("legacy request requires its exact original fields")
+        return _decode(row["protected_intent"])

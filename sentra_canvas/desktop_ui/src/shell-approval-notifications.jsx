@@ -3,7 +3,7 @@ import { BellRing, ShieldAlert } from 'lucide-react';
 import { canvasMaintenanceActive } from './shell-maintenance.js';
 
 // Owner-visible persisted requests. Neither polling nor mounting grants access.
-export function ShellApprovalNotifications({ bridge, projectId, onOpenConversation, shellError = '' }) {
+export function ShellApprovalNotifications({ bridge, projectId, onOpenConversation, shellError = '', inlineConversationId }) {
   const [items, setItems] = useState([]), [busy, setBusy] = useState(''), [error, setError] = useState('');
   const pendingKeys = useRef(new Map());
   const alive = useRef(true);
@@ -54,10 +54,11 @@ export function ShellApprovalNotifications({ bridge, projectId, onOpenConversati
     } catch (e) { setError(e.message); if (!e.uncertain) pendingKeys.current.delete(token); }
     finally { if (alive.current) setBusy(''); }
   }
-  if (!items.length && !error) return null;
+  const visibleItems=items.filter(item=>item.conversation_id!==inlineConversationId);
+  if (!visibleItems.length && !error) return null;
   return <aside className="shell-approval-popup" aria-label="Aprovações pendentes do SENTRA" role="region" aria-live="polite">
-    <header><BellRing size={17}/><strong>Solicitações de aprovação</strong><span>{items.length || ''}</span></header>
-    {items.map(item => <article key={item.approval_id}>
+    <header><BellRing size={17}/><strong>Solicitações de aprovação</strong><span>{visibleItems.length || ''}</span></header>
+    {visibleItems.map(item => <article key={item.approval_id}>
       <div className="shell-approval-popup-title"><ShieldAlert size={16}/><strong>{item.summary?.name || item.summary?.kind || 'Ação do Dot'}</strong></div>
       <p>O Dot solicitou <code>{item.capability}</code>. Acesso completo ao computador não autoriza automaticamente coordenação.</p>
       <small>Solicitação: {item.approval_id}</small>

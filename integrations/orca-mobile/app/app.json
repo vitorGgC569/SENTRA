@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "SENTRA",
+    "slug": "sentra-mobile",
+    "version": "0.1.0",
+    "scheme": "sentra",
+    "orientation": "default",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "bundleIdentifier": "app.sentra.mobile",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSLocalNetworkUsageDescription": "Conectar \u00e0s m\u00e1quinas SENTRA que voc\u00ea parear na rede local.",
+        "NSCameraUsageDescription": "Escanear o QR tempor\u00e1rio de pareamento do SENTRA.",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    },
+    "android": {
+      "package": "app.sentra.mobile",
+      "permissions": [
+        "CAMERA",
+        "INTERNET"
+      ]
+    },
+    "plugins": [
+      "expo-secure-store",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Escanear o QR tempor\u00e1rio de pareamento SENTRA.",
+          "recordAudioAndroid": false
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ],
+    "platforms": [
+      "ios",
+      "android"
+    ]
+  }
+}

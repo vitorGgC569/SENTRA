@@ -308,6 +308,10 @@ def deliveries(canvas, control, owner, project_id, space_id, member_dot_ids):
             "receipt": receipt,
             "mode": "dispatch",
         })
+    from sentra_runtime.task_lifecycle import project_task
+    for row in result:
+        row['lifecycle']=project_task(row,verified_evidence=(row.get('task_completed') is True
+            and row.get('model_result_verified') is True))
     return result
 
 

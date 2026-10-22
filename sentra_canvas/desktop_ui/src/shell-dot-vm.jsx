@@ -17,7 +17,7 @@ function scancodes(code, down) {
   return list;
 }
 
-export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote, onStatus }) {
+export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote, onStatus, simple = false }) {
   const [status, setStatus] = useState(null), [frame, setFrame] = useState(null), [intervalMs, setIntervalMs] = useState(null);
   const [images, setImages] = useState([]);
   const [settings, setSettings] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [pending, setPending] = useState(null);
@@ -195,7 +195,7 @@ export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote
     {error && <FailureNotice message={error} onConsult={() => { void refresh().then(() => setError('')).catch(e => setError(e.message)); }} onDismiss={() => setError('')} />}
     {vm?.provisioning_status === 'uncertain_requires_reconciliation' && <p role="alert" className="shell-error">O provisionamento anterior está INCERTO. A reserva permanece retida. Verifique a VM física e reconcilie a operação original antes de tentar criar novamente.</p>}
     {pending && <p className="shell-notice">A operação anterior não foi confirmada. <button disabled={busy} onClick={() => void inspectPending()}>Verificar estado sem reenviar</button></p>}
-    {existingVm && !vm?.conversation_authorized && <p className="shell-notice" role="status">Esta VM já pertence ao SENTRA, mas a conversa atual ainda não possui WorkItem de VM. Abra Configuração e vincule esta conversa para obter o acesso autorizado. A operação não recria a VM nem repete a instalação.</p>}
+    {existingVm && !vm?.conversation_authorized && <p className="shell-notice" role="status">{simple?'O computador já está disponível. Abra Configuração para permitir o acesso desta conversa.':'Esta VM já pertence ao SENTRA, mas a conversa atual ainda não possui WorkItem de VM. Abra Configuração e vincule esta conversa para obter o acesso autorizado. A operação não recria a VM nem repete a instalação.'}</p>}
     {settings && <form className="dot-vm-form" onSubmit={e => { e.preventDefault(); void create(); }}>
       <label>Sistema<select value={form.os_family} disabled={busy || Boolean(pending) || vm?.vm_state === 'running'} onChange={e => setForm(value => ({ ...value, os_family:e.target.value, cpus:Math.max(value.cpus, e.target.value === 'windows' ? 2 : 1), memory_mb:Math.max(value.memory_mb, e.target.value === 'windows' ? 4096 : 1024), disk_gb:Math.max(value.disk_gb, e.target.value === 'windows' ? 64 : 16) }))}><option value="linux">Linux com interface gráfica</option><option value="windows">Windows</option></select></label>
       <label>Processadores<input type="number" min={form.os_family === 'windows' ? 2 : 1} max={status?.host?.max_cpus || 1} value={form.cpus} disabled={busy || Boolean(pending)} onChange={e => setForm(value => ({ ...value, cpus:Number(e.target.value) }))} /></label>

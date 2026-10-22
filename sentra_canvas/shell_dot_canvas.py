@@ -14,6 +14,7 @@ from .shell_requests import ShellHostRequests
 from .store import Denied
 
 DOT_CANVAS_ACTIONS = frozenset({
+    "dot_canvas_access",
     "dot_canvas_get", "dot_canvas_move", "dot_canvas_link", "dot_canvas_unlink",
     "dot_canvas_terminal", "dot_canvas_terminal_close", "dot_canvas_handoff",
     "dot_canvas_task_submit", "dot_canvas_task_cancel",
@@ -446,6 +447,10 @@ def dot_graph(canvas, project_id, dot_id, space_id=None):
               "cancel_requested": t.get("cancel_requested", False)}
              for t in canvas.store.list_resources("tasks", project_id)
              if t["agent_id"] in agents]
+    from .task_presentation import conversation_tasks
+    from sentra_runtime.task_lifecycle import project_task
+    for task in tasks:task['lifecycle']=project_task(task)
+    tasks+=conversation_tasks(control,owner,project_id,dots[0]['space_id'],dots)
     return {"project_id": project_id, "canvas_root_dot_id": root, "dots": dots,
             "nodes": nodes, "agents": resources, "terminals": terminals,
             "tool_sessions": sessions, "tools": tool_catalog(canvas.project_dir),
@@ -457,6 +462,10 @@ def dot_graph(canvas, project_id, dot_id, space_id=None):
 
 
 def dispatch_dot_canvas(canvas, project_id, action, params, request_key):
+    if action == 'dot_canvas_access':
+        graph = dot_graph(canvas, project_id, params.get('dot_id'), params.get('space_id'))
+        from .workspace_access import configure_access
+        return configure_access(canvas, project_id, params, request_key, graph)
     fields = {"dot_id", "space_id"}
     fields |= {
         "dot_canvas_move": {"id", "x", "y"},

@@ -3,6 +3,7 @@ import { Handle, Position, NodeResizer } from '@xyflow/react';
 import { TerminalSquare, Bot, Users, StickyNote, Maximize2, Send, Copy, Pencil, PanelRight, X } from 'lucide-react';
 import { IconButton, ActionMenu } from './primitives';
 import { useDesktop } from './context';
+import { terminalHistoryLabel } from './terminal-history-state';
 
 const icons = { terminal: TerminalSquare, agent: Bot, team: Users, note: StickyNote };
 export function PtySlot({ ws, resource, priority = 1 }) {
@@ -57,7 +58,7 @@ export const SessionNode = memo(function SessionNode({ id, data, selected }) {
         {terminal.shell === 'sentra-cli' ? <span className="cli-controls">
           <button className="nodrag" title="Consultar modelo no CLI" onClick={() => pool.command(ws, terminal.id, '/model')}>/model</button>
           <button className="nodrag" title="Consultar esforço no CLI" onClick={() => pool.command(ws, terminal.id, '/effort')}>/effort</button>
-        </span> : <span>{actual?.persisted === false ? 'Histórico não salvo' : terminal.shell}</span>}
+        </span> : <span>{terminalHistoryLabel(actual,terminal.shell)}</span>}
         <span>{terminal.pid ? 'PID ' + terminal.pid : ''}</span>
       </footer>
     </> : owner ? <div className="reference-node"><strong>{owner.name}</strong>

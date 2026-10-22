@@ -28,6 +28,7 @@ from .store import Denied, MODEL_RE
 # pair. These are finite wait ceilings, never automatic retries or new sends.
 SHELL_PROVIDER_TIMEOUT_SECONDS = 1800
 SHELL_EXECUTION_TIMEOUT_SECONDS = 3600
+SHELL_TOOL_ROUND_LIMIT = 32
 # Attested finals may still be adopted for turns that are in flight or already
 # succeeded. UNCERTAIN is not in this set: a later read must not publish it.
 _OBSERVABLE_FINAL_STATES = frozenset({
@@ -258,6 +259,11 @@ class CanvasShellRuntime:
         capabilities = {cap for kind, cap in COORDINATOR_CAPABILITIES.items() if kind not in {"pause", "resume", "cancel"}} if dot_manages_canvas(dot) else set()
         if self._coordinator_child(project_id, owner):
             capabilities.add("model:invoke")
+        from .full_access import source
+        if source(self.control, owner, conversation['conversation_id']):
+            capabilities.add('model:invoke')
+            if self._turn_uses_web(project_id, conversation):
+                capabilities.add('web:send')
         if refs:
             capabilities.update({"web:send", "web:attach"})
         if conversation.get('native_generation') == 'image':
@@ -309,6 +315,10 @@ class CanvasShellRuntime:
         return receipt
 
     def _model_grant(self, message, dot):
+        from .shell_access import AccessStore
+        from .full_access import source
+        if AccessStore(self.control, self.owner).raw_profile(message['conversation_id']).get('full_source') and not source(self.control, self.owner, message['conversation_id']):
+            raise Denied('full-access delegation was revoked')
         item = self.control.work_item_info(message["work_item_id"], self.owner)
         if message.get("coordinator_child") or "model:invoke" in item.get("required_capabilities", []):
             return self.control.authorization.require(self.owner, principal_type="agent",
@@ -398,6 +408,10 @@ class CanvasShellRuntime:
             consulted = self.reconcile_message(project_id, owner, message)
             consulted["resent"] = False
             return consulted
+        from .full_access import inherit, prepare_turn
+        with self.canvas._lock:
+            inherit(self, message, dot)
+            prepare_turn(self, message, dot)
         message["live_dot_session"] = self._dot_session_view(
             project_id, owner, dot, message["conversation_id"])
         if not MODEL_RE.fullmatch(agent["model"]):
@@ -458,13 +472,18 @@ class CanvasShellRuntime:
                         (oid, self.owner)).fetchone()
                 if row is not None:
                     self._stop_unverified_web_turn(oid, _decode(row["protected_input"])["message"])
-            except Exception:
+            except Exception as worker_error:
                 # Preserve authoritative failure/uncertainty; never submit again.
                 try:
                     op = self.control.durable.operation_status(oid, self.owner)
                     if op["state"] in {"STARTING", "RUNNING", "WAITING_EXTERNAL"}:
+                        import traceback
+                        frames=[{'module':Path(frame.filename).name,'line':frame.lineno,'function':frame.name}
+                            for frame in traceback.extract_tb(worker_error.__traceback__)[-8:]]
                         self.control.durable.update_operation(oid, self.owner, state="UNCERTAIN",
-                            event_type="SHELL_WORKER_FAILED", progress={"automatic_retry": False})
+                            event_type="SHELL_WORKER_FAILED", progress={"automatic_retry": False},
+                            error={'code':'shell_worker_failed','message':'Falha interna no turno; consulte o diagnóstico, sem reenviar.',
+                                'exception_type':type(worker_error).__name__,'frames':frames})
                 except Exception:
                     pass
             finally:
@@ -512,6 +531,8 @@ class CanvasShellRuntime:
         current_operation = self.control.durable.operation_status(oid, self.owner)
         if current_operation["state"] != "QUEUED":
             return
+        from .full_access import prepare_turn
+        prepare_turn(self, message, dot)
         run = self.control.durable.run_status(message["run_id"], self.owner, include_details=False)
         if run["state"] in {"PAUSED", "CREATED", "BLOCKED", "RECOVERING"}:
             if not self._stop.wait(.5):
@@ -525,6 +546,8 @@ class CanvasShellRuntime:
             with closing(self.control.store.connect("shell")) as db, db:
                 db.execute("UPDATE canvas_shell_queue SET state='cancelled' WHERE operation_id=?", (oid,))
             return
+        from .full_access import prepare_resources
+        prepare_resources(self, message, dot)
         uses_web = self._turn_uses_web(message["project_id"], message)
         if uses_web and dot.get("model") == UNVERIFIED_TURN_MODEL:
             self._stop_unverified_web_turn(oid, message)
@@ -579,6 +602,7 @@ class CanvasShellRuntime:
         self.conversations.set_model_preferences(sid, dot["model"], dot.get("effort"), workspace=workspace["path"])
         command = self.canvas._cli_command(["--prompt-stdin", "--workspace", workspace["path"],
             "--model", dot["model"], "--no-auto-start", "--timeout", str(SHELL_PROVIDER_TIMEOUT_SECONDS),
+            "--max-tool-rounds", str(SHELL_TOOL_ROUND_LIMIT),
             "--state-dir", str(self.canvas.state_dir.parent), "--resume", sid])
         from sentra_runtime.provider_authority import ENVIRONMENT_KEY, prepare_provider_binding
         environment = {k: v for k, v in os.environ.items()
@@ -601,7 +625,9 @@ class CanvasShellRuntime:
                     actor_token = self.actors.register(message, dot, deadline=deadline)
                     environment.update(SENTRA_CANVAS_AGENT_TOKEN=actor_token,
                         SENTRA_CANVAS_AGENT_PORT=str(self.canvas._agent_port), SENTRA_CANVAS_AGENT_SCOPE="shell")
-                process = TaskProcess(command, cwd=str(self.canvas.project_dir), env=environment,
+                from .task_workspace import for_work_item
+                assigned=for_work_item(self.control,self.owner,message['work_item_id'],dot['agent_id'])
+                process = TaskProcess(command, cwd=assigned['path'] if assigned else workspace['path'], env=environment,
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 self._processes[oid] = process
@@ -791,8 +817,11 @@ class CanvasShellRuntime:
         from .shell_generated_media import ShellGeneratedMedia
         original = _decode(row['protected_input']) if row else None
         assets = ShellGeneratedMedia(self).publish(message, original['dot'], assistant_id) if original else []
+        from .task_verification import confirm_for_publish
+        verification=confirm_for_publish(self,message)
         self.control.durable.update_operation(oid, self.owner, state="SUCCEEDED",
             event_type="SHELL_MODEL_VERIFIED_FINAL", result={**evidence, "receipt_id": receipt, 'generated_assets': assets,
+                **({'task_verification':verification} if verification else {}),
                 "content_sha256": hashlib.sha256(content.encode()).hexdigest()})
         if original and isinstance(content, str) and content.strip():
             self._remember_turn(message, original["dot"]["dot_id"], content)

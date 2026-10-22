@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "observed_utc": "2026-10-21T18:36:52.213638+00:00",
+  "build_id": "sentra-orca-experimental-6d3814ddf526",
+  "python_regressions_passed": 49,
+  "python_presentation_repeat_passed": 7,
+  "repeat_included_in_regression_count": true,
+  "node_desktop_passed": 151,
+  "node_transport_passed": 15,
+  "typecheck_transport": true,
+  "typecheck_mobile_app": true,
+  "renderer_fixture": {
+    "passed": true,
+    "inline_permission_lost_ack_recovered": true,
+    "contextual_resource_hint": true,
+    "guided_draft_not_sent": true,
+    "initial": {
+      "mode": "simple",
+      "members": false,
+      "explorer": false,
+      "tabs": "none",
+      "files": 0,
+      "effects": 0,
+      "styled": "flex",
+      "mascot": 512
+    },
+    "recipe_calls": 1,
+    "layout_modes_preserved": true,
+    "host_profile_restores_after_reload": true,
+    "keyboard_end_moves_tab": true,
+    "narrow": {
+      "width": 660,
+      "scroll": 660
+    },
+    "light": {
+      "background": "rgb(255, 255, 255)",
+      "color": "rgb(10, 10, 10)"
+    }
+  },
+  "shell_fixture": {
+    "passed": true,
+    "composer_identity_preserved": true,
+    "transcript_identity_preserved": true,
+    "scroll_position_preserved": 220,
+    "draft_preserved": true,
+    "context_browser_preserves_composer": true,
+    "missing_browser_grant_blocks_session": true,
+    "no_message_sent": true,
+    "legacy_logo_removed": true
+  },
+  "permanent_dot_collaboration": {
+    "status": "passed",
+    "model": "sentra/codex/current",
+    "real_model": true,
+    "automatic_retry": false,
+    "permanent_conversations": [
+      "conversation-55a1610e1754f3ffaa8b60fad509fba6",
+      "conversation-90699280064847c0388f8d48c23b63df"
+    ],
+    "child_messages": 1,
+    "child_inherits_coordination": false,
+    "completed_provider_receipts": 5,
+    "child_answer_sha256": "cc26e7207930e7da41adbfcbda7d459a6c2b54745c890f6ba0210caa4b6339af",
+    "parent_answer_sha256": "cc26e7207930e7da41adbfcbda7d459a6c2b54745c890f6ba0210caa4b6339af",
+    "own_processes_closed": true
+  },
+  "legacy_cli_collaboration_status": "passed",
+  "live_evaluation_readiness": {
+    "styled": true,
+    "title": "SENTRA Â· Trabalho conjunto",
+    "workspaceMode": "simple",
+    "workspaceReady": true,
+    "welcomeVisible": true,
+    "explorerVisible": false,
+    "membersVisible": false,
+    "mascotCount": 3,
+    "mascotsReady": true,
+    "loadError": false,
+    "hasLocalCredential": true,
+    "projectOptions": 0,
+    "mobileButton": true
+  },
+  "live_evaluation_title": "SENTRA · Trabalho conjunto",
+  "first_evaluation_display_required_reopen": true,
+  "source_count": 161,
+  "output_count": 261,
+  "hash_mismatches": 0,
+  "evidence": {
+    ".tmp/orca-flow-final.xml": "8e82c2a88d91b65edc91982861cec2bef663d3f0033537efc84e01fdf7dbe05c",
+    ".tmp/orca-flow-presentation-final.xml": "701d9c260b9e6e7eeeeb4887a54aff5b0f0e66c498535d9fbf22ace3ffae8e74",
+    ".tmp/orca-flow-shell-collaboration-v6/report.json": "4fd2e0acf0d34fc3471b919d20ff5cb5700f90323f7a7c988aabb1573676990a",
+    ".tmp/orca-flow-cli-coordination/report.json": "c2b9dcaa66a11d38303f2094639677f60325dc370f76dea37467ddcb8275acd7",
+    ".tmp/workspace-flow-ux-proof-final/result.json": "302190ef537739e6058a9a54665471b95ea6e476108ea98a1eabb12dfb0b581c",
+    ".tmp/shell-flow-proof-final/result.json": "aa4120f5b20a28b02ae3185fa1e16ed015167396808fce7c619536eeb8c8df54",
+    "sentra_canvas/desktop_ui/.tmp/flow-node-final.log": "cc18265b95db27743f99431c38bcc633fc39daf5ff6473c1343e528b6252cd76",
+    ".tmp/flow-mobile-transport-final.log": "a28b6d7c231c91c0f5d78fdf8a629f7a7cd6ab20600be415c6da9094393896d1"
+  },
+  "installed_ui_replaced": false,
+  "new_self_grant_authority": false,
+  "physical_mobile_homologation": false,
+  "native_signed_installers": false,
+  "full_orca_migration_complete": false
+}
