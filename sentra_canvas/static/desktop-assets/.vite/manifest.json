@@ -161,8 +161,8 @@
       "desktop.css"
     ],
     "assets": [
-      "desktop2.png",
       "desktop3.png",
+      "desktop2.png",
       "desktop4.png",
       "desktop.png"
     ]
@@ -950,11 +950,11 @@
     "isDynamicEntry": true
   },
   "src/assets/opendots/blue.png": {
-    "file": "desktop2.png",
+    "file": "desktop3.png",
     "src": "src/assets/opendots/blue.png"
   },
   "src/assets/opendots/mint.png": {
-    "file": "desktop3.png",
+    "file": "desktop2.png",
     "src": "src/assets/opendots/mint.png"
   },
   "src/assets/opendots/orange.png": {
