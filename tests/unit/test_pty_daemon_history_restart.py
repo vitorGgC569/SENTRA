@@ -14,6 +14,30 @@ import pytest
 from sentra_canvas.service import Canvas
 from sentra_canvas.pty_client import PtyDaemonClient
 from sentra_canvas.__main__ import CanvasServer
+from sentra_canvas.owned_process import TaskProcess
+
+
+def owned_runtime(process,pid):
+    """Prove the actual daemon belongs to this fixture's exact OS Job.
+
+    A venv redirector's Popen PID is not its interpreter PID. Neither a PID
+    alone nor a descriptor from a previous daemon establishes this ownership.
+    """
+    import ctypes
+    from ctypes import wintypes
+    kernel=process.job.kernel
+    kernel.OpenProcess.argtypes=[wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
+    kernel.OpenProcess.restype=wintypes.HANDLE
+    kernel.IsProcessInJob.argtypes=[wintypes.HANDLE,wintypes.HANDLE,ctypes.POINTER(wintypes.BOOL)]
+    kernel.IsProcessInJob.restype=wintypes.BOOL
+    handle=kernel.OpenProcess(0x1000,False,pid)
+    if not handle:raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        member=wintypes.BOOL()
+        if not kernel.IsProcessInJob(handle,process.job.handle,ctypes.byref(member)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return bool(member.value)
+    finally:kernel.CloseHandle(handle)
 
 
 def http_checkpoint(app,ws,terminal):
@@ -36,21 +60,33 @@ def http_checkpoint(app,ws,terminal):
 
 
 def start_daemon(state):
-    process=subprocess.Popen([sys.executable,'-m','sentra_canvas.pty_daemon',str(state)],
+    process=TaskProcess([sys.executable,'-m','sentra_canvas.pty_daemon',str(state)],
         stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,
         creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
     try:
         deadline=time.monotonic()+8
         while time.monotonic()<deadline:
-            if process.poll() is not None:pytest.fail('owned daemon exited: '+process.stderr.read().decode(errors='replace'))
+            if process.poll() is not None:pytest.fail('owned daemon exited: '+process.process.stderr.read().decode(errors='replace'))
             try:
                 client=PtyDaemonClient(state)
-                if client.call('health')['pid']==process.pid:return process,client
+                if owned_runtime(process,client.call('health')['pid']):return process,client
             except (OSError,ValueError,KeyError,RuntimeError):pass
             time.sleep(.05)
         pytest.fail('owned daemon startup timed out')
     except BaseException:
-        process.terminate();process.wait(5);raise
+        process.terminate_tree();process.process.wait(5);raise
+
+
+@pytest.mark.skipif(os.name!='nt',reason='real Windows Job membership')
+def test_daemon_fixture_rejects_a_foreign_live_pid():
+    process=TaskProcess([sys.executable,'-c','import time;time.sleep(15)'],
+        stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+        creationflags=subprocess.CREATE_NO_WINDOW)
+    try:
+        assert owned_runtime(process,process.pid) is True
+        assert owned_runtime(process,os.getpid()) is False
+    finally:
+        process.terminate_tree();process.process.wait(5)
 
 
 @pytest.mark.skipif(os.name!='nt',reason='real ConPTY and DPAPI restart')
@@ -82,7 +118,7 @@ def test_daemon_death_restores_only_protected_history_and_never_respawns(tmp_pat
         assert http_checkpoint(app,ws,terminal['id'])['available']
         app.shutdown();app=None
         # This daemon and all its ConPTY jobs were created by this test alone.
-        process.terminate();process.wait(5)
+        process.terminate_tree();process.process.wait(5)
         process,client=start_daemon(daemon_state)
         assert client.runtime_id!=old_runtime
         rows=client.call('inventory',{'include_history':True})
@@ -106,6 +142,6 @@ def test_daemon_death_restores_only_protected_history_and_never_respawns(tmp_pat
     finally:
         if app:app.shutdown()
         if process.poll() is None:
-            try:client.call('drain');client.call('stop_when_idle');process.wait(5)
+            try:client.call('drain');client.call('stop_when_idle');process.process.wait(5)
             finally:
-                if process.poll() is None:process.terminate();process.wait(5)
+                if process.poll() is None:process.terminate_tree();process.process.wait(5)

@@ -85,6 +85,32 @@ def test_recursive_unit_lane_has_a_bounded_budget_without_expanding_other_lanes(
     assert "--ignore" not in tests["run"] and "-k " not in tests["run"]
 
 
+def test_unit_lane_prepares_real_patched_terminal_before_runtime_tests():
+    data = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    steps = data["jobs"]["python"]["steps"]
+    setup_index = next(i for i, step in enumerate(steps)
+                       if step.get("name") == "Setup Node 24 for real terminal checkpoints")
+    build_index = next(i for i, step in enumerate(steps)
+                       if step.get("name") == "Build and verify pinned terminal snapshot engine")
+    test_index = next(i for i, step in enumerate(steps)
+                      if step.get("name") == "Deterministic test suite")
+    type_index = next(i for i, step in enumerate(steps)
+                      if step.get("name") == "Enforce type-debt baseline")
+    setup, build = steps[setup_index], steps[build_index]
+    assert setup_index < build_index < type_index < test_index
+    assert setup["uses"] == "actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020"
+    assert setup["with"]["node-version"] == "24"
+    assert setup["with"]["cache-dependency-path"] == "integrations/orca-terminal/package-lock.json"
+    assert setup["if"] == build["if"] == "matrix.target == 'tests/unit'"
+    assert "npm ci --prefix integrations/orca-terminal" in build["run"]
+    assert "npm --prefix integrations/orca-terminal run build" in build["run"]
+    assert "validate_terminal_engine" in build["run"]
+    assert build["run"].count("if ($LASTEXITCODE -ne 0)") == 3
+    assert build.get("continue-on-error") is not True
+    assert build["id"] == "terminal-fixtures"
+    assert "steps.terminal-fixtures.outcome == 'success'" in steps[test_index]["if"]
+
+
 def test_type_failure_never_hides_runtime_tests_or_becomes_optional():
     data = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
     steps = data['jobs']['python']['steps']

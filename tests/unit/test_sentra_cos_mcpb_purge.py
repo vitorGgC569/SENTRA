@@ -1,5 +1,6 @@
 """Physical extracted MCPB removal only when globally unowned; audit archive retained."""
 import zipfile
+import shutil
 import pytest
 
 from test_sentra_cos_mcpb_lifecycle import bundle
@@ -51,7 +52,10 @@ def test_purge_denies_shared_staged_workspace_and_unreconciled_docker(tmp_path):
     cat = cp.bundle_catalog
     other = tmp_path / "other"
     other.mkdir()
-    source = bundle(other, "1.0.0")
+    # Sharing is defined by the archive bytes, including ZIP entry timestamps.
+    source = other / 'same-package.mcpb'
+    shutil.copy2(ws / '1_0_0.mcpb', source)
+    assert source.read_bytes() == (cat.target / '.archives' / (sha + '.mcpb')).read_bytes()
     sha2 = cat.stage("second-owner", other, source)["package_sha256"]
     assert sha == sha2
     cat.uninstall("owner", ws, sha, cp.governance, approved=True)

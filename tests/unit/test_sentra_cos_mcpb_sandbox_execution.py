@@ -16,6 +16,8 @@ import pytest
 from sentra_mcp.services.context import ContextBusService
 from sentra_mcp.services.control_plane import ControlPlaneService
 from sentra_mcp.services.durable import DurableRunService
+from sentra_mcp.services import mcpb_sandbox
+from mcpb_docker_fixture import probe, trusted_docker
 
 SERVER = r'''
 import json, socket, sys
@@ -78,6 +80,12 @@ def _grant(control, capability):
 
 def test_mcpb_isolation_requires_host_image_and_discovery_and_tool_grants(tmp_path,monkeypatch):
     cp,ws,params=_fixture(tmp_path)
+    monkeypatch.delenv('SENTRA_MCPB_SANDBOX_IMAGE_ID', raising=False)
+    # This case proves grants independently of the machine's Docker installation.
+    monkeypatch.setattr(mcpb_sandbox, '_trusted_docker', lambda: 'fixture-docker-must-never-execute')
+    async def no_process(*args, **kwargs):
+        pytest.fail('A denied grant launched a process')
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', no_process)
     _grant(cp,"mcp:launch")
     with pytest.raises(PermissionError,match="pinned local Docker image"):
         asyncio.run(cp.bundle_call_tool(**params))
@@ -93,17 +101,30 @@ def test_mcpb_isolation_requires_host_image_and_discovery_and_tool_grants(tmp_pa
     cp.durable.close()
 
 
+def test_mcpb_missing_trusted_docker_fails_before_operation_even_with_all_grants(tmp_path, monkeypatch):
+    cp,ws,params=_fixture(tmp_path)
+    try:
+        monkeypatch.setenv('SENTRA_MCPB_SANDBOX_IMAGE_ID', 'sha256:'+'0'*64)
+        monkeypatch.setattr(mcpb_sandbox, '_ALLOWED_DOCKER', tmp_path/'missing-docker.exe')
+        for capability in ('mcp:launch', 'mcp:list', 'mcp:echo'):
+            _grant(cp, capability)
+        with pytest.raises(PermissionError, match='trusted Docker CLI binary unavailable'):
+            asyncio.run(cp.bundle_call_tool(**params))
+        with pytest.raises(FileNotFoundError):
+            cp.durable.operation_status(params['operation_id'], 'owner')
+    finally:
+        cp.durable.close()
+
+
 def test_mcpb_real_docker_durable_stdio_and_no_replay(tmp_path,monkeypatch):
-    docker=shutil.which("docker")
+    docker=trusted_docker()
     if not docker:
         pytest.skip("Docker CLI not installed")
     # Only a locally installed image may be used, by immutable image ID.
-    inspection=subprocess.run([docker,"image","inspect","oma-sandbox:local","--format","{{.Id}}"],
-        capture_output=True,text=True,timeout=5)
+    inspection=probe(docker, 'image')
     if inspection.returncode or not inspection.stdout.strip().startswith("sha256:"):
         pytest.skip("Local isolation image not present")
-    info=subprocess.run([docker,"info","--format","{{.OSType}}"],
-        capture_output=True,text=True,timeout=5)
+    info=probe(docker, 'daemon')
     if info.returncode or info.stdout.strip()!="linux":
         pytest.skip("Linux container Docker daemon unavailable")
     monkeypatch.setenv("SENTRA_MCPB_SANDBOX_IMAGE_ID",inspection.stdout.strip())

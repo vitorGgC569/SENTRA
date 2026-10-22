@@ -95,6 +95,23 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Upstream fixture bootstrap failed" }
           python -B scripts/ci/verify_release_contract.py --verify-upstream
           if ($LASTEXITCODE -ne 0) { throw "Pinned Web Models fixture invalid" }
+      - name: Setup Node 24 for real terminal checkpoints
+        if: matrix.target == 'tests/unit'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: integrations/orca-terminal/package-lock.json
+      - name: Build and verify pinned terminal snapshot engine
+        id: terminal-fixtures
+        if: matrix.target == 'tests/unit'
+        run: |
+          npm ci --prefix integrations/orca-terminal
+          if ($LASTEXITCODE -ne 0) { throw "Pinned terminal dependencies unavailable" }
+          npm --prefix integrations/orca-terminal run build
+          if ($LASTEXITCODE -ne 0) { throw "Patched terminal engine build failed" }
+          python -B -c "from pathlib import Path; from scripts.commander.stage_terminal import validate_terminal_engine; validate_terminal_engine(Path('integrations/orca-terminal'))"
+          if ($LASTEXITCODE -ne 0) { throw "Terminal dependency seal invalid" }
       - name: Enforce type-debt baseline
         if: matrix.target == 'tests/unit'
         run: |
@@ -103,7 +120,7 @@ jobs:
       - name: Deterministic test suite
         # A type failure still fails this job, but must not hide runtime test
         # failures. Never run against missing/unverified dependency fixtures.
-        if: ${{ !cancelled() && steps.python-fixtures.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.python-fixtures.outcome == 'success' && (matrix.target != 'tests/unit' || steps.terminal-fixtures.outcome == 'success') }}
         run: |
           python -B -m pytest -q ${{ matrix.target }} --junitxml=test-results.xml -o faulthandler_timeout=120
           if ($LASTEXITCODE -ne 0) { throw "Required pytest suite failed" }

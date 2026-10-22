@@ -7,22 +7,20 @@ import pytest
 
 from test_sentra_cos_mcpb_offline import fixture
 from sentra_mcp.services.mcpb_offline import verify_offline_dependencies_in_docker
-from sentra_mcp.services.mcpb_sandbox import _trusted_docker
+from mcpb_docker_fixture import probe, trusted_docker
 
 
 def test_docker_pinned_offline_wheel_real_effect_and_no_replay(tmp_path, monkeypatch):
-    cp, ws, sha = fixture(tmp_path)
-    docker = shutil.which("docker")
+    docker = trusted_docker()
     if not docker:
         pytest.skip("Docker CLI not available")
-    info = subprocess.run([docker, "image", "inspect", "oma-sandbox:local",
-                           "--format", "{{.Id}}"], capture_output=True, text=True, timeout=5)
+    info = probe(docker, 'image')
     if info.returncode or not info.stdout.strip().startswith("sha256:"):
         pytest.skip("Pinned local sandbox image absent")
-    cli = subprocess.run([docker, "info", "--format", "{{.OSType}}"],
-                         capture_output=True, text=True, timeout=5)
+    cli = probe(docker, 'daemon')
     if cli.returncode or cli.stdout.strip() != "linux":
         pytest.skip("Linux Docker daemon not available")
+    cp, ws, sha = fixture(tmp_path)
     monkeypatch.setenv("SENTRA_MCPB_SANDBOX_IMAGE_ID", info.stdout.strip())
     cp.durable.create_run("owner", run_id="run-wheel", workspace=str(ws))
     cp.ensure_agent("run-wheel", "owner", agent_id="worker", role="worker")

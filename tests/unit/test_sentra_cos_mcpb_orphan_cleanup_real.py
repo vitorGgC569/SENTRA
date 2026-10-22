@@ -10,10 +10,11 @@ from sentra_mcp.services.context import ContextBusService
 from sentra_mcp.services.control_plane import ControlPlaneService
 from sentra_mcp.services.durable import DurableRunService
 from sentra_mcp.services.mcpb_orphans import MCPBDockerOwnership, DockerOwnershipDenied
+from mcpb_docker_fixture import probe, trusted_docker
 
 
 def _docker(*args, check=True):
-    proc = subprocess.run([shutil.which("docker"), *args], capture_output=True,
+    proc = subprocess.run([trusted_docker(), *args], capture_output=True,
                           text=True, timeout=12)
     if check and proc.returncode:
         raise RuntimeError("Docker test-owned operation failed")
@@ -21,11 +22,11 @@ def _docker(*args, check=True):
 
 
 def test_real_stopped_orphan_exact_id_cleanup_with_central_grant(tmp_path, monkeypatch):
-    if not shutil.which("docker"):
+    docker = trusted_docker()
+    if not docker:
         pytest.skip("Docker CLI unavailable")
-    os_name = _docker("info", "--format", "{{.OSType}}", check=False)
-    image = _docker("image", "inspect", "oma-sandbox:local",
-                    "--format", "{{.Id}}", check=False)
+    os_name = probe(docker, 'daemon')
+    image = probe(docker, 'image')
     if (os_name.returncode or os_name.stdout.strip() != "linux"
             or image.returncode or not image.stdout.strip().startswith("sha256:")):
         pytest.skip("Pinned Docker Linux sandbox image unavailable")

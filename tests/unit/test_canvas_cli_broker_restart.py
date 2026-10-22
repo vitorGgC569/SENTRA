@@ -22,7 +22,7 @@ effect.write_text(effect.read_text()+'once' if effect.exists() else 'once')
 bridge=CanvasBridge(SimpleNamespace(workspace=str(root),model=None))
 try:
     first=bridge.working_context()
-    (root/'first.json').write_text(json.dumps({'pid':os.getpid(),'port':bridge.port,'context':isinstance(first,dict)}))
+    (root/'first.json').write_text(json.dumps({'pid':os.getpid(),'parent_pid':os.getppid(),'port':bridge.port,'context':isinstance(first,dict)}))
     for _ in range(400):
         if gate.exists():break
         time.sleep(.05)
@@ -33,7 +33,7 @@ try:
     denied=False
     try:urllib.request.urlopen(request,timeout=3)
     except urllib.error.HTTPError as error:denied=error.code==401
-    (root/'second.json').write_text(json.dumps({'pid':os.getpid(),'port':bridge.port,
+    (root/'second.json').write_text(json.dumps({'pid':os.getpid(),'parent_pid':os.getppid(),'port':bridge.port,
         'context':isinstance(second,dict),'owner_route_denied':denied}))
     for _ in range(400):time.sleep(.05)
 except BaseException as error:
@@ -64,7 +64,10 @@ def test_running_cli_rebinds_broker_without_duplicate_process_or_owner_authority
         terminal=first._start(ws,'CLI','sentra-cli',[sys.executable,'-u',str(driver),str(source),str(work)])
         client=first._pty_client;pid=first._sessions[terminal['id']].pty.pid
         before=wait_json(work/'first.json',work/'error.json')
-        assert before['context'] and before['port']==server.server_port and before['pid']==pid
+        assert before['context'] and before['port']==server.server_port
+        # Windows venv python.exe redirects to an interpreter child. Keep the
+        # owned ConPTY root and actual driver identity distinct and stable.
+        assert before['pid']>0 and (before['pid']==pid or before['parent_pid']==pid)
         token=next(token for token,binding in first._agent_tokens.items() if binding==(ws,terminal['id']))
         old_runtime=server.runtime_id
         server.shutdown();server.server_close();thread.join(5);server=None
@@ -76,7 +79,8 @@ def test_running_cli_rebinds_broker_without_duplicate_process_or_owner_authority
         assert server.runtime_id!=old_runtime
         (work/'continue').write_text('continue')
         after=wait_json(work/'second.json',work/'error.json')
-        assert after['context'] and after['port']==server.server_port and after['pid']==pid
+        assert after['context'] and after['port']==server.server_port
+        assert after['pid']==before['pid'] and after['parent_pid']==before['parent_pid']
         assert after['owner_route_denied']
         assert (work/'once.txt').read_text()=='once'
         assert len(client.call('inventory'))==1
