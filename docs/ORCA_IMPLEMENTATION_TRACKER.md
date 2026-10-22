@@ -1,5 +1,18 @@
 # Execução integral ORCA → SENTRA
 
+### 22/10 — setup de prévia e retomada da implementação
+
+- [x] Quatorze executáveis, Web Models e setup Windows compilados localmente.
+- [x] Verificação básica do payload, GUI congelada e Canvas/arquivos visuais empacotados.
+- [x] Tag `installer-preview-20261022-a8a525d` publicada; artefato e hashes na Área de Trabalho.
+- [x] README em inglês com fotos, perfis e créditos dos contribuidores.
+- [x] Revisão de worktrees reconhece apenas bloqueios atômicos válidos e conserva evidência.
+
+O setup é uma prévia sem assinatura. Instalação limpa, login, upgrade/rollback e
+aparelhos físicos continuam pendentes. A correção dos bloqueios é posterior à
+tag, sem alterar o artefato já fixado. [Build e escopo](WINDOWS_PREVIEW_2026-10-22.md).
+As pendências macro abaixo permanecem abertas.
+
 ### 22/10 — checkpoint de worktrees e documentação pública
 
 - [x] Vínculo no registro central de execução por conversa/Dot/Run, sem nova autoridade.

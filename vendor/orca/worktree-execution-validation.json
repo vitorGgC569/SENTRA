@@ -15,6 +15,8 @@
   "earlier_attempts": {"v1": "Conversation versus CLI routing ambiguity", "v2_v3": "Git inventory actions field missing", "v4": "Delegation confirmation timeout", "v5": "Files and integrity proofs produced; eight-round ceiling prevented final completion"},
   "publication_performed_by_worktree_review": false,
   "installed_application_replaced": false,
-  "new_installer_claimed": false,
+  "windows_preview": {"tag": "installer-preview-20261022-a8a525d", "report": "windows-preview-20261022.json", "scope": "basic packaged smoke; not full installed-product qualification", "post_tag_lock_metadata_fix_included": false},
+  "lock_metadata_regression": {"passed": 26, "skipped": 1, "report": ".tmp/worktree-lock-review.xml", "skip_reason": "host cannot create test symlink; not runtime-qualified", "overlap_with_earlier_suites": true},
+  "post_tag_regression_union": {"unique_passed": 39, "skipped": 1, "reports": [".tmp/worktree-lock-review.xml", ".tmp/worktree-lock-integration.xml"], "overlap_with_earlier_checkpoint": true},
   "remaining": ["complete real-model three-worker acceptance", "versioned file editor", "untracked and binary review", "structured cleanup and Git publication", "guest worktree mapping", "installed product qualification"]
 }

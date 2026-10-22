@@ -42,6 +42,12 @@ não comprova correção semântica nem autoriza integração/publicação.
 
 Limites iniciais: oito trabalhos, patch de 8 MiB, snapshot de 32 MiB e 4.096 entradas.
 Arquivos novos não rastreados, binários, links e submódulos exigem revisão explícita.
+Metadados internos de bloqueio atômico têm uma exceção estreita: somente arquivos
+regulares de um byte `0`, com nome SHA-256 correspondente ao caminho exato de um
+arquivo rastreado e sem links/junctions no caminho. A revisão registra caminho,
+alvo e hash desses metadados e os confere novamente ao final. Não apaga bloqueios,
+não ignora a pasta inteira e recusa arquivos vizinhos desconhecidos ou o namespace
+de bloqueios incluído no índice/snapshot. Mudança durante o ensaio invalida o resultado.
 O ensaio rejeita caminhos reservados e saídas do diretório temporário. Git é chamado
 sem as variáveis `GIT_*` herdadas e com hooks desabilitados nesses caminhos internos.
 
@@ -102,3 +108,15 @@ estado atual e, depois, novo build local, validação básica e publicação de 
 
 Nada foi ativado na instalação principal. Os bundles são gerados nas entradas
 isoladas de validação e de prévia.
+
+## Continuidade após a tag de prévia
+
+O setup Windows foi compilado e passou na validação básica, com tag publicada;
+o [relatório da prévia](WINDOWS_PREVIEW_2026-10-22.md) fixa o commit e os limites.
+A correção de metadados de bloqueio descrita acima é posterior à tag e não está
+embutida nesse executável. Regressão específica: 26 testes aprovados e um pulado;
+suíte ampliada de worktrees/arquivos: 32 aprovados. A união dos dois relatórios
+contém 39 casos aprovados únicos e um pulado por indisponibilidade de criação de
+symlink no Windows deste host. O caso pulado
+não conta como homologação de symlinks. A suíte usa Git/worktrees e escrita
+atômica reais, sem novas chamadas a modelos nem reenvio dos turnos incertos.
