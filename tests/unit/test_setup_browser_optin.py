@@ -40,7 +40,7 @@ def test_existing_install_reuses_verification_without_stopping_sessions(tmp_path
     wizard._install.assert_called_once_with(require_openai=False, verify_only=True)
 
 
-def test_fresh_installer_first_install_then_opens_consent_wizard(
+def test_fresh_installer_first_install_then_opens_embedded_consent_wizard(
     tmp_path, monkeypatch
 ):
     install_dir = tmp_path / "sentra"
@@ -68,10 +68,11 @@ def test_fresh_installer_first_install_then_opens_consent_wizard(
     wizard.root.after.side_effect = lambda _delay, callback: callback()
     wizard._installed = False
     wizard._schedule_connection_check = Mock()
+    # Enrollment now stays in Setup. This unit fixture must never enter the
+    # live browser enrollment loop through its synchronous Thread replacement.
+    wizard._start_browser_setup = Mock()
 
     provided = []
-    approvals = []
-    monkeypatch.setattr(installer, "authorize_installer_enrollment", lambda paths: approvals.append(paths))
     monkeypatch.setattr(
         installer, "install",
         lambda **kwargs: provided.append(kwargs) or {
@@ -96,13 +97,9 @@ def test_fresh_installer_first_install_then_opens_consent_wizard(
     )
     wizard._install(require_openai=False)
     assert provided and provided[0]["launch"] is False
-    assert len(approvals) == 1
-    assert len(commands) == 1
-    assert commands[0][-2:] == [
-        "--open-url", "sentra://openai-enroll"
-    ]
+    wizard._start_browser_setup.assert_called_once_with()
+    assert commands == []
     assert wizard._installed is True
-    assert "Edge" in wizard.connect_hint.configure.call_args.kwargs["text"]
-    wizard._schedule_connection_check.assert_called_once()
+    wizard._schedule_connection_check.assert_not_called()
     wizard.root.destroy.assert_not_called()
     assert 100 not in [call.args[0] for call in wizard.progress_value.set.call_args_list]

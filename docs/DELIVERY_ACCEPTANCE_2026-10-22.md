@@ -15,6 +15,29 @@ are identified individually rather than changing an existing release asset.
 There is no Apple Developer account or published iPhone installation channel.
 No unsigned IPA or simulator bundle is offered as a phone installation.
 
+## Installed Windows delivery
+
+The final local Canvas build from source `743414d9d281cc0c4b141bff220d99e48dae0e0e`
+was applied to the physical installed Commander directory, with a separate
+backup and 208 verified file updates. Its Canvas SHA-256 is
+`f2cf5fdd7322f50bbe9e5c980ab2d79fa1b7dbd883c4e31be26976c49356e18b`.
+The authenticated owner broker was restarted only after verifying that central
+physical effects and leases were idle. Existing uncertain deliveries were not
+retried. Accounts, Web Models and MCP services were preserved.
+
+Nine local frozen gateway/runtime tests passed. The installed owner API also
+passed listener shutdown, repeated shutdown, restart and identity preservation.
+LAN is enabled again; repeated activation reuses the existing listener. The
+pairing offer has a 120-second lifetime and matches the current host identity.
+No physical phone was used in these checks.
+
+The 1,800-second corrected installed-daemon run is recorded separately at
+`.tmp/sentra-delivery/installed-soak-final/report.json`. A `running` report is
+not a passing qualification. The final result must be checked before declaring
+the prolonged test complete. This is a local patch, not a new full Setup/tag.
+
+[Android pairing and network troubleshooting](MOBILE_LAN_QUICKSTART.md).
+
 ## Completed source and local protocol checks
 
 - The installed gateway can be explicitly enabled in Devices, using a bundled
@@ -108,8 +131,15 @@ the previous objective reference. The gate still refuses missing evidence.
 New binding/tampering tests and the existing gate/threshold/review regressions
 pass; failure isolation plus candidate verification passed 12 cases.
 
-The broad CI remains red: existing type-debt exceeds its unchanged 47-error
-ratchet, and full-suite integration/legacy fixture failures remain under review.
+On source `743414d`, CI integration and failure suites both passed, together
+with Canvas Edge E2E, Web Models/Electron and the source contract. The broad CI
+remains red: 297 type errors exceed the unchanged 47-error ratchet. This blocks
+full distribution qualification; it is not waived. The unit lane now runs its
+runtime tests even when type checking fails and preserves JUnit results, while
+both gates remain mandatory. An obsolete installer unit fixture was corrected
+to mock the current embedded enrollment entry point instead of entering a live
+browser enrollment loop. The corrected fixture passed four tests. The interrupted
+earlier local full-suite run does not count as passing qualification.
 The global runner pipx dependency conflict was fixed by isolating locked Python
 dependencies in a virtual environment. No checks were removed or made optional.
 Canvas Edge E2E, Web Models/Electron, source contract, Android build and Pages

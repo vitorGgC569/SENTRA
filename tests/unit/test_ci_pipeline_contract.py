@@ -73,6 +73,23 @@ def test_ci_lanes_gate_windows_canvas_and_web_models():
     assert "success" in jobs["ci-required"]["steps"][0]["run"]
 
 
+def test_type_failure_never_hides_runtime_tests_or_becomes_optional():
+    data = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
+    steps = data['jobs']['python']['steps']
+    fixture = next(s for s in steps if s.get('id') == 'python-fixtures')
+    assert 'verify_release_contract.py --verify-upstream' in fixture['run']
+    types = next(s for s in steps if s.get('name') == 'Enforce type-debt baseline')
+    tests = next(s for s in steps if s.get('name') == 'Deterministic test suite')
+    assert types.get('continue-on-error') is not True
+    assert tests.get('continue-on-error') is not True
+    assert "steps.python-fixtures.outcome == 'success'" in tests['if']
+    assert '!cancelled()' in tests['if']
+    assert '--junitxml=test-results.xml' in tests['run']
+    assert 'throw "Required pytest suite failed"' in tests['run']
+    assert any(s.get('uses', '').startswith('actions/upload-artifact@') and
+               s['with']['path'] == 'test-results.xml' for s in steps)
+
+
 def test_release_publishing_uses_separate_minimal_token():
     data = yaml.safe_load((ROOT / ".github/workflows/release-commander.yml").read_text(encoding="utf-8"))
     assert data["permissions"] == {"contents": "read"}

@@ -87,6 +87,7 @@ jobs:
           python -B -c "from scripts.commander.pdfium_pin import require_pdfium; require_pdfium()"
 
       - name: Restore pinned upstream test fixture
+        id: python-fixtures
         run: |
           ./scripts/integrations/Bootstrap-CodexChatGPTWeb.ps1
           if ($LASTEXITCODE -ne 0) { throw "Upstream fixture bootstrap failed" }
@@ -98,9 +99,20 @@ jobs:
           python -B scripts/check_mypy_baseline.py
           if ($LASTEXITCODE -ne 0) { throw "Type-debt baseline regressed" }
       - name: Deterministic test suite
+        # A type failure still fails this job, but must not hide runtime test
+        # failures. Never run against missing/unverified dependency fixtures.
+        if: ${{ !cancelled() && steps.python-fixtures.outcome == 'success' }}
         run: |
-          python -B -m pytest -q ${{ matrix.target }}
+          python -B -m pytest -q ${{ matrix.target }} --junitxml=test-results.xml -o faulthandler_timeout=120
           if ($LASTEXITCODE -ne 0) { throw "Required pytest suite failed" }
+      - name: Preserve deterministic test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-results-${{ strategy.job-index }}
+          path: test-results.xml
+          if-no-files-found: ignore
+          retention-days: 7
 
   canvas:
     name: Canvas Windows/Edge E2E
