@@ -30,7 +30,10 @@ async function replaceManifest(content) {
     await unlink(staging).catch(error => { if (error?.code !== 'ENOENT') throw error; });
   }
 }
-await writeFile(resolve(project, '../static/desktop.html'), await readFile(resolve(assets, 'index.html')));
+// Seal the same LF bytes Git preserves, even when Vite inherited CRLF HTML.
+const entry = (await readFile(resolve(assets, 'index.html'), 'utf8')).replace(/\r\n?/g, '\n');
+await writeFile(resolve(assets, 'index.html'), entry);
+await writeFile(resolve(project, '../static/desktop.html'), entry);
 const pkg = JSON.parse(await readFile(resolve(project, 'package.json'), 'utf8'));
 const lock = JSON.parse(await readFile(resolve(project, 'package-lock.json'), 'utf8'));
 let licenses = 'SENTRA Desktop third-party runtime notices\n\n';

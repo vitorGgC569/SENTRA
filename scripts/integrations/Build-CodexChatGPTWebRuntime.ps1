@@ -142,7 +142,9 @@ $ExpectedHash = (Get-FileHash -LiteralPath $Patch -Algorithm SHA256).Hash
 $ApprovedPatch = Join-Path $StateRoot "approved.patch"
 $LegacyAppliedPatch = Join-Path $StateRoot "applied.patch"
 if (-not (Test-Path -LiteralPath $Source)) {
-    & git -C $Checkout worktree add --detach $Source ([string]$Manifest.commit)
+    # The exact-file-set and whitespace gates below compare LF bytes. Create
+    # this owned worktree with LF too, independent of the user's Git defaults.
+    & git -c core.autocrlf=false -C $Checkout worktree add --detach $Source ([string]$Manifest.commit)
     if ($LASTEXITCODE -ne 0) { throw "Could not create pinned integration worktree" }
 }
 if ((& git -C $Source rev-parse HEAD).Trim() -ne [string]$Manifest.commit) { throw "Integration worktree commit mismatch" }

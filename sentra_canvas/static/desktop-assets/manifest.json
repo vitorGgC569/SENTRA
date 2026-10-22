@@ -151,12 +151,12 @@
     "chunk-u8YMmbU0.js": "84ae4ba6bf879a4608696af785e17cedd8b581bdbea0c90f856585d451b34190",
     "chunk-xvONpD0Z.js": "bd8b29f1100faa6548bf4e1fd9270feccb476af74862a06cb0ed267c067683b9",
     "desktop.css": "504a0fd4699784426398aa2ba4cec43d064ccea645b376b5e9ba6c874cf9f5eb",
-    "desktop.js": "fdd91014f45ee46cf8dc531baaf09a04e5b6ff06ead9c242e3925c39a2f027bf",
+    "desktop.js": "294933fb4550a199d6c72b365ea43cb7be544ccdc62c944cdc954be57367a55b",
     "desktop.png": "9fb3e53fc90b4fe881e1c1f8121dd32fbe9882dbc989156c40b0a8fadc348441",
-    "desktop2.png": "aebbd4a27e346b7a2f41976bcdae4b144e42219cce77182053cfe4140bb6486f",
-    "desktop3.png": "bf8ef19c7b7d753c11ba05e411f15a0733bcb810541bc88fb34c38427c6a6040",
+    "desktop2.png": "bf8ef19c7b7d753c11ba05e411f15a0733bcb810541bc88fb34c38427c6a6040",
+    "desktop3.png": "aebbd4a27e346b7a2f41976bcdae4b144e42219cce77182053cfe4140bb6486f",
     "desktop4.png": "bf9a2f9f6859c2931b9a4062117deb7d06fba77b190b5ad52a90587f368b34a7",
-    "index.html": "97ffba8b5f9d5c053d1670d37dcc8891dc9477f06332fd35f841e6d0e671a2a6"
+    "index.html": "ba56c8358b83f445f59cac529ed360a62caea4c5d91ca2ca17af73dcb4dfb7ce"
   },
   "source_inputs": {
     "index.html": "2eed6c905c6435a23af82d6d2d59f689ed370e87f6aa9c9e0e246178410d996a",
@@ -164,7 +164,7 @@
     "package.json": "da6d20df94186ef6d521aeddd4817a7480ddb1b23792eed28c60938542c570a8",
     "public/bootstrap.js": "b4b79dd3babf2bf9df1370cb97f6f4dc003921939d1a8fa8cfd3518262ddcc24",
     "scripts/build.mjs": "3b3c75460cf1da82c0b67d50d0e5708d0a3c9f7d88e7b256002c5f949da40d02",
-    "scripts/materialize.mjs": "f501c6d1f63b65d108f70376d67fb90ba6d3818cb715969128673a9f0e9053dc",
+    "scripts/materialize.mjs": "6ea619b4a3ace0cbd064a838477383cebe85f675a3dc597bbd6a7de64b942221",
     "scripts/source-inputs.mjs": "c016d8f35e0f8def39c4365d5f75073f8f43d5e675c5c305d49d307a8e541d6b",
     "src/api.js": "07a7c710cabb79b6e7ef7df809adbaf11bd93ebd46f3444051f9f906f9b17420",
     "src/assets/dot-motion/blue.svg": "3e3b0ce3cd1c7719840a05de2b1edd88dc128bf2279350076260507ef022659f",
