@@ -32,12 +32,20 @@ def test_mobile_runtime_refuses_unknown_files_and_missing_notices(tmp_path):
 
 
 def test_terminal_runtime_seals_read_only_engine_sources_and_dependencies(tmp_path):
-    names=['src/worker.mjs','dist/engine.cjs','dist/manifest.json','vendor/orca/LICENSE',
-           'node_modules/@xterm/headless/lib-headless/xterm-headless.js']
+    names=['src/worker.mjs','dist/engine.cjs','vendor/orca/LICENSE',
+           'node_modules/@xterm/headless/lib-headless/xterm-headless.js',
+           'node_modules/@xterm/addon-serialize/lib/addon-serialize.js',
+           'node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js']
     for name in names:
         p=tmp_path/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_text(name,encoding='utf-8')
-    (tmp_path/'runtime.json').write_text(json.dumps({'schema':1,'files':inventory(tmp_path)}),encoding='utf-8')
-    assert len(validate_terminal_runtime(tmp_path)['files'])==5
+    hashes=inventory(tmp_path)
+    payload={'sources':{name:hashes[name] for name in names if name.startswith(('src/','vendor/'))},
+             'runtime_dependencies':{name:hashes[name] for name in names if name.startswith('node_modules/')},
+             'output':hashes['dist/engine.cjs']}
+    build_id=hashlib.sha256(json.dumps(payload,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+    (tmp_path/'dist/manifest.json').write_text(json.dumps({'version':2,'build_id':build_id,**payload}),encoding='utf-8')
+    (tmp_path/'runtime.json').write_text(json.dumps({'schema':2,'engine_build_id':build_id,'files':inventory(tmp_path)}),encoding='utf-8')
+    assert len(validate_terminal_runtime(tmp_path)['files'])==7
     (tmp_path/names[-1]).write_text('tampered',encoding='utf-8')
     with pytest.raises(ValueError,match='integrity'):validate_terminal_runtime(tmp_path)
 

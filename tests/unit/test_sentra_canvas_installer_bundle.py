@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -32,6 +35,40 @@ def bundle(tmp_path):
     return tmp_path
 
 
+def _windows_git_object_refusal(stderr):
+    errors = [line for line in stderr.splitlines()
+              if line.startswith(("error:", "fatal:"))]
+    if len(errors) != 4:
+        return False
+    object_error = re.fullmatch(
+        r"error: unable to write file \.git/objects/[0-9a-f]{2}/[0-9a-f]{38}: Permission denied",
+        errors[0],
+    )
+    source_error = re.fullmatch(r"error: (.+): failed to insert into database", errors[1])
+    return bool(object_error and source_error
+                and errors[2] == f"error: unable to index file '{source_error[1]}'"
+                and errors[3] == "fatal: adding files failed")
+
+
+def _checkout_fixture_git(source, *args):
+    command = ["git", "-c", "core.autocrlf=true", "-c", "core.longpaths=true", *args]
+    for attempt in range(5):
+        completed = subprocess.run(command, cwd=source, capture_output=True, timeout=30)
+        if completed.returncode == 0:
+            return
+        stderr = completed.stderr.decode("utf8", errors="replace")
+        # The checkout fixture tests byte-preserving CRLF handling. Windows
+        # scanners can deny publication of a freshly compressed Git object.
+        # Retry only that exact, idempotent staging operation in this repository.
+        if (os.name != "nt" or args != ("add", "--force", ".") or attempt == 4
+                or not _windows_git_object_refusal(stderr)):
+            raise AssertionError(
+                f"Disposable checkout Git {args!r} failed ({completed.returncode}):\n"
+                + completed.stdout.decode("utf8", errors="replace") + stderr
+            )
+        time.sleep(0.05 * (attempt + 1))
+
+
 def test_react_canvas_bundle_current_source_has_verified_hashes():
     ui=Path(__file__).resolve().parents[2]/"sentra_canvas"/"static"
     manifest=validate_desktop_bundle(ui)
@@ -49,13 +86,72 @@ def test_sealed_canvas_survives_a_windows_git_checkout(tmp_path):
         shutil.copytree(root / "sentra_canvas" / name, source / "sentra_canvas" / name,
                         ignore=shutil.ignore_patterns("node_modules", ".tmp", "__pycache__"))
     def git(*args):
-        subprocess.run(["git", "-c", "core.autocrlf=true", "-c", "core.longpaths=true", *args],
-                       cwd=source, check=True, capture_output=True)
+        _checkout_fixture_git(source, *args)
     git("init", "--quiet")
     git("add", "--force", ".")
     checkout = tmp_path / "checkout"
     git("checkout-index", "--all", "--prefix=" + checkout.as_posix() + "/")
     assert validate_desktop_bundle(checkout / "sentra_canvas/static")["files"]
+
+
+_GIT_OBJECT_REFUSAL = (
+    "error: unable to write file .git/objects/a4/" + "7b" * 19 + ": Permission denied\n"
+    "error: sentra_canvas/static/chunk.js: failed to insert into database\n"
+    "error: unable to index file 'sentra_canvas/static/chunk.js'\n"
+    "fatal: adding files failed\n"
+)
+
+
+def test_checkout_fixture_retries_only_same_git_index(monkeypatch, tmp_path):
+    import sys
+    module = sys.modules[__name__]
+    calls = []
+    pauses = []
+
+    def run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        failed = len(calls) <= 2
+        return SimpleNamespace(returncode=128 if failed else 0, stdout=b"",
+                               stderr=_GIT_OBJECT_REFUSAL.encode() if failed else b"")
+
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(module, "subprocess", SimpleNamespace(run=run))
+    monkeypatch.setattr(module, "time", SimpleNamespace(sleep=pauses.append))
+    _checkout_fixture_git(tmp_path, "add", "--force", ".")
+    assert len(calls) == 3 and calls[0] == calls[1] == calls[2]
+    assert calls[0][1] == {"cwd": tmp_path, "capture_output": True, "timeout": 30}
+    assert pauses == [0.05, 0.1]
+
+
+@pytest.mark.parametrize("platform,args,stderr,attempts", [
+    ("nt", ("add", "--force", "."), _GIT_OBJECT_REFUSAL, 5),
+    ("posix", ("add", "--force", "."), _GIT_OBJECT_REFUSAL, 1),
+    ("nt", ("init", "--quiet"), _GIT_OBJECT_REFUSAL, 1),
+    ("nt", ("checkout-index", "--all"), _GIT_OBJECT_REFUSAL, 1),
+    ("nt", ("add", "--force", "."), "fatal: index.lock: Permission denied\n", 1),
+    ("nt", ("add", "--force", "."), _GIT_OBJECT_REFUSAL + "error: other refusal\n", 1),
+    ("nt", ("add", "--force", "."), _GIT_OBJECT_REFUSAL.replace("Permission denied", "No space left on device"), 1),
+])
+def test_checkout_fixture_preserves_other_errors_and_bounds_refusal(
+        monkeypatch, tmp_path, platform, args, stderr, attempts):
+    import sys
+    module = sys.modules[__name__]
+    calls = []
+    pauses = []
+
+    def run(command, **kwargs):
+        calls.append((tuple(command), kwargs))
+        return SimpleNamespace(returncode=128, stdout=b"git stdout\n", stderr=stderr.encode())
+
+    monkeypatch.setattr(module, "os", SimpleNamespace(name=platform))
+    monkeypatch.setattr(module, "subprocess", SimpleNamespace(run=run))
+    monkeypatch.setattr(module, "time", SimpleNamespace(sleep=pauses.append))
+    with pytest.raises(AssertionError) as caught:
+        _checkout_fixture_git(tmp_path, *args)
+    assert stderr in str(caught.value) and "git stdout" in str(caught.value)
+    assert len(calls) == attempts
+    assert all(call == calls[0] for call in calls)
+    assert len(pauses) == attempts - 1
 
 
 def test_builder_denies_missing_changed_or_tampered_bundle(tmp_path):

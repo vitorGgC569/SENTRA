@@ -1,9 +1,22 @@
 import {createRequire} from 'node:module';
 import {createInterface} from 'node:readline';
 import {readFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {resolve,relative} from 'node:path';
+const manifest=JSON.parse(readFileSync(new URL('../dist/manifest.json',import.meta.url),'utf8'));
+if(manifest.version!==2||!manifest.runtime_dependencies||Object.keys(manifest.runtime_dependencies).length<1||Object.keys(manifest.runtime_dependencies).length>512)
+ throw Error('Terminal dependency seal missing; rebuild legacy engine');
+const root=fileURLToPath(new URL('../',import.meta.url));let bytes=0;
+for(const [name,digest] of Object.entries({...manifest.runtime_dependencies,'dist/engine.cjs':manifest.output})){
+ if((!name.startsWith('node_modules/@xterm/')&&name!=='dist/engine.cjs')||name.includes('\\')||name.includes(':')||name.split('/').some(p=>p==='..'||p==='.')||!/^[a-f0-9]{64}$/.test(digest))
+  throw Error('Invalid terminal dependency seal');
+ const file=resolve(root,name);if(relative(root,file).startsWith('..'))throw Error('Escaped terminal dependency');
+ const data=readFileSync(file);bytes+=data.length;
+ if(bytes>64*1024*1024||createHash('sha256').update(data).digest('hex')!==digest)throw Error('Terminal dependency seal stale');
+}
 const {SnapshotEngine,ENGINE_VERSION}=createRequire(import.meta.url)('../dist/engine.cjs');
 const engine=new SnapshotEngine();
-const manifest=JSON.parse(readFileSync(new URL('../dist/manifest.json',import.meta.url),'utf8'));
 process.stdout.write(JSON.stringify({ready:true,engine_version:ENGINE_VERSION,pid:process.pid,build_id:manifest.build_id})+'\n');
 try{for await(const line of createInterface({input:process.stdin,crlfDelay:Infinity})){
  let request;try{

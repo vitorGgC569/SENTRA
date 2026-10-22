@@ -52,7 +52,9 @@ jobs:
     name: Python - ${{ matrix.target }}
     needs: contract
     runs-on: windows-latest
-    timeout-minutes: 35
+    # The recursive unit suite exceeded 35 minutes on the Windows runner
+    # (job 120109970919); retain a bounded run without omitting cases.
+    timeout-minutes: ${{ matrix.target == 'tests/unit' && 90 || 35 }}
     strategy:
       fail-fast: false
       matrix:

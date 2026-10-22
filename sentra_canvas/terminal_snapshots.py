@@ -1,6 +1,5 @@
 """Read-only headless mirrors. This child has neither PTY input nor host credentials."""
 import base64
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,14 +34,8 @@ class TerminalSnapshots:
         if not node or not (root/'dist/engine.cjs').is_file():
             self.error='snapshot_runtime_unavailable';return
         try:
-            manifest=json.loads((root/'dist/manifest.json').read_text(encoding='utf-8'))
-            if manifest.get('version')!=1:raise SnapshotUnavailable('snapshot_build_mismatch')
-            for name,digest in manifest['sources'].items():
-                source=(root/name).resolve()
-                if not source.is_relative_to(root.resolve()) or hashlib.sha256(source.read_bytes()).hexdigest()!=digest:
-                    raise SnapshotUnavailable('snapshot_build_stale')
-            if hashlib.sha256((root/'dist/engine.cjs').read_bytes()).hexdigest()!=manifest['output']:
-                raise SnapshotUnavailable('snapshot_build_mismatch')
+            from scripts.commander.stage_terminal import validate_terminal_engine
+            manifest=validate_terminal_engine(root)
             environment={k:v for k,v in os.environ.items() if k.upper() in {'SYSTEMROOT','WINDIR','TEMP','TMP','PATH'}}
             self.process=subprocess.Popen([str(node),str(root/'src/worker.mjs')],cwd=root,
                 stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,

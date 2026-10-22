@@ -73,6 +73,18 @@ def test_ci_lanes_gate_windows_canvas_and_web_models():
     assert "success" in jobs["ci-required"]["steps"][0]["run"]
 
 
+def test_recursive_unit_lane_has_a_bounded_budget_without_expanding_other_lanes():
+    data = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    lane = data["jobs"]["python"]
+    assert lane["timeout-minutes"] == "${{ matrix.target == 'tests/unit' && 90 || 35 }}"
+    assert lane["strategy"]["matrix"]["target"] == [
+        "tests/unit", "tests/failure", "tests/integration",
+    ]
+    tests = next(step for step in lane["steps"] if step.get("name") == "Deterministic test suite")
+    assert "python -B -m pytest -q ${{ matrix.target }}" in tests["run"]
+    assert "--ignore" not in tests["run"] and "-k " not in tests["run"]
+
+
 def test_type_failure_never_hides_runtime_tests_or_becomes_optional():
     data = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
     steps = data['jobs']['python']['steps']
