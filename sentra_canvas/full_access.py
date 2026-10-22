@@ -165,6 +165,8 @@ def prepare_resources(runtime, message, dot):
         if not any(m['agent_id']==dot['agent_id'] and m['kind']=='terminal' for m in host.inventory(message['project_id'])):
             host.configure_terminal(workspace_id=message['project_id'],workspace_root=root,
                 agent_id=dot['agent_id'],canvas=runtime.canvas)
+        if not any(m['agent_id']==dot['agent_id'] and m['kind']=='workspace-files' for m in host.inventory(message['project_id'])):
+            host.configure_workspace_files(workspace_id=message['project_id'],workspace_root=root,agent_id=dot['agent_id'])
         for machine in host.inventory(message['project_id']):
             if machine['agent_id']!=dot['agent_id'] or machine['kind'] not in {
                     'terminal','workspace-files','browser','git-worktrees','acp'}:continue

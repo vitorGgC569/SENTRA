@@ -5,6 +5,7 @@ import {createRoot} from 'react-dom/client';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import {DotWorkspace} from '../src/workspace/DotWorkspace';
 import {canonicalIntent,journalIntent} from '../src/workspace/request-journal';
+import {textDigest} from '../src/workspace/file-editor-state';
 import '../src/desktop.css';
 import '../src/shell-polish.css';
 const scope={project_id:'ux-project',space_id:'ux-space',dot_id:'ux-dot'};
@@ -20,6 +21,7 @@ async function bridge(p){
  if(p.action==='workspace_inventory')return {protocol_version:1,layout_scope:'ux-scope',graph,host:{label:'Fixture host'},resources:{terminals:[]}};
  if(p.action==='project_file_list'){window.fixture.files++;return {items:[{name:'README.md',path:'README.md',directory:false}]};}
  if(p.action==='project_file_preview'){window.fixture.fileScopes.push({dot_id:p.dot_id,conversation_id:p.conversation_id,execution_workspace_id:p.execution_workspace_id});return {content:'# Arquivo do projeto\nSomente fixture.'};}
+ if(p.action==='workspace_file_get'){window.fixture.fileScopes.push({dot_id:p.dot_id,conversation_id:p.conversation_id,execution_workspace_id:p.execution_workspace_id});const content='# Arquivo do projeto\nSomente fixture.';return {content,sha256:await textDigest(content),editable:true,execution_workspace_id:'project',scope:'ux-file-scope',layout_scope:'ux-scope',revision:0,draft:null,editor:null};}
  if(p.action==='dot_worktree_review'){window.fixture.gitReviews++;return {state:'needs_review',reason:'Arquivo novo exige revisão.',publication_performed:false,resources:[]};}
  if(p.action==='access_status')return {mode:'ask',scope:'workspace',approval:'ask',requests:permissionActive?[permission]:[]};
  if(p.action==='coordinator_approval_list')return {items:[]};

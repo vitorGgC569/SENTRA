@@ -1,5 +1,19 @@
 # Execução integral ORCA → SENTRA
 
+### 22/10 — retomada da meta: editor dentro do Canvas
+
+- [x] Editor na aba de arquivo existente, com CodeMirror já usado pelo SENTRA.
+- [x] Rascunho protegido no host, revisão CAS, escopo completo e retenção após remoção/alteração externa.
+- [x] Salvamento pela máquina de arquivos/Grants/WorkItems existentes e captura durável.
+- [x] Seletor de workspace conferido no executor; aba antiga não escreve em outra pasta.
+- [x] Conflito anterior à publicação é falha confirmada; confirmação perdida é consultada sem reenvio.
+- [x] Acesso completo prepara a máquina de arquivos por derivação da seleção vigente do proprietário.
+- [ ] Conferência visual/interativa do editor: revisão automática bloqueou a janela Electron de ensaio.
+
+52 casos Python únicos aprovados, um pulado por limitação de symlink; 160 Node
+aprovados. Nenhum novo bundle/setup gerado nesta retomada. [Escopo e limites](ORCA_FILE_EDITOR_2026-10-22.md).
+Esta entrega em código não encerra os critérios macro de migração.
+
 ### 22/10 — setup de prévia e retomada da implementação
 
 - [x] Quatorze executáveis, Web Models e setup Windows compilados localmente.

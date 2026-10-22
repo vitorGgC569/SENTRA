@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "checkpoint_date": "2026-10-22",
+  "scope": "source implementation of task-bound file editor, protected drafts and centrally admitted CAS saves",
+  "python_unique_passed": 52,
+  "python_skipped": 1,
+  "skip_reason": "host cannot create the test symlink; not runtime-qualified",
+  "python_reports": [".tmp/workspace-editor-python-final.xml", ".tmp/workspace-editor-regression.xml"],
+  "desktop_node_passed": 160,
+  "editor_node_cases_included": 8,
+  "jsx_syntax_check_passed": true,
+  "controlled_real_resources": ["Canvas HTTP", "Git worktree", "DPAPI protected drafts", "central grants and WorkItems", "atomic CAS and durable capture", "lost HTTP confirmation recovery without repeat"],
+  "model_generation_used": false,
+  "renderer_acceptance_passed": false,
+  "renderer_limitation": "Automatic tool approval rejected the disposable Electron fixture launch: blocked by policy",
+  "new_bundles_generated": false,
+  "new_installer_generated": false,
+  "installed_application_replaced": false,
+  "migration_complete": false
+}

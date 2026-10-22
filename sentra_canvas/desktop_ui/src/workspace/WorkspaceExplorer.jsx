@@ -2,6 +2,7 @@
 // source. Reads remain scoped to the existing SENTRA project_file_* bridge.
 import React,{useEffect,useRef,useState} from 'react';
 import {Files,GitBranch,Activity,ChevronRight,Folder,FileText,RefreshCw} from 'lucide-react';
+import {WorkspaceEditor} from './WorkspaceEditor';
 
 export function WorkspaceExplorer({bridge,projectId,onOpen,onReview,onActivity,fileScope={}}){
  const [rows,setRows]=useState([]),[children,setChildren]=useState({}),[expanded,setExpanded]=useState(new Set()),[error,setError]=useState(''),[selected,setSelected]=useState('');
@@ -14,8 +15,6 @@ export function WorkspaceExplorer({bridge,projectId,onOpen,onReview,onActivity,f
  return <aside className="sw-explorer" aria-label="Explorador do Canvas"><nav><button aria-label="Explorador de arquivos" aria-current="page"><Files size={15}/></button><button aria-label="Revisão Git" onClick={onReview}><GitBranch size={15}/></button><button aria-label="Atividade do Dot" onClick={onActivity}><Activity size={15}/></button></nav><header><strong>Arquivos do projeto</strong><button aria-label="Atualizar explorador" onClick={load}><RefreshCw size={12}/></button></header>{error?<p role="alert">{error}</p>:loadedScope!==scopeKey?<p role="status">Consultando arquivos deste trabalho…</p>:<div role="tree" aria-label="Arquivos">{tree(rows)}{!rows.length&&<p>Nenhum arquivo neste projeto.</p>}</div>}<footer>Projeto autorizado pelo SENTRA</footer></aside>;
 }
 
-export function WorkspaceFile({bridge,projectId,path,fileScope={}}){
- const [file,setFile]=useState(null),[error,setError]=useState('');const scopeKey=JSON.stringify(fileScope);
- useEffect(()=>{let alive=true;setFile(null);setError('');bridge({action:'project_file_preview',project_id:projectId,...fileScope,path}).then(v=>{if(alive)setFile(v)}).catch(e=>{if(alive)setError(e.message)});return()=>{alive=false}},[projectId,path,bridge,scopeKey]);
- return <section className="sw-file-preview"><header><FileText size={13}/><span>{path}</span><small>{file?.branch||'Leitura'}</small></header>{error?<p role="alert">{error}</p>:file?<div className="sw-code-lines">{String(file.content??file.text??'').split('\n').map((line,i)=><div key={i}><span aria-hidden>{i+1}</span><code>{line||' '}</code></div>)}</div>:<p role="status">Abrindo arquivo…</p>}</section>;
+export function WorkspaceFile(props){
+ return <WorkspaceEditor key={JSON.stringify([props.projectId,props.path,props.fileScope])} {...props}/>;
 }

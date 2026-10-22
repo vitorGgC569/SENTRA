@@ -198,7 +198,8 @@ class MachineHost:
             return dict(self._inventory[machine_id])
         paths = workspace_paths(root, self.control.durable.root)
         from sentra_canvas.task_workspace import directory
-        resolve_paths=lambda request:workspace_paths(directory(self.control,self.owner,request,root),self.control.durable.root)
+        resolve_paths=lambda request:workspace_paths(directory(self.control,self.owner,request,root,
+            expected_workspace_id=request.arguments.get('execution_workspace_id')),self.control.durable.root)
         bindings = tuple(WorkspaceFilesBinding(capability_id=cap, paths=paths, actions=tuple(actions),resolve_paths=resolve_paths)
                          for cap, actions in FILE_CAPABILITIES.items())
         factory = CentralExecutorFactory(control=self.control, owner=self.owner, agent_id=agent_id)

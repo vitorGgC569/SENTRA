@@ -9,7 +9,7 @@ import hashlib
 from dataclasses import dataclass,replace
 from pathlib import Path
 
-from ._base import GuardedExecutor
+from ._base import GuardedExecutor,EffectRefusedBeforePublication
 from .rpa import AuthorizedPaths, OutputPathLock, atomic_output, digest, effect_checkpoint
 
 FILE_CAPABILITIES = {
@@ -44,7 +44,12 @@ class WorkspaceFilesExecutor(GuardedExecutor):
                          bindings={binding.capability_id: binding for binding in bindings}, policy=policy)
 
     def _request_binding(self,request,binding):
-        return replace(binding,paths=binding.resolve_paths(request),resolve_paths=None) if binding.resolve_paths else binding
+        if 'execution_workspace_id' in request.arguments and not binding.resolve_paths:
+            raise ValueError('execution_workspace_selector_requires_host_resolver')
+        try:return replace(binding,paths=binding.resolve_paths(request),resolve_paths=None) if binding.resolve_paths else binding
+        except PermissionError as error:
+            # Binding validation runs before _execute; no requested effect began.
+            raise ValueError('workspace_file_scope_changed') from error
 
     def resolve_requested_output(self, request):
         """Host-only capture binding; never accept an arbitrary output root."""
@@ -72,6 +77,10 @@ class WorkspaceFilesExecutor(GuardedExecutor):
                   "write": {"action", "path", "content"},
                   "edit": {"action", "path", "content", "expected_sha256"},
                   "delete": {"action", "path", "expected_sha256"}}[action]
+        if 'execution_workspace_id' in args:
+            if action!='edit' or not isinstance(args['execution_workspace_id'],str) or not 1<=len(args['execution_workspace_id'])<=128:
+                raise ValueError('invalid_execution_workspace_selector')
+            fields=fields|{'execution_workspace_id'}
         if set(args) != fields:
             raise ValueError("workspace_file_argument_schema")
         is_write = action in {"write", "edit", "delete", "stat"}
@@ -113,7 +122,7 @@ class WorkspaceFilesExecutor(GuardedExecutor):
                 if action == "edit":
                     target = self._path(binding, args["path"], write=False)
                     if digest(target) != args["expected_sha256"]:
-                        raise ValueError("workspace_file_revision_conflict")
+                        raise EffectRefusedBeforePublication("workspace_file_revision_conflict")
                 effect_checkpoint()
                 temp.write_bytes(encoded)
             def verify(temp):

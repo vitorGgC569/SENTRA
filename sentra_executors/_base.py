@@ -12,6 +12,14 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
 
+class EffectRefusedBeforePublication(RuntimeError):
+    """Trusted backend proof of refusal before publishing any requested output.
+
+    Never construct this from provider text, an error string or a response flag.
+    Uncertain errors after dispatch/publication keep their existing semantics.
+    """
+
+
 @dataclass(frozen=True)
 class LocalOperationResult:
     operation_id: str
@@ -193,6 +201,8 @@ class GuardedExecutor:
             evidence = await asyncio.wait_for(
                 asyncio.to_thread(execute_at_boundary),
                 timeout=float(binding.timeout_seconds))
+        except EffectRefusedBeforePublication as error:
+            return await self._finish(op, "failed", error=str(error))
         except asyncio.TimeoutError:
             # Thread/remote action may still finish. Never imply safe rollback.
             return await self._finish(op, "uncertain", error="timeout_may_have_executed")

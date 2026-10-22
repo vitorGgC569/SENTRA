@@ -434,6 +434,9 @@ class Canvas:
         if action in {'workspace_presentation_get','workspace_presentation_save'}:
             from .workspace_presentation import dispatch_presentation
             return {'ok':True,'value':dispatch_presentation(self,project_id,action,params)}
+        if action in {'workspace_file_get','workspace_file_draft_save'}:
+            from .workspace_file_editor import dispatch_editor
+            return {'ok':True,'value':dispatch_editor(self,project_id,action,params)}
         if action == "workspace_request_status":
             from .workspace_requests import inspect_request
             return {"ok": True, "value": inspect_request(self, project_id, params, exact_dot=bool(input_client_id))}

@@ -65,8 +65,10 @@ def for_work_item(control,owner,work_item_id,agent_id):
     return selected
 
 
-def directory(control,owner,request,fallback):
+def directory(control,owner,request,fallback,*,expected_workspace_id=None):
     assigned=for_work_item(control,owner,request.work_item_id,request.principal_id)
+    if expected_workspace_id is not None and expected_workspace_id!=(assigned['execution_workspace_id'] if assigned else 'project'):
+        raise PermissionError('file workspace changed; reopen before saving')
     return Path(assigned['path']) if assigned else Path(fallback)
 
 

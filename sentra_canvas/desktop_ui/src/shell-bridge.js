@@ -4,8 +4,9 @@ import { confirmedConversation } from './shell-navigation.js';
 
 const projectReviewActions = new Set(['project_file_list', 'project_file_preview', 'project_file_diff', 'project_file_pdf_text',
   'project_file_pdf_visual', 'project_watch_start', 'project_watch_poll', 'project_watch_close']);
+const editorActions = new Set(['workspace_file_get','workspace_file_draft_save']);
 const reads = new Set(['home', 'space_list', 'space_get', 'dot_list', 'conversation_list', 'conversation_get', 'conversation_request_status', 'message_request_status', 'message_list', 'message_content', 'events',
-  'workspace_presentation_get', 'conversation_permission_status',
+  'workspace_presentation_get', 'workspace_file_get', 'conversation_permission_status',
   'dot_preferences_get', 'dot_remove_preflight', 'dot_retire_authority_status', 'dot_retire_authority_reconcile', 'dot_vm_retire_preflight',
   'access_status', 'goal_status', 'dot_canvas_get', 'workspace_inventory', 'workspace_request_status', 'dot_computer_get', 'dot_computer_read',
   'dot_vm_status', 'dot_vm_frame', 'dot_vm_images', 'dot_vm_reconcile_status',
@@ -16,7 +17,7 @@ const reads = new Set(['home', 'space_list', 'space_get', 'dot_list', 'conversat
   'skill_list', 'skill_review', 'skill_versions', 'skill_latest', 'skill_disclose', 'skill_activations', 'skill_learning_review',
   'plugin_bundle_list', 'plugin_bundle_inspect', 'plugin_supervision', 'plugin_transport_status', 'plugin_connection_proof', ...projectReviewActions]);
 const actions = new Set([...reads, 'space_create', 'dot_create', 'dot_update', 'conversation_create', 'message_send', 'coordinate',
-  'workspace_presentation_save',
+  'workspace_presentation_save', 'workspace_file_draft_save',
   'dot_canvas_access',
   'dot_preference_set', 'dot_order_move', 'dot_order_place', 'dot_archive_local', 'dot_restore_local',
   'dot_pause_family', 'dot_resume_family', 'dot_delete_request', 'dot_retire_authority_close',
@@ -53,6 +54,9 @@ export function pendingShellMutations(projectId) {
 function retainMutation(payload, retained) {
   if (!recoverable.has(payload.action)) return;
   if (payload.action === 'machine_execute' && payload.arguments && 'source' in payload.arguments) return;
+  // Editor content is protected on the host. Only its workspace journal selector
+  // may persist in the renderer, including after a lost acknowledgement.
+  if ((payload.action==='dot_computer_action'?payload.request:payload)?.capability_id==='workspace:file.write') return;
   try {
     const values = JSON.parse(sessionStorage.getItem(pendingStorage)) || {};
     if (retained) values[payload.request_key] = payload; else delete values[payload.request_key];
@@ -70,7 +74,7 @@ export class ShellBridgeError extends ApiError {
 export async function shellBridge(payload, options = {}) {
   if (!payload || !actions.has(payload.action)) throw new ShellBridgeError('Ação do shell não disponível.', 400);
   if (['owner', 'principal', 'grant', 'permissions'].some(key => key in payload) ||
-      ('path' in payload && !projectReviewActions.has(payload.action))) {
+      ('path' in payload && !projectReviewActions.has(payload.action) && !editorActions.has(payload.action))) {
     throw new ShellBridgeError('A identidade e o escopo são definidos pelo servidor.', 400);
   }
   if (String(payload.action || '').startsWith('network_') &&

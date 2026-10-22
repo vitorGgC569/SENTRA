@@ -96,7 +96,8 @@ estado atual e, depois, novo build local, validação básica e publicação de 
 
 ## Ainda falta para o aceite integral
 
-- Editor com save condicionado à versão, rascunhos e conflitos de edição.
+- Conferência visual e aceite do editor com save condicionado à versão, rascunhos
+  e conflitos; [código e testes de backend entregues em 22/10](ORCA_FILE_EDITOR_2026-10-22.md).
 - Arquivos não rastreados/binários na revisão e resolução estruturada de conflitos.
 - Ciclo de limpeza, descarte e publicação Git com decisões e recibos próprios.
 - Vínculo explícito da pasta do trabalho às ferramentas executadas dentro da VM.
