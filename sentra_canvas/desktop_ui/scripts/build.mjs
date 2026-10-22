@@ -16,6 +16,7 @@ async function run(script, args = []) {
   });
 }
 try {
+  await run(resolve(project, 'scripts/build-island.mjs'));
   await run(resolve(project, 'node_modules/vite/bin/vite.js'), ['build']);
   await run(resolve(project, 'scripts/materialize.mjs'), [staging]);
 } finally {

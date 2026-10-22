@@ -29,6 +29,7 @@ import '@xyflow/react/dist/style.css';
 import '@xterm/xterm/css/xterm.css';
 import './desktop.css';
 import './shell-polish.css';
+import './shell-coucou-macos.css';
 
 function WorkspaceDesktop() {
   const flow = useReactFlow(), viewport = useViewport();

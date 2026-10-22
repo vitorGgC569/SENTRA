@@ -14,7 +14,7 @@ function Board() {
   const [live, setLive] = useState('idle');
   const [color, setColor] = useState('blue');
   return <div className="opendots-shell" style={{ display: 'block', height: 'auto', overflow: 'auto' }}>
-    <div className="shell-mascot-picker" data-preview="picker"><div>{DOT_MASCOTS.map(item => <button type="button" key={item.id} onClick={() => setColor(item.id)}><img src={item.image} alt="" width="60" height="60" /><span>{item.label}</span></button>)}</div></div>
+    <div className="shell-mascot-picker" data-preview="picker"><div>{DOT_MASCOTS.map(item => <button type="button" key={item.id} onClick={() => setColor(item.id)}><DotMascot mascot={item.id} name={item.label} size="card" decorative /></button>)}</div></div>
     {states.map(status => <section key={status} style={{ display: 'flex', gap: 16, alignItems: 'end', padding: 10 }}>
       <strong style={{ width: 110 }}>{status}</strong>
       {DOT_MASCOTS.map(item => <div key={item.id} style={{ display: 'flex', gap: 8, alignItems: 'end' }}>

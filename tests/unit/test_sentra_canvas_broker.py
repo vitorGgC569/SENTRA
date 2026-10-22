@@ -72,7 +72,7 @@ def test_native_window_can_detach_without_owning_broker_lifecycle(monkeypatch):
         "minimize", "toggle_maximize", "close",
         "check_full_updates", "apply_full_updates",
         "check_code_updates", "apply_code_updates",
-        "reauthorize", "select_iso"}
+        "reauthorize", "select_iso", "check_update_notification"}
     controls = []
     class ShownEvent:
         def __init__(self):

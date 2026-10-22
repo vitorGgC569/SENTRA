@@ -2,6 +2,9 @@
 // Runs only in a disposable Electron process with a synthetic loopback Canvas.
 const { app, BrowserWindow, session } = require('electron');
 const assert = require('node:assert/strict');
+const profileArgument = process.argv.find(value => value.startsWith('--user-data-dir='));
+assert.ok(profileArgument, 'disposable test profile required');
+app.setPath('userData', profileArgument.slice('--user-data-dir='.length));
 BrowserWindow.prototype.show = function () {}; // keep the QA window hidden
 const timer = setTimeout(() => { console.error('isolated Electron timed out'); app.exit(5); }, 20000);
 app.on('web-contents-created', (_event, contents) => {
@@ -19,7 +22,9 @@ app.on('web-contents-created', (_event, contents) => {
       const windows = BrowserWindow.getAllWindows().length;
       await contents.executeJavaScript('window.open("https://example.invalid", "_blank"); true');
       assert.equal(BrowserWindow.getAllWindows().length, windows);
-      console.log('SENTRA_ELECTRON_ISOLATION_OK'); clearTimeout(timer); app.quit();
+      require('node:fs').writeFileSync(require('node:path').join(app.getPath('userData'), 'isolation-result.json'),
+        JSON.stringify({ isolated: true, popupBlocked: true }));
+      clearTimeout(timer); app.exit(0); // This disposable probe never leaves a tray process running.
     } catch (error) { console.error(error.message); clearTimeout(timer); app.exit(6); }
   });
 });

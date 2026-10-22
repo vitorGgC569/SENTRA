@@ -15,6 +15,7 @@ from pathlib import Path
 from sentra_remote.secrets import protect_secret, unprotect_secret
 
 from .instance_lock import InstanceLock
+from .process_lifetime import launch_independent
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -137,10 +138,9 @@ def connect_or_start(root, state_dir=None, *, port=0, timeout=15):
             arguments = ["--root", str(root), "--state-dir", str(state),
                          "--broker", "--port", str(port)]
             command = broker_command(arguments)
-            process = subprocess.Popen(
+            process = launch_independent(
                 command, cwd=root if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
                 close_fds=True,
             )
             while time.monotonic() < deadline:

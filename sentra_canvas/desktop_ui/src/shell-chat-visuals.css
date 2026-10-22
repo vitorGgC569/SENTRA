@@ -1,0 +1,430 @@
+/* Coucou visual layer (Frente 3): presença, ticker, pills e pensamento.
+   Tokens e superfícies seguem o shell do SENTRA; nada é fixo na viewport. */
+
+:where(.shell-chat-presence, .shell-chat-ticker, .shell-chat-event-pill,
+  .shell-chat-thinking, .shell-chat-composer-wrap) {
+  --chat-amber: #a45c0a;
+  --chat-green: #1a7f37;
+  --chat-red: #c62828;
+  --chat-blue: #1565a8;
+  --chat-surface: rgba(255, 255, 255, .88);
+  --chat-line: color-mix(in srgb, var(--shell-line, #e2e5eb) 88%, transparent);
+  --chat-ink: var(--shell-ink, #20232a);
+  --chat-muted: var(--shell-muted, #6b7280);
+}
+
+:root[data-sentra-theme=dark] :is(.shell-chat-presence, .shell-chat-ticker,
+  .shell-chat-event-pill, .shell-chat-thinking, .shell-chat-composer-wrap) {
+  --chat-amber: #f7a85c;
+  --chat-green: #34c759;
+  --chat-red: #ff453a;
+  --chat-blue: #6cc3ff;
+  --chat-surface: rgba(22, 23, 26, .86);
+  --chat-line: color-mix(in srgb, var(--shell-line, #2d3036) 84%, transparent);
+  --chat-ink: var(--shell-ink, #edeef2);
+  --chat-muted: var(--shell-muted, #9da2ae);
+}
+
+/* Presença no header: compacta, sem substituir título nem ações. */
+.opendots-shell .shell-chat-heading { flex-wrap: wrap; row-gap: 8px; }
+.shell-chat-presence {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 4px 6px 4px 5px;
+  border: 1px solid var(--chat-line);
+  border-radius: 999px;
+  background: var(--chat-surface);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  color: var(--chat-ink);
+  font-size: 11px;
+  line-height: 1;
+  animation: shell-chat-enter 190ms cubic-bezier(.2, .8, .2, 1) backwards;
+}
+.shell-chat-presence[data-state=idle] { --chat-state: var(--chat-muted); }
+.shell-chat-presence[data-state=listening] { --chat-state: var(--chat-blue); }
+.shell-chat-presence[data-state=thinking] { --chat-state: var(--chat-amber); }
+.shell-chat-presence[data-state=working] { --chat-state: var(--chat-amber); }
+.shell-chat-presence[data-state=waiting] { --chat-state: var(--chat-amber); }
+.shell-chat-presence[data-state=error] { --chat-state: var(--chat-red); }
+.shell-chat-presence[data-state=done] { --chat-state: var(--chat-green); }
+.shell-chat-presence[data-verified=true] {
+  border-color: color-mix(in srgb, var(--chat-green) 32%, var(--chat-line));
+}
+/* No header, mascote e nome já vivem em .shell-persona; o cluster traz só estado/modelo. */
+.shell-chat-heading > .shell-chat-presence {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.shell-chat-presence-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 27px;
+  height: 29px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+}
+button.shell-chat-presence-avatar { cursor: pointer; }
+.shell-chat-presence button.shell-chat-presence-avatar,
+.shell-chat-presence button.shell-chat-presence-canvas {
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+.shell-chat-presence button.shell-chat-presence-avatar { padding: 0; }
+.shell-chat-presence button.shell-chat-presence-canvas {
+  gap: 4px;
+  padding: 0 7px;
+  color: var(--chat-muted);
+}
+.shell-chat-presence button.shell-chat-presence-avatar:hover:not(:disabled),
+.shell-chat-presence button.shell-chat-presence-canvas:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--chat-state, var(--chat-amber)) 12%, transparent);
+  color: var(--chat-ink);
+}
+.shell-chat-presence-avatar .shell-mascot { width: 27px; height: 29px; }
+
+.shell-chat-presence-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.shell-chat-presence-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid color-mix(in srgb, var(--chat-state, var(--chat-amber)) 34%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--chat-state, var(--chat-amber)) 11%, transparent);
+  color: var(--chat-state, var(--chat-amber));
+  font-size: 10px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.shell-chat-presence-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 16%, transparent);
+}
+
+.shell-chat-presence-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--chat-muted);
+  font-size: 10px;
+}
+.shell-chat-presence-model {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-left: 7px;
+  border-left: 1px solid var(--chat-line);
+  color: var(--chat-muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.shell-chat-presence-canvas {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--chat-muted);
+  font-size: 10px;
+  font-weight: 600;
+}
+.shell-chat-presence :is(button):focus-visible {
+  outline: 2px solid var(--chat-state, var(--chat-amber));
+  outline-offset: -2px;
+}
+
+/* Ticker de passos: linhas curtas, no máximo quatro. */
+.shell-chat-ticker {
+  --chat-enter-opacity: 1;
+  flex: 0 0 auto;
+  margin: 3px 28px 0;
+  padding: 4px 10px;
+  border: 1px solid var(--chat-line);
+  border-radius: 13px;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--chat-surface) 94%, var(--chat-amber) 6%), var(--chat-surface));
+  color: var(--chat-ink);
+  font-size: 11px;
+  overflow: hidden;
+  transition: opacity 160ms ease, border-color 160ms ease;
+  animation: shell-chat-enter 190ms cubic-bezier(.2, .8, .2, 1) backwards;
+}
+.shell-chat-ticker.is-muted { opacity: .68; --chat-enter-opacity: .68; }
+.shell-chat-ticker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.shell-chat-ticker-list li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 3px 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.shell-chat-ticker-list li + li { border-top: 1px solid color-mix(in srgb, var(--chat-line) 55%, transparent); }
+.shell-chat-ticker-list li[data-kind=tool] { --chat-kind: var(--chat-blue); }
+.shell-chat-ticker-list li[data-kind=working] { --chat-kind: var(--chat-amber); }
+.shell-chat-ticker-list li[data-kind=approval] { --chat-kind: var(--chat-amber); }
+.shell-chat-ticker-list li[data-kind=receipt] { --chat-kind: var(--chat-blue); }
+.shell-chat-ticker-list li[data-kind=uncertain] { --chat-kind: var(--chat-amber); }
+.shell-chat-ticker-list li[data-kind=error] { --chat-kind: var(--chat-red); }
+.shell-chat-ticker-list li[data-kind=done] { --chat-kind: var(--chat-green); }
+.shell-chat-ticker-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 19px;
+  height: 19px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--chat-kind, var(--chat-muted)) 13%, transparent);
+  color: var(--chat-kind, var(--chat-muted));
+}
+.shell-chat-ticker-step {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 44%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 10.5px;
+}
+.shell-chat-ticker-detail {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--chat-muted);
+  font-size: 10px;
+}
+.shell-chat-ticker-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--chat-muted);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Pills de evento por mensagem. */
+.shell-chat-event-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: -2px 0 8px;
+}
+.shell-chat-event-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  height: 26px;
+  padding: 0 9px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--chat-kind, var(--chat-muted)) 30%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--chat-kind, var(--chat-muted)) 9%, var(--chat-surface));
+  color: var(--chat-kind, var(--chat-muted));
+  font-size: 10.5px;
+  line-height: 1;
+  white-space: nowrap;
+  animation: shell-chat-enter 190ms cubic-bezier(.2, .8, .2, 1) backwards;
+}
+.shell-chat-event-pill svg { flex: 0 0 auto; }
+.shell-chat-event-pill[data-kind=tool] { --chat-kind: var(--chat-blue); }
+.shell-chat-event-pill[data-kind=approval] { --chat-kind: var(--chat-amber); }
+.shell-chat-event-pill[data-kind=receipt] { --chat-kind: var(--chat-blue); }
+.shell-chat-event-pill[data-kind=uncertain] { --chat-kind: var(--chat-amber); border-style: dashed; }
+.shell-chat-event-pill[data-kind=error] { --chat-kind: var(--chat-red); }
+.shell-chat-event-pill[data-kind=done] { --chat-kind: var(--chat-green); }
+.shell-chat-event-pill-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+.shell-chat-event-pill-detail {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-left: 5px;
+  border-left: 1px solid color-mix(in srgb, currentColor 22%, transparent);
+  color: var(--chat-muted);
+  font-size: 9.5px;
+}
+
+/* Pensamento: mascote + três pontos com opacidade estática. */
+.shell-chat-thinking {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.shell-chat-thinking .shell-mascot { width: 30px; height: 30px; flex: 0 0 auto; }
+.shell-chat-thinking .shell-thinking-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.shell-chat-thinking-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.shell-chat-thinking-dots i {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--chat-amber);
+  opacity: .34;
+}
+.shell-chat-thinking-dots i:nth-child(2) { opacity: .58; }
+.shell-chat-thinking-dots i:nth-child(3) { opacity: .82; }
+.shell-thinking > .shell-chat-thinking { flex: 1 1 auto; }
+
+/* Borda de presença no composer, aplicada pelo wrapper; o form não muda. */
+.shell-chat-composer-wrap .shell-composer {
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+.shell-chat-composer-wrap.is-thinking .shell-composer {
+  border-color: color-mix(in srgb, var(--chat-blue) 34%, var(--shell-input-line, var(--chat-line)));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chat-blue) 7%, transparent);
+}
+.shell-chat-composer-wrap.is-working .shell-composer {
+  border-color: color-mix(in srgb, var(--chat-amber) 42%, var(--shell-input-line, var(--chat-line)));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chat-amber) 8%, transparent);
+}
+.shell-chat-composer-wrap.is-waiting .shell-composer {
+  border-color: color-mix(in srgb, var(--chat-amber) 58%, var(--shell-input-line, var(--chat-line)));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chat-amber) 11%, transparent);
+}
+.shell-chat-composer-wrap.is-error .shell-composer {
+  border-color: color-mix(in srgb, var(--chat-red) 52%, var(--shell-input-line, var(--chat-line)));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chat-red) 8%, transparent);
+}
+.shell-chat-composer-wrap.is-done .shell-composer {
+  border-color: color-mix(in srgb, var(--chat-green) 38%, var(--shell-input-line, var(--chat-line)));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--chat-green) 7%, transparent);
+}
+
+@keyframes shell-chat-enter {
+  from { opacity: 0; transform: translateY(-6px) scale(.98); }
+  to { opacity: var(--chat-enter-opacity, 1); transform: none; }
+}
+
+@media (max-width: 1180px) {
+  .shell-chat-heading > .shell-chat-presence {
+    order: 4;
+    flex-basis: 100%;
+    justify-content: flex-start;
+    border-radius: 12px;
+  }
+  .shell-chat-presence-detail { max-width: 180px; }
+}
+
+@media (max-width: 700px) {
+  .shell-chat-heading > .shell-chat-presence {
+    order: 4;
+    flex-basis: 100%;
+    padding: 4px 6px;
+    border-radius: 12px;
+  }
+  .shell-chat-presence-detail,
+  .shell-chat-presence-model { display: none; }
+  .shell-chat-presence-name { max-width: 96px; }
+  .shell-chat-presence-canvas { margin-left: auto; }
+  .shell-chat-ticker {
+    margin: 6px 16px 0;
+    padding: 4px 8px;
+  }
+  .shell-chat-ticker-step { max-width: 48%; }
+  .shell-chat-ticker-detail { max-width: 42%; }
+  .shell-chat-event-pill { height: 28px; }
+  .shell-chat-event-pill-detail { max-width: 112px; }
+  .shell-chat-thinking { gap: 8px; }
+  .shell-chat-thinking .shell-mascot { width: 26px; height: 26px; }
+}
+
+@media (max-width: 480px) {
+  .shell-chat-presence-name { max-width: 72px; }
+  .shell-chat-presence-pill { padding: 0 6px; font-size: 9.5px; }
+  .shell-chat-presence-canvas { justify-content: center; width: 26px; padding: 0; }
+  .shell-chat-presence-canvas span { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell-chat-presence,
+  .shell-chat-ticker,
+  .shell-chat-event-pill {
+    animation: none;
+  }
+  .shell-chat-presence,
+  .shell-chat-ticker,
+  .shell-chat-event-pill,
+  .shell-chat-composer-wrap .shell-composer {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .shell-chat-presence,
+  .shell-chat-ticker,
+  .shell-chat-event-pill,
+  .shell-chat-composer-wrap .shell-composer {
+    border-color: CanvasText;
+  }
+}

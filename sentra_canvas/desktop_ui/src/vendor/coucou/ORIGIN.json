@@ -1,0 +1,15 @@
+{
+  "repository": "https://github.com/Louis-CFM/coucou",
+  "commit": "1e5180921c1326fc72e41d313e3e2855e9c10162",
+  "license": "MIT",
+  "files_sha256": {
+    "style.css": "4f859033ac550f3a4c60af35d01cb1570f6749e96e7871f0103a03a9211c8d47",
+    "core/layout.ts": "f44363c788b7addf5f8d280d0672ae2915e683ac1e5a18d7c4380e5d9bc0b6bb",
+    "core/anim.ts": "996ffe5031fb36219570f66f3325a99d852c4760a3df1f64bed39c5acdda1fc7",
+    "core/diff.ts": "f0dbe996b1bd1c43756fa90f3378538e31b45111d576284a0d76c57a4bd5f23a",
+    "island/fsm.ts": "239cba31e40d7524477888b22e8051719d3a308de3013f4d11fbb5050b8d845a",
+    "views/icons.ts": "af7c5d124acb302cf58a846a892e4454d880dfb09eae76797d2f2d86094a14c1",
+    "views/ticker.ts": "131820c3184a4f8de5453df9e3492b2df39740da9d79b2d3f6396d2f84eee8e2"
+  },
+  "scope": "Original island styles, geometry, timing, ticker and icon paths. SENTRA data adapter and characters are separate. No Mochi assets or sounds."
+}

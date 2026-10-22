@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../src/desktop.css';
 import '../src/shell-polish.css';
+import '../src/shell-coucou-macos.css';
 import { ShellConversation } from '../src/shell-conversation';
 import { shellBridge } from '../src/shell-bridge';
 import { conversationCache } from '../src/shell-conversation-cache';

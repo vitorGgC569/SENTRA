@@ -1,0 +1,17 @@
+/* SENTRA adapter only. All island materials, typography, cards and controls
+   come unchanged from vendor/coucou/style.css (MIT, pinned ORIGIN.json). */
+#island-root { width: 100%; height: 100%; }
+#sentra-bot { position: absolute; transform: translate(-50%, -50%); z-index: 2; cursor: default; }
+.sentra-coucou-dot, .sentra-coucou-dot .shell-mascot { display: inline-flex; width: 100%; height: 100%; background: transparent; }
+.sentra-coucou-dot canvas { width: 100%; height: 100%; }
+#mini-grid .sentra-coucou-dot { width: 13px; height: 13px; }
+.coucou-compact { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: transparent; display: flex; cursor: default; }
+.pill { padding: 0; font-family: var(--font); color: inherit; }
+.pill:hover { background: color-mix(in srgb, var(--pill-color) 18%, transparent); border-color: color-mix(in srgb, var(--pill-color) 55%, transparent) !important; box-shadow: 0 2px 10px color-mix(in srgb, var(--pill-color) 35%, transparent); }
+.pill:hover .lbl { color: color-mix(in srgb, var(--pill-color) 70%, white); }
+.sentra-coucou-ticker { display: contents; }
+.sentra-coucou-static .tick-text { color: var(--dim); }
+.status-badge .link-btn { padding: 0; font-size: inherit; color: inherit; background: transparent; }
+button:disabled { opacity: .4; }
+button:focus-visible, #sentra-bot:focus-visible { outline: 1px solid var(--ink); outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

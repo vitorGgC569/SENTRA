@@ -5,6 +5,7 @@ import { ShellDotCanvas } from '../shell-dot-canvas';
 import '@xyflow/react/dist/style.css';
 import '../desktop.css';
 import '../shell-polish.css';
+import '../shell-coucou-macos.css';
 
 const dots = [
   { dot_id: 'fixture-a', agent_id: 'agent-a', name: 'Agente A · teste visual', mascot: 'blue', project_id: 'fixture', space_id: 'fixture' },

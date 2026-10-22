@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "date": "2026-10-22",
+  "scope": "Coucou palette and macOS-style visual refinement",
+  "source_stylesheet": "sentra_canvas/desktop_ui/src/shell-coucou-macos.css",
+  "source_sha256": "50a538994d155abceb46e812e29fb4d83ecebcfbfa03c0736e9314962fb6a09a",
+  "desktop_build_passed": true,
+  "build_log": "sentra_canvas/desktop_ui/.tmp/coucou-macos-desktop-build.log",
+  "desktop_css_sha256": "9cf9c9d287bad89568d5f2de3f06bc5c588c2b0dcecd71dfcfa516d9c6c2d78f",
+  "desktop_manifest_sha256": "122a874cbcfefa6e6083282d5171794e3f71ffcc79520f0e51d96e0d7ce03710",
+  "preview": "http://127.0.0.1:5200/desktop-assets/qa/orca-workspace.html?view=home",
+  "preview_open_status": "queued",
+  "interactive_visual_qualified": false,
+  "interactive_blocker": "Local browser use is disabled in Work settings",
+  "unit_tests_run_in_this_styling_checkpoint": false,
+  "setup_rebuilt": false,
+  "installed_sessions_restarted": false
+}

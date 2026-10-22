@@ -10,9 +10,12 @@ import '@xyflow/react/dist/style.css';
 import '@xterm/xterm/css/xterm.css';
 import '../src/desktop.css';
 import '../src/shell-polish.css';
+import '../src/shell-coucou-macos.css';
 // Render the existing shell. Only this isolated origin uses fixture data.
 const scope={project_id:'project-preview',space_id:'space-preview',dot_id:'dot-preview'};
-localStorage.setItem('sentra_shell_navigation',JSON.stringify({...scope,view:'canvas'}));
+const requestedView=new URLSearchParams(window.location.search).get('view');
+const previewView=['home','canvas','dots','conversations','spaces'].includes(requestedView)?requestedView:'canvas';
+localStorage.setItem('sentra_shell_navigation',JSON.stringify({...scope,view:previewView}));
 localStorage.setItem('sentra-orca-workspace-enabled','1');
 if(!localStorage.getItem('sentra-workspace-v1:qa-orca-inner-v2')){
  const state=initialLayout();

@@ -1,0 +1,518 @@
+/*!
+ * SENTRA compact decisions — self-contained glass surface.
+ * Visual inspiration only: Coucou (MIT).
+ * No external token is required: every variable has a local fallback.
+ */
+
+/* Self-contained box model: works even when desktop.css is absent. */
+.shell-decisions,
+.shell-decisions * {
+  box-sizing: border-box;
+}
+
+.shell-decisions {
+  --decisions-bg: rgba(255, 255, 255, .92);
+  --decisions-panel: rgba(252, 251, 249, .97);
+  --decisions-ink: #2b2925;
+  --decisions-muted: #6f6a62;
+  --decisions-line: rgba(32, 30, 26, .14);
+  --decisions-soft: rgba(32, 30, 26, .055);
+  --decisions-hover: rgba(32, 30, 26, .09);
+  --decisions-code: rgba(32, 30, 26, .05);
+  --decisions-accent: #b4691f;
+  --decisions-accent-soft: rgba(247, 168, 92, .22);
+  --decisions-danger: #b23b3b;
+  --decisions-info: #2f6f9e;
+  --decisions-primary-bg: #2b2925;
+  --decisions-primary-ink: #fdfbf7;
+  --decisions-shadow: 0 18px 50px rgba(28, 24, 18, .18), 0 2px 8px rgba(28, 24, 18, .08);
+  --decisions-radius: 20px;
+  --decisions-z: 900;
+  color: var(--decisions-ink);
+  font: 13px/1.45 "Segoe UI", system-ui, sans-serif;
+}
+
+:root[data-sentra-theme=dark] .shell-decisions {
+  --decisions-bg: rgba(22, 23, 26, .88);
+  --decisions-panel: rgba(25, 26, 30, .96);
+  --decisions-ink: #f4f1ec;
+  --decisions-muted: #a7a39c;
+  --decisions-line: rgba(255, 255, 255, .11);
+  --decisions-soft: rgba(255, 255, 255, .065);
+  --decisions-hover: rgba(255, 255, 255, .12);
+  --decisions-code: rgba(255, 255, 255, .05);
+  --decisions-accent: #f7a85c;
+  --decisions-accent-soft: rgba(247, 168, 92, .18);
+  --decisions-danger: #ff8f8f;
+  --decisions-info: #6cc3ff;
+  --decisions-primary-bg: #f4f1ec;
+  --decisions-primary-ink: #17181b;
+  --decisions-shadow: 0 20px 60px rgba(0, 0, 0, .5), 0 2px 10px rgba(0, 0, 0, .35);
+}
+
+/* Floating center: pointer-events only on the panel, below modals (1401+) and above chrome. */
+.shell-decisions-center {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: var(--decisions-z);
+  width: min(432px, calc(100vw - 24px));
+  max-height: min(78vh, 720px);
+  display: flex;
+  pointer-events: none;
+}
+
+.shell-decisions-center > .shell-decisions-panel {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-height: inherit;
+  padding: 12px;
+  border: 1px solid var(--decisions-line);
+  border-radius: var(--decisions-radius);
+  background: var(--decisions-bg);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: var(--decisions-shadow);
+  overflow: hidden;
+}
+
+.shell-decisions-center-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 4px 8px;
+  border-bottom: 1px solid var(--decisions-line);
+  color: var(--decisions-ink);
+}
+
+.shell-decisions-center-head strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.shell-decisions-count {
+  margin-left: auto;
+  min-width: 22px;
+  padding: 1px 7px;
+  border: 1px solid var(--decisions-line);
+  border-radius: 999px;
+  background: var(--decisions-soft);
+  color: var(--decisions-muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.shell-decisions-stack {
+  min-width: 0;
+}
+
+.shell-decisions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+/* The center must be able to shrink so the list scrolls instead of clipping. */
+.shell-decisions-center .shell-decisions-stack {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.shell-decisions-center .shell-decisions-list {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.shell-decisions-center .shell-decisions-more {
+  flex-shrink: 0;
+}
+
+.shell-decisions-list > li {
+  min-width: 0;
+}
+
+/* Card */
+.shell-decisions-card {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--decisions-line);
+  border-radius: 16px;
+  background: var(--decisions-panel);
+  box-shadow: 0 1px 2px rgba(20, 18, 14, .06);
+  animation: shell-decisions-in 180ms ease-out both;
+}
+
+@keyframes shell-decisions-in {
+  from { opacity: 0; transform: translateY(-6px) scale(.98); }
+  to { opacity: 1; transform: none; }
+}
+
+.shell-decisions-card[data-compact=true] {
+  gap: 7px;
+  padding: 9px 10px;
+  border-radius: 14px;
+}
+
+.shell-decisions-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.shell-decisions-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.shell-decisions-avatar .shell-mascot {
+  width: 34px;
+  height: 34px;
+}
+
+.shell-decisions-card[data-compact=true] .shell-decisions-avatar .shell-mascot {
+  width: 26px;
+  height: 26px;
+}
+
+.shell-decisions-headings {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.shell-decisions-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.shell-decisions-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--decisions-muted);
+  font-size: 11px;
+}
+
+.shell-decisions-meta code {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 5px;
+  border: 1px solid var(--decisions-line);
+  border-radius: 6px;
+  background: var(--decisions-soft);
+  font: 10.5px/1.5 ui-monospace, Consolas, monospace;
+}
+
+.shell-decisions-pill {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border: 1px solid var(--decisions-line);
+  border-radius: 999px;
+  background: var(--decisions-soft);
+  color: var(--decisions-muted);
+  font-size: 10.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.shell-decisions-pill[data-tone=active] {
+  border-color: color-mix(in srgb, var(--decisions-accent) 42%, transparent);
+  background: var(--decisions-accent-soft);
+  color: var(--decisions-accent);
+}
+
+.shell-decisions-pill[data-tone=uncertain] {
+  border-color: color-mix(in srgb, var(--decisions-info) 45%, transparent);
+  color: var(--decisions-info);
+}
+
+.shell-decisions-pill[data-tone=busy] {
+  border-color: color-mix(in srgb, var(--decisions-info) 45%, transparent);
+  color: var(--decisions-info);
+}
+
+.shell-decisions-pill[data-tone=expired] {
+  border-color: color-mix(in srgb, var(--decisions-danger) 40%, transparent);
+  color: var(--decisions-danger);
+}
+
+.shell-decisions-summary {
+  margin: 0;
+  color: var(--decisions-ink);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.shell-decisions-card[data-compact=true] .shell-decisions-summary {
+  font-size: 11.5px;
+}
+
+.shell-decisions-validity {
+  color: var(--decisions-muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.shell-decisions-note {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--decisions-info) 35%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--decisions-info) 10%, transparent);
+  color: var(--decisions-ink);
+  font-size: 11.5px;
+}
+
+.shell-decisions-note[data-tone=expired] {
+  border-color: color-mix(in srgb, var(--decisions-danger) 35%, transparent);
+  background: color-mix(in srgb, var(--decisions-danger) 9%, transparent);
+}
+
+/* Bounded previews */
+.shell-decisions-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+
+.shell-decisions-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--decisions-muted);
+  font-size: 10.5px;
+}
+
+.shell-decisions-toggle {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  border: 1px solid var(--decisions-line);
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.shell-decisions-toggle:hover {
+  background: var(--decisions-hover);
+}
+
+.shell-decisions-toggle svg {
+  transition: transform 160ms ease;
+}
+
+.shell-decisions-preview[data-open=true] .shell-decisions-toggle svg {
+  transform: rotate(180deg);
+}
+
+.shell-decisions-preview pre {
+  max-height: 5.6em;
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--decisions-line);
+  border-radius: 10px;
+  background: var(--decisions-code);
+  color: var(--decisions-ink);
+  font: 11.5px/1.4 ui-monospace, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+
+.shell-decisions-preview[data-open=true] pre {
+  max-height: 220px;
+}
+
+.shell-decisions-card[data-compact=true] .shell-decisions-preview pre {
+  max-height: 2.9em;
+}
+
+.shell-decisions-card[data-compact=true] .shell-decisions-preview[data-open=true] pre {
+  max-height: 160px;
+}
+
+.shell-decisions-hidden {
+  color: var(--decisions-muted);
+  font-size: 10px;
+}
+
+/* Actions */
+.shell-decisions-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.shell-decisions-card[data-compact=true] .shell-decisions-actions {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.shell-decisions-card[data-compact=true] .shell-decisions-actions::-webkit-scrollbar {
+  display: none;
+}
+
+.shell-decisions-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 6px 11px;
+  border: 1px solid var(--decisions-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--decisions-ink);
+  font: 600 12px/1 "Segoe UI", system-ui, sans-serif;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.shell-decisions-card[data-compact=true] .shell-decisions-button {
+  min-height: 27px;
+  padding: 5px 9px;
+  font-size: 11.5px;
+}
+
+.shell-decisions-button:hover:not(:disabled) {
+  background: var(--decisions-hover);
+}
+
+.shell-decisions-button.is-primary {
+  border-color: var(--decisions-primary-bg);
+  background: var(--decisions-primary-bg);
+  color: var(--decisions-primary-ink);
+}
+
+.shell-decisions-button.is-primary:hover:not(:disabled) {
+  opacity: .9;
+}
+
+.shell-decisions-button.is-quiet {
+  color: var(--decisions-muted);
+}
+
+.shell-decisions-button:disabled {
+  opacity: .5;
+  cursor: not-allowed;
+}
+
+.shell-decisions-more {
+  display: flex;
+  justify-content: center;
+  padding-top: 8px;
+}
+
+.shell-decisions-more button {
+  min-height: 28px;
+  padding: 5px 12px;
+  border: 1px dashed var(--decisions-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--decisions-muted);
+  font: 600 11.5px/1 "Segoe UI", system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.shell-decisions-more button:hover {
+  background: var(--decisions-hover);
+}
+
+.shell-decisions-error {
+  margin: 0;
+  padding: 7px 9px;
+  border: 1px solid color-mix(in srgb, var(--decisions-danger) 40%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--decisions-danger) 10%, transparent);
+  color: var(--decisions-danger);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.shell-decisions :is(button, [tabindex]):focus-visible {
+  outline: 2px solid var(--decisions-accent);
+  outline-offset: 2px;
+}
+
+/* Island embedding: the stack keeps its own rhythm and never stretches the panel. */
+.shell-decisions-stack.is-compact {
+  --decisions-radius: 14px;
+}
+
+.shell-decisions-empty {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--decisions-line);
+  border-radius: 12px;
+  color: var(--decisions-muted);
+  font-size: 11.5px;
+}
+
+@media (max-width: 700px) {
+  .shell-decisions-center {
+    right: 8px;
+    left: 8px;
+    bottom: 8px;
+    width: auto;
+    max-height: min(72vh, 620px);
+  }
+
+  .shell-decisions-center > .shell-decisions-panel {
+    padding: 10px;
+  }
+
+  .shell-decisions-meta code {
+    max-width: 42vw;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell-decisions-card {
+    animation: none;
+  }
+
+  .shell-decisions :is(button, .shell-decisions-toggle svg, pre) {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .shell-decisions-card,
+  .shell-decisions-button,
+  .shell-decisions-preview pre {
+    border: 1px solid CanvasText;
+  }
+}

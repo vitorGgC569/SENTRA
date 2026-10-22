@@ -14,6 +14,15 @@ SENTRA brings Dots, permanent conversations, terminals, files, browser tools, an
 
 Some linked documents and application labels remain in Portuguese. Dated reports identify the actual validation scope and remaining work.
 
+## Downloads and application preview
+
+Visit the [SENTRA download page](https://vitorggc569.github.io/SENTRA/) for current
+availability, application screenshots and LAN pairing instructions. Android
+preview downloads appear only after a signed standalone APK and its checksum
+metadata have been published. iPhone installation remains unavailable until an
+Apple distribution channel is configured. Physical-device qualification is a
+separate milestone from producing a build.
+
 ## SENTRA Desktop
 
 Desktop brings **Dots**, conversations, **Spaces**, and authorized computer resources into a Windows interface. It starts with a dark theme and offers a light-theme option.

@@ -7,6 +7,8 @@ import {restoreCheckpoint,mayWriteTerminal,writeTerminalFrame,releaseDisposedWri
 import {Unicode11Addon} from '@xterm/addon-unicode11';
 import {activateOrcaTerminalUnicodeProvider} from '../../../integrations/orca-terminal/vendor/orca/src/shared/terminal-unicode-provider';
 import {TerminalReadBudget} from '../../../integrations/orca-terminal/src/consumer-flow.mjs';
+import {TerminalInputQueue} from '../../../integrations/orca-terminal/src/input-queue.mjs';
+import {TerminalInputJournal,deliveredInput} from './terminal-input-journal';
 
 // Owns terminal VIEWs, never starts, closes or reconnects a backend PTY.
 // A stable (workspace, terminal ID) has exactly one xterm and input writer.
@@ -23,6 +25,9 @@ export class TerminalPool {
   snapshot = () => this.revision;
   constructor(report, changed) {
     this.readBudget = new TerminalReadBudget();
+    this.inputQueue = new TerminalInputQueue();
+    this.onInputStorage=()=>{for(const entry of this.entries.values())if(entry.inputJournal)void this.syncInput(entry)};
+    window.addEventListener('storage',this.onInputStorage);
     this.onVisibility=()=>{for(const entry of this.entries.values()){
       if(!this.visible(entry))this.suspend(entry);
       else if(!entry.polling&&!entry.timer)this.poll(entry);
@@ -38,6 +43,8 @@ export class TerminalPool {
   suspend(entry) {
     if(entry.pendingWrites?.size){entry.renderUncertain=true;entry.snapshotRestored=false;entry.checkpointUnavailable=false;}
     entry.viewEpoch = (entry.viewEpoch || 0) + 1; entry.inputEpoch++;
+    if(entry.sendingPacket)entry.inputBlocked=entry.inputBlocked||'view_changed';
+    this.inputQueue.cancel(entry.key);entry.pendingResize=null;
     entry.inputSuspended = true; entry.term.options.disableStdin = true;
     entry.readAbort?.abort();clearTimeout(entry.timer);entry.timer = null;
   }
@@ -64,33 +71,47 @@ export class TerminalPool {
     }
   }
   key(ws, id) { return ws + ':' + id; }
+  createRenderer(entry) {
+    const term = new Terminal({
+      fontFamily: '"Cascadia Mono", Consolas, monospace', fontSize: 13,
+      scrollback: 6000, screenReaderMode: true, allowProposedApi: true,vtExtensions:{kittyKeyboard:true},
+      disableStdin: true, cursorBlink: false,
+      theme: { background: '#1b1b1e', foreground: '#d4d4d8', cursor: '#d4d4d8', selectionBackground: '#51515b99' },
+    });
+    const fit = new FitAddon(); term.loadAddon(fit);
+    term.loadAddon(new Unicode11Addon());activateOrcaTerminalUnicodeProvider(term);
+    entry.term=term;entry.fit=fit;
+    term.onData(data => this.send(entry, data));
+    return term;
+  }
+  recoverRenderer(entry) {
+    if(!entry.alive)return;
+    this.suspend(entry);
+    entry.term.dispose();releaseDisposedWrites(entry);
+    entry.host.replaceChildren();entry.opened=false;
+    entry.snapshotRestored=false;entry.checkpointUnavailable=false;entry.cursor=0;
+    entry.transportUnavailable=true;entry.rendererRecoveries=(entry.rendererRecoveries||0)+1;
+    this.createRenderer(entry);this.place(entry);this.changed();
+    this.report('A visualização foi reiniciada. O processo e os comandos não foram reiniciados.','error');
+  }
   ensure(ws, resource) {
     const key = this.key(ws, resource.id);
     let entry = this.entries.get(key);
     if (entry) {
       const running = resource.status === 'running' && entry.recoverable !== false;
-      entry.term.options.disableStdin = !running || entry.transportUnavailable === true || entry.inputSuspended === true;
+      entry.term.options.disableStdin = !running || entry.transportUnavailable === true || entry.inputSuspended === true || !!entry.inputBlocked || !entry.inputProtocol;
       entry.resource = resource;
       if (!this.visible(entry)) this.suspend(entry);
       return entry;
     }
     const host = document.createElement('div');
     host.className = 'pty-emulator';
-    const term = new Terminal({
-      fontFamily: '"Cascadia Mono", Consolas, monospace', fontSize: 13,
-      scrollback: 6000, screenReaderMode: true, allowProposedApi: true,vtExtensions:{kittyKeyboard:true},
-      disableStdin: resource.status !== 'running', cursorBlink: false,
-      theme: { background: '#1b1b1e', foreground: '#d4d4d8', cursor: '#d4d4d8',
-        selectionBackground: '#51515b99' },
-    });
-    const fit = new FitAddon(); term.loadAddon(fit);
-    term.loadAddon(new Unicode11Addon());activateOrcaTerminalUnicodeProvider(term);
-    entry = { key, ws, id: resource.id, resource, host, term, fit,
-      cursor: 0, slots: new Map(), queue: Promise.resolve(), opened: false,
+    entry = { key, ws, id: resource.id, resource, host,
+      cursor: 0, slots: new Map(), opened: false,
       polling: false, status: resource.status, alive: true, retry: 0,inputEpoch:0,viewEpoch:0,inputSuspended:true,
       inViewport:typeof IntersectionObserver!=='function' };
     this.entries.set(key, entry);
-    term.onData(data => this.send(entry, data));
+    this.createRenderer(entry);entry.onRendererStall=()=>this.recoverRenderer(entry);
     entry.observer = new ResizeObserver(() => {
       if(!this.visible(entry)){this.suspend(entry);return;}
       this.scheduleFit(entry);if(!entry.polling&&!entry.timer)this.poll(entry);
@@ -132,29 +153,109 @@ export class TerminalPool {
       if (!changed && !entry.needsServerResize) return;
       if (changed) { entry.term.resize(cols, rows); entry.needsServerResize = true; }
       if (!entry.term.options.disableStdin) {
-        // Geometry only; no input is reissued and no PTY is relaunched.
-        const epoch=entry.inputEpoch;
-        entry.queue = entry.queue.catch(() => {}).then(() => {
-          if(!this.visible(entry)||entry.inputEpoch!==epoch)return;
-          return api('/api/terminal/resize',{ ws: entry.ws, id: entry.id, cols, rows });
-        }).then(() => {
-            if(!this.visible(entry)||entry.inputEpoch!==epoch)return;
-            entry.needsServerResize = false;
-          }).catch(e => { if(!entry.alive||entry.inputEpoch!==epoch)return;entry.needsServerResize = true; this.report(e.message, 'error'); });
+        entry.pendingResize={cols,rows};this.queueResize(entry);
       }
     }, 120);
   }
-  send(entry, data) {
-    if (!this.visible(entry) || !mayWriteTerminal(entry)) return;
-    const epoch=entry.inputEpoch;
-    entry.queue = entry.queue.catch(() => {}).then(async () => {
-      const characters = Array.from(data);
-      for (let offset = 0; offset < characters.length; offset += 1024) {
-        if (!this.visible(entry)||!mayWriteTerminal(entry,epoch)) return;
-        await api('/api/terminal/input', { ws: entry.ws, id: entry.id,
-          data: characters.slice(offset, offset + 1024).join('') });
+  queueResize(entry){
+    if(entry.resizeQueued||!entry.pendingResize||!this.visible(entry)||!mayWriteTerminal(entry))return;
+    entry.resizeQueued=true;const epoch=entry.inputEpoch;
+    try{
+      this.inputQueue.enqueue(entry.key,'resize',async()=>{
+        if(!this.visible(entry)||!mayWriteTerminal(entry,epoch))return;
+        const size=entry.pendingResize;entry.pendingResize=null;if(!size)return;
+        await this.inputRequest('/api/terminal/resize',{ws:entry.ws,id:entry.id,...size});
+        if(this.visible(entry)&&entry.inputEpoch===epoch)entry.needsServerResize=false;
+      }).catch(error=>{if(entry.alive&&entry.inputEpoch===epoch){this.blockInput(entry,'geometry_unconfirmed');this.report(error.message,'error')}})
+        .finally(()=>{entry.resizeQueued=false;if(entry.pendingResize)this.queueResize(entry)});
+    }catch(error){entry.resizeQueued=false;this.blockInput(entry,'queue_limit');}
+  }
+  blockInput(entry,reason){
+    entry.inputBlocked=reason;entry.inputEpoch++;entry.term.options.disableStdin=true;
+    this.inputQueue.cancel(entry.key);entry.pendingResize=null;this.changed();
+  }
+  async syncInput(entry,value){
+    try{
+      if(value){
+        if(entry.inputScope&&value.input_scope&&entry.inputScope!==value.input_scope){this.blockInput(entry,'scope_changed');return;}
+        if(entry.inputTarget&&entry.inputTarget!==value.input_target){
+          if(this.inputQueue.status(entry.key).sessionCount)this.blockInput(entry,'target_changed');
+          else entry.inputEpoch++;
+        }
+        entry.inputProtocol=value.input_protocol_version===1&&/^[0-9a-f]{64}$/.test(value.input_scope||'')&&/^[0-9a-f]{32}$/.test(value.input_target||'');
+        entry.inputTarget=value.input_target;
+        if(!entry.inputProtocol){entry.term.options.disableStdin=true;entry.inputEpoch++;this.inputQueue.cancel(entry.key)}
+        if(/^[0-9a-f]{64}$/.test(value.input_scope||'')&&entry.inputScope!==value.input_scope){entry.inputScope=value.input_scope;entry.inputJournal=new TerminalInputJournal(value.input_scope,entry.id)}
+        if(entry.inputProtocol&&!entry.inputJournal?.locks?.request)throw Error('Este ambiente não permite coordenar a entrada entre janelas.');
+        if(value.input_pending?.length){
+          if(value.input_pending_overflow||value.input_pending.length>1)throw Error('Há várias confirmações de entrada neste host. Consulte o diagnóstico antes de continuar.');
+          await entry.inputJournal.adopt(value.input_pending[0]);
+        }
       }
-    }).catch(e => this.report(e.message, 'error'));
+      const row=entry.inputJournal?.list()[0]||null;
+      const previous=entry.inputPending?.request_key;entry.inputPending=row;
+      if(row&&row.request_key!==entry.activeRequestKey&&!entry.inputBlocked)this.blockInput(entry,'confirmation_pending');
+      if(previous!==row?.request_key)this.changed();
+    }catch(error){entry.inputJournalError=error.message;this.blockInput(entry,'journal_unavailable')}
+  }
+  send(entry, data) {
+    if (!this.visible(entry) || !entry.inputProtocol || !mayWriteTerminal(entry)) return;
+    const epoch=entry.inputEpoch;
+    try{
+      return this.inputQueue.enqueue(entry.key,data,packet=>entry.inputJournal.writer(async()=>{
+        if(!this.visible(entry)||!mayWriteTerminal(entry,epoch))return {cancelled:true};
+        entry.sendingPacket=true;
+        try{
+        const characters=Array.from(packet);
+        for(let offset=0;offset<characters.length;offset+=1024){
+          if(!this.visible(entry)||!mayWriteTerminal(entry,epoch))return {cancelled:true};
+          const part=characters.slice(offset,offset+1024).join(''),key=crypto.randomUUID();
+          entry.activeRequestKey=key;
+          try{
+            const row=await entry.inputJournal.begin(key,entry.inputTarget,part);entry.inputPending=row;this.changed();
+            if(!this.visible(entry)||!mayWriteTerminal(entry,epoch)){
+              // This branch proves the HTTP call was never made. After dispatch
+              // only a host receipt can clear the selector.
+              await entry.inputJournal.cancelBeforeDispatch(row);entry.inputPending=null;this.changed();return {cancelled:true};
+            }
+            const value=await this.inputRequest('/api/terminal/input',{ws:entry.ws,id:entry.id,data:part,request_key:key,input_target:row.input_target});
+            if(!deliveredInput(value,row,entry.id))throw Error('Entrega ao terminal não confirmada.');
+            await this.acknowledgeInput(entry,row);
+            await entry.inputJournal.resolve(row,{resolved:true,automatic_retry:false,request_key:key,input_target:row.input_target});
+            entry.inputPending=null;this.changed();
+          }finally{entry.activeRequestKey=null}
+        }
+        }finally{entry.sendingPacket=false;this.changed()}
+      })).catch(async error=>{
+        if(!entry.alive)return;
+        await this.syncInput(entry);this.blockInput(entry,'confirmation_pending');this.report('Entrada interrompida. Consulte a confirmação antes de continuar.','error');
+      });
+    }catch(error){
+      this.blockInput(entry,'queue_limit');this.report('Fila de entrada cheia ou texto acima do limite. Confira a sessão antes de continuar.','error');
+    }
+  }
+  async inputRequest(path,body){
+    const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000);
+    try{return await api(path,body,{signal:controller.signal})}finally{clearTimeout(timer)}
+  }
+  async acknowledgeInput(entry,row){
+    const value=await this.inputRequest('/api/terminal/input-ack',{ws:entry.ws,id:entry.id,request_key:row.request_key,fingerprint:row.fingerprint});
+    if(value.acknowledged!==true||value.request_key!==row.request_key||value.terminal_id!==entry.id||value.input_target!==row.input_target)throw Error('Leitura do recibo não confirmada.');
+  }
+  async inspectInput(ws,id){
+    const entry=this.entries.get(this.key(ws,id));if(!entry?.inputJournal||entry.activeRequestKey)return;
+    await this.syncInput(entry);const row=entry.inputPending;if(!row)return;
+    const value=await api(route('/api/terminal/input-status',{ws,id,request_key:row.request_key,fingerprint:row.fingerprint}));
+    if(value.terminal_id!==id&&value.found)throw Error('Recibo de outra sessão.');
+    if(value.resolved){await this.acknowledgeInput(entry,row);await entry.inputJournal.resolve(row,value);entry.inputPending=null;entry.inputBlocked='review_required';this.changed();}
+    return value;
+  }
+  async resumeInput(ws,id){
+    const entry=this.entries.get(this.key(ws,id));if(!entry||!this.visible(entry)||entry.activeRequestKey||this.inputQueue.status(entry.key).active)return false;
+    const epoch=entry.inputEpoch;
+    await this.syncInput(entry);
+    if(entry.inputEpoch!==epoch||!this.visible(entry)||entry.inputPending||!entry.inputProtocol||entry.inputJournalError||entry.inputSuspended||entry.transportUnavailable||entry.status!=='running'||entry.recoverable===false)return false;
+    entry.inputEpoch++;entry.inputBlocked=null;entry.term.options.disableStdin=false;this.changed();return true;
   }
   focus(ws, id) { this.entries.get(this.key(ws, id))?.term.focus(); }
   command(ws, id, text) {
@@ -166,7 +267,9 @@ export class TerminalPool {
     return e ? { status: e.status, recoverable: e.recoverable, persisted: e.persisted,
       transportUnavailable: e.transportUnavailable, persistenceState: e.persistenceState,
       persistenceGap: e.persistenceGap, tailUncertain: e.tailUncertain,checkpointUnavailable:e.checkpointUnavailable,
-      scrollbackOmitted:e.scrollbackOmitted } : null;
+      scrollbackOmitted:e.scrollbackOmitted,inputBlocked:e.inputBlocked,inputPending:e.inputPending,
+      inputProtocol:e.inputProtocol,inputJournalError:e.inputJournalError,inputBusy:!!e.activeRequestKey,
+      rendererRecoveries:e.rendererRecoveries||0 } : null;
   }
   reconcile(ws, resources) {
     this.activeWorkspace = ws;
@@ -199,10 +302,11 @@ export class TerminalPool {
     entry.timer = null;
     const generation=entry.viewEpoch,controller=new AbortController();entry.readAbort=controller;
     const current=()=>entry.alive&&entry.viewEpoch===generation&&this.visible(entry)&&!controller.signal.aborted;
-    let release,catchingUp=false;
+    let release,deadline,expired=false,catchingUp=false;
     try {
       release=await this.readBudget.acquire(entry.key,controller.signal);
       if(!current())return;
+      deadline=setTimeout(()=>{expired=true;controller.abort()},entry.readTimeoutMs??15000);
       const value = await api(route('/api/terminal/output', {
         ws: entry.ws, id: entry.id, cursor: String(entry.cursor),
       }),undefined,{signal:controller.signal});
@@ -222,6 +326,8 @@ export class TerminalPool {
         await writeTerminalFrame(entry,value.text,current);
       }
       if(!current())return;
+      await this.syncInput(entry,value);
+      if(!current())return;
       if (value.cursor !== undefined) entry.cursor = value.cursor;
       catchingUp=value.has_more===true&&value.text.length>0;
       const change = entry.transportUnavailable || entry.status !== value.status || entry.recoverable !== value.recoverable ||
@@ -233,7 +339,7 @@ export class TerminalPool {
       entry.persistenceGap = !!(value.persistence_gap||value.truncated);
       entry.tailUncertain = value.tail_uncertain === true;
       entry.inputSuspended = false;
-      entry.term.options.disableStdin = value.status !== 'running' || value.recoverable === false;
+      entry.term.options.disableStdin = value.status !== 'running' || value.recoverable === false || !!entry.inputBlocked || !entry.inputProtocol;
       if (entry.needsServerResize && !entry.term.options.disableStdin) this.scheduleFit(entry);
       if (value.persisted === false && (!value.persistence_state || value.persistence_state === 'failed') && !entry.warned) {
         entry.warned = true; this.report('O histórico da sessão não está sendo salvo.', 'error');
@@ -244,7 +350,7 @@ export class TerminalPool {
       }
       if (change) this.changed();
     } catch (e) {
-      if (!current()) return;
+      if (!current()&&!(expired&&entry.alive&&entry.viewEpoch===generation&&this.visible(entry))) return;
       entry.retry++;
       if (entry.retry === 1) this.report(e.message, 'error');
       if (!entry.transportUnavailable) { entry.transportUnavailable = true; this.changed(); }
@@ -253,6 +359,7 @@ export class TerminalPool {
       entry.term.options.disableStdin = true;
       // Loss of transport is not a successful or ready process state.
     } finally {
+      clearTimeout(deadline);
       release?.();if(entry.readAbort===controller)entry.readAbort=null;
       entry.polling = false;
       if (this.visible(entry)) entry.timer = setTimeout(() => this.poll(entry),
@@ -264,5 +371,5 @@ export class TerminalPool {
     entry.observer.disconnect();entry.intersection?.disconnect();entry.term.dispose(); entry.host.remove();
     releaseDisposedWrites(entry);
   }
-  destroy() { document.removeEventListener('visibilitychange',this.onVisibility);for (const e of this.entries.values()) this.dispose(e); this.entries.clear(); }
+  destroy() { window.removeEventListener('storage',this.onInputStorage);document.removeEventListener('visibilitychange',this.onVisibility);for (const e of this.entries.values()) this.dispose(e); this.entries.clear(); }
 }

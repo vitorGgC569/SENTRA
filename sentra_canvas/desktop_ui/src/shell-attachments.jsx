@@ -18,9 +18,12 @@ export function ShellAttachments({ bridge, scope, availability, attachments, onA
   const [upload, setUpload] = useState(() => restore(storageKey)), [busy, setBusy] = useState(false);
   const [error, setError] = useState(''), [kind, setKind] = useState('auto'), [fileReady, setFileReady] = useState(false);
   const file = useRef(null), current = useRef(upload), locked = useRef(false), cancelled = useRef(false), alive = useRef(true);
+  const details = useRef(null), chooseRef = useRef(null);
   const attachmentsRef = useRef(attachments); attachmentsRef.current = attachments;
   const bridgeRef = useRef(bridge); bridgeRef.current = bridge;
   const available = availability?.available === true;
+  const availableRef = useRef(available); availableRef.current = available;
+  const availabilityRef = useRef(availability); availabilityRef.current = availability;
   function remember(value) {
     current.current = value;
     if (alive.current) setUpload(value);
@@ -71,6 +74,22 @@ export function ShellAttachments({ bridge, scope, availability, attachments, onA
     });
     // The user explicitly resumes a staged upload. No implicit restart after an ambiguous response.
   }
+  chooseRef.current = choose;
+  useEffect(() => {
+    const receive = event => {
+      const files = Array.from(event.detail?.files || []).filter(Boolean);
+      if (!files.length) return;
+      if (details.current) details.current.open = true;
+      if (!availableRef.current) {
+        setError(availabilityRef.current?.reason || 'O adaptador de anexos desta conversa não está configurado.');
+        return;
+      }
+      void chooseRef.current?.(files[0]);
+      if (files.length > 1) setError('Um arquivo por vez; os demais não foram anexados.');
+    };
+    window.addEventListener('sentra:attach-file', receive);
+    return () => window.removeEventListener('sentra:attach-file', receive);
+  }, []);
   async function consult() {
     await exclusive(async () => {
       const value = current.current;
@@ -122,7 +141,7 @@ export function ShellAttachments({ bridge, scope, availability, attachments, onA
       remember(null); file.current = null; setFileReady(false);
     });
   }
-  return <details className="shell-attachments"><summary><Paperclip size={14} /> Anexos</summary>
+  return <details className="shell-attachments" ref={details}><summary><Paperclip size={14} /> Anexos</summary>
     {!available && <p>{availability?.reason || 'O adaptador de anexos desta conversa não está configurado.'}</p>}
     {available && <div><label>Tipo<select value={kind} disabled={busy || Boolean(upload)} onChange={e => setKind(e.target.value)}><option value="auto">Detectar pelo arquivo</option><option value="image">Imagem PNG/JPEG</option><option value="pdf">PDF</option><option value="text">Texto</option><option value="code">Código</option></select></label>
       <label>{upload ? 'Escolher o mesmo arquivo para retomar' : 'Escolher arquivo'}<input type="file" disabled={busy || disabled} accept="image/png,image/jpeg,application/pdf,text/plain,.md,.py,.js,.jsx,.ts,.tsx,.json,.css,.html,.sql,.go,.rs,.ps1,.yaml,.yml" onChange={e => { const selected = e.target.files[0]; e.target.value = ''; void choose(selected); }} /></label>

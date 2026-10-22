@@ -4,12 +4,13 @@ import { TerminalSquare, Bot, Users, StickyNote, Maximize2, Send, Copy, Pencil, 
 import { IconButton, ActionMenu } from './primitives';
 import { useDesktop } from './context';
 import { terminalHistoryLabel } from './terminal-history-state';
+import {TerminalInputNotice} from './terminal-input-notice';
 
 const icons = { terminal: TerminalSquare, agent: Bot, team: Users, note: StickyNote };
 export function PtySlot({ ws, resource, priority = 1 }) {
   const { pool } = useDesktop(); const ref = useRef(null);
   useLayoutEffect(() => pool.attach(ws, resource, ref.current, priority), [pool, ws, resource.id, priority]);
-  return <div ref={ref} className="pty-slot nodrag nowheel nopan" aria-label={'Terminal ' + resource.name} />;
+  return <><div ref={ref} className="pty-slot nodrag nowheel nopan" aria-label={'Terminal ' + resource.name} /><TerminalInputNotice key={pool.key(ws,resource.id)} pool={pool} ws={ws} id={resource.id}/></>;
 }
 export const SessionNode = memo(function SessionNode({ id, data, selected }) {
   const { actions, pool, ws, collaboration } = useDesktop();

@@ -61,7 +61,11 @@ INTENT_FIELDS = {
 class ShellCoordinatorService:
     @staticmethod
     def _mascot(value):
-        if value not in {"blue", "mint", "orange", "purple"}:
+        # Keep legacy persisted IDs; remaining IDs are original animated companions.
+        allowed = {"blue", "mint", "orange", "purple", "pudim", "nuvem", "cacto",
+                   "queijinho", "algodao", "lua", "tesla", "einstein", "turing",
+                   "ada", "grace", "curie", "oxta"}
+        if value not in allowed:
             raise ValueError("unsupported Dot mascot")
         return value
 

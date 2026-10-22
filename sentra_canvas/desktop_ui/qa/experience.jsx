@@ -2,6 +2,7 @@ import React, { useRef, useState, Profiler } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../src/desktop.css';
 import '../src/shell-polish.css';
+import '../src/shell-coucou-macos.css';
 import { ConversationMarkdown } from '../src/shell-markdown';
 import { ShellMessageWindow } from '../src/shell-message-window';
 import { ComputerResizeHandle } from '../src/shell-computer-resize';

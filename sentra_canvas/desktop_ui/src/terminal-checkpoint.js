@@ -21,11 +21,22 @@ export async function decodeCheckpoint(packet){
 }
 export async function writeTerminalFrame(entry,text,current=()=>entry.alive!==false){
  if(!current())throw Error('Visualização de terminal substituída.');
- await new Promise(resolve=>{
+ await new Promise((resolve,reject)=>{
   entry.pendingWrites??=new Set();
-  const done=()=>{entry.pendingWrites.delete(done);resolve()};
+  let settled=false;
+  const finish=error=>{if(settled)return;settled=true;clearTimeout(timer);entry.pendingWrites.delete(done);error?reject(error):resolve()};
+  const done=()=>finish();
+  const timer=setTimeout(()=>{
+   // A lost xterm ACK cannot retain a global read credit forever. Dispose the
+   // emulator before releasing its writes; a late ACK belongs to that emulator.
+   finish(Error('A visualização do terminal parou de responder. Restaurando o histórico.'));
+   entry.renderUncertain=true;entry.snapshotRestored=false;entry.inputSuspended=true;
+   entry.term.options.disableStdin=true;
+   if(entry.onRendererStall)entry.onRendererStall();
+   else {entry.term.dispose();releaseDisposedWrites(entry)}
+  },entry.writeAckTimeoutMs??10000);
   entry.pendingWrites.add(done);
-  try{entry.term.write(text,done)}catch(error){entry.pendingWrites.delete(done);throw error}
+  try{entry.term.write(text,done)}catch(error){finish(error)}
  });
  if(!current())throw Error('Visualização de terminal substituída.');
 }
@@ -51,5 +62,5 @@ export async function restoreCheckpoint(entry,value,current=()=>entry.alive!==fa
  }finally{entry.replaying=false;}
 }
 export function mayWriteTerminal(entry,epoch=entry.inputEpoch){
- return entry.alive&&!entry.inputSuspended&&!entry.replaying&&!entry.term.options.disableStdin&&!entry.transportUnavailable&&entry.inputEpoch===epoch;
+ return entry.alive&&!entry.inputSuspended&&!entry.inputBlocked&&!entry.replaying&&!entry.term.options.disableStdin&&!entry.transportUnavailable&&entry.inputEpoch===epoch;
 }

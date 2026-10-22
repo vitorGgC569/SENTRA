@@ -256,6 +256,10 @@ class CanvasHandler(BaseHTTPRequestHandler):
         qs=parse_qs(path.query)
         ws=(qs.get("ws") or [""])[0]
         a=self.server.canvas
+        if path.path=='/api/terminal/input-status':
+            fields={'ws','id','request_key','fingerprint'}
+            if set(qs)!=fields or any(len(qs[key])!=1 for key in fields):raise ValueError('exact terminal receipt selector required')
+            self._send(200,a.terminal_input_status(ws,qs['id'][0],qs['request_key'][0],qs['fingerprint'][0]));return
         if path.path=="/api/shell/stream":
             if set(qs)-{"project_id","after"} or "project_id" not in qs or any(len(v)!=1 for v in qs.values()):
                 raise ValueError("exact project stream scope required")
@@ -638,7 +642,13 @@ class CanvasHandler(BaseHTTPRequestHandler):
         elif route=="/api/terminals":
             result=a.create_terminal(ws,p["name"],p.get("shell","powershell"),p.get("model"),p.get("effort"))
         elif route=="/api/terminal/input":
-            result=a.terminal_input(ws,p["id"],p["data"])
+            if set(p)-{'ws','id','data','request_key','input_target'} or ('request_key' in p)!=('input_target' in p):raise ValueError('exact terminal input fields required')
+            if 'request_key' in p and (not isinstance(p['request_key'],str) or not 8<=len(p['request_key'])<=200):raise ValueError('durable input request key required')
+            result=a.terminal_input(ws,p["id"],p["data"],request_key=p.get('request_key'),input_target=p.get('input_target'))
+        elif route=='/api/terminal/input-ack':
+            if set(p)!={'ws','id','request_key','fingerprint'}:raise ValueError('exact terminal receipt selector required')
+            from .terminal_input_receipts import acknowledge
+            result=acknowledge(a,ws,p['id'],p['request_key'],p['fingerprint'])
         elif route=="/api/terminal/resize":
             result=a.terminal_resize(ws,p["id"],p["cols"],p["rows"])
         elif route=="/api/terminal/rename":

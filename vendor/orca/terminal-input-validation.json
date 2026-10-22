@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "checkpoint_date": "2026-10-22",
+  "source_base": "5d5b40f",
+  "scope": "bounded terminal input source checkpoint",
+  "desktop_node_passed": 231,
+  "node_report": "sentra_canvas/desktop_ui/.tmp/coucou-terminal-final-node.log",
+  "host_passed": 56,
+  "host_reports": [
+    {
+      "report": ".tmp/coucou-terminal-host-clean.xml",
+      "passed": 51
+    },
+    {
+      "report": ".tmp/coucou-approval-host-final.xml",
+      "passed": 5
+    }
+  ],
+  "jsx_sources_parsed_without_emit": 11,
+  "fresh_interactive_acceptance": false,
+  "interactive_blocker": "Local browser use is disabled in Work settings. Prior automatic rejection of disposable Electron launch was not bypassed.",
+  "inherited_visual_report": {
+    "report": "sentra_canvas/desktop_ui/.tmp/visual-audit/result.json",
+    "scenarios_completed": 10,
+    "functional_console_errors": 2,
+    "errors_fixed_in_source": true,
+    "latest_source_rerun": false
+  },
+  "new_bundle_generated_by_final_review": false,
+  "handoff_static_outputs_preserved": true,
+  "static_outputs_match_final_source": false,
+  "new_setup_generated": false,
+  "installed_sessions_restarted": false,
+  "macro_goal_complete": false,
+  "remaining": [
+    "fresh visual acceptance",
+    "corresponding desktop output bundle",
+    "cross-origin input possession",
+    "journal retention",
+    "multiple pending input conflict recovery",
+    "renderer watchdog",
+    "aggregate heap budgets",
+    "real model and prolonged TUI acceptance",
+    "unified subscriptions",
+    "installed daemon qualification",
+    "physical Android and iPhone acceptance",
+    "Coucou CLI adapters and reversible hooks"
+  ],
+  "limits": {
+    "aggregate_bytes": 262144,
+    "per_terminal_bytes": 65536,
+    "packet_bytes": 16384,
+    "http_utf8_bytes": 4096,
+    "entries": 512,
+    "per_terminal_entries": 128
+  },
+  "delivery_verifies_task_completion": false,
+  "legacy_authenticated_owner_input_preserved": true
+}

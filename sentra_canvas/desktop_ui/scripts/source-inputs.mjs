@@ -4,7 +4,8 @@ import { resolve, relative } from 'node:path';
 
 export async function sourceInputs(project) {
   const names = ['package.json', 'package-lock.json', 'index.html', 'vite.config.js',
-    'scripts/build.mjs', 'scripts/materialize.mjs', 'scripts/source-inputs.mjs'];
+    'scripts/build.mjs', 'scripts/build-island.mjs', 'scripts/materialize.mjs', 'scripts/source-inputs.mjs',
+    'island.html', 'vite.island.config.js'];
   async function walk(directory) {
     for (const item of await readdir(directory, { withFileTypes: true })) {
       const path = resolve(directory, item.name);

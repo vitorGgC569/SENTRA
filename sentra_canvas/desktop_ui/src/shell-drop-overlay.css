@@ -1,0 +1,204 @@
+/* Prévia de drop do SENTRA. Não captura o drop e não bloqueia o ponteiro. */
+
+.shell-drop-overlay {
+  --drop-ink: #2d3040;
+  --drop-muted: #6b6e80;
+  --drop-line: rgba(65, 70, 100, 0.16);
+  --drop-bg: linear-gradient(150deg, rgba(255, 255, 255, 0.94), rgba(247, 247, 251, 0.86));
+  --drop-row: rgba(255, 255, 255, 0.58);
+  --drop-accent: #4f5bc0;
+  --drop-accent-soft: rgba(79, 91, 192, 0.11);
+  --drop-accent-line: rgba(79, 91, 192, 0.24);
+  --drop-shadow: rgba(26, 30, 60, 0.28);
+  --drop-shine: rgba(255, 255, 255, 0.7);
+
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 20px 20px max(24px, env(safe-area-inset-bottom));
+  pointer-events: none;
+  color-scheme: light;
+}
+
+.shell-drop-card {
+  width: min(560px, calc(100vw - 32px));
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 16px;
+  pointer-events: auto;
+  border: 1px solid var(--drop-line);
+  border-radius: 18px;
+  background: var(--drop-bg);
+  color: var(--drop-ink);
+  box-shadow: 0 24px 70px var(--drop-shadow), inset 0 1px 0 var(--drop-shine);
+  backdrop-filter: blur(22px) saturate(1.15);
+  font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+}
+
+.shell-drop-visual {
+  width: 64px;
+  height: 64px;
+  display: grid;
+  place-items: center;
+  border-radius: 18px;
+  background: radial-gradient(85% 85% at 50% 12%, var(--drop-accent-soft), transparent 72%);
+}
+
+.shell-drop-card .shell-mascot.card {
+  width: 64px;
+  height: 64px;
+  margin: 0;
+}
+
+.shell-drop-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.shell-drop-copy > strong {
+  color: var(--drop-ink);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
+}
+
+.shell-drop-copy > p {
+  margin: 0;
+  color: var(--drop-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.shell-drop-files {
+  display: grid;
+  gap: 3px;
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.shell-drop-files li {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 7px;
+  border: 1px solid var(--drop-line);
+  border-radius: 8px;
+  background: var(--drop-row);
+}
+
+.shell-drop-files li > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--drop-ink);
+  font-size: 9.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-drop-files li > small {
+  flex: none;
+  color: var(--drop-muted);
+  font-size: 8.5px;
+  white-space: nowrap;
+}
+
+.shell-drop-extra {
+  color: var(--drop-muted);
+  font-size: 8.5px;
+  line-height: 1.4;
+}
+
+.shell-drop-card .shell-drop-close {
+  align-self: start;
+  padding: 6px 9px;
+  border: 1px solid var(--drop-accent-line);
+  border-radius: 9px;
+  background: var(--drop-accent-soft);
+  color: var(--drop-accent);
+  font: inherit;
+  font-size: 9.5px;
+  font-weight: 650;
+  line-height: 1.3;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, color 160ms ease;
+}
+
+.shell-drop-card .shell-drop-close:hover:not(:disabled) {
+  border-color: var(--drop-accent);
+  background: var(--drop-accent-soft);
+  color: var(--drop-accent);
+}
+
+.shell-drop-card .shell-drop-close:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.shell-drop-card :is(.shell-drop-close):focus-visible {
+  outline: 3px solid var(--drop-accent);
+  outline-offset: 2px;
+}
+
+:root[data-sentra-theme="dark"] .shell-drop-overlay {
+  --drop-ink: #f0f0f4;
+  --drop-muted: #aaaab8;
+  --drop-line: rgba(255, 255, 255, 0.13);
+  --drop-bg: linear-gradient(150deg, rgba(31, 32, 41, 0.95), rgba(20, 21, 28, 0.91));
+  --drop-row: rgba(255, 255, 255, 0.045);
+  --drop-accent: #b7c2ff;
+  --drop-accent-soft: rgba(154, 168, 255, 0.13);
+  --drop-accent-line: rgba(170, 183, 255, 0.28);
+  --drop-shadow: rgba(0, 0, 0, 0.55);
+  --drop-shine: rgba(255, 255, 255, 0.06);
+  color-scheme: dark;
+}
+
+@media (max-width: 560px) {
+  .shell-drop-overlay {
+    padding: 12px 12px max(16px, env(safe-area-inset-bottom));
+  }
+
+  .shell-drop-card {
+    width: calc(100vw - 24px);
+    grid-template-columns: 54px minmax(0, 1fr);
+    gap: 10px 12px;
+    padding: 12px 13px;
+    border-radius: 16px;
+  }
+
+  .shell-drop-visual {
+    width: 52px;
+    height: 52px;
+    border-radius: 15px;
+  }
+
+  .shell-drop-card .shell-mascot.card {
+    width: 52px;
+    height: 52px;
+  }
+
+  .shell-drop-card .shell-drop-close {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell-drop-overlay * {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
+}

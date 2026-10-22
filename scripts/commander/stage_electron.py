@@ -11,7 +11,9 @@ import shutil
 from pathlib import Path
 
 BROWSER_RUNTIME_REQUIRED = ("electron.exe", "resources", "locales", "LICENSE", "LICENSES.chromium.html")
-SURFACE_REQUIRED = ("main.cjs", "policy.cjs", "healthcheck.cjs", "SENTRA.ico", "SENTRA-DOT.ico", "THIRD_PARTY_NOTICES.md")
+SURFACE_REQUIRED = ("main.cjs", "policy.cjs", "healthcheck.cjs", "SENTRA.ico", "SENTRA-DOT.ico", "THIRD_PARTY_NOTICES.md",
+    "presence-window.cjs", "presence-preload.cjs", "island-preload.cjs", "desktop-lifecycle.cjs",
+    "island/island.html", "island/island.css", "island/island.js", "island/source-manifest.json")
 
 
 def _inventory(root: Path) -> dict[str, str]:
@@ -51,6 +53,13 @@ def stage_electron_surface(source: Path, destination: Path) -> dict:
     for name in SURFACE_REQUIRED:
         if not (source / name).is_file():
             raise FileNotFoundError("Electron display source missing: " + name)
+    island = json.loads((source / "island/source-manifest.json").read_text(encoding="utf-8"))
+    desktop = json.loads((source.parent / "sentra_canvas/static/desktop-assets/manifest.json").read_text(encoding="utf-8"))
+    if island.get("schema") != 1 or island.get("source_inputs") != desktop.get("source_inputs"):
+        raise ValueError("Desktop and island source seals differ; rebuild the desktop before packaging")
+    for name in ("island.html", "island.css", "island.js"):
+        if hashlib.sha256((source / "island" / name).read_bytes()).hexdigest() != island.get("files", {}).get(name):
+            raise ValueError("Island artifact differs from its build seal: " + name)
     if destination == source or destination.is_relative_to(source):
         raise ValueError("refusing to stage Electron in its source directory")
     temp = destination.with_name(destination.name + ".staging")
@@ -60,6 +69,7 @@ def stage_electron_surface(source: Path, destination: Path) -> dict:
     try:
         shutil.copytree(runtime, temp, dirs_exist_ok=True, symlinks=False)
         for name in SURFACE_REQUIRED:
+            (temp / name).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source / name, temp / name)
         fingerprints = _inventory(temp)
         proof = {"schema": 1, "authority": "sentra_canvas", "runtime": "electron",
@@ -89,6 +99,7 @@ def validate_electron_payload(root: Path) -> dict:
     hashes = payload.get("files")
     required = {"electron.exe", "main.cjs", "policy.cjs", "healthcheck.cjs", "SENTRA.ico", "SENTRA-DOT.ico",
                 "LICENSE", "LICENSES.chromium.html", "THIRD_PARTY_NOTICES.md"}
+    required.update(SURFACE_REQUIRED)
     if not isinstance(hashes, dict) or not required.issubset(hashes):
         raise ValueError("incomplete Electron build evidence")
     if any(not isinstance(value, str) or len(value) != 64 for value in hashes.values()):

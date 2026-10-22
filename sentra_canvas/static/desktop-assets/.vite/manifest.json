@@ -159,12 +159,6 @@
     ],
     "css": [
       "desktop.css"
-    ],
-    "assets": [
-      "desktop2.png",
-      "desktop3.png",
-      "desktop4.png",
-      "desktop.png"
     ]
   },
   "node_modules/@codemirror/lang-angular/dist/index.js": {
@@ -948,21 +942,5 @@
     "name": "guacamole-common",
     "src": "node_modules/guacamole-common-js/dist/esm/guacamole-common.js",
     "isDynamicEntry": true
-  },
-  "src/assets/opendots/blue.png": {
-    "file": "desktop2.png",
-    "src": "src/assets/opendots/blue.png"
-  },
-  "src/assets/opendots/mint.png": {
-    "file": "desktop3.png",
-    "src": "src/assets/opendots/mint.png"
-  },
-  "src/assets/opendots/orange.png": {
-    "file": "desktop4.png",
-    "src": "src/assets/opendots/orange.png"
-  },
-  "src/assets/opendots/purple.png": {
-    "file": "desktop.png",
-    "src": "src/assets/opendots/purple.png"
   }
 }

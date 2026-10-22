@@ -286,3 +286,77 @@ gateway cifrado/Canvas HTTP reais; 10 testes Node do desktop e cinco do
 transporte passaram. Tipos mobile/transport, builds desktop isolados e
 exportações Android/iOS concluíram. Estes bundles não são APK/IPA assinados.
 Build: `sentra-orca-experimental-9bd339f85792`.
+
+
+### 22/10 — entrada dos terminais e fechamento da frente visual Coucou
+
+- [x] Fila de teclado/paste limitada por sessão e no agregado; pacotes ativos contam no orçamento.
+- [x] Descarte do sufixo de entrada ao ocultar/trocar a visualização ou perder uma confirmação; sem Enter tardio.
+- [x] Recibos no diário protegido existente, vinculados à encarnação observada do terminal.
+- [x] Recuperação de seletores pelo host após mudança da porta HTTP; consulta não reenvia a entrada.
+- [x] Coordenação de escrita entre janelas da mesma origem e retomada manual somente de entrada nova.
+- [x] Revisão da frente Coucou: Dots animados, ilha, conversa, central, decisões e drop pelo adaptador existente.
+- [x] Decisões globais persistem seletores e consultam `conversation_permission_status`, sem repetir a resposta.
+- [x] Entrega ao processo, IDs de recibos e verificação antiga não são apresentados como conclusão atual.
+- [x] Corrigidos os dois erros `target.closest` encontrados no relatório visual herdado.
+- [x] Origem fixada do Coucou e licença MIT preservadas; nenhum asset Mochi ou dependência nova.
+
+Evidência desta revisão: **231 casos Node e 56 casos Python únicos passaram**;
+11 fontes JSX foram analisadas em memória. O primeiro ensaio Python teve 51 casos
+aprovados mas falhou na limpeza do temporário; a repetição em diretório exclusivo
+passou com código de saída zero. Não se contam repetições como novos casos.
+
+A aceitação Electron herdada passou, mas as capturas da frente Coucou tinham dois
+erros funcionais e não foram refeitas após a correção. Controle de navegador local
+desativado nas configurações do Work impede nova conferência interativa nesta
+sessão; isso permanece pendente. A recusa anterior do lançamento Electron não foi
+contornada. Artefatos estáticos já gerados pelo DeepSeek foram preservados, mas não
+representam os ajustes finais desta revisão. Nenhum novo bundle/setup/tag foi gerado.
+
+**P0 e a migração macro continuam abertos.** Posse de entrada entre origens/máquinas,
+retenção dos diários, múltiplos pedidos conflitantes, watchdog, heap dos emuladores,
+CLI/modelos prolongados, assinatura de eventos e homologação instalada/móvel ainda
+precisam dos gates correspondentes. Hooks/adaptadores CLI e biometria Coucou são
+backlog separado, não recursos entregues por esta integração visual.
+
+Relatórios: [entrada dos terminais](ORCA_TERMINAL_INPUT_2026-10-22.md) e
+[revisão Coucou](COUCOU_INTEGRATION_REVIEW_2026-10-22.md).
+
+
+### 22/10 — refinamento visual Coucou / macOS
+
+- [x] Paleta Coucou unificada: preto, carvão e laranja; tema claro correspondente.
+- [x] Home, navegação, cartões, conversa, Canvas, documentos, configurações e portais refinados.
+- [x] Tipografia de sistema, superfícies, estados de foco, movimento e transparência reduzidos.
+- [x] Bundle desktop atualizado, sem rebuild do setup ou reinício das sessões instaladas.
+- [ ] Conferência visual interativa: controle de navegador desativado no Work.
+
+Este checkpoint substitui a limitação anterior de assets estáticos desatualizados:
+os arquivos agora foram compilados com as correções da revisão e o novo tema.
+Nenhum resultado de teste anterior foi reatribuído a esta rodada exclusivamente
+visual. Detalhes: [refinamento macOS](COUCOU_MACOS_VISUAL_2026-10-22.md).
+
+## Native presence delivery — 2026-10-22
+
+The physical installed Canvas now includes the Coucou-inspired native activity
+bar, real Dot projection, tray controls and independent Windows launch. Native
+integration checks covered both connected monitors, hide/reopen, scoped view
+shortcuts and disconnect/reconnect. See
+[delivery and recovery notes](NATIVE_PRESENCE_DELIVERY_2026-10-22.md). This local
+delivery does not constitute the remaining ORCA/mobile migration's completion.
+
+
+## 22/10 — reliability and public download delivery in progress
+
+- Terminal read/xterm-ACK watchdog implemented without PTY restart or command replay.
+  Eighteen targeted cases and 233 desktop cases passed.
+- Physical installed-daemon trial passed: three concurrent ConPTYs, 1,863 reads,
+  three Canvas reopens, unchanged worker PIDs, one delivery for duplicate input.
+  Workload duration: 180 seconds; a separate 30-minute run is in progress.
+- Twenty-nine Python lifecycle/terminal regressions passed.
+- Pages source, actual fixture captures, verified download catalog and standalone
+  Android-preview workflow added. APK/publication completion is a separate gate.
+- Physical devices and iPhone distribution remain pending. The user requests
+  public downloads, rather than assuming local Mac or USB availability.
+
+See [mobile and Pages delivery](MOBILE_PAGES_DELIVERY_2026-10-22.md).

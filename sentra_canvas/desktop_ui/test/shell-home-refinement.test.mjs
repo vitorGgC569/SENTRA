@@ -15,7 +15,8 @@ test('the home refinement keeps search, space action, count, and chevron motion'
   for (const host of hosts) {
     const calls = host.match(/<DotMascot\b[^>]*>/g) || [];
     assert.ok(calls.length > 0);
-    assert.equal(calls.every(call => /execution=\{[^}]+\}/.test(call)), true);
+    // The Home's Oxta is a fixed brand character, not an execution-status indicator.
+    assert.equal(calls.every(call => /execution=\{[^}]+\}/.test(call) || /mascot="oxta" name="Oxta" size="hero" decorative/.test(call)), true);
     assert.equal(calls.some(call => /validated:\s*true|executionValidated|status="working"/.test(call)), false);
   }
   assert.match(jsx, /setChevron\(\{ open, reduced \}\)/);

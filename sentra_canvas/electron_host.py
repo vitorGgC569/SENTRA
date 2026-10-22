@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from .process_lifetime import launch_independent
 
 SURFACE = (Path(sys.executable).resolve().parent / "sentra-electron" if getattr(sys, "frozen", False)
            else Path(__file__).resolve().parents[1] / "sentra_electron")
@@ -87,11 +88,10 @@ def launch_electron(endpoint, *, wait: bool = False) -> int:
     cleanup.daemon = True
     cleanup.start()
     try:
-        process = subprocess.Popen(
+        process = launch_independent(
             [str(executable), str(entry), "--sentra-ticket=" + ticket],
             cwd=SURFACE, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL, close_fds=True,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except Exception:
         path.unlink(missing_ok=True)

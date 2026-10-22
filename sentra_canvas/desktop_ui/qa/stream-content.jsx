@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '../src/desktop.css';
 import '../src/shell-polish.css';
+import '../src/shell-coucou-macos.css';
 import { ShellStreamContent } from '../src/shell-stream-content.jsx';
 
 function Harness() {

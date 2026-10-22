@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import closing
 from sentra_mcp.errors import sanitize_error
 from pathlib import Path
@@ -25,6 +26,7 @@ from .adapters import catalog as terminal_catalog,cli_argv,resolve as resolve_ad
 
 class Session:
     def __init__(self, persist=None, on_persistence_error=None):
+        self.input_instance_id=uuid.uuid4().hex
         self.lock=threading.RLock()
         self.decoder=codecs.getincrementaldecoder("utf-8")("replace")
         self.base=0
@@ -2347,17 +2349,20 @@ class Canvas:
         from .terminal_frames import bounded_output
         record=self.store.resource("terminals",terminal,ws)
         session=self._sessions.get(terminal)
+        from .terminal_input_receipts import input_identity
+        identity=input_identity(self,ws,terminal,session)
+        def frame(value):return bounded_output({**value,**identity})
         if not session:
             if terminal in self._pty_histories and self._pty_client is not None:
                 data=self._pty_client.call('output',{'workspace_id':ws,'terminal_id':terminal,'cursor':int(cursor)})
-                return bounded_output({**data,'status':'history_restored','recoverable':False})
-            return bounded_output({**self.store.terminal_output(ws,terminal,cursor),
+                return frame({**data,'status':'history_restored','recoverable':False})
+            return frame({**self.store.terminal_output(ws,terminal,cursor),
                     "status":record["status"],"recoverable":False,
                     "persisted":True})
         if getattr(session.pty,"durable",False):
             data=session.pty.output(cursor)
             code=data.pop("exit_code")
-            return bounded_output({**data,"status":"running" if data.get('process_live',code is None) else "exited",
+            return frame({**data,"status":"running" if data.get('process_live',code is None) else "exited",
                     "exit_code":code,"recoverable":data.get('process_live',code is None)})
         data=session.output(cursor)
         state=session.pty.poll()
@@ -2367,17 +2372,24 @@ class Canvas:
                     exit_code=state,recoverable=True,
                     persisted=session.persistence_error is None,
                     persistence_error=session.persistence_error)
-        return bounded_output(data)
+        return frame(data)
 
-    def terminal_input(self,ws,terminal,data):
+    def terminal_input(self,ws,terminal,data,*,request_key=None,input_target=None):
         self.store.resource("terminals",terminal,ws)
         if not isinstance(data,str) or len(data)>4096:
             raise ValueError("invalid terminal input")
+        if request_key is not None:
+            from .terminal_input_receipts import send
+            return send(self,ws,terminal,data,request_key,input_target)
         session=self._sessions.get(terminal)
         if session is None or session.pty is None:
             raise TerminalError("terminal is no longer attached")
         session.pty.write(data.encode("utf-8"))
         return {"ok":True}
+
+    def terminal_input_status(self,ws,terminal,request_key,fingerprint):
+        from .terminal_input_receipts import inspect
+        return inspect(self,ws,terminal,request_key,fingerprint)
 
     def terminal_resize(self,ws,terminal,cols,rows):
         self.store.resource("terminals",terminal,ws)

@@ -1,7 +1,7 @@
 // Acceptance runner for the disposable local HTML fixture, never a live app.
 const {app,BrowserWindow}=require('electron');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const target=path.resolve(process.argv[2]),output=path.resolve(process.argv[3]);
+const argv=process.argv.slice(2).filter(arg=>arg!=='--'),target=argv[0],output=path.resolve(argv[1]),remote=/^https?:\/\//i.test(target);
 fs.mkdirSync(output,{recursive:true});app.setPath('userData',path.join(output,'profile-'+process.pid));
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 app.whenReady().then(async()=>{
@@ -12,9 +12,9 @@ app.whenReady().then(async()=>{
  const click=label=>run(`(()=>{const b=[...document.querySelectorAll('button,[role=menuitem]')].find(b=>b.textContent.trim()===${JSON.stringify(label)}||b.getAttribute('aria-label')===${JSON.stringify(label)});if(!b)throw Error('Missing control '+${JSON.stringify(label)});b.click()})()`);
  const capture=async name=>{await run('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))');await pause(150);fs.writeFileSync(path.join(output,name),(await win.webContents.capturePage()).toPNG())};
  try{
-  await win.loadFile(target);await wait("document.querySelector('.sw-welcome h2')");
-  const initial=await run(`({mode:document.querySelector('.sentra-workspace').dataset.mode,members:!!document.querySelector('.sw-members'),explorer:!!document.querySelector('.sw-explorer'),tabs:getComputedStyle(document.querySelector('.sw-tabs')).display,files:window.fixture.files,effects:window.fixture.effects,styled:getComputedStyle(document.querySelector('.sw-welcome')).display,mascot:document.querySelector('.sw-welcome img').naturalWidth})`);
-  assert.deepEqual(initial,{mode:'simple',members:false,explorer:false,tabs:'none',files:0,effects:0,styled:'flex',mascot:512});
+  await (remote?win.loadURL(target):win.loadFile(path.resolve(target)));await wait("document.querySelector('.sw-welcome h2')");
+  const initial=await run(`({mode:document.querySelector('.sentra-workspace').dataset.mode,members:!!document.querySelector('.sw-members'),explorer:!!document.querySelector('.sw-explorer'),tabs:getComputedStyle(document.querySelector('.sw-tabs')).display,files:window.fixture.files,effects:window.fixture.effects,styled:getComputedStyle(document.querySelector('.sw-welcome')).display,mascot:!!document.querySelector('.sw-welcome canvas')})`);
+  assert.deepEqual(initial,{mode:'simple',members:false,explorer:false,tabs:'none',files:0,effects:0,styled:'flex',mascot:true});
   await capture('simple.png');
   await click('Conhecer este projeto');assert.match(await run('window.fixture.proposed'),/Não altere nada/);assert.equal(await run('window.fixture.effects'),0);
   await click('Nova sessão');await wait("document.querySelector('[role=dialog]')");

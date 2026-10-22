@@ -1,0 +1,13 @@
+/* Only the animated figures. No gallery cards, captions or companion backgrounds. */
+.shell-mascot.dot-companion { display:inline-flex; position:relative; flex-shrink:0; align-items:center; justify-content:center; background:transparent; overflow:visible; }
+.shell-mascot.dot-companion canvas { display:block; width:100%; height:100%; aspect-ratio:1; background:transparent; pointer-events:auto; }
+/* Rotating an already-rasterized Home canvas softens fine details on 100% displays. */
+.opendots-shell .shell-home-hero .shell-mascot.dot-companion.hero { transform:none; }
+:is(.opendots-shell,.shell-modal) .shell-mascot-picker { border:0; background:transparent; padding:0; }
+:is(.opendots-shell,.shell-modal) .shell-mascot-picker > div { display:grid; grid-template-columns:repeat(auto-fill,minmax(66px,1fr)); gap:7px; justify-content:initial; max-height:280px; overflow-y:auto; }
+:is(.opendots-shell,.shell-modal) .shell-mascot-picker button { position:relative; min-width:0; width:100%; height:76px; flex:none; justify-content:center; padding:5px; background:transparent; border:2px solid transparent; border-radius:12px; color:inherit; }
+:is(.opendots-shell,.shell-modal) .shell-mascot-picker button[aria-pressed=true] { border-color:var(--shell-ink); }
+:is(.opendots-shell,.shell-modal) .shell-mascot-picker button:focus-visible { outline:2px solid var(--shell-ink); outline-offset:2px; }
+:is(.opendots-shell,.shell-modal) .shell-mascot-picker button .shell-mascot { width:60px; height:60px; max-width:100%; }
+:is(.opendots-shell,.shell-modal) .shell-mascot-picker button .shell-mascot-check { position:absolute; top:2px; right:2px; }
+@media (prefers-reduced-motion:reduce) { .shell-mascot.dot-companion { animation:none!important; transform:none!important; } }

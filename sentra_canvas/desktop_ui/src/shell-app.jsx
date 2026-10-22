@@ -1,5 +1,7 @@
+import { desktopProjection } from './desktop-presence.js';
+import { closestEventTarget } from './shell-event-target.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Activity, Bot, ChevronRight, FileText, Folder, Heart, Home, Layers, Menu, MessageCircle, Monitor, Moon, Plus, RefreshCw, Search, Settings2, Sun, Users, X } from 'lucide-react';
+import { Activity, Bot, ChevronRight, FileText, Folder, Heart, Home, Layers, Menu, MessageCircle, Monitor, Moon, Plus, RefreshCw, Search, Settings2, Sparkles, Sun, Users, X } from 'lucide-react';
 import { shellBridge, rememberNavigation, restoreNavigation, pendingShellMutations, acknowledgeVerifiedPending } from './shell-bridge';
 import { ShellConversation } from './shell-conversation';
 import { conversationCache } from './shell-conversation-cache';
@@ -12,6 +14,9 @@ import { ShellMachines } from './shell-machines';
 import { ShellCode } from './shell-code';
 import { ShellInteractions } from './shell-interactions';
 import { ShellApprovalNotifications } from './shell-approval-notifications';
+import { ShellIsland } from './shell-island';
+import { ShellHub } from './shell-hub';
+import { ShellDropOverlay } from './shell-drop-overlay';
 import { CanvasWorkspace } from './workspace/DotWorkspace';
 import {ConversationResource} from './workspace/ConversationResource';
 import {stageConversationDraft} from './shell-draft-staging';
@@ -43,6 +48,17 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
     document.documentElement.dataset.sentraTheme = theme;
     try { localStorage.setItem('sentra_shell_theme', theme); } catch { /* Keep the in-memory preference. */ }
   }, [theme]);
+  // The floating island is a presence layer, never a second navigation authority.
+  const [islandEnabled, setIslandEnabled] = useState(() => {
+    try { return localStorage.getItem('sentra_shell_island') !== 'off'; }
+    catch { return true; }
+  });
+  const [islandDecisionCount, setIslandDecisionCount] = useState(0);
+  const [presenceObservedAt, setPresenceObservedAt] = useState(0);
+  const nativePresence = window.sentraDesktopPresence?.available === true;
+  useEffect(() => {
+    try { localStorage.setItem('sentra_shell_island', islandEnabled ? 'on' : 'off'); } catch { /* Memory only. */ }
+  }, [islandEnabled]);
   const [nav, setNav] = useState(restoreNavigation), [home, setHome] = useState(empty), [detail, setDetail] = useState(null);
   const [collections, setCollections] = useState({}), [pages, setPages] = useState({}), [documents, setDocuments] = useState([]);
   const [dotPreferences, setDotPreferences] = useState([]);
@@ -54,6 +70,9 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
   const [search, setSearch] = useState(''), [homeQuery, setHomeQuery] = useState(''), [rail, setRail] = useState(() => !window.matchMedia('(max-width:700px)').matches), [context, setContext] = useState(false);
   const updateMenuRef = useRef(null);
   const [dialog, setDialog] = useState(null), [coordinate, setCoordinate] = useState(false), [events, setEvents] = useState([]);
+  const [hubOpen, setHubOpen] = useState(false);
+  const [dropActive, setDropActive] = useState(false), [droppedFiles, setDroppedFiles] = useState([]);
+  const fileDragDepth = useRef(0);
   const [coordinationKind, setCoordinationKind] = useState('create_team');
   const [machinePanel, setMachinePanel] = useState(false);
   const [computerOpen, setComputerOpen] = useState(false);
@@ -176,6 +195,32 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
     || a.position - b.position || a.dot_id.localeCompare(b.dot_id));
   const canvasDot = rootDots.find(row => row.dot_id === (dot?.canvas_root_dot_id || dot?.dot_id || nav.dot_id)) || (!nav.dot_id ? rootDots[0] : null);
   const projectRunning = home.run?.state === 'RUNNING';
+  const islandProjectName = space?.name || workspaces.find(row => row.id === projectId)?.name || '';
+  useEffect(() => {
+    if (!nativePresence) return;
+    window.sentraDesktopPresence.publish(desktopProjection({ enabled: islandEnabled,
+      projectId, projectName: islandProjectName, dots, conversations, events,
+      decisions: islandDecisionCount, observedAt: presenceObservedAt,
+      connected: homeSettled && !homeReadError && !warmVisual && home.project_id === projectId,
+    }));
+  }, [nativePresence, islandEnabled, projectId, islandProjectName, dots, conversations, events,
+    islandDecisionCount, presenceObservedAt, homeSettled, homeReadError, warmVisual, home.project_id]);
+  useEffect(() => {
+    if (!nativePresence) return;
+    return window.sentraDesktopPresence.onAction(value => {
+      if (value?.projectId !== projectId) return;
+      if (value.action === 'enable') { setIslandEnabled(true); return; }
+      if (value.action === 'hide') { setIslandEnabled(false); return; }
+      if (value.action === 'hub') { setHubOpen(true); return; }
+      if (value.action === 'decisions') { window.dispatchEvent(new Event('sentra:decisions:reveal')); return; }
+      const selected = dots.find(row => row.dot_id === value.dotId);
+      if (!selected) return;
+      if (value.action === 'canvas') { openCanvas(selected); return; }
+      const existing = conversations.find(row => row.conversation_id === value.conversationId && row.dot_id === selected.dot_id);
+      if (value.action === 'conversation' && existing) openConversation(existing);
+    });
+  }, [nativePresence, projectId, dots, conversations]);
+
   const bridge = useCallback((payload, options) => shellBridge({ project_id: currentProject.current, ...payload }, options), []);
   const preferenceGeneration = useRef(0);
   async function loadDotPreferences(project = currentProject.current, spaceId = currentSpaceId) {
@@ -438,6 +483,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
       if (ticket !== generation.current || currentProject.current !== project) return;
       if (value.project_id !== project) throw Error('O shell retornou outro projeto.');
       setHome({ ...empty, ...value }); setError(''); setHomeReadError(''); setHomeSettled(true);
+      setPresenceObservedAt(Date.now());
       setWarmVisual(false);
       saveVisualHome(project, value);
       setEvents(old => mergeEvents(old, value.activity?.items || []));
@@ -506,7 +552,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
   }, [nav, projectId]);
   useEffect(() => {
     const keydown = event => {
-      if (event.target.closest('[role=dialog]')) return;
+      if (closestEventTarget(event, '[role=dialog]')) return;
       if (closeUpdateMenuOnEscape(event, updateMenuRef.current)) return;
       if (navRef.current.view === 'canvas') return;
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); onTools('history'); }
@@ -530,7 +576,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
     void loadCollection('conversation_list', 0, false, currentSpaceId);
     void refreshDocuments();
     return () => { disposed = true; };
-  }, [projectId, currentSpaceId, homeSettled, warmVisual, home.project_id]);
+  }, [projectId, currentSpaceId, homeSettled, warmVisual, home.project_id, nativePresence, islandEnabled]);
   useEffect(() => {
     if (nav.view === 'spaces') void loadCollection('space_list');
   }, [nav.view, projectId]);
@@ -563,23 +609,26 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
   }, [projectId, currentSpaceId, nav.view, nav.conversation_id, homeSettled, warmVisual, home.project_id, home.conversations, conversationLookupRevision]);
   useEffect(() => {
     if (!projectId || !currentSpaceId || !homeSettled || warmVisual || home.project_id !== projectId) return;
-    let disposed = false, fetching = false, sequence = eventCursor;
+    let disposed = false, fetching = false, sequence = eventCursor, catalogAt = 0;
     const poll = async () => {
-      if (disposed || fetching || document.hidden) return;
+      if (disposed || fetching || (document.hidden && !(nativePresence && islandEnabled))) return;
       fetching = true;
       try {
         const value = await shellBridge({ action: 'events', project_id: projectId, space_id: currentSpaceId, after_seq: sequence, limit: 50 });
         if (disposed) return;
         setEvents(old => mergeEvents(old, value.items || [])); setHasMoreEvents(Boolean(value.has_more));
         sequence = value.next_cursor ?? value.cursor ?? sequence; setEventCursor(sequence);
-        if (value.items?.length) {
+        // A quiet event stream is not proof that a previous process is still running.
+        // Refresh the actual inventory even while the main window is minimized.
+        if (value.items?.length || (nativePresence && islandEnabled && Date.now() - catalogAt >= 8000)) {
+          catalogAt = Date.now();
           void refresh(); void loadCollection('dot_list', 0, false, currentSpaceId); void loadCollection('conversation_list', 0, false, currentSpaceId);
         }
       } catch (e) { if (!disposed) setError(e.message); } finally { fetching = false; }
     };
     const timer = setInterval(poll, 4000); void poll();
     return () => { disposed = true; clearInterval(timer); };
-  }, [projectId, currentSpaceId, homeSettled, warmVisual, home.project_id]);
+  }, [projectId, currentSpaceId, homeSettled, warmVisual, home.project_id, nativePresence, islandEnabled]);
   function navigate(next) {
     const changesDocumentScope = next.project_id && next.project_id !== projectId || next.space_id && next.space_id !== currentSpaceId;
     if (changesDocumentScope && codePending) { setCodePanel(true); setContext(true); setError('Consulte a operação Code Mode pendente antes de trocar de projeto ou Space.'); return; }
@@ -657,6 +706,47 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
   }
   function openCanvas(row) { if (row) navigate(canvasNavigation(row)); else navigate({ view:'canvas', dot_id:null, conversation_id:null }); }
   function openConversation(row,options) { if(options?.draft&&stageConversationDraft(sessionStorage,row,options.draft))window.dispatchEvent(new CustomEvent('sentra:draft-staged',{detail:{project_id:row.project_id,conversation_id:row.conversation_id}}));navigate({ view: 'chat', space_id: row.space_id, conversation_id: row.conversation_id, dot_id: row.dot_id }); }
+  function draggingFiles(event) {
+    const types = event.dataTransfer?.types;
+    return Boolean(types && Array.from(types).includes('Files'));
+  }
+  function previewDroppedFiles(event) {
+    let items = [];
+    try { items = Array.from(event.dataTransfer?.items || []); } catch { items = []; }
+    const files = items.filter(item => item.kind === 'file').map(item => { try { return item.getAsFile(); } catch { return null; } }).filter(Boolean);
+    if (!files.length) return;
+    setDroppedFiles(previous => previous.length === files.length
+      && previous.every((row, index) => row.name === files[index].name && row.size === files[index].size)
+      ? previous : files);
+  }
+  function dragFilesIn(event) {
+    if (!draggingFiles(event)) return;
+    event.preventDefault();
+    fileDragDepth.current += 1;
+    if (nav.view === 'chat') { event.dataTransfer.dropEffect = 'copy'; setDropActive(true); previewDroppedFiles(event); }
+    else event.dataTransfer.dropEffect = 'none';
+  }
+  function dragFilesOver(event) {
+    if (!draggingFiles(event)) return;
+    event.preventDefault();
+    if (nav.view === 'chat') { event.dataTransfer.dropEffect = 'copy'; setDropActive(true); previewDroppedFiles(event); }
+    else event.dataTransfer.dropEffect = 'none';
+  }
+  function dragFilesOut(event) {
+    if (!draggingFiles(event)) return;
+    fileDragDepth.current = Math.max(0, fileDragDepth.current - 1);
+    if (!fileDragDepth.current) { setDropActive(false); setDroppedFiles([]); }
+  }
+  function dropFiles(event) {
+    if (!draggingFiles(event)) return;
+    event.preventDefault();
+    fileDragDepth.current = 0;
+    setDropActive(false);
+    setDroppedFiles([]);
+    if (nav.view !== 'chat') { setError('Abra uma conversa para anexar arquivos.'); return; }
+    const files = Array.from(event.dataTransfer?.files || []);
+    if (files.length) window.dispatchEvent(new CustomEvent('sentra:attach-file', { detail: { files } }));
+  }
   useEffect(() => {
     const reveal = event => {
       const selected = dots.find(row => row.agent_id === event.detail?.agent_id);
@@ -714,7 +804,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
       className={'shell-dot-nav-row' + (active ? ' selected' : '') + (drop ? ' drop-' + drop : '')}
       draggable={!dotPreferenceBusy && !archivedLocal}
       onDragStart={event => {
-        if (event.target.closest('.icon-button')) { event.preventDefault(); return; }
+        if (closestEventTarget(event, '.icon-button')) { event.preventDefault(); return; }
         draggingDot.current = { dot_id: row.dot_id, project_id: projectId, space_id: currentSpaceId };
         event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', row.dot_id);
       }}
@@ -758,14 +848,26 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
         <button aria-current={nav.view === 'documents' ? 'page' : undefined} onClick={() => navigate({ view: 'documents' })}><FileText size={17} />Documentos</button>
         <button aria-current={nav.view === 'canvas' ? 'page' : undefined} onClick={() => navigate({ view: 'canvas' })}><Layers size={17} />Canvas</button>
         <button aria-current={nav.view === 'network' ? 'page' : undefined} onClick={() => navigate({ view: 'network' })}><Users size={17} />Rede</button></nav></>}
-      <div className="shell-rail-footer"><button onClick={() => tools('registry')}><Settings2 size={16} />Ambientes e modelos</button><button onClick={() => onTools('skills')}><Layers size={16} />Skills e ferramentas</button><button onClick={onWorkspaceCreate}><Plus size={16} />Novo projeto</button></div>
+      <div className="shell-rail-footer"><button onClick={() => setHubOpen(true)}><Sparkles size={16} />Central do Oxta</button><button onClick={() => tools('registry')}><Settings2 size={16} />Ambientes e modelos</button><button onClick={() => onTools('skills')}><Layers size={16} />Skills e ferramentas</button><button onClick={onWorkspaceCreate}><Plus size={16} />Novo projeto</button></div>
     </aside>
-    <div className="shell-workspace"><header className="shell-topbar pywebview-drag-region"
-      onMouseDown={e => { if (e.target.closest('button, input, select, textarea, a, summary, details')) e.stopPropagation(); }}
-      onDoubleClick={e => { if (!e.target.closest('button, input, select, textarea, a, summary, details')) void window.pywebview?.api?.toggle_maximize(); }}>
+    <div className="shell-workspace" onDragEnter={dragFilesIn} onDragOver={dragFilesOver} onDragLeave={dragFilesOut} onDrop={dropFiles}><header className="shell-topbar pywebview-drag-region"
+      onMouseDown={e => { if (closestEventTarget(e, 'button, input, select, textarea, a, summary, details')) e.stopPropagation(); }}
+      onDoubleClick={e => { if (!closestEventTarget(e, 'button, input, select, textarea, a, summary, details')) void window.pywebview?.api?.toggle_maximize(); }}>
       <button className="shell-icon" onClick={() => setRail(value => !value)} aria-label={rail ? 'Recolher navegação' : 'Mostrar navegação'} aria-expanded={rail}><Menu size={19} /></button>
       <div className="shell-breadcrumb pywebview-drag-region"><span>{space?.name || workspaces.find(row => row.id === projectId)?.name || 'Seu trabalho'}</span><ChevronRight size={12} /><strong>{titles[nav.view]}</strong></div>
       <div className="shell-topbar-actions">{home.run && <span className="shell-run-label"><Status value={home.run.state} /></span>}
+        <button type="button" className={'shell-icon shell-island-toggle' + (islandEnabled ? ' is-on' : '')} data-island-toggle
+          onClick={() => {
+            if (nativePresence) { setIslandEnabled(true); window.sentraDesktopPresence.toggle(); return; }
+            if (!islandEnabled) {
+              setIslandEnabled(true);
+              window.dispatchEvent(new CustomEvent('sentra:island-open'));
+            } else {
+              window.dispatchEvent(new CustomEvent('sentra:island-toggle'));
+            }
+          }} aria-pressed={islandEnabled}
+          title={nativePresence ? 'Mostrar barra de atividade dos Dots' : islandEnabled ? 'Abrir a ilha do Oxta' : 'Mostrar a ilha do Oxta'}
+          aria-label={nativePresence ? 'Mostrar barra de atividade dos Dots' : islandEnabled ? 'Abrir a ilha do Oxta' : 'Mostrar a ilha do Oxta'}><Sparkles size={17} aria-hidden="true" /></button>
         <button className="shell-icon" onClick={() => setTheme(value => value === 'dark' ? 'light' : 'dark')}
           aria-label={theme === 'dark' ? 'Ativar modo claro' : 'Ativar modo escuro'} title={theme === 'dark' ? 'Modo claro' : 'Modo escuro'}>
           {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}</button>
@@ -785,6 +887,33 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
           </div>
         </details>
         <button className="shell-icon" onClick={() => setContext(value => !value)} aria-label="Mostrar painel contextual" aria-expanded={context}><Activity size={17} /></button>{nativeControls}</div></header>
+      <ShellIsland enabled={islandEnabled && !nativePresence} onToggle={() => setIslandEnabled(false)}
+        dots={rootDots} conversations={conversations} events={events} decisions={islandDecisionCount}
+        projectName={islandProjectName}
+        onOpenConversation={row => {
+          const target = row?.conversation || conversations.find(item => item.conversation_id === row?.conversationId);
+          if (target) openConversation(target);
+          else if (row?.conversationId) navigate({ view: 'chat', space_id: row.space_id || currentSpaceId, conversation_id: row.conversationId, dot_id: row.dotId });
+        }}
+        onOpenCanvas={() => openCanvas(canvasDot)}
+        onOpenHub={() => setHubOpen(true)}
+        onReviewDecisions={() => {
+          const center = document.querySelector('.shell-decisions-center');
+          if (center) {
+            center.scrollIntoView({ block: 'nearest' });
+            center.querySelector('button:not([disabled])')?.focus({ preventScroll: true });
+          } else {
+            const first = conversations[0];
+            if (first) openConversation(first); else setContext(true);
+          }
+        }} />
+      <ShellHub open={hubOpen} onClose={() => setHubOpen(false)} home={home} dots={rootDots}
+        events={events} project={{ name: islandProjectName, project_id: projectId }} models={models}
+        onEditDot={row => { setHubOpen(false); setDialog({ kind: 'dot', dot: row }); }}
+        onNavigate={next => { setHubOpen(false); if (next?.view) navigate(next); }}
+        onTools={tool => { setHubOpen(false); onTools?.(tool); }} />
+      <ShellDropOverlay active={dropActive} files={{ files: droppedFiles, dot: displayDot }}
+        onClose={() => { fileDragDepth.current = 0; setDropActive(false); setDroppedFiles([]); }} />
       <span className="shell-sr-only" role="status" aria-live="polite">
         {updatingCode ? 'Atualização do SENTRA em andamento. Aguarde a reinicialização.' : ''}
       </span>
@@ -816,9 +945,9 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
           {nav.view === 'chat' && !conversation && (['error', 'recovering'].includes(matchingResolution?.status) ? <div className="shell-empty" role="alert"><h2>Conversa indisponível neste Space</h2><p>{matchingResolution.error}</p><button type="button" onClick={() => setConversationLookupRevision(value => value + 1)}>Consultar conversa novamente</button><button onClick={() => navigate({ view: 'conversations' })}>Ver conversas</button></div> : <p className="shell-empty" role="status">Abrindo a conversa…</p>)}</div>
         {!['canvas', 'documents', 'chat'].includes(nav.view) && <main className="shell-content" id="shell-main-content">
           {!projectId ? <div className="shell-welcome"><h1>Um lugar para dar continuidade.</h1><p>Crie ou adicione um projeto para organizar Dots, conversas e documentos.</p><button className="shell-primary" onClick={onWorkspaceCreate}>Criar projeto</button></div> : !homeSettled ? (homeReadError && !loading ? <div className="shell-error" role="alert" data-mutation="false" data-resend="false"><strong>{explainFailure({ read: true, message: homeReadError }).headline}</strong><p>{explainFailure({ read: true, message: homeReadError }).safeNext}</p><button type="button" onClick={() => { setLoading(true); setHomeReadError(''); void refresh(); }}>Consultar de novo</button></div> : <p role="status" aria-busy="true" className="shell-empty">Consultando seu trabalho…</p>) : <>
-          {nav.view === 'home' && <><div className="shell-page-heading shell-home-hero"><div><span className="shell-eyebrow">SEU ESPAÇO DE TRABALHO</span><h1>O que vamos fazer hoje?</h1><p>Converse com seus Dots. Continue de onde parou.</p></div><DotMascot mascot={rootDots[0]?.mascot} identity={rootDots[0]?.agent_id || rootDots[0]?.dot_id} name={rootDots[0]?.name || 'Dot'} status={rootDots[0]?.status} execution={rootDots[0]?.execution} size="hero" decorative /></div>
+          {nav.view === 'home' && <><div className="shell-page-heading shell-home-hero"><div><span className="shell-eyebrow">SEU ESPAÇO DE TRABALHO</span><h1>Seu trabalho, em movimento.</h1><p>Converse com seus Dots, acompanhe as ações e continue de onde parou.</p><div className="shell-home-hero-actions"><button className="shell-primary" onClick={() => navigate({ view: 'dots' })}><MessageCircle size={15}/>Nova conversa</button><button onClick={() => setContext(true)}><Activity size={15}/>Ver atividade</button></div></div><DotMascot mascot="oxta" name="Oxta" size="hero" decorative /></div>
             <HomeResumePanel home={home} surface={restoreWorkSurface()} onNavigate={navigate} onConversation={openConversation} />
-            <section className="shell-home-start"><MessageCircle size={24} /><div><h2>Uma ideia pode virar trabalho.</h2><p>Escolha um Dot e comece uma conversa.</p></div><button className="shell-primary" onClick={() => navigate({ view: 'dots' })}>Escolher Dot <ChevronRight size={15} /></button></section>
+            {!rootDots.length && <section className="shell-home-start"><MessageCircle size={24} /><div><h2>Uma ideia pode virar trabalho.</h2><p>Escolha um Dot e comece uma conversa.</p></div><button className="shell-primary" onClick={() => navigate({ view: 'dots' })}>Escolher Dot <ChevronRight size={15} /></button></section>}
             <div className="shell-section-heading"><h2>Seus Dots</h2><button onClick={() => setDialog({ kind: 'dot' })} disabled={!space || !projectRunning} title={!projectRunning ? 'Inicie o projeto para admitir um Dot.' : undefined}><Plus size={14} />Novo Dot</button></div>
             <div className="shell-dot-grid">{rootDots.slice(0, 6).map(dotCard)}</div>{!home.dots.length && <p className="shell-empty">Crie um Dot especializado no Space deste projeto.</p>}
             <div className="shell-section-heading"><h2>Conversas recentes</h2><button onClick={() => navigate({ view: 'conversations' })}>Ver todas</button></div><div className="shell-conversation-list">{home.conversations.slice(0, 8).map(conversationRow)}</div>
@@ -859,6 +988,7 @@ export function OpenDotsShell({ children, projectId, workspaces, models, onProje
     {dialog && <ShellEntityDialog key={(dialog.dot?.dot_id || dialog.kind) + ':' + currentSpaceId} kind={dialog.kind} dot={dialog.dot} canvasRoot={dialog.canvasRoot} initialModel={typeof dialog.initialModel === 'string' ? dialog.initialModel : dialog.initialModel?.id} space={space} projectId={projectId} models={models} bridge={bridge}
       onClose={() => setDialog(null)} onCreated={async value => { if (dialog.canvasRoot && value.dot_id) await bridge({ action: 'dot_canvas_terminal', space_id: space.space_id, dot_id: dialog.canvasRoot, member_dot_id: value.dot_id, request_key: crypto.randomUUID() }); await refresh(); if (dialog.kind === 'space') await selectSpace(value); else { await loadCollection('dot_list'); } }} />}
     <ShellApprovalNotifications inlineConversationId={nav.view==='chat'?conversation?.conversation_id:null} bridge={bridge} projectId={projectId} shellError={conversationError || error}
+      onCount={setIslandDecisionCount}
       onOpenConversation={(conversationId, spaceId) => navigate({ view:'chat', space_id:spaceId, conversation_id:conversationId })} />
     {coordinate && space && <ShellCoordinateDialog initialKind={coordinationKind} space={space} conversation={conversation} dots={dots} teams={teams} bridge={bridge} onClose={() => { setCoordinate(false); setCoordinationKind('create_team'); }} onChanged={async () => { await refresh(); await loadCollection('dot_list'); }} />}
   </div>;

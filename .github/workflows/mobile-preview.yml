@@ -1,0 +1,85 @@
+name: SENTRA Android preview
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sentra-android-preview
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      contents: write
+    env:
+      CI: '1'
+      EXPO_NO_TELEMETRY: '1'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install transport and mobile dependencies
+        run: |
+          npm ci --prefix integrations/orca-mobile/transport
+          npm ci --prefix integrations/orca-mobile/app
+      - name: Check types and contracts
+        run: |
+          npm --prefix integrations/orca-mobile/transport run typecheck
+          npm --prefix integrations/orca-mobile/transport test
+          npm --prefix integrations/orca-mobile/app run typecheck
+          npm --prefix integrations/orca-mobile/app test
+      - name: Prepare isolated preview identity
+        env:
+          BUILD_NUMBER: ${{ github.run_number }}
+        run: |
+          python scripts/site/android_preview.py --prepare "$BUILD_NUMBER"
+          npm --prefix integrations/orca-mobile/app run build:terminal
+          cd integrations/orca-mobile/app
+          npx --no-install expo prebuild --platform android --no-install
+      - name: Configure protected signing
+        env:
+          KEYSTORE: ${{ secrets.SENTRA_ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.SENTRA_ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.SENTRA_ANDROID_KEY_ALIAS }}
+        run: |
+          test -n "$KEYSTORE" && test -n "$STORE_PASSWORD" && test -n "$KEY_ALIAS"
+          printf '%s' "$KEYSTORE" | base64 --decode > "$RUNNER_TEMP/sentra-preview.p12"
+          chmod 600 "$RUNNER_TEMP/sentra-preview.p12"
+          python scripts/site/android_preview.py
+      - name: Build self-contained APK
+        working-directory: integrations/orca-mobile/app/android
+        env:
+          SENTRA_ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/sentra-preview.p12
+          SENTRA_ANDROID_STORE_PASSWORD: ${{ secrets.SENTRA_ANDROID_STORE_PASSWORD }}
+          SENTRA_ANDROID_KEY_ALIAS: ${{ secrets.SENTRA_ANDROID_KEY_ALIAS }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon --max-workers=2 -PreactNativeArchitectures=arm64-v8a
+      - name: Verify and prepare release
+        env:
+          APK_PATH: integrations/orca-mobile/app/android/app/build/outputs/apk/release/app-release.apk
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          python scripts/site/package_android.py
+          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify --verbose .tmp/mobile-release/SENTRA-Android-preview.apk
+      - name: Publish preview only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="mobile-preview-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" .tmp/mobile-release/* --target "$GITHUB_SHA" --prerelease --title "SENTRA Android · $tag" --notes-file .tmp/mobile-release/RELEASE-NOTES.md
+      - name: Remove runner signing material
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/sentra-preview.p12" ]; then rm -- "$RUNNER_TEMP/sentra-preview.p12"; fi

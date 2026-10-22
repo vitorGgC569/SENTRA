@@ -19,6 +19,11 @@ def root_dir() -> Path:
 
 def main(argv=None):
     arguments=list(sys.argv[1:] if argv is None else argv)
+    if '--windows-interactive-launch' in arguments:
+        # This entry is launched once by the interactive Windows task service,
+        # which owns its lifetime instead of the developer application's job.
+        arguments.remove('--windows-interactive-launch')
+        os.environ['SENTRA_DESKTOP_LAUNCH_CONTEXT'] = 'windows-interactive'
     if len(arguments)==2 and arguments[0]=='--pty-daemon':
         return canvas_main(arguments)
     if any(arg == "--root" or arg.startswith("--root=") for arg in arguments):

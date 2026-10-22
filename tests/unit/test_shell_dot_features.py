@@ -30,7 +30,8 @@ def dot(call, name, **fields):
     return call("dot_create", name=name, role="coordinator", model="sentra/test-one", **fields)
 
 
-@pytest.mark.parametrize("mascot", ["blue", "mint", "orange", "purple"])
+@pytest.mark.parametrize("mascot", ["blue", "mint", "orange", "purple", "pudim", "nuvem",
+    "cacto", "queijinho", "algodao", "lua", "tesla", "einstein", "turing", "ada", "grace", "curie", "oxta"])
 def test_dot_color_and_model_update_preserve_agent_and_conversation(shell, mascot):
     app, server, scope, call = shell
     original = dot(call, "Personal", mascot=mascot)

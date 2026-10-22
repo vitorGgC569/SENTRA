@@ -24,6 +24,8 @@ import { presentLive, previewStillVisible, reconcileLivePreview } from './shell-
 import { subscribeShellStream } from './shell-stream.js';
 import { feedMotion, useReducedMotion } from './experience/cadencia/index.js';
 import { Modal, ActionMenu } from './primitives';
+// Coucou visual layer: componentes e modelos puros da Frente 3.
+import { ChatEventPill, ChatPresence, ChatThinking, ChatTicker, chatEventPillFor, chatPresenceModel, deriveChatTicker } from './shell-chat-visuals.jsx';
 
 function readDraft(key) {
   try { return JSON.parse(sessionStorage.getItem(key)) || { content: '', pending: null }; }
@@ -566,9 +568,16 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
   const beat = feedMotion(livePreview && typeof livePreview === 'object' ? livePreview : { status: 'idle' }, feedPrevious.current);
   useEffect(() => { feedPrevious.current = { activity: beat.activity, content: beat.content }; }, [beat.activity, beat.content]);
   const showLivePreview = previewStillVisible(livePreview, messages);
+  // Coucou visual layer: modelos puros calculados a partir do que já está carregado.
+  const presence = useMemo(() => chatPresenceModel({ dot, messages: presentedMessages, livePreview, connectionState, busy }),
+    [dot, presentedMessages, livePreview, connectionState, busy]);
+  const tickerItems = useMemo(() => deriveChatTicker({ messages: presentedMessages, livePreview, limit: 4 }),
+    [presentedMessages, livePreview]);
   return <section className="shell-chat" aria-label={'Conversa com ' + (dot?.name || 'Dot')}>
     <header className="shell-chat-heading"><div className="shell-persona"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="small" decorative />
       <div><h2>{conversation.title || dot?.name || 'Conversa'}</h2><p title={dot?.model}>{dot?.name}</p></div></div>
+      {/* Coucou visual layer: presença compacta sem remover o h2 nem as ações. */}
+      <ChatPresence dot={dot} model={presence} showIdentity={false} />
       <div className="shell-chat-actions"><ConversationTools scope={scope} dot={dot} bridge={bridge} onResource={onResource}/><button onClick={onCanvas}><Layers size={15} />Canvas</button><ActionMenu label="Opções da conversa" items={[
         { label: 'Modelo e raciocínio', icon: <SlidersHorizontal size={15} />, action: () => onModel('') },
         { label: 'Definir objetivo', icon: <Flag size={15} />, action: () => setGoalDialog({ argument: '' }) },
@@ -578,6 +587,8 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
         { label: 'Exportar conversa', icon: <Download size={15} />, action: exportConversation, disabled: exporting || !messages.length },
       ]} /></div>
     </header>
+    {/* Coucou visual layer: ticker derivado das mensagens já carregadas, sem polling próprio. */}
+    <ChatTicker items={tickerItems} muted={connectionState !== 'connected'} />
     <div className="shell-chat-stream-status" role="status" data-state={!readAccess.current && connectionState !== 'reauth_required' ? 'access_unavailable' : connectionState}>
       {!readAccess.current && connectionState !== 'reauth_required' ? 'Acesso à conversa indisponível · consulte novamente' :
         { connecting: 'Conectando', connected: 'Conexão contínua', reconnecting: 'Reconectando · texto preservado',
@@ -604,6 +615,9 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
           <header>{message.role === 'assistant' && <DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="message" decorative />}
             <strong>{message.role === 'user' ? 'Você' : message.role === 'assistant' ? dot?.name || 'Dot' : message.role}</strong>
             <time>{message.created_at ? new Date(message.created_at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' }) : ''}</time></header>
+          {/* Coucou visual layer: pill apenas quando a mensagem traz status, operação ou recibo. */}
+          {(() => { const pill = chatEventPillFor(message); return pill ?
+            <div className="shell-chat-event-row"><ChatEventPill kind={pill.kind} label={pill.label} detail={pill.detail} /></div> : null; })()}
           <div className="shell-message-content">{fullContents[messageContentKey(message)] !== undefined ?
             <pre className="shell-message-original">{fullContents[messageContentKey(message)]}</pre> :
             message.role === 'user' ? message.content : <ConversationMarkdown content={message.content}
@@ -638,15 +652,15 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
         }} />
       </article>}
       {((inFlight && !(showLivePreview && beat.content)) || (showLivePreview && live && !beat.content)) && <div className="shell-thinking cadence-activity" role="status" aria-live="polite" data-authoritative="false" data-partial="true" data-closes-trio="false" data-stop={beat.stop ? 'true' : 'false'} data-animate={!reducedMotion && beat.animate && !beat.content ? 'true' : 'false'} data-resend="false" aria-label={(dot?.name || 'Dot') + ' está processando a mensagem'}>
-        <DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="message" decorative />
-        <span className="shell-thinking-label">{busy ? 'Preparando envio' : beat.activity || live?.activity || 'Aguardando resposta'}</span>
-        <span className="shell-thinking-dots" aria-hidden="true"><i /><i /><i /></span>
+        {/* Coucou visual layer: o wrapper autoritativo permanece; só o conteúdo visual muda. */}
+        <ChatThinking dot={dot} label={busy ? 'Preparando envio' : beat.activity || live?.activity || 'Aguardando resposta'} />
       </div>}
       {waitingApproval && latest?.role === 'user' && <p className="shell-notice" role="status">Aguardando aprovação das permissões necessárias para continuar.</p>}
       {showLivePreview && !beat.content && livePreview?.content_error && <ShellStreamContent scope={scope} preview={livePreview} />}
     </div>
     {(!follow || recentPage) && <button className="shell-jump-latest" type="button" onClick={jumpLatest}>{recentPage ? 'Há novas mensagens · Ir para o mais recente' : 'Ir para o mais recente'}</button>}
-    <div className="shell-composer-wrap">
+    {/* Coucou visual layer: classe de presença apenas no wrapper; o form e o envio não mudam. */}
+    <div className={'shell-composer-wrap shell-chat-composer-wrap is-' + (presence.state || 'idle')}>
       <ConversationPermissionCards scope={scope} dot={dot} bridge={bridge} onResource={onResource}/>
       {(error || loadError) && <div className="shell-error" role="alert">{error || loadError}</div>}
       {receipt && <OperationReceipt value={receipt} />}
