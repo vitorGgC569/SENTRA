@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import statistics
 import time
 from pathlib import Path
@@ -1137,6 +1138,36 @@ class OMAEngine:
         print(f"[+] [OMA Engine] Queued {len(tasks)} subtasks into PriorityTaskQueue.")
         return tasks
 
+    def _record_objective_evidence(self, task, candidate, evidence, record) -> None:
+        """Bind actual persisted verification to the current candidate's gate.
+
+        Provider prose and prior candidates cannot mint this reference. A new
+        candidate retires the previous objective reference, including on failure.
+        """
+        kept=[value for value in task.metadata.get('evidence_ids',[])
+              if isinstance(value,str) and not value.startswith('verification:')]
+        task.metadata['evidence_ids']=kept
+        task.metadata.pop('objective_evidence',None)
+        results=evidence.get('results',[])
+        if (evidence.get('all_passed') is not True or evidence.get('source_unchanged') is not True
+                or evidence.get('candidate_id')!=candidate.candidate_id or evidence.get('task_id')!=task.id
+                or evidence.get('patch_hash')!=hashlib.sha256(candidate.patch.encode('utf-8')).hexdigest()
+                or not results or evidence.get('checks_ran')!=len(results)
+                or any(row.get('passed') is not True or row.get('refused') for row in results)
+                or not all(isinstance(evidence.get(k),str) and len(evidence[k])==64
+                           for k in ('base_hash','candidate_hash'))):
+            return
+        record=Path(record)
+        if record.is_symlink() or not record.resolve().is_relative_to(self.persistence.run_dir.resolve()):
+            raise ValueError('Verification record outside this run')
+        raw=record.read_bytes()
+        if json.loads(raw)!=evidence:raise ValueError('Verification record changed before gate')
+        digest=hashlib.sha256(raw).hexdigest();ident='verification:'+digest
+        task.metadata['evidence_ids']=[*kept,ident]
+        task.metadata['objective_evidence']={'evidence_id':ident,'sha256':digest,
+            'record':record.relative_to(self.persistence.run_dir).as_posix(),
+            'candidate_id':candidate.candidate_id,'patch_hash':evidence['patch_hash']}
+
     def _capture_candidate_renders(self, task, candidate, root, evidence) -> None:
         """Render HTML targets of the applied candidate for validator review.
 
@@ -1490,8 +1521,9 @@ class OMAEngine:
                                                              event_sink=self._repository_event)
                     reports = test_results.pop("_reports")
                     await self._task_heartbeat(task, "validation_complete")
-                    self.persistence._atomic_write_json(
-                        self.persistence.run_dir / f"verification-{candidate.candidate_id}.json", test_results)
+                    verification_record=self.persistence.run_dir / f"verification-{candidate.candidate_id}.json"
+                    self.persistence._atomic_write_json(verification_record, test_results)
+                    self._record_objective_evidence(task,candidate,test_results,verification_record)
                 except asyncio.CancelledError:
                     if task.id not in self._timeout_cancellations:
                         await self.cancel_task(task.id, reason="cancelled during deterministic verification")

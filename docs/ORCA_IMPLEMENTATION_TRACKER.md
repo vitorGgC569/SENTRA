@@ -2,7 +2,7 @@
 
 ### 22/10 — conexão direta LAN/VPN, Android e aceite real de agentes
 
-- [x] APK ARM64 assinado de avaliação publicado em `mobile-preview-20261022-1`.
+- [x] APK ARM64 assinado de avaliação atualizado em `mobile-preview-20261022-2`.
 - [x] GitHub Pages com capturas próprias de demonstração, notas e download verificado por hash.
 - [x] Endereços RFC1918 e VPN privada `100.64.0.0/10`; interface virtual escolhida explicitamente.
 - [x] Gateway Node empacotável, ativado em Dispositivos; sem npm/tsx no computador do usuário.
@@ -13,7 +13,8 @@
 - [x] Página gráfica observada da sessão Playwright existente, com identidade, hash e limite de imagem.
 - [x] Layout remoto adotado apenas sem alterações locais pendentes; retomada móvel é uma dica de navegação.
 - [ ] Homologação prolongada do daemon instalado: o primeiro ensaio de 30 min falhou;
-  quota de histórico e custo por registro corrigidos, repetição ainda necessária.
+  quota/custo por registro e batching corrigidos; ensaio congelado de 120 s com
+  36 checkpoints válidos passou, repetição prolongada instalada ainda necessária.
 - [ ] Aparelhos físicos e rota VPN real. Sem conta Apple Developer/canal de instalação iOS.
 
 Direção atual do proprietário: conexão direta por LAN ou VPN; relay público deixou de ser

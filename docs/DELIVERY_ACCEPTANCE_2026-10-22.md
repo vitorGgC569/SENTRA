@@ -8,9 +8,9 @@ The mobile device still pairs with the pinned host identity and receives an
 explicit project/Space/Dot scope. Pairing never grants unrestricted execution.
 
 The [download page](https://vitorggc569.github.io/SENTRA/) presents the app with
-screenshots captured from disposable demonstration fixtures. The first signed
-Android ARM64 preview is [mobile-preview-20261022-1](https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261022-1).
-It predates the later browser-frame, palette and continuation changes; builds
+screenshots captured from disposable demonstration fixtures. The current signed
+Android ARM64 preview is [mobile-preview-20261022-2](https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261022-2),
+including browser frames, the revised palette and scoped continuation. Builds
 are identified individually rather than changing an existing release asset.
 There is no Apple Developer account or published iPhone installation channel.
 No unsigned IPA or simulator bundle is offered as a phone installation.
@@ -19,7 +19,9 @@ No unsigned IPA or simulator bundle is offered as a phone installation.
 
 - The installed gateway can be explicitly enabled in Devices, using a bundled
   Node 24 executable and compiled gateway. Runtime hashes and dependency notices
-  travel with the package; the user does not need npm or tsx.
+  travel with the package; the user does not need npm or tsx. The listener can
+  be explicitly stopped/rebound without revoking pairings. Shutdown is bound
+  to the launcher generation, not a reusable PID; it does not stop Dot work.
 - Automatic address selection prefers physical LAN. A reachable private VPN
   interface can be selected explicitly; RFC1918 and 100.64.0.0/10 are accepted.
 - The production gateway bundle passed encryption, pinning, identity mutation,
@@ -83,11 +85,35 @@ its page ceiling because ciphertext-only quota accounting omitted the cost of
 many small records. The source correction accounts for row/index overhead,
 maintains its budget transactionally instead of scanning the entire transcript
 on every chunk, and evicts with headroom. Tiny-frame/rollback regression passes.
-The next installed binary must repeat the prolonged acceptance; the earlier
-short passing run does not qualify the corrected binary.
+A second installed run was retired after checkpoint coverage became unavailable
+under sustained fragmented output. It is retained as failed. Batching now groups
+at most 64 ordered records into one durable transaction and one mirror RPC,
+without merging sequence identities or geometries. A new staged frozen binary
+passed 120 seconds of workloads, three Canvas reopenings and 36 valid checkpoint
+reads. The new installed binary still needs the prolonged repeat; this short
+run does not qualify it. The harness now explicitly fails if a workload exits
+early or a checkpoint loses coverage.
 
 Reports: `.tmp/sentra-delivery/installed-soak-v2/report.json` and
 `.tmp/sentra-delivery/installed-soak-30min/report.json`.
+
+## Orchestration and CI findings
+
+Real CandidateVerifier results were persisted but never assigned an accepted
+objective evidence reference. This blocked valid nonvisual tasks at the quality
+gate and triggered repeated repairs. The engine now binds the exact saved
+verification bytes to the current task/candidate/patch, only after nonempty
+passing checks and unchanged source. Failed or mismatched candidates retire
+the previous objective reference. The gate still refuses missing evidence.
+New binding/tampering tests and the existing gate/threshold/review regressions
+pass; failure isolation plus candidate verification passed 12 cases.
+
+The broad CI remains red: existing type-debt exceeds its unchanged 47-error
+ratchet, and full-suite integration/legacy fixture failures remain under review.
+The global runner pipx dependency conflict was fixed by isolating locked Python
+dependencies in a virtual environment. No checks were removed or made optional.
+Canvas Edge E2E, Web Models/Electron, source contract, Android build and Pages
+passed on their respective published workflow runs.
 
 ## Remaining acceptance and distribution limits
 

@@ -85,6 +85,15 @@ def test_release_publishing_uses_separate_minimal_token():
     assert "test_canvas.ps1" in build
 
 
+def test_release_stages_local_runtime_dependencies_without_mobile_app_tooling():
+    data=yaml.safe_load((ROOT/'.github/workflows/release-commander.yml').read_text(encoding='utf-8'))
+    steps=data['jobs']['windows-release']['steps']
+    assert any(s.get('uses','').startswith('actions/setup-node@') and s['with']['node-version']=='24' for s in steps)
+    local=next(s['run'] for s in steps if s.get('name')=='Build pinned Canvas and independent local runtimes')
+    assert 'integrations/orca-terminal' in local and 'integrations/orca-mobile/transport' in local
+    assert 'integrations/orca-mobile/app' not in local
+
+
 def test_pinned_bun_and_untrusted_pr_permissions():
     install = (ROOT / "scripts/ci/install_bun.ps1").read_text(encoding="utf-8")
     lint = (ROOT / "scripts/ci/install_actionlint.ps1").read_text(encoding="utf-8")

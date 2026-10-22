@@ -24,7 +24,7 @@ def stage_mobile_runtime(destination,node):
  license=node.parent/'LICENSE'
  if not license.is_file():raise FileNotFoundError('Node third-party license missing')
  destination.mkdir(parents=True,exist_ok=True)
- esbuild=ROOT/'integrations/orca-mobile/app/node_modules/esbuild/bin/esbuild'
+ esbuild=ROOT/'integrations/orca-terminal/node_modules/esbuild/bin/esbuild'
  source=ROOT/'integrations/orca-mobile/transport/src/gateway.ts'
  subprocess.run([str(node),str(esbuild),str(source),'--bundle','--platform=node','--format=esm','--target=node24','--banner:js=import { createRequire } from "node:module"; const require = createRequire(import.meta.url);','--outfile='+str(destination/'gateway.mjs')],check=True,capture_output=True)
  shutil.copy2(node,destination/'node.exe');shutil.copy2(license,destination/'LICENSE')

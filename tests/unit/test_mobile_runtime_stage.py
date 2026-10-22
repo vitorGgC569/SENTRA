@@ -1,6 +1,7 @@
 import hashlib,json,sys
 from pathlib import Path
 import pytest
+import threading,time
 from scripts.commander.stage_mobile import FILES,validate_mobile_runtime
 from scripts.commander.stage_terminal import validate_terminal_runtime,inventory
 from sentra_canvas.instance_lock import InstanceLock
@@ -60,3 +61,29 @@ def test_activation_reuses_ready_gateway_and_rejects_public_bind(tmp_path,monkey
     monkeypatch.setattr(mobile_host,'host_status_ready',lambda state:True)
     assert mobile_host.start_installed_host(tmp_path,'100.88.1.2')=={'started':False,'already_running':True}
     with pytest.raises(ValueError):mobile_host.start_installed_host(tmp_path,'8.8.8.8')
+
+
+def test_stop_is_bound_to_one_generation_and_preserves_pairing_files(tmp_path):
+    instance='a'*32;descriptor=tmp_path/'mobile-host.json'
+    descriptor.write_text(json.dumps({'instance_id':instance}),encoding='utf-8')
+    pairing=tmp_path/'mobile-key.protected';pairing.write_bytes(b'unchanged protected identity')
+    (tmp_path/'mobile-stop.json').write_text(json.dumps({'instance_id':'b'*32}),encoding='utf-8')
+    assert not mobile_host.stop_requested(tmp_path,instance)
+    ready=threading.Event();done=threading.Event()
+    def host():
+        lease=InstanceLock(tmp_path/'mobile-host.lock');ready.set()
+        try:
+            deadline=time.monotonic()+3
+            while not mobile_host.stop_requested(tmp_path,instance) and time.monotonic()<deadline:time.sleep(.01)
+            descriptor.unlink()
+        finally:lease.close();done.set()
+    thread=threading.Thread(target=host);thread.start();assert ready.wait(2)
+    try:assert mobile_host.stop_installed_host(tmp_path)=={'stopped':True,'pairings_preserved':True}
+    finally:assert done.wait(3);thread.join()
+    assert pairing.read_bytes()==b'unchanged protected identity'
+
+
+def test_legacy_descriptor_cannot_authorize_signaling_a_pid(tmp_path):
+    (tmp_path/'mobile-host.json').write_text(json.dumps({'pid':1234}),encoding='utf-8')
+    with pytest.raises(RuntimeError,match='predates'):mobile_host.stop_installed_host(tmp_path)
+    assert not (tmp_path/'mobile-stop.json').exists()

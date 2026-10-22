@@ -9,9 +9,44 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
+import sys
 import pytest
 from test_shell_dot_features import shell,dot
 from sentra_canvas.mobile_devices import registry,owner_control
+
+
+@pytest.mark.skipif(os.environ.get('SENTRA_MOBILE_ACCEPTANCE')!='1',reason='explicit local mobile launcher acceptance')
+def test_mobile_launcher_stops_and_restarts_with_same_host_identity(shell):
+    from sentra_canvas.broker import publish_endpoint
+    from sentra_canvas.mobile_host import stop_installed_host
+    from sentra_canvas.mobile_network import host_status
+    app,server,scope,call=shell;publish_endpoint(server)
+    binary=os.environ.get('SENTRA_MOBILE_HOST_BINARY');node=shutil.which('node');assert node
+    with socket.socket() as reservation:
+        reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
+    command=([binary,'--mobile-host'] if binary else [sys.executable,'-m','sentra_canvas.mobile_host','--node',node])
+    command+=['--state',str(app.state_dir),'--bind','127.0.0.1','--port',str(port)]
+    identities=[]
+    for _ in range(2):
+        child=subprocess.Popen(command,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,env={**os.environ,'PYINSTALLER_RESET_ENVIRONMENT':'1'},
+            creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        try:
+            deadline=time.monotonic()+25;status={}
+            while time.monotonic()<deadline:
+                status=host_status(app.state_dir)
+                if status.get('available'):break
+                if child.poll() is not None:pytest.fail('Owned mobile launcher exited')
+                time.sleep(.1)
+            assert status.get('available') and status['status']=='ready'
+            identities.append(status['public_key'])
+            assert stop_installed_host(app.state_dir)=={'stopped':True,'pairings_preserved':True}
+            child.wait(timeout=8);assert child.returncode==0
+            assert not host_status(app.state_dir)['available']
+        finally:
+            if child.poll() is None:child.terminate();child.wait(timeout=8)
+    assert identities[0]==identities[1]
 
 
 def line_from(process):

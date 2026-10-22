@@ -45,6 +45,30 @@ def test_empty_terminal_has_a_restorable_initial_frame(tmp_path):
     finally:host.close()
 
 
+def test_fragmented_output_batches_preserve_order_geometry_and_each_terminal(tmp_path):
+    host=open_history(tmp_path)
+    try:
+        assert host.snapshots.available
+        texts={}
+        for ident in ('one','two','three'):host.register('w',ident,'runtime')
+        for ident in ('one','two','three'):
+            cursor=0;parts=[]
+            for i in range(700):
+                text=('\x1b[3' if i%3==0 else '2m' if i%3==1 else ident+' 🐋\r\n')
+                host.append(ident,cursor,text);cursor+=len(text);parts.append(text)
+                if i==350:host.resize(ident,70,12)
+            texts[ident]=''.join(parts)
+        assert host.flush(timeout=10)
+        assert host.dropped_chars==0 and not host.snapshot_errors and not host.snapshot_invalid
+        for ident,text in texts.items():
+            frame=decode(host.checkpoint('w',ident))
+            assert frame['sequence']==701 and frame['cursor']==len(text)
+            assert frame['cols']==70 and frame['rows']==12
+            assert ident in frame['snapshotAnsi']
+            assert all(other not in frame['snapshotAnsi'] for other in texts if other!=ident)
+    finally:assert host.close()
+
+
 def test_drained_terminal_releases_its_mirror_after_an_already_saved_frame(tmp_path):
     host=open_history(tmp_path)
     try:

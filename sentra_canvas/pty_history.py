@@ -241,7 +241,7 @@ class PtyHistory:
         with self.db_lock,self.db:
             self.db.execute('UPDATE sessions SET snapshot_supported=0 WHERE terminal_id=?',(terminal_id,))
 
-    def _snapshot_apply(self,ident,start,text,sequence,kind,geometry):
+    def _snapshot_apply_batch(self,ident,batch):
         if not self.snapshots or not self.snapshots.available:return
         if ident in self.retired_mirrors:self.snapshot_invalid.add(ident)
         if ident in self.snapshot_invalid or ident in self.snapshot_errors:return
@@ -249,9 +249,13 @@ class PtyHistory:
             if ident not in self.mirrors:
                 self.snapshots.call('create',ident,cols=100,rows=28)
                 self.mirrors.add(ident)
-            event={'kind':kind,'sequence':sequence,'start':start}
-            if kind!='init':event.update({'text':text} if kind=='output' else geometry)
-            if kind!='init':self.snapshots.call('apply',ident,event=event)
+            events=[]
+            for start,text,size,sequence,kind,geometry in batch:
+                if kind=='init':continue
+                event={'kind':kind,'sequence':sequence,'start':start}
+                event.update({'text':text} if kind=='output' else geometry)
+                events.append(event)
+            if events:self.snapshots.call('batch',ident,events=events)
             with self.condition:self.snapshot_dirty.add(ident)
         except Exception as exc:self.snapshot_errors[ident]=type(exc).__name__
 
@@ -334,12 +338,18 @@ class PtyHistory:
                         self.condition.wait(.2 if self.snapshot_dirty else None)
                     capture=next(iter(due()),None)
                     if not self.pending and not self.dirty_heads and not self.snapshot_dirty and self.stopping:return
-                    ident,start,text,sequence,kind,geometry=None,0,'',0,'output',None
-                    size=0
+                    ident=None;batch=[];size=0;start=0;chars=0
                     if capture is not None:self.snapshot_dirty.discard(capture)
                     elif self.pending:
                         ident,queue=self.pending.popitem(last=False)
-                        start,text,size,sequence,kind,geometry=queue.popleft()
+                        # Fair, bounded transactions and mirror RPCs. ConPTY
+                        # emits tiny fragments; a disk fsync/pipe roundtrip for
+                        # each fragment cannot keep up with ordinary TUI output.
+                        while queue and len(batch)<64:
+                            event=queue[0]
+                            if batch and chars+len(event[1])>OUTPUT_CHARS:break
+                            batch.append(queue.popleft());size+=event[2];chars+=len(event[1])
+                        start=batch[0][0]
                         if queue:self.pending[ident]=queue
                         self.sizes[ident]-=size;self.queued_bytes-=size
                     heads={}
@@ -349,15 +359,18 @@ class PtyHistory:
                     if capture is not None:
                         self._capture(capture)
                     else:
-                        protected=self.protect(text) if text else None
-                        if text and (not isinstance(protected,str) or not protected.startswith(('dpapi:','keyring:'))):
-                            raise RuntimeError('OS protected history required')
+                        protected_batch=[]
+                        for event in batch:
+                            text=event[1];protected=self.protect(text) if text else None
+                            if text and (not isinstance(protected,str) or not protected.startswith(('dpapi:','keyring:'))):
+                                raise RuntimeError('OS protected history required')
+                            protected_batch.append((event,protected))
                         with self.db_lock,self.db:
-                            if text:self.db.execute('''INSERT INTO chunks(terminal_id,start,end,protected,bytes,created,sequence) VALUES(?,?,?,?,?,?,?)
-                                ON CONFLICT(terminal_id,start) DO UPDATE SET end=excluded.end,protected=excluded.protected,
-                                bytes=excluded.bytes,created=excluded.created,sequence=excluded.sequence''',
-                                (ident,start,start+len(text),protected,len(protected.encode('utf-8')),time.time(),sequence))
-                            if ident is not None:
+                            for (start,text,_,sequence,kind,geometry),protected in protected_batch:
+                                if text:self.db.execute('''INSERT INTO chunks(terminal_id,start,end,protected,bytes,created,sequence) VALUES(?,?,?,?,?,?,?)
+                                    ON CONFLICT(terminal_id,start) DO UPDATE SET end=excluded.end,protected=excluded.protected,
+                                    bytes=excluded.bytes,created=excluded.created,sequence=excluded.sequence''',
+                                    (ident,start,start+len(text),protected,len(protected.encode('utf-8')),time.time(),sequence))
                                 self.db.execute('UPDATE sessions SET sequence=?,head=MAX(head,?) WHERE terminal_id=?',(sequence,start+len(text),ident))
                                 if kind=='resize':
                                     self.db.execute('INSERT INTO geometry VALUES(?,?,?,?,?)',(ident,sequence,start,geometry['cols'],geometry['rows']))
@@ -369,12 +382,15 @@ class PtyHistory:
                             pruned=self._trim()
                         with self.condition:
                             for terminal,left,right in pruned:self._gap(terminal,left,right)
-                            if text:self.durable[ident]=max(self.durable.get(ident,0),start+len(text))
-                        if ident is not None:self._snapshot_apply(ident,start,text,sequence,kind,geometry)
+                            for start,text,*_ in batch:
+                                if text:self.durable[ident]=max(self.durable.get(ident,0),start+len(text))
+                        if ident is not None:self._snapshot_apply_batch(ident,batch)
                 except Exception as exc:
                     with self.condition:
                         self.error=type(exc).__name__
-                        if text:self._gap(ident,start,start+len(text));self.snapshot_invalid.add(ident)
+                        for start,text,*_ in batch:
+                            if text:self._gap(ident,start,start+len(text))
+                        if ident is not None:self.snapshot_invalid.add(ident)
                 finally:
                     with self.condition:
                         self.inflight=False;self.inflight_bytes=0;self.inflight_terminal=None

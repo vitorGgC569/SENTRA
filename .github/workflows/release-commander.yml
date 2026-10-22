@@ -103,6 +103,29 @@ jobs:
           npm test --prefix sentra_electron
           if ($LASTEXITCODE -ne 0) { throw "Electron display sandbox tests failed" }
 
+      - name: Setup Node 24 for packaged local runtimes
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24'
+
+      - name: Build pinned Canvas and independent local runtimes
+        shell: pwsh
+        run: |
+          foreach ($project in @("sentra_canvas/desktop_ui", "integrations/orca-terminal", "integrations/orca-mobile/transport")) {
+            npm ci --prefix $project --no-audit --no-fund
+            if ($LASTEXITCODE -ne 0) { throw "Pinned dependency installation failed: $project" }
+          }
+          npm run build --prefix sentra_canvas/desktop_ui
+          if ($LASTEXITCODE -ne 0) { throw "Sealed Canvas build failed" }
+          npm run build --prefix integrations/orca-terminal
+          if ($LASTEXITCODE -ne 0) { throw "Terminal mirror build failed" }
+          npm test --prefix integrations/orca-terminal
+          if ($LASTEXITCODE -ne 0) { throw "Terminal mirror tests failed" }
+          npm run typecheck --prefix integrations/orca-mobile/transport
+          if ($LASTEXITCODE -ne 0) { throw "Mobile gateway typecheck failed" }
+          npm test --prefix integrations/orca-mobile/transport
+          if ($LASTEXITCODE -ne 0) { throw "Mobile transport tests failed" }
+
       - name: Fail closed on missing or uncommitted inputs
         shell: pwsh
         run: python -B scripts/ci/verify_release_contract.py --require-tracked

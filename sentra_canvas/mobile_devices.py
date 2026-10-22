@@ -100,6 +100,9 @@ def owner_control(canvas,body):
     if action=='start' and set(body)=={'action','bind'}:
         from .mobile_host import start_installed_host
         return start_installed_host(canvas.state_dir,body['bind'])
+    if action=='stop' and set(body)=={'action'}:
+        from .mobile_host import stop_installed_host
+        return stop_installed_host(canvas.state_dir)
     if action=='status' and set(body)=={'action'}:
         from .mobile_network import host_status
         return host_status(canvas.state_dir)
