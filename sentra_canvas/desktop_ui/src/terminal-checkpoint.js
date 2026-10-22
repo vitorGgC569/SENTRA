@@ -19,12 +19,25 @@ export async function decodeCheckpoint(packet){
   throw Error('Identidade ou geometria do checkpoint inválida.');
  return frame;
 }
-export async function restoreCheckpoint(entry,value){
+export async function writeTerminalFrame(entry,text,current=()=>entry.alive!==false){
+ if(!current())throw Error('Visualização de terminal substituída.');
+ await new Promise(resolve=>{
+  entry.pendingWrites??=new Set();
+  const done=()=>{entry.pendingWrites.delete(done);resolve()};
+  entry.pendingWrites.add(done);
+  try{entry.term.write(text,done)}catch(error){entry.pendingWrites.delete(done);throw error}
+ });
+ if(!current())throw Error('Visualização de terminal substituída.');
+}
+// Call only after disposing this emulator, never merely on temporary suspension.
+export function releaseDisposedWrites(entry){for(const done of [...(entry.pendingWrites||[])])done()}
+export async function restoreCheckpoint(entry,value,current=()=>entry.alive!==false){
  const frame=await decodeCheckpoint(value.checkpoint);
+ if(!current())return false;
  entry.replaying=true;entry.inputEpoch=(entry.inputEpoch||0)+1;entry.term.options.disableStdin=true;
  try{
   entry.term.reset();entry.term.resize(frame.cols,frame.rows);
-  const write=text=>new Promise(resolve=>entry.term.write(text,resolve));
+  const write=text=>writeTerminalFrame(entry,text,current);
   await write(frame.scrollbackAnsi);await write(frame.rehydrateSequences);await write(frame.snapshotAnsi);
   if(frame.modes?.kittyKeyboardFlags)await write(`\x1b[=${frame.modes.kittyKeyboardFlags};1u`);
   await write(frame.pendingEscapeTailAnsi||'');
@@ -32,9 +45,11 @@ export async function restoreCheckpoint(entry,value){
   restoreSavedRegisters(entry.term,frame.savedRegisters);
   entry.cursor=frame.cursor;entry.geometrySequence=value.geometry_sequence;
   entry.snapshotRestored=true;entry.needsServerResize=true;
+  entry.renderUncertain=false;
   entry.scrollbackOmitted=Boolean(frame.scrollback_omitted)||frame.scrollbackLines>=500;
+  return true;
  }finally{entry.replaying=false;}
 }
 export function mayWriteTerminal(entry,epoch=entry.inputEpoch){
- return entry.alive&&!entry.replaying&&!entry.term.options.disableStdin&&!entry.transportUnavailable&&entry.inputEpoch===epoch;
+ return entry.alive&&!entry.inputSuspended&&!entry.replaying&&!entry.term.options.disableStdin&&!entry.transportUnavailable&&entry.inputEpoch===epoch;
 }

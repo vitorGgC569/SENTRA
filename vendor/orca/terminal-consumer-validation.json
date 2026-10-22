@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "checkpoint_date": "2026-10-22",
+  "scope": "source: bounded pull consumers, stale-callback rejection and normalized terminal frames",
+  "python_passed": 25,
+  "python_report": ".tmp/consumer-flow-host-final.xml",
+  "desktop_node_passed": 169,
+  "new_consumer_node_cases": 9,
+  "node_report": "sentra_canvas/desktop_ui/.tmp/consumer-flow-regression.log",
+  "real_host_coverage": ["authenticated Canvas HTTP history pagination", "supplementary Unicode cursor preservation", "Windows ConPTY", "daemon reconnect", "protected history", "terminal read authorization"],
+  "pool_scheduler_coverage": "injected HTTP/parser/DOM boundaries; not interactive layout qualification",
+  "max_concurrent_reads": 8,
+  "max_waiting_consumers": 128,
+  "max_frame_unicode_characters": 16000,
+  "producer_control_added": false,
+  "new_bundles_generated": false,
+  "installed_application_replaced": false,
+  "unified_subscriptions_delivered": false,
+  "macro_p0_complete": false,
+  "remaining": ["renderer watchdog", "aggregate emulator heap budgets", "bounded input queues", "prolonged TUI and model CLI qualification", "unified sequenced subscriptions", "physical mobile acceptance", "installed daemon qualification"]
+}

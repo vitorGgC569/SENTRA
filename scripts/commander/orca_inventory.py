@@ -20,6 +20,7 @@ ADAPTED={
  'src/main/acp/acp-dialects/opencode-dialect.ts':'sentra_interop/acp_dialects.py',
  'mobile/src/transport/pairing-keychain.ts':'integrations/orca-mobile/app/App.tsx',
  'mobile/src/session/MobileNativeChatCardHeaderAction.tsx':'integrations/orca-mobile/app/components/CardHeaderAction.tsx',
+ 'src/main/daemon/daemon-stream-backpressure.ts':'integrations/orca-terminal/src/consumer-flow.mjs',
 }
 
 

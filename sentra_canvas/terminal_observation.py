@@ -47,6 +47,6 @@ def observe_terminal(services,project_id,action,params):
             'origin_runtime_id','geometry_sequence','cols','rows','checkpoint_supported','tail_uncertain')
     return {**{key:value[key] for key in fields if key in value},'protocol_version':1,
         'terminal_id':terminal_id,'start':start,'cursor':start+len(text),'text':text,
-        'has_more':start+len(text)<end,
+        'head':value.get('head',end),'has_more':bool(value.get('has_more')) or start+len(text)<end,
         'truncated':bool(value.get('truncated')) or start!=cursor,'read_only':True,
         'automatic_input_replay':False}

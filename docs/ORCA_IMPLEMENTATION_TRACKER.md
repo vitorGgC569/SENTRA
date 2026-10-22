@@ -1,5 +1,18 @@
 # Execução integral ORCA → SENTRA
 
+### 22/10 — consumidores de terminal e respostas obsoletas
+
+- [x] Oito leituras concorrentes no Desktop, uma por consumidor, FIFO de 128 identidades.
+- [x] Crédito contabilizado até ACK do xterm; callback antigo não libera leitura substituta.
+- [x] Painéis suspensos/fora da área visível não consultam saída; geração antiga não reativa entrada.
+- [x] Escrita visual sem ACK força restauração/indicação de imagem parcial na retomada.
+- [x] Saída de histórico/live/daemon limitada a 16 mil caracteres com cursor/head/has_more coerentes.
+- [x] Origem MIT e hashes conferidos; nova adaptação de backpressure registrada.
+
+25 Python e 169 Node aprovados. Sem novo build. Watchdog, orçamento de emuladores,
+fila de entrada e assinatura unificada continuam abertos; limites de leitura não
+encerram o P0. [Evidência e limites](ORCA_TERMINAL_CONSUMERS_2026-10-22.md).
+
 ### 22/10 — retomada da meta: editor dentro do Canvas
 
 - [x] Editor na aba de arquivo existente, com CodeMirror já usado pelo SENTRA.

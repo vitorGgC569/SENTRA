@@ -15,7 +15,7 @@ FILES=('sentra_canvas/desktop_ui/src/shell-app.jsx','sentra_canvas/desktop_ui/sr
        'sentra_canvas/desktop_ui/qa/orca-preview-api.js','sentra_canvas/desktop_ui/vite.orca-preview.config.js',
        'sentra_canvas/desktop_ui/package.json','sentra_canvas/pty_daemon.py','sentra_canvas/pty_client.py','sentra_canvas/mobile_devices.py',
        'sentra_canvas/mobile_host.py','sentra_canvas/mobile_network.py','sentra_canvas/pty_history.py',
-       'sentra_canvas/terminal_snapshots.py','sentra_canvas/evaluation.py','sentra_canvas/electron_host.py',
+       'sentra_canvas/terminal_snapshots.py','sentra_canvas/terminal_frames.py','sentra_canvas/evaluation.py','sentra_canvas/electron_host.py',
        'sentra_canvas/terminal_observation.py','sentra_canvas/shell_machines.py',
        'sentra_canvas/shell_dot_computer.py','sentra_canvas/shell_environment.py',
        'sentra_canvas/workspace_access.py','sentra_canvas/shell_dot_canvas.py','sentra_canvas/shell_access.py',

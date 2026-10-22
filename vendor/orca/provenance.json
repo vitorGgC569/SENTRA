@@ -98,6 +98,11 @@
       "source": "mobile/src/session/MobileNativeChatCardHeaderAction.tsx",
       "target": "integrations/orca-mobile/app/components/CardHeaderAction.tsx",
       "source_sha256": "1ccac43b26ce467396726cc73da7bfef0c11af3efb312ed11a28d2d22acef091"
+    },
+    {
+      "source": "src/main/daemon/daemon-stream-backpressure.ts",
+      "target": "integrations/orca-terminal/src/consumer-flow.mjs",
+      "source_sha256": "c20b25185f72e396515cf098ce74f8d52636c2db470a33cd527c0c54fa5c580f"
     }
   ],
   "assets_imported": [],

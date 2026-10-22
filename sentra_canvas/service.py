@@ -2344,20 +2344,21 @@ class Canvas:
         return self._pty_client.call('checkpoint',{'workspace_id':ws,'terminal_id':terminal})
 
     def terminal_output(self,ws,terminal,cursor=0):
+        from .terminal_frames import bounded_output
         record=self.store.resource("terminals",terminal,ws)
         session=self._sessions.get(terminal)
         if not session:
             if terminal in self._pty_histories and self._pty_client is not None:
                 data=self._pty_client.call('output',{'workspace_id':ws,'terminal_id':terminal,'cursor':int(cursor)})
-                return {**data,'status':'history_restored','recoverable':False}
-            return {**self.store.terminal_output(ws,terminal,cursor),
+                return bounded_output({**data,'status':'history_restored','recoverable':False})
+            return bounded_output({**self.store.terminal_output(ws,terminal,cursor),
                     "status":record["status"],"recoverable":False,
-                    "persisted":True}
+                    "persisted":True})
         if getattr(session.pty,"durable",False):
             data=session.pty.output(cursor)
             code=data.pop("exit_code")
-            return {**data,"status":"running" if data.get('process_live',code is None) else "exited",
-                    "exit_code":code,"recoverable":data.get('process_live',code is None)}
+            return bounded_output({**data,"status":"running" if data.get('process_live',code is None) else "exited",
+                    "exit_code":code,"recoverable":data.get('process_live',code is None)})
         data=session.output(cursor)
         state=session.pty.poll()
         if state is not None:
@@ -2366,7 +2367,7 @@ class Canvas:
                     exit_code=state,recoverable=True,
                     persisted=session.persistence_error is None,
                     persistence_error=session.persistence_error)
-        return data
+        return bounded_output(data)
 
     def terminal_input(self,ws,terminal,data):
         self.store.resource("terminals",terminal,ws)
