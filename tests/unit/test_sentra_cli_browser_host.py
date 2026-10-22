@@ -2,6 +2,7 @@ import io
 import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+import pytest
 
 from sentra_cli.client import ModelClient
 from sentra_cli.config import CLIConfig
@@ -72,10 +73,43 @@ def test_wait_browser_host_turn_ready_waits_through_session_refresh(tmp_path: Pa
     response.__exit__.return_value = False
     with patch.object(
         client, "_browser_descriptor_path", return_value=descriptor
-    ), patch(
-        "sentra_cli.client.urllib.request.urlopen",
+    ), patch.object(
+        client, "_provider_http",
         side_effect=[busy, response],
     ), patch("sentra_cli.client.time.sleep", return_value=None):
         ready, detail = client._wait_browser_host_turn_ready(timeout_s=1.0)
     assert ready is True
     assert detail == "ready"
+
+
+@pytest.mark.parametrize('endpoint',[
+    'http://127.0.0.1:62080@evil.invalid', 'http://127.0.0.1:62080/other',
+    'http://127.0.0.1:62080?secret=bad', 'http://127.0.0.1:notaport',
+])
+def test_session_probe_never_transmits_owner_token_to_untrusted_descriptor(tmp_path,endpoint):
+    import json
+    client=ModelClient(CLIConfig(workspace=tmp_path))
+    descriptor=tmp_path/'browser.json';descriptor.write_text(json.dumps({'control':{'endpoint':endpoint,'token':'x'*48}}))
+    with patch.object(client,'_browser_descriptor_path',return_value=descriptor),patch.object(client,'_provider_http') as transport:
+        ready,_=client._wait_browser_host_turn_ready(timeout_s=.001)
+    assert not ready;transport.assert_not_called()
+
+
+def test_session_refresh_uses_real_loopback_http_and_rechecks_admission(tmp_path):
+    import json,threading
+    from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
+    calls=[];checkpoints=[]
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self,*_):pass
+        def do_POST(self):
+            calls.append((self.path,self.headers.get('Authorization'),json.loads(self.rfile.read(int(self.headers['Content-Length'])))))
+            body=json.dumps({'error':'busy with session refresh'} if len(calls)==1 else {'authenticated':True,'temporary':True}).encode()
+            self.send_response(409 if len(calls)==1 else 200);self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
+    server=ThreadingHTTPServer(('127.0.0.1',0),Handler);thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+    descriptor=tmp_path/'browser.json';descriptor.write_text(json.dumps({'control':{'endpoint':f'http://127.0.0.1:{server.server_port}','token':'x'*48}}))
+    client=ModelClient(CLIConfig(workspace=tmp_path));client.on_before_http=lambda provider:checkpoints.append(provider)
+    try:
+        with patch.object(client,'_browser_descriptor_path',return_value=descriptor):assert client._wait_browser_host_turn_ready(timeout_s=3)==(True,'ready')
+        assert calls==[('/v1/session/inspect','Bearer '+'x'*48,{'detectCapabilities':False})]*2
+        assert len(checkpoints)==2
+    finally:server.shutdown();server.server_close();thread.join(2)

@@ -43,19 +43,26 @@ class FakeTemporalClient:
         self.handles: dict[str, FakeTemporalHandle] = {}
 
     async def start_workflow(self, workflow_type, inputs, *, id,
-                             task_queue, id_reuse_policy, memo):
+                             task_queue, id_reuse_policy, retry_policy, execution_timeout, memo):
+        assert retry_policy.maximum_attempts == 1
         handle = FakeTemporalHandle(id)
         self.handles[id] = handle
         return handle
 
-    def get_workflow_handle(self, workflow_id):
+    def get_workflow_handle(self, workflow_id, *, first_execution_run_id=None):
+        assert first_execution_run_id in (None, "t-run-1")
         return self.handles.setdefault(workflow_id,
                                        FakeTemporalHandle(workflow_id))
 
 
 class FakeMachineHost:
     def __init__(self):
-        self.control = SimpleNamespace()
+        def work_item_info(work_item_id, owner):
+            if (work_item_id, owner) != ("wi1", "owner1"):
+                raise FileNotFoundError("work item outside test authority scope")
+            return {"work_item_id": work_item_id, "run_id": "run1",
+                    "assignee_agent_id": "agent1"}
+        self.control = SimpleNamespace(work_item_info=work_item_info)
         self.owner = "owner1"
 
 
@@ -89,10 +96,10 @@ def test_host_configure_catalog_restore(tmp_path):
     assert [entry["binding_id"] for entry in catalog] == [record["binding_id"]]
     assert "address" not in str(catalog)
     host._adapters.clear()
-    restored = host.restore(record["binding_id"])
+    restored = asyncio.run(host.arestore(record["binding_id"]))
     assert restored._config is not None
     with pytest.raises(FileNotFoundError):
-        host.restore("rt-missing")
+        asyncio.run(host.arestore("rt-missing"))
 
 
 def test_host_rejects_secret_options_and_unknown_factory(tmp_path):
@@ -112,7 +119,7 @@ def test_host_dispatch_request_shape(tmp_path):
         record["binding_id"], operation="signal", workflow_id="wf1",
         occurrence="occ1", arguments={"signal_name": "tick"})
     assert intent["capability_id"] == "runtime:temporal:signal"
-    assert intent["arguments"]["binding_id"] == record["binding_id"]
+    assert intent["binding_id"] == record["binding_id"]
     assert intent["effects_started"] is False
     with pytest.raises(RuntimeHostDenied):
         host.dispatch_request(record["binding_id"], operation="fly",
@@ -131,6 +138,8 @@ def test_host_submit_requires_admission(tmp_path):
 
 def test_host_submit_inside_admission(tmp_path, monkeypatch):
     from sentra_interop.workflow_runtime import SubordinateRuntimeAdapter
+    from pulso_test_sdk import install_temporal_value_objects
+    install_temporal_value_objects(monkeypatch)
 
     class _Receipt:
         owner, run_id, operation_id = "owner1", "run1", "op1"
@@ -146,10 +155,18 @@ def test_host_submit_inside_admission(tmp_path, monkeypatch):
                         lambda self, scope: context)
     host = _host(tmp_path)
     record = _configure(host)
+    asyncio.run(host.restore(record["binding_id"]).start(
+        _scope(), workflow_id="wf1", occurrence="occ1", inputs={"fixture":1}))
+    from sentra_runtime.contracts import OperationRequest
+    from sentra_runtime.provider_content import text_digest
+    payload = {"cursor": 1}
+    context.request = OperationRequest("op1", "agent1", "m1", "runtime:temporal:signal", "wi1", "key1",
+        {"binding_id": record["binding_id"], "workflow_id": "wf1", "occurrence": "occ1",
+         "name": "tick", "payload_sha256": text_digest(payload)})
     outcome = asyncio.run(host.submit(
         record["binding_id"], operation="signal", scope=_scope(),
         workflow_id="wf1", occurrence="occ1",
-        payload={"signal_name": "tick"}))
+        signal_name="tick", payload=payload))
     assert outcome["status"] == "SIGNALLED"
     assert outcome["replayed_effect"] is False
 

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..conversation_pool import FixedConversationRouter
+
 import asyncio
 import json
 import uuid
@@ -175,7 +179,7 @@ def _compact_patch(patch: str, limit: int = 6000) -> str:
 
 
 class SpecializedValidator:
-    def __init__(self, role: ValidatorRole, router: ModelRouter, require_explicit_scores=False):
+    def __init__(self, role: ValidatorRole, router: ModelRouter | FixedConversationRouter, require_explicit_scores=False):
         self.role = role
         self.router = router
         self.require_explicit_scores = require_explicit_scores
@@ -262,10 +266,10 @@ DETERMINISTIC TEST RESULTS:
         except (ValueError, TypeError):
             confidence = 0.0
         try:
-            raw_score = float(parsed.get("score"))
+            raw_score = float(parsed["score"])
             explicit_score = (raw_score if math.isfinite(raw_score)
                               and 0.0 <= raw_score <= 10.0 else None)
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError):
             explicit_score = None
         model_judgment_ok = (
             resp.success and status in {"APPROVED", "REJECTED", "DISPUTED"}
@@ -394,7 +398,7 @@ class ValidatorPool:
     Manages a pool of specialized cognitive diversity validators.
     """
 
-    def __init__(self, router: ModelRouter, require_explicit_scores=False):
+    def __init__(self, router: ModelRouter | FixedConversationRouter, require_explicit_scores=False):
         self.router = router
         self.validators = {
             role: SpecializedValidator(role, router, require_explicit_scores)

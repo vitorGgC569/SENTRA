@@ -5,7 +5,7 @@ import re
 from collections.abc import Callable
 from typing import Annotated, Any, Literal
 
-from mcp.server import MCPServer
+from sentra_mcp.tool_policy import ToolRegistrar
 from mcp.server.mcpserver.context import Context
 from pydantic import Field
 
@@ -42,7 +42,7 @@ def _call(operation: Callable[[], dict[str, Any]]) -> ResponseEnvelope:
 
 
 def register_filesystem_tools(
-    mcp: MCPServer,
+    mcp: ToolRegistrar,
     service: FilesystemService,
     capabilities: Any | None = None,
 ) -> None:

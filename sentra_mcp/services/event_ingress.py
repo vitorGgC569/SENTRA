@@ -1,6 +1,8 @@
 """Durable ordered ingress for Remote/Edge/plugin event sources."""
 from __future__ import annotations
 
+from .postgres_store import PostgresConnection
+
 import hashlib
 import json
 import sqlite3
@@ -63,7 +65,7 @@ class EventIngressService:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> sqlite3.Connection | PostgresConnection:
         return self.store.connect("event_ingress")
 
     @staticmethod

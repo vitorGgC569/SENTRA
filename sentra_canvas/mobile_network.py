@@ -85,6 +85,7 @@ def host_status(state):
         return {'available': True, 'status': 'ready' if health.get('broker_available') else 'broker_restarting',
                 'endpoint': host['endpoint'], 'public_key': host['public_key'],
                 'addresses': [endpoint.hostname], 'lan': not loopback,
+                'discovery': health.get('discovery', 'unavailable'),
                 'protocol_version': 1, 'reason': 'Loopback: acessível apenas neste computador.' if loopback else
                 'Conecte o celular à mesma LAN ou VPN privada e confira o endereço alcançável no aparelho.'}
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):

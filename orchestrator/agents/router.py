@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import asyncio
+
+from orchestrator.decisioning import DecisionController
+
+from orchestrator.budgets import TokenBudget
+from typing import Callable
+
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -88,24 +95,25 @@ class ModelRouter:
         self.success_counts: Dict[str, int] = {name: 0 for name in providers}
         self.total_counts: Dict[str, int] = {name: 0 for name in providers}
         self._repository_context = ContextVar(f"repository-{id(self)}", default=None)
+        self.run_id: str | None = None
         self._provider_boundary = ContextVar(f"provider-boundary-{id(self)}", default=None)
-        self.budget = None
-        self.role_routes = {}
+        self.budget: TokenBudget | None = None
+        self.role_routes: dict[str, str] = {}
         self.request_timeout = None
         self.max_output_tokens = None
         self.max_inflight_requests = 0
-        self._admission_semaphore = None
-        self.response_sink = None
+        self._admission_semaphore: asyncio.Semaphore | None = None
+        self.response_sink: Callable | None = None
         # Optional typed decision model (Kev/Jev/System One). Disabled by default.
         # It may recommend a route, but deterministic policy remains the fallback
         # and explicit/critical routing is never overridden.
-        self.decision_controller = None
+        self.decision_controller: DecisionController | None = None
         self.decision_routing_enabled = False
         self.decision_retry_enabled = False
         self.decision_validator_selection_enabled = False
         self.decision_quality_advisory_enabled = False
         self.decision_min_confidence = 0.35
-        self.decision_trace_sink = None
+        self.decision_trace_sink: Callable | None = None
 
     @contextmanager
     def provider_scope(self, boundary):
@@ -295,7 +303,7 @@ class ModelRouter:
                 response = (await boundary(request, name, invoke) if boundary is not None
                             else await invoke(request))
             except asyncio.CancelledError:
-                if reservation:
+                if reservation and self.budget is not None:
                     self.budget.settle(reservation, uncertain=True)
                 breaker.release_probe()
                 raise
@@ -305,7 +313,7 @@ class ModelRouter:
             except Exception as exc:
                 response = AgentResponse(content="", success=False, error=f"[PROVIDER_ERROR] '{name}': {exc}",
                                          metadata=self._external_failure_metadata(name))
-            if reservation:
+            if reservation and self.budget is not None:
                 try:
                     self.budget.settle(reservation, response.token_usage, uncertain=not response.success)
                 except BudgetExceeded as exc:

@@ -52,3 +52,13 @@ test('remote layout cannot overwrite unsaved local changes or cross an in-flight
  const other=new PresentationWriter(async()=>{},1);other.busy=true;
  assert.equal(other.observe({revision:2,profile:emptyProfile()}),null);assert.equal(other.conflict,true);other.close();
 });
+
+test('layout conflict has explicit local or remote resolution and repeats CAS on a new race',async()=>{
+ const local=rememberPanel(emptyProfile(),{id:'activity',kind:'activity'}),remote=emptyProfile(),calls=[];
+ const writer=new PresentationWriter(async(profile,revision)=>{calls.push({profile,revision});return {saved:true,revision:revision+1}},1);
+ writer.schedule(local);writer.observe({revision:2,profile:remote});assert.equal(writer.conflict,true);
+ assert.equal(await writer.resolve({revision:2,profile:remote},'local',local),local);assert.equal(writer.revision,3);assert.equal(calls[0].revision,2);assert.deepEqual(calls[0].profile,local);
+ writer.freeze({revision:4,profile:remote});assert.equal(await writer.resolve({revision:4,profile:remote},'remote',local),remote);assert.equal(calls.length,1);writer.close();
+ const race=new PresentationWriter(async()=>({saved:false,revision:6,profile:remote}),4);race.schedule(local);race.freeze({revision:5,profile:remote});
+ assert.equal(await race.resolve({revision:5,profile:remote},'local',local),null);assert.equal(race.conflict,true);assert.equal(race.local,JSON.stringify(local));race.close();
+});

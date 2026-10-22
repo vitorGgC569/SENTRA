@@ -4,15 +4,16 @@ import {WebView} from 'react-native-webview';
 import * as Crypto from 'expo-crypto';
 import {Buffer} from 'buffer';
 import {MobileClient,TerminalFeed,type TerminalOutputFrame,type TerminalDelivery} from '@sentra/mobile-transport';
+import {useProtectedDraft} from './use-protected-draft';
 import {TERMINAL_DOCUMENT} from '../terminal/document';
 
-type Props={client:MobileClient|null;conversation:any;connected:boolean;colors:Record<string,string>;
+type Props={draftScope:string;client:MobileClient|null;conversation:any;connected:boolean;colors:Record<string,string>;
  request:(action:string,fields?:Record<string,any>,effect?:boolean)=>Promise<any>};
 const unwrap=(value:any)=>value?.ok===true?value.value:value;
 
-export function TerminalWorkspace({client,conversation,connected,colors,request}:Props){
+export function TerminalWorkspace({draftScope,client,conversation,connected,colors,request}:Props){
  const [inventory,setInventory]=useState<any>(null),[selected,setSelected]=useState(''),[ready,setReady]=useState(false);
- const [notice,setNotice]=useState(''),[command,setCommand]=useState(''),[writing,setWriting]=useState(false),[reload,setReload]=useState(0),[processLive,setProcessLive]=useState(false);
+ const [notice,setNotice]=useState(''),[writing,setWriting]=useState(false),[reload,setReload]=useState(0),[processLive,setProcessLive]=useState(false);
  const [foreground,setForeground]=useState(AppState.currentState==='active'),[viewStatus,setViewStatus]=useState('Aguardando sessão.');
  const web=useRef<WebView<{}>>(null),sequence=useRef(0),writingNow=useRef(false),current=useRef({client,connected});
  const pending=useRef(new Map<number,{resolve:(value:any)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>());
@@ -20,6 +21,8 @@ export function TerminalWorkspace({client,conversation,connected,colors,request}
  const terminals=inventory?.terminals||[],terminal=terminals.find((row:any)=>row.id===selected);
  const work=inventory?.work_items?.find((row:any)=>row.work_item_id===terminal?.work_item_id&&row.machine_id===terminal?.machine_id&&row.capabilities.includes('terminal:read'));
  const view=useMemo(()=>Crypto.randomUUID(),[selected,reload,client,connected,foreground,conversation?.conversation_id]);
+ const draft=useProtectedDraft(JSON.stringify(['terminal',draftScope,conversation?.conversation_id,selected]));
+ const command=draft.value,setCommand=draft.change;
  const activeView=useRef(view);activeView.current=view;
  const html=useMemo(()=>TERMINAL_DOCUMENT.replace('__SENTRA_VIEW_ID__',view),[view]);
 
@@ -84,7 +87,7 @@ export function TerminalWorkspace({client,conversation,connected,colors,request}
  },[client,connected,conversation?.conversation_id,terminal?.id,work?.work_item_id,ready,foreground,view,inventory?.terminal_observation?.protocol_version]);
 
  function confirm(data:string,clearDraft=false){
-  const identity=view,session=terminal,job=work,transport=client,draft=command;
+  const identity=view,session=terminal,job=work,transport=client,submitted=command;
   if(!job?.capabilities?.includes('terminal:write')){setNotice('O WorkItem desta sessão não tem Grant de escrita. Configure no desktop.');return;}
   Alert.alert('Enviar entrada ao terminal?','A entrada será entregue à sessão '+session.name+'.',[
    {text:'Cancelar'},{text:'Enviar',onPress:()=>{void(async()=>{
@@ -95,7 +98,7 @@ export function TerminalWorkspace({client,conversation,connected,colors,request}
      const value=await request('dot_computer_action',{conversation_id:conversation.conversation_id,request:{action:'machine_execute',
       machine_id:job.machine_id,work_item_id:job.work_item_id,capability_id:'terminal:write',arguments:{terminal_id:session.id,data}}},true);
      if(value.state!=='SUCCEEDED')throw Error('Entrega não confirmada. Consulte o recibo no desktop.');
-     if(activeView.current===identity){if(clearDraft)setCommand(value=>value===draft?'':value);setNotice('Entrada entregue. A conclusão do processo ainda não foi comprovada.');}
+     if(activeView.current===identity){if(clearDraft)draft.clear(submitted);setNotice('Entrada entregue. A conclusão do processo ainda não foi comprovada.');}
     }catch(error:any){if(activeView.current===identity)setNotice(error.message)}
     finally{writingNow.current=false;setWriting(false)}
    })()}}]);
@@ -119,10 +122,10 @@ export function TerminalWorkspace({client,conversation,connected,colors,request}
       if(value.type==='ready')setReady(true);else if(value.type==='ack'){const item=pending.current.get(value.id);if(item){pending.current.delete(value.id);clearTimeout(item.timer);value.error?item.reject(Error(value.error)):item.resolve(value)}}}catch{setNotice('Mensagem inválida da visualização.')}}}
      onError={()=>{setReady(false);setNotice('O terminal não carregou neste aparelho. Retome a observação.')}}/>
    </View>{text(viewStatus,11)}{!work&&text('Não há WorkItem de leitura autorizado para esta sessão.',12)}
-   <TextInput accessibilityLabel="Entrada para a sessão autorizada" value={command} onChangeText={setCommand} autoCapitalize="none" autoCorrect={false}
+   <TextInput accessibilityLabel="Entrada para a sessão autorizada" value={command} editable={draft.ready} onChangeText={setCommand} autoCapitalize="none" autoCorrect={false}
     multiline placeholder="Comando ou resposta para o processo…" placeholderTextColor={colors.muted}
     style={{color:colors.text,borderColor:colors.line,borderWidth:1,borderRadius:9,padding:13,marginVertical:10}}/>
-   {button('Enviar texto + Enter',()=>confirm(command+'\r',true),!writable||!command)}
+   {text(draft.status,10)}{button('Enviar texto + Enter',()=>confirm(command+'\r',true),!writable||!draft.ready||!command)}
    <ScrollView horizontal>{[['Ctrl+C','\x03'],['Tab','\t'],['Esc','\x1b'],['↑','\x1b[A'],['↓','\x1b[B'],['Enter','\r']].map(([label,data])=><View key={label}>{button(label,()=>confirm(data),!writable)}</View>)}</ScrollView>
   </>}{!!notice&&<Text accessibilityLiveRegion="polite" style={{color:colors.accent,marginTop:12,fontSize:12,lineHeight:20}}>{notice}</Text>}
  </ScrollView>;

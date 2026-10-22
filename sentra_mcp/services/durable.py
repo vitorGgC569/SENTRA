@@ -141,6 +141,7 @@ class DurableRunService:
 
     def __init__(self, state_root: Path, *, clock=_now, store=None) -> None:
         from .control_store import create_control_plane_store
+        from .postgres_store import PostgresConnection
         self.store = store or create_control_plane_store(state_root)
         if getattr(self.store, "backend", "sqlite") == "postgres":
             state_root = self.store.state_root
@@ -155,6 +156,8 @@ class DurableRunService:
         self.lock = threading.RLock()
         if getattr(self.store, "backend", "sqlite") == "postgres":
             self.db = self.store.connect("durable")
+            if not isinstance(self.db, PostgresConnection):
+                raise TypeError("native PostgreSQL connection required")
             self.lock = self.db.scope_lock()
         else:
             self.store.assert_active()
@@ -343,7 +346,8 @@ class DurableRunService:
             self.db.commit()
 
     def close(self) -> None:
-        if self.store.backend == "postgres":
+        from .postgres_store import PostgresConnection
+        if isinstance(self.db, PostgresConnection):
             with self.db._mutex:
                 self.db.close()
             return
@@ -461,9 +465,22 @@ class DurableRunService:
     def _project_locked(self, run_id: str) -> dict[str, Any]:
         snapshot = self._run_info_locked(self._run_row(run_id), include_details=True)
         target = self._state_path(run_id)
-        temp = target.with_suffix(".tmp")
-        temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(temp, target)
+        temp = target.with_name(target.name + "." + uuid.uuid4().hex + ".tmp")
+        try:
+            temp.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+            # Windows scanners can briefly hold the destination without delete
+            # sharing. Retry only this projection replacement, never the event
+            # or Operation whose authoritative transaction already succeeded.
+            for attempt in range(6):
+                try:
+                    os.replace(temp, target)
+                    break
+                except PermissionError:
+                    if os.name != "nt" or attempt == 5:
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
+        finally:
+            temp.unlink(missing_ok=True)
         return snapshot
 
     def create_run(

@@ -156,4 +156,5 @@ def test_authorization_wildcards_and_local_owner_shortcut(tmp_path: Path) -> Non
         "source": "local_owner",
         "grant_id": None,
         "reason": "local owner authority",
+        "constraints": {},
     }

@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import type {NetworkInterfaceInfo} from 'node:os';
 import {isLocalIPv4,lanAddresses} from '../src/lan-address';
-import {deviceAtAddress,upsertDevice,directEndpoint} from '../src/pairing-state';
+import {deviceAtAddress,deviceAtOffer,upsertDevice,directEndpoint} from '../src/pairing-state';
 import type {Device} from '../src/client';
 
 const nic=(address:string,family='IPv4'):NetworkInterfaceInfo=>({address,netmask:'255.255.255.0',
@@ -22,10 +22,13 @@ test('changing an IP preserves the pinned identity, credential, key and Dot scop
  const changed=deviceAtAddress(device,'192.168.1.9:5197');
  assert.equal(changed.endpoint,'ws://192.168.1.9:5197/sentra/mobile/v1');
  assert.deepEqual({...changed,endpoint:device.endpoint},device);
+ const offer={endpoint:changed.endpoint,public_key:device.public_key,protocol_version:1 as const,invite_id:'unused',invite:'unused'};
+ assert.deepEqual(deviceAtOffer(device,offer),changed);
+ assert.throws(()=>deviceAtOffer(device,{...offer,public_key:'foreign-host'}),/outra/);
  const other={...device,device_id:'other',public_key:'another-host'};
  const otherDot={...device,device_id:'other-dot',scope:{...device.scope,dot_id:'second'}};
  assert.deepEqual(upsertDevice([device,other,otherDot],changed),[other,otherDot,changed]);
- for(const invalid of ['http://192.168.1.9:5197','ws://user:pass@192.168.1.9','ws://192.168.1.9/other','ws://192.168.1.9/?token=secret'])
+ for(const invalid of ['http://192.168.1.9:5197','ws://user:pass@192.168.1.9','ws://192.168.1.9/other','ws://192.168.1.9/?token=secret','8.8.8.8:5197','public.example:5197'])
   assert.throws(()=>directEndpoint(invalid));
 });
 

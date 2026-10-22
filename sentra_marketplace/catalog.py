@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from builtins import list as List
+from builtins import list as List
 
 from .absence import absence_stamp
 from .gate import PackagePin, Subject
@@ -57,7 +59,7 @@ class LocalMarketplace:
             "connector", "skill", "plugin", "marketplace_package", "visual_model",
         } else "marketplace_package"
         subject = Subject(
-            kind=kind,
+            kind=str(kind),
             subject_id=package_id,
             capability=item.get("capability") or f"marketplace:{package_id}:enable",
             manifest=manifest,
@@ -84,8 +86,10 @@ class LocalMarketplace:
             receipt["opted_in"] = True
         return receipt
 
-    def _manifests(self) -> list[Path]:
-        found = []
+    def _manifests(self) -> List[Path]:
+        found: List[Path] = []
+        if self.root is None:
+            return found
         direct = self.root / "sentra-package.json"
         if direct.is_file() and not direct.is_symlink():
             found.append(direct)

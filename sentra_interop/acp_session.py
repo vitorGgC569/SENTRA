@@ -296,6 +296,8 @@ class ACPSessionState:
                     terminal[name]=copy.deepcopy(value)  # v2 absent skips, null clears.
             else:
                 value=event.get("data")
+                if not isinstance(value, (str, bytes)):
+                    raise ValueError("invalid ACP terminal chunk")
                 try:
                     chunk=base64.b64decode(value,validate=True)
                     before=base64.b64decode((terminal.get("output") or {}).get("data",""),validate=True)

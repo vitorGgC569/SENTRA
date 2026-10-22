@@ -3,9 +3,10 @@ import {FileText,Pencil,Save,RefreshCw} from 'lucide-react';
 import {DocumentCodeEditor} from '../document-code-editor';
 import {useWorkspaceEffects} from './useWorkspaceEffects';
 import {FileDraftWriter,draftFor,editorConflict,savedDraftMatches,fileSaveRequest} from './file-editor-state';
+import {watchWorkspaceFile} from './file-observer';
 
 /** File presentation only; all physical saves go through central machine admission. */
-export function WorkspaceEditor({bridge,projectId,path,fileScope={},visible=true,onRequestAccess}){
+export function WorkspaceEditor({bridge,projectId,path,fileScope={},visible=true,onRequestAccess,onChooseExisting,onRemoveReference}){
  const [file,setFile]=useState(null),[draft,setDraft]=useState(null),[busy,setBusy]=useState(false);
  const [error,setError]=useState(''),[message,setMessage]=useState(''),[draftStatus,setDraftStatus]=useState('');
  const [draftError,setDraftError]=useState(''),[epoch,setEpoch]=useState(0),[compared,setCompared]=useState(false);
@@ -27,7 +28,7 @@ export function WorkspaceEditor({bridge,projectId,path,fileScope={},visible=true
    writer.current?.close();pin.current=value.execution_workspace_id;
    const selected=fields();
    writer.current=new FileDraftWriter((body,revision)=>callbacks.current.bridge({action:'workspace_file_draft_save',...selected,draft:body,expected_revision:revision}),value.revision,
-    (state,issue)=>{if(alive.current){setDraftStatus(state);if(issue)setDraftError(issue.message)}});
+    (state,issue)=>{if(alive.current){setDraftStatus(state);if(issue)setDraftError(issue.message)}},value.draft);
    setFile(value);draftRef.current=value.draft;setDraft(value.draft);setDraftError('');setCompared(false);setEpoch(n=>n+1);
    setDraftStatus(value.draft?'saved':'');
   }catch(issue){if(alive.current)setError(issue.message)}
@@ -40,17 +41,14 @@ export function WorkspaceEditor({bridge,projectId,path,fileScope={},visible=true
   return()=>{alive.current=false;writer.current?.close();window.removeEventListener('blur',flush);document.removeEventListener('visibilitychange',flush);window.removeEventListener('beforeunload',leave)};
  },[]);
  useEffect(()=>{
-  if(!file||!draft||!visible)return;
-  let stopped=false,running=false;
-  const check=async()=>{
-   if(running||document.hidden)return;running=true;
-   try{const current=await callbacks.current.bridge({action:'project_file_preview',...fields()});if(!stopped)setFile(old=>({...old,...current,file_error:null}))}
-   catch(issue){if(!stopped)setFile(old=>({...old,file_error:issue.message}))}
-   finally{running=false}
-  };
-  const timer=setInterval(()=>void check(),3000);window.addEventListener('focus',check);
-  return()=>{stopped=true;clearInterval(timer);window.removeEventListener('focus',check)};
- },[file?.scope,!!draft,visible]);
+  if(!file||!visible)return;
+  return watchWorkspaceFile(bridge,fields(),current=>{
+   if(!alive.current||inAction.current)return;
+   const changed=writer.current?.observe(current,draftRef.current);
+   setFile(current);
+   if(changed){draftRef.current=changed.draft;setDraft(changed.draft);setEpoch(n=>n+1);setMessage('Rascunho atualizado por outra aba ou janela.');setDraftStatus(changed.draft?'saved':'')}
+  },issue=>{if(alive.current)setFile(old=>({...old,file_error:issue.message}))});
+ },[file?.scope,visible,bridge]);
  useEffect(()=>setCompared(false),[file?.sha256,file?.file_error]);
  async function refresh(){try{const current=await callbacks.current.bridge({action:'workspace_file_get',...fields()});if(alive.current)setFile(current)}catch(issue){if(alive.current)setError(issue.message)}}
  async function finish(operation){
@@ -99,7 +97,7 @@ export function WorkspaceEditor({bridge,projectId,path,fileScope={},visible=true
    <button aria-label="Conferir versão do arquivo" disabled={busy} onClick={refresh}><RefreshCw size={13}/></button>
    {!draft?<button disabled={!file?.editable||busy} onClick={()=>remember(draftFor(file))}><Pencil size={13}/>Editar</button>:<><button disabled={busy||!!pending.length} onClick={discard}>Descartar rascunho</button><button className="sw-primary" disabled={!canSave} onClick={save}><Save size={13}/>Salvar</button></>}
   </div></header>
-  {error&&<p role="alert" className="sw-file-notice">{error}</p>}
+  {error&&<div role="alert" className="sw-file-notice"><p>{error}</p>{!file&&<><p>A referência e os rascunhos protegidos foram preservados. Consultar novamente não recria o trabalho.</p><button disabled={busy} onClick={()=>void load()}>Consultar recurso existente</button>{onChooseExisting&&<button onClick={onChooseExisting}>Escolher outro arquivo</button>}{onRemoveReference&&<button onClick={onRemoveReference}>Remover esta aba</button>}</>}</div>}
   {effects.error&&<p role="alert" className="sw-file-notice">Não foi possível consultar o diário de salvamento. {effects.error}</p>}
   {draftError&&<div className="sw-file-notice" role="alert"><p>{draftError} Seu texto continua no editor.</p><button onClick={copyDraft}>Copiar meu texto</button><button disabled={busy} onClick={()=>void load()}>Carregar rascunho guardado</button></div>}
   {pending.map(row=><div className="sw-file-notice" role="status" key={row.request_key}>Salvamento aguardando confirmação.<button disabled={busy||!!effects.inspecting} onClick={()=>inspect(row)}>Consultar sem reenviar</button></div>)}

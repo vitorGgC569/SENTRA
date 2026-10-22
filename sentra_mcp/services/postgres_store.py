@@ -367,6 +367,7 @@ class PostgresConnection:
 
 class PostgresControlPlaneStore:
     backend = "postgres"
+    provider_binding: dict | None = None
     def __init__(self, state_root, *, dsn, tenant_id, principal_id, timeout_seconds=30):
         if not isinstance(dsn, str) or not dsn.strip():
             raise PostgresUnavailable("PostgreSQL authority is unavailable: DSN is not configured")
@@ -444,7 +445,10 @@ class PostgresControlPlaneStore:
         self.schema(namespace)
         return None
 
-    def connect(self, namespace):
+    def assert_active(self) -> None:
+        self.assert_available()
+
+    def connect(self, namespace, *, shared=False) -> PostgresConnection:
         self.assert_available()
         schema = self.schema(namespace)
         with self._mutex:

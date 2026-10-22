@@ -1,6 +1,11 @@
 name: SENTRA Android preview
 on:
   workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Reviewed full source commit SHA to build and publish
+        required: true
+        type: string
 permissions:
   contents: read
 concurrency:
@@ -19,6 +24,15 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
+          ref: ${{ inputs.source_commit }}
+      - name: Bind the build to reviewed sources
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          [[ "$EXPECTED_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          source_commit="$(git rev-parse HEAD)"
+          test "$source_commit" = "$EXPECTED_SOURCE_COMMIT"
+          printf 'SOURCE_COMMIT=%s\n' "$source_commit" >> "$GITHUB_ENV"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
@@ -70,15 +84,20 @@ jobs:
         env:
           APK_PATH: integrations/orca-mobile/app/android/app/build/outputs/apk/release/app-release.apk
           RUN_NUMBER: ${{ github.run_number }}
+          VERIFIED_ANDROID_REPORT: .tmp/mobile-verified.json
         run: |
+          mkdir -p .tmp
+          tools="$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)"
+          "$tools/apksigner" verify --verbose --print-certs "$APK_PATH" > .tmp/mobile-signature.txt
+          "$tools/aapt" dump badging "$APK_PATH" > .tmp/mobile-badging.txt
+          python scripts/site/verify_android.py --apk "$APK_PATH" --signature .tmp/mobile-signature.txt --badging .tmp/mobile-badging.txt --policy scripts/site/android-preview-signing.json --run "$RUN_NUMBER" --out "$VERIFIED_ANDROID_REPORT"
           python scripts/site/package_android.py
-          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify --verbose .tmp/mobile-release/SENTRA-Android-preview.apk
       - name: Publish preview only
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="mobile-preview-$(date -u +%Y%m%d)-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" .tmp/mobile-release/* --target "$GITHUB_SHA" --prerelease --title "SENTRA Android · $tag" --notes-file .tmp/mobile-release/RELEASE-NOTES.md
+          tag="$(python -c 'import json; print(json.load(open(".tmp/mobile-release/mobile-downloads.json"))["tag"])')"
+          gh release create "$tag" .tmp/mobile-release/* --target "$SOURCE_COMMIT" --prerelease --title "SENTRA Android · $tag" --notes-file .tmp/mobile-release/RELEASE-NOTES.md
       - name: Remove runner signing material
         if: always()
         run: |

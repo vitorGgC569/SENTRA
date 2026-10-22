@@ -28,7 +28,10 @@ def _source(tmp_path: Path, *, ready: bool) -> Path:
 def test_repo_extension_has_store_publishing_blockers():
     report = edge.store_preflight()
     assert not report["ready_for_store"]
-    assert any("pairing proof" in text for text in report["blockers"])
+    # Per-device bootstrap is now generated outside the source checkout. The
+    # actual remaining source blocker is the broad host permission; the
+    # synthetic archive tests below still require rejection of local proofs.
+    assert any("<all_urls>" in text for text in report["blockers"])
 
 
 def test_package_offline_deterministic_and_excludes_markdown(tmp_path):

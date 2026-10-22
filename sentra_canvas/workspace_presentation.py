@@ -50,7 +50,7 @@ def dispatch_presentation(canvas,pid,action,params):
         old=_decode(row['body']) if row else None;revision=row['revision'] if row else 0
         if action=='workspace_presentation_get':return {'scope':key,'revision':revision,'profile':old,'restoration_creates_resources':False}
         if old==params['profile']:return {'saved':True,'revision':revision,'scope':key}
-        if revision!=params['expected_revision']:return {'saved':False,'conflict':True,'revision':revision,'scope':key}
+        if revision!=params['expected_revision']:return {'saved':False,'conflict':True,'revision':revision,'scope':key,'profile':old,'execution_started':False}
         revision+=1
         db.execute('INSERT INTO canvas_workspace_presentation VALUES(?,?,?,?,?,?) ON CONFLICT(owner,scope) DO UPDATE SET revision=excluded.revision,body=excluded.body,updated_at=excluded.updated_at',
             (owner,key,1,revision,_encode(params['profile']),time.time()))

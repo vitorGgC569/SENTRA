@@ -42,15 +42,16 @@ def _result(operation_id: str, state: str, evidence: Mapping[str, Any] | None = 
             error: str | None = None) -> Any:
     # The coordinator owns this contract; use it when present, without writing it.
     try:
-        from sentra_runtime.contracts import OperationResult
+        from sentra_runtime.contracts import OperationResult as CoreOperationResult
+        result_type: Callable = CoreOperationResult
     except ImportError:
-        OperationResult = LocalOperationResult
+        result_type = LocalOperationResult
     # Core v1 accepts six uppercase states; authorization denial is FAILED.
     states = {"running": "RUNNING", "succeeded": "SUCCEEDED",
               "failed": "FAILED", "denied": "FAILED",
               "uncertain": "UNCERTAIN", "unknown": "UNCERTAIN",
               "cancelled": "CANCELLED"}
-    return OperationResult(operation_id=operation_id or "invalid-operation",
+    return result_type(operation_id=operation_id or "invalid-operation",
                            state=states.get(state, state),
                            evidence=dict(evidence or {}), error=error)
 

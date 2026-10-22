@@ -74,7 +74,10 @@ class ACPRegistryEntry:
             # Do NOT fetch, trust remote hashes or execute registry-provided cmd.
             package = "binary:manual-approval-required"
         else:
-            package = descriptors[0].package
+            descriptor_package = descriptors[0].package
+            if descriptor_package is None:
+                raise ValueError("distribution package missing")
+            package = descriptor_package
         return cls(agent_id, name, version, kind, package, descriptors, channel)
 
     def installation_plan(self, *, system: str, architecture: str, kind: str | None = None,

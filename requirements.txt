@@ -14,3 +14,4 @@ keyring>=25.0
 pypdf>=5.0
 pyarrow>=18.0
 zstandard>=0.23,<1
+tzdata>=2026.5; sys_platform == "win32"

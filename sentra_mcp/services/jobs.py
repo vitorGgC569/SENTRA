@@ -68,13 +68,18 @@ class JobService:
         self.done_events: dict[str, threading.Event] = {}
         self.loop_ready = threading.Event()
         self.worker_thread = None
-        self.loop = getattr(machine_host, "_loop", None)
+        borrowed_loop = getattr(machine_host, "_loop", None)
+        self.loop: asyncio.AbstractEventLoop
         if self.control is None:
             self.loop = asyncio.new_event_loop()
             self.worker_thread = threading.Thread(target=self._loop_main, name="sentra-job-loop", daemon=True)
             self.worker_thread.start()
             if not self.loop_ready.wait(5):
                 raise RuntimeError("job event loop failed to start")
+        else:
+            if borrowed_loop is None:
+                raise ValueError("central jobs require the MachineHost event loop")
+            self.loop = borrowed_loop
         self.db.executescript(
             """
             CREATE TABLE IF NOT EXISTS jobs(

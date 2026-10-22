@@ -5,7 +5,7 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Annotated, Any, Literal, TypeVar
 
-from mcp.server import MCPServer
+from sentra_mcp.tool_policy import ToolRegistrar
 from mcp.server.mcpserver.context import Context
 from pydantic import Field
 
@@ -74,7 +74,7 @@ def _call(operation: Callable[[], _T]) -> ResponseEnvelope:
     return ResponseEnvelope.success({"items": result})
 
 
-def register_process_tools(mcp: MCPServer, service: ProcessService) -> None:
+def register_process_tools(mcp: ToolRegistrar, service: ProcessService) -> None:
     """Register caller/session-scoped persistent process tools."""
 
     @mcp.tool()

@@ -449,7 +449,7 @@ def page():
             browser.close()
 
 
-def install_fixture(page, *, existing=(), all_permissions=True):
+def install_fixture(page, *, existing=(), all_permissions=True, project=True, expiry=True):
     tunnels = """<main>EXISTING</main><button onclick="openTunnel()">Create tunnel</button>
     <script>
     function openTunnel() {
@@ -466,6 +466,8 @@ def install_fixture(page, *, existing=(), all_permissions=True):
     function openKey() {
       document.body.insertAdjacentHTML('beforeend', `<section role="dialog">
       <label>Name <input id="name"></label>
+      <label>Project <select id="project"><option value="">Select project</option><option value="default">Default project</option></select></label>
+      <label>Expiration <select id="expiry"><option value="">Select expiration</option><option value="never">Never</option></select></label>
       <label><input type="radio" name="permissions" value="Restricted" checked>Restricted</label>
       ALLRADIO
       <button onclick="createKey()">Create secret key</button></section>`);
@@ -473,11 +475,17 @@ def install_fixture(page, *, existing=(), all_permissions=True):
     function createKey() {
       window.keyCreates = (window.keyCreates || 0) + 1;
       window.createdPermission = document.querySelector('input[name=permissions]:checked').value;
+      window.createdProject = document.querySelector('#project').value;
+      window.createdExpiry = document.querySelector('#expiry').value;
       document.querySelector('[role=dialog]').innerHTML = '<span>SECRET</span>';
     }
     </script>""".replace("SECRET", KEY).replace("ALLRADIO", (
         '<label><input type="radio" name="permissions" value="All">All</label>' if all_permissions else ""
     ))
+    if not project:
+        keys = keys.replace('<label>Project <select id="project"><option value="">Select project</option><option value="default">Default project</option></select></label>', '')
+    if not expiry:
+        keys = keys.replace('<label>Expiration <select id="expiry"><option value="">Select expiration</option><option value="never">Never</option></select></label>', '')
     def route(request):
         url = request.request.url
         if url == en.OPENAI_TUNNELS_URL:
@@ -498,6 +506,8 @@ def test_real_edge_creation_all_capture_and_verified_storage(page, paths, existi
     assert tunnel == TUNNEL
     assert key == KEY
     assert page.evaluate("window.createdPermission") == "All"
+    assert page.evaluate("window.createdProject") == "default"
+    assert page.evaluate("window.createdExpiry") == "never"
     assert page.evaluate("window.keyCreates") == 1
     assert KEY not in repr(events)
     assert auto.configure_and_verify(paths, tunnel, key, runtime())["ok"]
@@ -510,6 +520,18 @@ def test_missing_all_never_submits_key_creation(page):
         auto.AutomaticEnrollment(page, lambda *_: None, threading.Event(),
                                  existing_tunnel_id=TUNNEL).run()
     assert page.evaluate("window.keyCreates || 0") == 0
+
+
+@pytest.mark.parametrize('missing',['project','expiry'])
+def test_missing_project_or_expiry_still_blocks_real_edge_key_creation(page,monkeypatch,missing):
+    install_fixture(page,existing=(TUNNEL,),**{missing:False})
+    original=auto.AutomaticEnrollment.wait
+    def bounded(self,probe,*,kind,timeout=30):
+        return original(self,probe,kind=kind,timeout=min(timeout,.6))
+    monkeypatch.setattr(auto.AutomaticEnrollment,'wait',bounded)
+    with pytest.raises(ValueError,match=missing+'_selection_required'):
+        auto.AutomaticEnrollment(page,lambda *_:None,threading.Event(),existing_tunnel_id=TUNNEL).run()
+    assert page.evaluate('window.keyCreates || 0')==0
 
 
 def test_reuses_only_previously_configured_sentra_tunnel(page):

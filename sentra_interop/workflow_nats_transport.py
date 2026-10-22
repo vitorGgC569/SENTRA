@@ -59,12 +59,12 @@ class NATSWorkflowTransport:
         if row is None or row["admitted_operation_id"] != operation_id or progress.get("work_item_id") != work_item_id or progress.get("capability_id") != "workflow:signal":
             raise PermissionError("broker ACK must reference its exact admitted signal")
         from sentra_runtime.contracts import OperationRequest
-        from .gate import _fingerprint
+        from sentra_runtime.executor import _request_snapshot
         request = OperationRequest(operation_id, progress["principal_id"], progress["machine_id"],
             "workflow:signal", work_item_id, operation["idempotency_key"], self.bridge._intent(dict(row))["arguments"])
         with self.control.durable.lock:
             recorded = self.control.durable._operation_row(operation_id, self.owner)["intent_sha256"]
-        if recorded != _fingerprint(request):
+        if recorded != _request_snapshot(request)[1]:
             raise PermissionError("NATS signal intent mismatch")
         if operation["state"] != "SUCCEEDED":
             return {"status": "UNCERTAIN", "broker_acknowledged": False, "automatic_replay": False}

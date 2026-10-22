@@ -119,12 +119,15 @@ def test_two_independent_cli_sessions(canvas):
     assert all(canvas.store.resource("terminals",i,ws)["pid"] for i in ids)
     deadline=time.time()+12
     outputs={}
+    def cli_ready(text):
+        return '/model' in text and '/help' in text and 'histórico' in text
     while time.time()<deadline:
         outputs={i:canvas.terminal_output(ws,i)["text"] for i in ids}
-        if all("SENTRA CLI" in s or "Workspace:" in s for s in outputs.values()):
+        if all(cli_ready(s) for s in outputs.values()):
             break
         time.sleep(.2)
-    assert all("SENTRA CLI" in s or "Workspace:" in s for s in outputs.values()), outputs
+    assert all(cli_ready(s) for s in outputs.values()), outputs
+    assert all(canvas._sessions[i].pty.poll() is None for i in ids)
     for i in ids: canvas.terminal_close(ws,i)
 
 def test_loopback_authentication_and_origin(canvas):

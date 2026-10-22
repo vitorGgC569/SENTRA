@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "package": "app.sentra.mobile.preview",
+  "certificate_sha256": "305c42f463397dedd995b4897e022119d059b5766603a57d97ad559c86eb7823",
+  "minimum_version_code": 3,
+  "previous_release": "mobile-preview-20261022-2"
+}

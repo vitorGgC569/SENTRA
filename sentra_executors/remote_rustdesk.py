@@ -5,6 +5,8 @@ build helper. Local receipts/lease are SENTRA instrumentation, not a guessed
 RustDesk RPC API. A verified peer does NOT prove desktop login/frame availability.
 """
 from __future__ import annotations
+
+from typing import Any
 import hashlib
 import json
 import os
@@ -105,7 +107,7 @@ class RustDeskPeerBinding:
 
 class RustDeskNativeBackend:
     def __init__(self,journal:SessionJournal):
-        self.journal=journal;self.running={};self.lock=threading.RLock()
+        self.journal=journal;self.running: dict[str, Any] = {};self.lock=threading.RLock()
 
     def shutdown(self):
         with self.lock:

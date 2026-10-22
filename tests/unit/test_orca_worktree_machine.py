@@ -13,7 +13,7 @@ def test_worktree_machine_uses_existing_grants_and_replays_one_git_effect(shell)
     (root/'base.txt').write_text('base');git(root,'add','base.txt');git(root,'commit','-m','base')
     base=git(root,'rev-parse','HEAD')
     machine=app.center_configure_machine(scope['project_id'],actor['agent_id'],'git-worktrees',provider_config={'dot_id':actor['dot_id']})
-    assert machine['grant_created'] is False and machine['publication_supported'] is False
+    assert machine['grant_created'] is False and machine['publication_supported'] is True and machine['publication_requires_review'] is True
     runtime=app._runtime();host=app._machine_service();control=runtime.control
     item=control.create_work_item(runtime.run(scope['project_id'])['run_id'],runtime.owner,
         objective='Create one isolated programming workspace',assignee_agent_id=actor['agent_id'],
@@ -38,6 +38,6 @@ def test_worktree_machine_uses_existing_grants_and_replays_one_git_effect(shell)
         assert (root/'base.txt').read_text()=='base'
         inspected=dispatch('git:worktree.inspect',{'worktree_id':record['worktree_id']},'git-inspect')
         assert inspected['state']=='SUCCEEDED' and inspected['evidence']['diff_stat']
-        # No publication action is advertised or accepted by this machine.
-        assert 'git:push' not in machine['capabilities']
+        # Publication uses a separate reviewed capability and is never implicit.
+        assert 'git:publish' in machine['capabilities'] and 'git:push' not in machine['capabilities']
     finally:git(root,'worktree','remove','--force',str(target))

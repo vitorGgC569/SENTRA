@@ -3,6 +3,7 @@ from pathlib import Path
 import argparse,json
 ROOT=Path(__file__).resolve().parents[2]
 def prepare(app,build_number):
+ if type(build_number) is not int or build_number<1:raise ValueError('Positive Android versionCode required')
  config=app/'app.json';value=json.loads(config.read_text(encoding='utf-8-sig'))
  value['expo']['name']='SENTRA Preview';value['expo']['android'].update(package='app.sentra.mobile.preview',versionCode=build_number)
  config.write_text(json.dumps(value,indent=2)+'\n',encoding='utf-8')

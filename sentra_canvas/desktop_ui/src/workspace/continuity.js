@@ -33,23 +33,30 @@ export function taskState(row){
  const [label,tone,detail]=values[stage]||values.requested;return {stage,label,tone,detail};
 }
 
-/** Serialized CAS writer. A conflict freezes saves until an explicit reload. */
+/** Serialized CAS writer. Conflicts retain both versions for an explicit choice. */
 export class PresentationWriter{
- constructor(save,revision,onError=()=>{}){this.save=save;this.revision=revision;this.onError=onError;this.pending=null;this.busy=false;this.closed=false;this.conflict=false;this.timer=null;this.last=null}
- schedule(profile){if(this.closed||this.conflict)return;this.pending=JSON.stringify(profile);clearTimeout(this.timer);this.timer=setTimeout(()=>void this.flush(),250)}
+ constructor(save,revision,onError=()=>{}){this.save=save;this.revision=revision;this.onError=onError;this.pending=null;this.busy=false;this.closed=false;this.conflict=false;this.timer=null;this.last=null;this.local=null;this.remote=null}
+ schedule(profile){if(this.closed)return;this.local=JSON.stringify(profile);if(this.conflict)return;this.pending=this.local;clearTimeout(this.timer);this.timer=setTimeout(()=>void this.flush(),250)}
+ freeze(value){this.conflict=true;clearTimeout(this.timer);if(Number.isSafeInteger(value?.revision)&&validProfile(value.profile))this.remote=value;this.onError(Error('O layout mudou em outra janela. Escolha a versão que deseja manter. Suas alterações locais foram preservadas.'))}
  observe(value){
-  if(this.closed||this.conflict||!Number.isSafeInteger(value?.revision)||value.revision<=this.revision)return null;
+  if(this.closed||!Number.isSafeInteger(value?.revision)||value.revision<=this.revision)return null;
   if(!validProfile(value.profile))throw Error('O layout recebido não pôde ser validado.');
-  if(this.busy||this.pending&&this.pending!==this.last){
-   this.conflict=true;clearTimeout(this.timer);
-   this.onError(Error('O layout mudou em outro dispositivo. Suas alterações locais foram preservadas. Reabra o Canvas para escolher a versão salva.'));
-   return null;
-  }
-  this.revision=value.revision;this.last=JSON.stringify(value.profile);this.pending=null;
+  if(this.conflict){this.remote=value;return null}
+  if(this.busy||this.pending&&this.pending!==this.last){this.freeze(value);return null}
+  this.revision=value.revision;this.last=JSON.stringify(value.profile);this.local=this.last;this.pending=null;
   return value.profile;
  }
+ async resolve(value,choice,local){
+  if(this.busy||this.closed)throw Error('Aguarde a gravação de layout em andamento.');
+  if(value?.revision===0&&value.profile===null)value={...value,profile:emptyProfile()};
+  if(!Number.isSafeInteger(value?.revision)||value.revision<this.revision||!validProfile(value.profile)||!['local','remote'].includes(choice))throw Error('A versão do layout não pôde ser validada.');
+  const selected=choice==='local'?local:value.profile;if(!validProfile(selected))throw Error('O layout local não pôde ser validado.');
+  this.revision=value.revision;this.last=JSON.stringify(value.profile);this.local=JSON.stringify(selected);this.pending=null;this.remote=null;this.conflict=false;
+  if(choice==='local'){this.pending=this.local;await this.flush()}
+  return this.conflict?null:selected;
+ }
  async flush(){clearTimeout(this.timer);if(this.busy||this.conflict||!this.pending)return;const wire=this.pending;this.pending=null;if(wire===this.last)return;this.busy=true;
-  try{const value=await this.save(JSON.parse(wire),this.revision);if(value.saved!==true){this.conflict=true;throw Error('O layout mudou em outra janela. Reabra o Canvas para carregar a versão salva.')}this.revision=value.revision;this.last=wire}
+  try{const value=await this.save(JSON.parse(wire),this.revision);if(value.saved!==true){this.freeze(value);return}this.revision=value.revision;this.last=wire}
   catch(error){this.conflict=true;this.onError(error)}finally{this.busy=false;if(this.pending&&!this.conflict)void this.flush()}
  }
  close(){this.closed=true;clearTimeout(this.timer);void this.flush()}

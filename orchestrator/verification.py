@@ -98,7 +98,10 @@ class CandidateVerifier:
             # saem das listas de passou/falhou e vão para refused_commands.
             ran_results = [r for r in results if not r.get("refused")]
             refused = [r["command"] for r in results if r.get("refused")]
-            touched_files = sorted(dry_run.get("files", []))
+            dry_run_files = dry_run.get("files", [])
+            if not isinstance(dry_run_files, list) or not all(isinstance(path, str) for path in dry_run_files):
+                raise ValueError("invalid dry-run file list")
+            touched_files = sorted(dry_run_files)
             touched_base_hashes = {
                 path: (
                     hashlib.sha256(sandbox.before[path]).hexdigest()

@@ -150,7 +150,7 @@ class DurableInteropGate(InteropGate):
         self.authority, self.run_id, self.owner = authority, run_id, owner
         self.status_policy = status_policy or policy
         super().__init__(machine, policy)
-        self.journal = _CentralJournal(self)
+        self.journal: _CentralJournal = _CentralJournal(self)
 
     async def decision(self, request):
         try:
@@ -170,6 +170,8 @@ class DurableInteropGate(InteropGate):
         # The real central policy is synchronous. Launch constraints are
         # validated by InteropGate.decision before reservation and are pinned
         # again by the host policy on each boundary; they must not disappear.
+        if self.policy is None:
+            return PolicyDecision(False, "central transport authorization unavailable")
         decision = self.policy(request)
         if inspect.isawaitable(decision):
             raise TypeError("central physical policy must be synchronous")

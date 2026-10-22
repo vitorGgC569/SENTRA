@@ -1,16 +1,19 @@
 import {PairedE2EEV2ClientSession} from './vendor/paired-e2ee-v2-client-session';
 import type {PairedE2EEPrimitives,PairedE2EEKeyPair} from './vendor/paired-e2ee-primitives';
 import type {PairedScope} from './contracts';
+import {directEndpoint} from './pairing-state';
 export {canonicalIntent,journalIntent} from './intent-fingerprint.js';
 export {EffectJournal,type PendingEffect} from './effect-journal';
-export {upsertDevice,deviceAtAddress,directEndpoint} from './pairing-state';
+export {upsertDevice,deviceAtAddress,deviceAtOffer,directEndpoint} from './pairing-state';
 export {TerminalFeed,type TerminalDelivery} from './terminal-feed';
 export type {TerminalOutputFrame} from './contracts';
 export {bindRequestContext,requireRequestContext} from './request-context';
+export {ScopedRefresh} from './scoped-refresh';
+export {pairedDiscoveryCandidates} from './lan-discovery';
 export type PairingOffer={endpoint:string;public_key:string;invite_id:string;invite:string;protocol_version:1};
-export type Device={device_id:string;credential:string;scope:PairedScope;endpoint:string;public_key:string;keys:{publicKey:string;secretKey:string}};
+export type Device={device_id:string;credential:string;rotation_key?:string;scope:PairedScope;endpoint:string;public_key:string;keys:{publicKey:string;secretKey:string}};
 type SocketLike={send:(value:string)=>void;close:()=>void;onopen:((e:any)=>void)|null;onmessage:((e:any)=>void)|null;onclose:((e:any)=>void)|null;onerror:((e:any)=>void)|null};
-export function parseOffer(uri:string):PairingOffer{if(!uri.startsWith('sentra://pair#')||uri.length>6000)throw Error('Link de pareamento inválido');const encoded=uri.slice('sentra://pair#'.length).replace(/-/g,'+').replace(/_/g,'/');const data=JSON.parse(atob(encoded));const url=new URL(data.endpoint);if(!['ws:','wss:'].includes(url.protocol)||url.username||url.password||url.search||url.hash||url.pathname!=='/sentra/mobile/v1'||data.protocol_version!==1)throw Error('Oferta incompatível');return data;}
+export function parseOffer(uri:string):PairingOffer{if(!uri.startsWith('sentra://pair#')||uri.length>6000)throw Error('Link de pareamento inválido');const encoded=uri.slice('sentra://pair#'.length).replace(/-/g,'+').replace(/_/g,'/');const data=JSON.parse(atob(encoded));const url=new URL(data.endpoint);if(!['ws:','wss:'].includes(url.protocol)||url.username||url.password||url.search||url.hash||url.pathname!=='/sentra/mobile/v1'||data.protocol_version!==1)throw Error('Oferta incompatível');directEndpoint(data.endpoint);return data;}
 export class MobileClient {
  private socket:SocketLike|null=null;private session:PairedE2EEV2ClientSession|null=null;
  private pending=new Map<string,{resolve:(v:any)=>void;reject:(e:Error)=>void;timer:ReturnType<typeof setTimeout>}>();
@@ -23,6 +26,17 @@ export class MobileClient {
  async rpc(body:Record<string,unknown>){const session=this.session,socket=this.socket;if(!session?.isReady||!socket)throw Error('Conecte-se ao host');const id=this.p.encodeBase64(this.p.randomBytes(18));return new Promise<any>((resolve,reject)=>{const timer=setTimeout(()=>{this.pending.delete(id);reject(Error('Resultado não confirmado. Nenhum reenvio automático.'));},15000);this.pending.set(id,{resolve,reject,timer});try{socket.send(session.sealText(JSON.stringify({id,...body})))}catch{clearTimeout(timer);this.pending.delete(id);reject(Error('Envio não confirmado'));}});}
  async pair(offer:PairingOffer,name:string){const keys=this.p.generateKeyPair();await this.connect(offer.endpoint,offer.public_key,keys);const value=await this.rpc({method:'pair',invite_id:offer.invite_id,invite:offer.invite,name});return {device_id:value.device_id,fingerprint:value.fingerprint,keys,offer};}
  async claim(pending:{device_id:string;keys:PairedE2EEKeyPair;offer:PairingOffer}){const value=await this.rpc({method:'claim',device_id:pending.device_id});if(value.state==='pending')return null;const device:Device={...value,endpoint:pending.offer.endpoint,public_key:pending.offer.public_key,keys:{publicKey:this.p.encodeBase64(pending.keys.publicKey),secretKey:this.p.encodeBase64(pending.keys.secretKey)}};this.device=device;return device;}
- async resume(device:Device){try{await this.connect(device.endpoint,device.public_key,{publicKey:this.p.decodeBase64(device.keys.publicKey),secretKey:this.p.decodeBase64(device.keys.secretKey)});this.device=device;await this.request({action:'workspace_inventory'});}catch(error){this.disconnect();throw error;}}
+ async rotateCredential(persist:(device:Device)=>Promise<void>){
+  const original=this.device;if(!original)throw Error('Dispositivo não pareado');
+  const prepared={...original,rotation_key:original.rotation_key||this.p.encodeBase64(this.p.randomBytes(24))};
+  await persist(prepared);if(this.device!==original)throw Error('A conexão mudou. A rotação não foi enviada.');this.device=prepared;
+  const result=await this.rpc({method:'rotate',device_id:prepared.device_id,credential:prepared.credential,request_key:prepared.rotation_key});
+  if(this.device!==prepared)throw Error('A conexão mudou. Retome a rotação salva.');
+  const {rotation_key,...next}={...prepared,credential:result.credential};await persist(next);
+  if(this.device!==prepared)throw Error('A conexão mudou. A credencial foi salva.');this.device=next;return next;
+ }
+ async resume(device:Device,persist?:(device:Device)=>Promise<void>){try{await this.connect(device.endpoint,device.public_key,{publicKey:this.p.decodeBase64(device.keys.publicKey),secretKey:this.p.decodeBase64(device.keys.secretKey)});this.device=device;
+  if(device.rotation_key){if(!persist)throw Error('Retome a rotação protegida neste aparelho.');device=await this.rotateCredential(persist)}
+  await this.request({action:'workspace_inventory'});return device;}catch(error){this.disconnect();throw error;}}
  async request(request:Record<string,unknown>){if(!this.device)throw Error('Dispositivo não pareado');return this.rpc({method:'request',device_id:this.device.device_id,credential:this.device.credential,request:{...request,project_id:this.device.scope.project_id,space_id:this.device.scope.space_id,dot_id:this.device.scope.dot_id}});}
 }

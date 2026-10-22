@@ -99,7 +99,10 @@ class Orchestrator:
             if hasattr(self.browser_pool, "resource_manifest")
             else {"max_concurrency": self.spec.max_parallel_sessions, "resources": []}
         )
-        browser_capacity = max(1, int(resource_manifest.get("max_concurrency") or 1))
+        raw_capacity = resource_manifest.get("max_concurrency") or 1
+        if not isinstance(raw_capacity, (int, float, str)):
+            raise ValueError("invalid browser resource capacity")
+        browser_capacity = max(1, int(raw_capacity))
         dispatch_limit = min(self.spec.max_parallel_sessions, browser_capacity)
         active_tasks = self.state.pending_tasks[:dispatch_limit]
         self.state.log(

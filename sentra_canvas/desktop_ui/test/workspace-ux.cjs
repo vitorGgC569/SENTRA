@@ -1,7 +1,9 @@
 // Acceptance runner for the disposable local HTML fixture, never a live app.
 const {app,BrowserWindow}=require('electron');
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
-const argv=process.argv.slice(2).filter(arg=>arg!=='--'),target=argv[0],output=path.resolve(argv[1]),remote=/^https?:\/\//i.test(target);
+const {parseWorkspaceFixtureArgs}=require('./workspace-fixture-args.cjs');
+const fixture=parseWorkspaceFixtureArgs(process.argv.slice(2));
+const target=fixture.target,output=path.resolve(fixture.output),remote=/^https?:\/\//i.test(target);
 fs.mkdirSync(output,{recursive:true});app.setPath('userData',path.join(output,'profile-'+process.pid));
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 app.whenReady().then(async()=>{

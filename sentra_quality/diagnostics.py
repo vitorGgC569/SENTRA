@@ -58,11 +58,11 @@ class DiagnosticsReport:
             snapshot["sections"]["identity"] = {"unavailable": str(exc)[:200]}
         try:
             from sentra_quality.learning_review import ReviewedLearningStore
-            store = ReviewedLearningStore(self.root)
+            learning_store = ReviewedLearningStore(self.root)
             counts: dict[str, int] = {}
             for status in ("PROPOSED", "APPROVED", "REJECTED", "WITHDRAWN"):
                 try:
-                    counts[status.lower()] = store.list(owner, status=status,
+                    counts[status.lower()] = learning_store.list(owner, status=status,
                                                        limit=1)["total"]
                 except Exception:
                     counts[status.lower()] = -1

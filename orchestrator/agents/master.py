@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..conversation_pool import FixedConversationRouter
+
 import json
 from typing import Any, Dict, List, Optional
 
@@ -37,7 +41,7 @@ class ReviewProtocolError(RuntimeError):
 
 
 class MasterModelAgent:
-    def __init__(self, router: ModelRouter, master_provider_name: str = "master"):
+    def __init__(self, router: ModelRouter | FixedConversationRouter, master_provider_name: str = "master"):
         self.router = router
         self.master_provider_name = master_provider_name
 

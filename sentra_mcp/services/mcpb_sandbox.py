@@ -138,7 +138,7 @@ async def _isolated_effect(
         data = json.dumps(response, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(data) > 16_384:
             raise ValueError("MCPB tool reply exceeds public response budget")
-        return response
+        return dict(response)
     finally:
         # Never retain an ungoverned server between Operations. --rm removes
         # normal Docker runs; unexpected host crashes still require reconciliation.

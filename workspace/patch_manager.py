@@ -261,10 +261,10 @@ class PatchManager:
                     if before is not None:
                         modes[target] = target.stat().st_mode
                     content = (before or b"").decode("utf-8")
-                    after = "".join(PatchManager._apply_hunks(content.splitlines(keepends=True), patch.hunks))
-                    if patch.new is None and after:
+                    after_text = "".join(PatchManager._apply_hunks(content.splitlines(keepends=True), patch.hunks))
+                    if patch.new is None and after_text:
                         raise ValueError("deletion patch leaves content behind")
-                    proposed[target] = after.encode("utf-8") if patch.new else None
+                    proposed[target] = after_text.encode("utf-8") if patch.new else None
                 # All context/path/count checks finish before the first mutation.
                 for target, after in proposed.items():
                     resolve_workspace_path(root, target.relative_to(root).as_posix())

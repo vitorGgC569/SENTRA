@@ -26,7 +26,10 @@ def test_sqlite_control_plane_store_owns_namespace_paths_and_pragmas(tmp_path) -
 
 
 def test_control_plane_store_fails_closed_for_unknown_backend_or_namespace(tmp_path) -> None:
+    from sentra_mcp.services.postgres_store import PostgresUnavailable
     with pytest.raises(UnsupportedControlPlaneBackend):
+        create_control_plane_store(tmp_path, backend="unknown")
+    with pytest.raises(PostgresUnavailable, match="DSN is not configured"):
         create_control_plane_store(tmp_path, backend="postgres")
 
     store = SQLiteControlPlaneStore(tmp_path)

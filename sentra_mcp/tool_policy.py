@@ -8,7 +8,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import wraps
 import inspect
-from typing import Any
+from typing import Any, Protocol
+
+
+class ToolRegistrar(Protocol):
+    """Registration surface shared by MCPServer and the policy wrapper."""
+
+    def tool(self, *args: Any, **kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]: ...
 
 
 def _invocation_origin(function, args, kwargs):

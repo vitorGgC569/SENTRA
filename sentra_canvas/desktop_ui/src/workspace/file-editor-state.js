@@ -15,7 +15,14 @@ export function fileSaveRequest(scope,file,draft,path,key){
 
 /** Serialized protected-draft CAS, with no storage of content in the renderer. */
 export class FileDraftWriter{
- constructor(save,revision,onState=()=>{}){this.save=save;this.revision=revision;this.onState=onState;this.pending=undefined;this.running=null;this.timer=null;this.closed=false;this.error=null}
+ constructor(save,revision,onState=()=>{},initialDraft=null){this.save=save;this.revision=revision;this.onState=onState;this.pending=undefined;this.running=null;this.timer=null;this.closed=false;this.error=null;this.last=JSON.stringify(initialDraft)}
+ observe(value,local){
+  if(this.closed||this.running||this.error||!Number.isSafeInteger(value?.revision)||value.revision<=this.revision)return null;
+  const wire=JSON.stringify(value.draft),own=JSON.stringify(local);
+  if(wire===own){this.revision=value.revision;this.last=wire;if(this.pending===wire)this.pending=undefined;return {draft:value.draft}}
+  if(this.pending!==undefined||own!==this.last){this.error=Error('O rascunho mudou em outra janela. Compare a versão guardada antes de continuar.');clearTimeout(this.timer);this.onState('error',this.error);return null}
+  this.revision=value.revision;this.last=wire;return {draft:value.draft};
+ }
  schedule(value){if(this.closed||this.error)return;this.pending=JSON.stringify(value);clearTimeout(this.timer);this.onState('pending');this.timer=setTimeout(()=>void this.flush().catch(()=>{}),600)}
  async flush(){
   clearTimeout(this.timer);
@@ -23,7 +30,7 @@ export class FileDraftWriter{
   if(this.error)throw this.error;
   if(this.pending===undefined)return;
   const wire=this.pending;this.pending=undefined;
-  this.running=(async()=>{try{const value=await this.save(JSON.parse(wire),this.revision);if(value.saved!==true)throw Error('O rascunho mudou em outra janela. Compare a versão guardada antes de continuar.');this.revision=value.revision;this.onState('saved')}
+  this.running=(async()=>{try{const value=await this.save(JSON.parse(wire),this.revision);if(value.saved!==true)throw Error('O rascunho mudou em outra janela. Compare a versão guardada antes de continuar.');this.revision=value.revision;this.last=wire;this.onState('saved')}
    catch(error){this.error=error;this.onState('error',error);throw error}finally{this.running=null}})();
   await this.running;
   if(this.pending!==undefined)await this.flush();

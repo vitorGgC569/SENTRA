@@ -35,7 +35,7 @@ def test_host_pricer_blocks_forged_cost_and_reserves_cumulative_sqlite(tmp_path)
             db.execute("UPDATE goal_loop_steps SET work_item_id=NULL "
                        "WHERE loop_id=? AND step=1",(lid,))
         quote_name[0]="host-quote-changed"
-        with pytest.raises(GoalLoopConflict,match="host price quote changed"):
+        with pytest.raises(GoalLoopConflict,match="durable host quote/objective changed"):
             loop.advance(p["owner"],lid,objective="step1",operator_approved=True)
         quote_name[0]="host-quote-original"
         restored=HostPricedGoalLoop(control,price_quote=catalog).advance(
@@ -49,6 +49,9 @@ def test_host_pricer_blocks_forged_cost_and_reserves_cumulative_sqlite(tmp_path)
         control.transition_work_item(result["work_item_id"],p["owner"],"COMPLETED")
         with pytest.raises(GoalLoopConflict,match="cost cap"):
             loop.advance(p["owner"],lid,objective="too-much",operator_approved=True)
+        with loop.store.connect("execution_workspace") as db:
+            assert db.execute("SELECT COUNT(*) FROM goal_loop_host_quotes WHERE loop_id=? AND step=2", (lid,)).fetchone()[0] == 0
+            assert db.execute("SELECT COUNT(*) FROM goal_loop_cost_reservations WHERE loop_id=?", (lid,)).fetchone()[0] == 1
         next_item=loop.advance(p["owner"],lid,objective="step2",operator_approved=True)
         assert next_item["reserved_cost_usd"]==0.2
         assert loop.status(p["owner"],lid)["reserved_cost_usd"]==0.9

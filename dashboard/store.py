@@ -133,7 +133,8 @@ def relay_jobs(db_path, limit: int = 50, task_id: Optional[str] = None,
     out = []
     for jid, payload, state, worker, updated in rows:
         try:
-            data = json.loads(payload or "{}")
+            from native_bridge.job_store import JobStore
+            data = JobStore._unseal(payload, jid, "payload")
         except Exception:
             continue
         if task_id and data.get("task_id") != task_id:
@@ -165,7 +166,8 @@ def _read_result(conn, job_id: str) -> Optional[Dict[str, Any]]:
     if not row or not row[0]:
         return None
     try:
-        data = json.loads(row[0])
+        from native_bridge.job_store import JobStore
+        data = JobStore._unseal(row[0], job_id, "result")
         return data if isinstance(data, dict) else None
     except Exception:
         return None

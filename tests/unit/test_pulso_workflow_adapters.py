@@ -107,8 +107,9 @@ def test_temporal_update_ledger_admitted_vs_completed():
 
 
 def _definition():
+    from sentra_interop.workflow_contracts import ActivitySpec
     return WorkflowDefinition(definition_id="doc", version="v1",
-                              worker_version="worker1", steps=())
+                              worker_version="worker1", steps=(ActivitySpec("wait", kind="wait", signal_name="done"),))
 
 
 def test_langgraph_lineage_and_memory(tmp_path):

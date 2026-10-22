@@ -1,6 +1,8 @@
 """Hierarchical cost/quota budget policies for SENTRA governance."""
 from __future__ import annotations
 
+from .postgres_store import PostgresConnection
+
 import json
 import math
 import sqlite3
@@ -74,7 +76,7 @@ class BudgetPolicyService:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> sqlite3.Connection | PostgresConnection:
         return self.store.connect("budget_policy")
 
     @staticmethod
@@ -278,7 +280,7 @@ class BudgetPolicyService:
         provider: str | None = None,
         proposed: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        context = {
+        context: dict[str, Any] = {
             "workspace": workspace,
             "goal_id": goal_id,
             "work_item_id": work_item_id,

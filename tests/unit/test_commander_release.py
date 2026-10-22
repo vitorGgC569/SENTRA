@@ -540,8 +540,10 @@ def test_windows_builder_fails_closed_and_terminates_pyinstaller_tree(
 
 def test_payload_build_probes_update_helper_first(monkeypatch, tmp_path: Path) -> None:
     from scripts.commander import build_windows
+    from scripts.commander import build_desktop_launcher
 
     calls = []
+    gui_checks = []
 
     def fake_build(name, entry_name, dist, work, spec, **kwargs):
         calls.append((name, kwargs.get("timeout_s")))
@@ -550,6 +552,9 @@ def test_payload_build_probes_update_helper_first(monkeypatch, tmp_path: Path) -
         (output / f"{name}.exe").write_text(name, encoding="utf-8")
 
     monkeypatch.setattr(build_windows, "_build", fake_build)
+    monkeypatch.setattr(build_windows, 'LOCAL_BUILD_ROOT', tmp_path / 'local-build')
+    monkeypatch.setattr(build_windows, '_verify_frozen_gui', lambda executable: gui_checks.append(executable.name))
+    monkeypatch.setattr(build_desktop_launcher, 'build_desktop_launcher', lambda executable: executable.write_bytes(b'fixture-launcher'))
     monkeypatch.setattr(build_windows, "_publish_payload", lambda staging, dist: None)
 
     build_windows.build_payload(
@@ -560,6 +565,7 @@ def test_payload_build_probes_update_helper_first(monkeypatch, tmp_path: Path) -
 
     assert calls[0] == ("sentra-update-helper", 600)
     assert [name for name, _ in calls].count("sentra-update-helper") == 1
+    assert gui_checks == ['sentra-desktop.exe']
 
 
 def test_payload_publish_rolls_back_if_target_becomes_locked(

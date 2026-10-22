@@ -265,10 +265,32 @@
 .opendots-shell .sentra-workspace .sw-welcome h2 { font-size: 27px; letter-spacing: -.035em; font-weight: 700; }
 .opendots-shell .sentra-workspace .sw-welcome > p { color: var(--sc-muted); font-size: 13px; }
 .opendots-shell .sentra-workspace .sw-welcome-actions button { border-radius: 11px; background: var(--sc-panel); box-shadow: var(--sc-shadow); }
+.opendots-shell .sentra-workspace button { color: var(--sw-text); }
+.opendots-shell .sentra-workspace :is(select, textarea, input:not([type=checkbox]):not([type=radio])) {
+  color: var(--sw-text); background: var(--sw-panel); border-color: var(--sw-line);
+}
+.opendots-shell .sentra-workspace button.sw-primary,
+.dialog-content button.sw-primary { background: var(--sc-accent); color: var(--sc-accent-ink); border-color: transparent; }
+.opendots-shell .sentra-workspace button.danger { color: var(--sc-red); }
 .opendots-shell .sentra-workspace .sw-statusbar { background: var(--sc-sidebar); border-color: var(--sc-line); font-size: 10px; }
 .opendots-shell .shell-studio { background-color: var(--sc-bg); }
 .opendots-shell .shell-studio .shell-agent-terminal { background: var(--sc-panel); border-color: var(--sc-line); border-radius: 12px; box-shadow: var(--sc-shadow); }
 .opendots-shell .shell-studio .shell-agent-terminal > header { background: var(--sc-field); border-color: var(--sc-line); }
+.opendots-shell .shell-dot-canvas.shell-studio {
+  --shell-bg: var(--sc-bg); --shell-panel: var(--sc-panel); --shell-line: var(--sc-line);
+  --shell-ink: var(--sc-ink); --shell-muted: var(--sc-muted); color-scheme: inherit;
+}
+.opendots-shell .shell-studio :is(.shell-dot-flow, .react-flow) { background: var(--sc-bg); }
+.opendots-shell .shell-studio .shell-agent-terminal { color: var(--sc-ink); }
+.opendots-shell .shell-studio :is(.shell-agent-tools, .shell-agent-session, .shell-agent-details) {
+  background: var(--sc-panel); color: var(--sc-muted); border-color: var(--sc-line);
+}
+.opendots-shell .shell-studio .shell-agent-terminal:not(.has-terminal) .shell-agent-stage { background: var(--sc-panel); }
+.opendots-shell .shell-studio .shell-terminal-empty :is(strong, button) { color: var(--sc-ink); }
+.opendots-shell .shell-studio .shell-terminal-empty p { color: var(--sc-muted); }
+.opendots-shell .shell-studio :is(.shell-agent-tools select, .shell-terminal-empty button) {
+  background: var(--sc-field); border-color: var(--sc-line); color: var(--sc-ink);
+}
 
 /* Portals, settings, hub and the island belong to the same window material. */
 .dialog-overlay { background: rgb(0 0 0 / 42%); backdrop-filter: blur(8px); }

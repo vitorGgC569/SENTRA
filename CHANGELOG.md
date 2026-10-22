@@ -2,6 +2,30 @@
 
 All notable user-facing changes to SENTRA are recorded here.
 
+## 1.0.1 — 2026-10-22 (preview qualification)
+
+### Added
+
+- Scoped workspace recovery, layout conflict choices, edge splits and keyboard navigation.
+- Protected editor drafts and centrally authorized Git review, commit, fast-forward merge, publication and cleanup.
+- Browser Design Mode and opt-in, owner-protected login profiles.
+- Protected mobile drafts, foreground refresh, pinned-host LAN discovery and recoverable credential rotation.
+- Scoped remote keyboard chords and drag gestures with input release on interruption.
+
+### Fixed
+
+- Host catalog reads blocking concurrent terminal and worker operations.
+- Windows worktree provisioning at deep paths and protected draft cleanup races.
+- HTTP SSE dechunking, truncated response detection, federation socket cleanup and A2A stream shutdown.
+- Budget rejection incorrectly retaining a quote for a later task step.
+- Installer login validation, exact loopback host checks and all findings in the enforced Python typing gate.
+
+### Qualification
+
+- Preview builds retain separate device, native package and signing acceptance gates.
+- Android/iPhone physical operation and private VPN behavior require device acceptance; no signed iOS distribution is claimed.
+- Stable Windows publication requires independent clean-install, upgrade, uninstall and signature evidence bound to the actual artifacts.
+
 ## 1.0.0 — 2026-09-22
 
 ### Added

@@ -14,6 +14,13 @@ import hashlib
 import difflib
 import tempfile
 from pathlib import Path
+from typing import TypedDict
+
+
+class ProjectEntry(TypedDict):
+    name: str
+    directory: bool
+    path: str
 
 MAX_PREVIEW = 128 * 1024
 MAX_LIST = 300
@@ -47,7 +54,7 @@ def list_level(root: str | Path, relative: str = "") -> dict:
     base, folder = confined(root, relative)
     if not folder.is_dir():
         raise ValueError("choose a directory")
-    entries = []
+    entries: list[ProjectEntry] = []
     with os.scandir(folder) as listing:
         for item in listing:
             if item.name in (".git", ".sentra") or item.name.lower() in SENSITIVE_NAMES:
@@ -518,7 +525,7 @@ class ProjectRevisionWatcher:
         self.committed = None
         self.pending = None
         self.pending_since = None
-        self._last_now = None
+        self._last_now: float | None = None
         self._closed = False
         self._watched = False
         self._identity = None
@@ -564,8 +571,15 @@ class ProjectRevisionWatcher:
             if len(candidates) != 1:
                 raise FileNotFoundError("watched file disappeared; rename cannot be established")
             old = self.relative
-            self.relative = candidates[0]
-            revision = project_revision(self.root, self.relative)
+            candidate = candidates[0]
+            revision = project_revision(self.root, candidate)
+            # A rejected read must not retarget the watcher. The directory
+            # entry can also be replaced during that read, so recheck the
+            # physical identity before accepting its new path.
+            _base, observed = confined(self.root, candidate)
+            if _rename_identity(observed, observed.stat(follow_symlinks=False)) != previous:
+                raise FileNotFoundError("watched file identity changed during rename observation")
+            self.relative = candidate
             return revision, old
         info = target.stat(follow_symlinks=False)
         self._watched = True

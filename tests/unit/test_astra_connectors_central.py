@@ -144,15 +144,39 @@ def test_central_grant_revoked_in_flight_suppresses_capture(central):
     assert len(central['transport'].requests)==1
 
 
-def test_protected_configuration_rebuilds_without_authentication_or_provider_io(central):
+def test_protected_configuration_rebuilds_without_authentication_or_provider_io(central,monkeypatch):
     result=dispatch(central);assert result['state']=='SUCCEEDED'
     entries=central['host'].configurations.entries();assert len(entries)==1
     another=MachineHost(central['control'],owner=OWNER);unused=Scripted()
+    monkeypatch.setattr('sentra_connectors.host.PinnedConnectorHTTPS',lambda:unused)
+    monkeypatch.setattr(ConnectorAccounts,'access',lambda *_:pytest.fail('restoration read a bearer token'))
+    validated=[]
     try:
-        configured=restore_connector_read(another,entries[0]['configuration'],transport=unused)
+        another.restore(lambda config:validated.append(config))
+        assert not another.restore_errors
+        assert validated==[entries[0]['configuration']]
+        configured=another.inventory(PROJECT)[0]
         assert configured['account_contacted'] is False and configured['machine_id']==central['machine']
         assert another.observe(workspace_id=PROJECT,operation_id='op-read')==result
         copy={**central,'host':another}
         assert dispatch(copy)==result
+        assert unused.requests==[]
+    finally:another.close()
+
+
+def test_connector_restore_still_requires_current_host_scope_and_pinned_package(central,monkeypatch):
+    def denied(_config):
+        raise PermissionError('scope no longer belongs to this Dot')
+    unused=Scripted()
+    monkeypatch.setattr('sentra_connectors.host.PinnedConnectorHTTPS',lambda:unused)
+    another=MachineHost(central['control'],owner=OWNER)
+    try:
+        another.restore(denied)
+        assert another.inventory(PROJECT)==[]
+        assert another.restore_errors==[{'machine_id':central['machine'],'error':'PermissionError'}]
+        Path(central['package'].path).write_bytes(b'changed pinned package')
+        another.restore(lambda _config:None)
+        assert another.inventory(PROJECT)==[]
+        assert another.restore_errors[-1]=={'machine_id':central['machine'],'error':'ValueError'}
         assert unused.requests==[]
     finally:another.close()

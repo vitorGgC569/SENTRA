@@ -97,6 +97,7 @@ def http_proxy(transport, payload, *, content_type, upstream_status=200, known_l
     upstream.calls = 0
     gateway = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
     gateway.web_transport = transport
+    gateway.audit = SimpleNamespace(emit=lambda *args: None)
     gateway.config = SimpleNamespace(upstream=f"http://127.0.0.1:{upstream.server_port}")
     threads = [threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
                for server in (upstream, gateway)]

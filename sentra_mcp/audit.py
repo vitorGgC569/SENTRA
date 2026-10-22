@@ -40,8 +40,8 @@ class AuditLogger:
         self.path = Path(path)
         self._lock = Lock()
         self.component = component
-        self.last_error = None
-        self._journal = None
+        self.last_error: str | None = None
+        self._journal: EventJournal | None = None
 
     def emit(
         self,

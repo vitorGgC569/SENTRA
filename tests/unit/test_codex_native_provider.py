@@ -10,6 +10,9 @@ from sentra_cli.config import CLIConfig
 
 def test_native_model_is_default_only_without_an_explicit_choice(tmp_path,monkeypatch):
     from sentra_cli.__main__ import parse_args
+    from types import SimpleNamespace
+    monkeypatch.setattr("sentra_remote.product.ProductPaths.default",
+                        lambda install_dir: SimpleNamespace(settings=tmp_path/"absent-desktop.json"))
     monkeypatch.delenv("SENTRA_CLI_MODEL",raising=False)
     monkeypatch.setattr("sentra_cli.codex_native.authenticated",lambda:True)
     assert CLIConfig(workspace=tmp_path).model=="sentra/codex/current"

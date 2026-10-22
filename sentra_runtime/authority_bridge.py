@@ -90,7 +90,7 @@ class BoundWorkItemPolicy:
                     return PolicyDecision(False, "trusted context unavailable")
                 context.update(dict(trusted))
             cost = context.get("actual_cost")
-            if type(cost) not in (int, float) or math.isnan(cost) or cost < 0:
+            if isinstance(cost, bool) or not isinstance(cost, (int, float)) or math.isnan(cost) or cost < 0:
                 return PolicyDecision(False, "invalid trusted cost estimate")
             # The existing AuthorizationService reads owner-scoped, persisted
             # ancestors and logs decisions. Never provide caller ancestors or

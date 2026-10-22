@@ -93,10 +93,10 @@ class RuntimeProviderHost:
         self.machine_host, self.control, self.owner = machine_host, control, owner
         self.workspace = str(root)
         self.database, self.clock = projection_path(database, workspace, control=control), clock
-        self._resources = []
+        self._resources: list[Any] = []
         self.secret_resolver = secret_resolver
         self._factories: dict[str, Callable] = {}
-        self._adapters: dict[str, SubordinateRuntimeAdapter] = {}
+        self._adapters: dict[str, TemporalRuntimeAdapter | LangGraphRuntimeAdapter] = {}
         self._register_builtin_factories()
         with self._db() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS rt_provider_configs(
@@ -259,7 +259,7 @@ class RuntimeProviderHost:
                     "secret_refs apply to factories only")
         if provider == "langgraph":
             ident(signal_channel)
-            adapter: SubordinateRuntimeAdapter = adapter_cls(
+            adapter: TemporalRuntimeAdapter | LangGraphRuntimeAdapter = adapter_cls(
                 self.database, workspace=str(Path(self.database).parent),
                 signal_channel=signal_channel, clock=self.clock, control=self.control)
         else:
@@ -296,6 +296,8 @@ class RuntimeProviderHost:
             value = options.get(name, default)
             if type(value) not in {int, float} or not 1 <= value <= 86400:
                 raise RuntimeHostDenied("bounded runtime timeout required")
+            if adapter._config is None:
+                raise RuntimeHostDenied("runtime configuration unavailable")
             adapter._config[name] = value
         self._adapters[record["binding_id"]] = adapter
         return {**record, "factory": str(factory or "prebuilt")}
@@ -308,7 +310,7 @@ class RuntimeProviderHost:
         return value
 
     async def arestore(self, binding_id: str, *,
-                secret_resolver: Callable | None = None) -> SubordinateRuntimeAdapter:
+                secret_resolver: Callable | None = None) -> TemporalRuntimeAdapter | LangGraphRuntimeAdapter:
         """Rebuild client + adapter from a persisted binding (host action)."""
         cached = self._adapters.get(binding_id)
         if cached is not None:

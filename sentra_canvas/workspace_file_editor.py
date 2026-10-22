@@ -3,7 +3,7 @@
 Drafts are presentation data, never filesystem authority or replayable operations.
 Their identity includes the live conversation and exact execution workspace.
 """
-from contextlib import closing
+from contextlib import closing,nullcontext
 import hashlib
 import json
 import time
@@ -13,6 +13,27 @@ from sentra_core.conversations import _encode,_decode
 
 ACTIONS=frozenset({'workspace_file_get','workspace_file_draft_save'})
 SCOPE={'space_id','dot_id','conversation_id','execution_workspace_id','path'}
+
+
+def workspace_draft_lock(control,project_id,execution_workspace_id):
+    from sentra_remote.product import _exclusive_registry_lock
+    directory=control.durable.root/'workspace-editor-locks';directory.mkdir(parents=True,exist_ok=True)
+    key=hashlib.sha256(json.dumps([project_id,execution_workspace_id],separators=(',',':')).encode()).hexdigest()
+    return _exclusive_registry_lock(directory/key,timeout_s=3)
+
+
+def has_protected_workspace_drafts(control,owner,project_id,execution_workspace_id):
+    """Cleanup must not orphan private text which has not reached the disk."""
+    with closing(control.store.connect('shell')) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_file_drafts'").fetchone():return False
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='canvas_file_draft_scopes'").fetchone():
+            # Old hashes cannot be reverse-mapped safely. Opening each draft
+            # under its verified scope migrates its metadata without losing it.
+            return bool(db.execute('SELECT 1 FROM canvas_file_drafts WHERE owner=? AND body IS NOT NULL LIMIT 1',(owner,)).fetchone())
+        return bool(db.execute('SELECT 1 FROM canvas_file_drafts d LEFT JOIN canvas_file_draft_scopes s '
+            'ON s.owner=d.owner AND s.scope=d.scope WHERE d.owner=? AND d.body IS NOT NULL AND '
+            '((s.workspace_id=? AND s.execution_workspace_id=?) OR s.scope IS NULL) LIMIT 1',
+            (owner,project_id,execution_workspace_id)).fetchone())
 
 
 def validate_draft(value):
@@ -48,11 +69,22 @@ def dispatch_editor(canvas,pid,action,params):
     control=canvas._shell_service();owner=canvas._runtime().owner
     key=hashlib.sha256(json.dumps([pid,params['space_id'],params['dot_id'],params['conversation_id'],
         identity['execution_workspace_id'],file['path']],ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
-    with closing(control.store.connect('shell')) as db,db:
+    guard=workspace_draft_lock(control,pid,identity['execution_workspace_id']) if action=='workspace_file_draft_save' else nullcontext()
+    with guard,closing(control.store.connect('shell')) as db,db:
+        if action=='workspace_file_draft_save':
+            # A cleanup may have fenced this workspace after the initial scope
+            # read. Never commit a late private draft into a discarded identity.
+            file_service(canvas,pid,{k:v for k,v in params.items() if k in SCOPE})
         db.execute('CREATE TABLE IF NOT EXISTS canvas_file_drafts(owner TEXT NOT NULL,scope TEXT NOT NULL,version INTEGER NOT NULL,revision INTEGER NOT NULL,body TEXT,updated_at REAL NOT NULL,PRIMARY KEY(owner,scope))')
         db.execute('BEGIN IMMEDIATE')
+        # Keep the original six-column draft table rollback-compatible. New
+        # scope metadata lives separately and never contains editor text.
+        db.execute('CREATE TABLE IF NOT EXISTS canvas_file_draft_scopes(owner TEXT NOT NULL,scope TEXT NOT NULL,workspace_id TEXT NOT NULL,execution_workspace_id TEXT NOT NULL,conversation_id TEXT NOT NULL,PRIMARY KEY(owner,scope))')
         row=db.execute('SELECT * FROM canvas_file_drafts WHERE owner=? AND scope=?',(owner,key)).fetchone()
         if row and row['version']!=1:raise RuntimeError('file draft schema is newer than this application')
+        if row or action=='workspace_file_draft_save' and params['draft'] is not None:
+            db.execute('INSERT INTO canvas_file_draft_scopes VALUES(?,?,?,?,?) ON CONFLICT(owner,scope) DO UPDATE SET workspace_id=excluded.workspace_id,execution_workspace_id=excluded.execution_workspace_id,conversation_id=excluded.conversation_id',
+                (owner,key,pid,identity['execution_workspace_id'],params['conversation_id']))
         draft=_decode(row['body']) if row and row['body'] is not None else None
         revision=row['revision'] if row else 0
         if action=='workspace_file_draft_save':
@@ -62,7 +94,8 @@ def dispatch_editor(canvas,pid,action,params):
             count=db.execute('SELECT COUNT(*) FROM canvas_file_drafts WHERE owner=?',(owner,)).fetchone()[0]
             if not row and count>=512:raise ValueError('file draft budget reached; no existing draft was replaced')
             revision+=1
-            db.execute('INSERT INTO canvas_file_drafts VALUES(?,?,?,?,?,?) ON CONFLICT(owner,scope) DO UPDATE SET revision=excluded.revision,body=excluded.body,updated_at=excluded.updated_at',
+            db.execute('INSERT INTO canvas_file_drafts(owner,scope,version,revision,body,updated_at) VALUES(?,?,?,?,?,?) '
+                'ON CONFLICT(owner,scope) DO UPDATE SET revision=excluded.revision,body=excluded.body,updated_at=excluded.updated_at',
                 (owner,key,1,revision,_encode(params['draft']) if params['draft'] is not None else None,time.time()))
             return {'saved':True,'revision':revision,'scope':key,'execution_started':False}
     # Reading a draft never registers machines, prepares grants or starts work.

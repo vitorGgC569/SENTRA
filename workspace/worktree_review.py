@@ -7,6 +7,7 @@ import stat
 import subprocess
 import tarfile
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 MAX_PATCH=8*1024*1024
 MAX_ARCHIVE=32*1024*1024
@@ -20,7 +21,7 @@ def _git(manager,cwd,args,*,limit=MAX_PATCH,stdin=None):
     # Spool stdout to disk so an unexpectedly large tree cannot exhaust memory.
     with tempfile.TemporaryFile() as output:
         result=subprocess.run(['git','-c','core.hooksPath='+str(manager.hooks),
-            '-c','core.fsmonitor=false','-C',str(cwd),*args],input=stdin,stdout=output,
+            '-c','core.fsmonitor=false','-c','core.longpaths=true','-C',str(cwd),*args],input=stdin,stdout=output,
             stderr=subprocess.PIPE,env=env,timeout=45,
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         size=output.tell()
@@ -137,16 +138,22 @@ def preview(entries):
     bases={item['base_commit'] for item in worktrees}
     if len(bases)!=1:raise ValueError('worktrees use different bases; a structured rebase decision is required')
     base=next(iter(bases));head=manager.git('rev-parse','HEAD').strip()
-    patches=[]
-    for own_manager,item in entries:
+    def capture(entry):
+        own_manager,item=entry
         # Recheck each physical identity immediately before capturing its diff.
         actual=own_manager.inspect(item['worktree_id'])
         if actual['path']!=item['path'] or actual['base_commit']!=base:raise PermissionError('worktree review identity changed')
-        try:captured=_patch(own_manager,item['path'],base)
-        except ValueError as error:
-            return {'state':'needs_review','reason':str(error),'worktree_id':item['worktree_id'],
-                'publication_performed':False,'base_commit':base}
-        patches.append(captured)
+        return _patch(own_manager,item['path'],base)
+    patches=[]
+    # Independent read-only worktree captures may overlap; application remains
+    # ordered, and every snapshot is checked again before returning a result.
+    with ThreadPoolExecutor(max_workers=min(4,len(entries))) as pool:
+        captures=[pool.submit(capture,entry) for entry in entries]
+        for (_,item),future in zip(entries,captures):
+            try:patches.append(future.result())
+            except ValueError as error:
+                return {'state':'needs_review','reason':str(error),'worktree_id':item['worktree_id'],
+                    'publication_performed':False,'base_commit':base}
     snapshot=_checked(manager,manager.repository,['archive','--format=tar',base],MAX_ARCHIVE)
     records=[]
     with tempfile.TemporaryDirectory(prefix='review-',dir=manager.state) as temporary:
@@ -162,18 +169,21 @@ def preview(entries):
                 'patch_sha256':hashlib.sha256(patch).hexdigest(),'changed':bool(patch),'state':'compatible',
                 'internal_metadata':metadata,'internal_metadata_count':len(metadata)}
             if patch:
-                code,_,error=_git(manager,scratch,['apply','--check','--whitespace=nowarn','-'],stdin=patch)
+                code,_,apply_error=_git(manager,scratch,['apply','--check','--whitespace=nowarn','-'],stdin=patch)
                 if code:
-                    record.update(state='conflict',reason=error.decode('utf-8','replace'))
+                    record.update(state='conflict',reason=apply_error.decode('utf-8','replace'))
                     records.append(record);break
                 code,_,_=_git(manager,scratch,['apply','--whitespace=nowarn','-'],stdin=patch)
                 if code:raise RuntimeError('scratch application failed after check')
             records.append(record)
     # A concurrent edit or publication invalidates the preview, never triggers retry.
     stable=manager.git('rev-parse','HEAD').strip()==head
-    for (own_manager,item),patch in zip(entries,patches):
-        try:stable=(_patch(own_manager,item['path'],base)==patch) and stable
-        except ValueError:stable=False
+    def unchanged(entry,patch):
+        own_manager,item=entry
+        try:return _patch(own_manager,item['path'],base)==patch
+        except ValueError:return False
+    with ThreadPoolExecutor(max_workers=min(4,len(entries))) as pool:
+        stable=all(pool.map(unchanged,entries,patches)) and stable
     state='stale' if not stable else 'conflict' if any(r['state']=='conflict' for r in records) else 'compatible'
     return {'state':state,'base_commit':base,'target_head':head,'base_diverged':head!=base,
         'worktrees':records,'unchecked_worktrees':len(worktrees)-len(records),

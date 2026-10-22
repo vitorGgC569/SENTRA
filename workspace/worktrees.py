@@ -23,7 +23,7 @@ class WorktreeManager:
     def git(self,*args,cwd=None):
         environment={k:v for k,v in os.environ.items() if not k.upper().startswith('GIT_')}
         environment.update(GIT_TERMINAL_PROMPT='0',LC_ALL='C')
-        return subprocess.run(['git','-c','core.hooksPath='+str(self.hooks),'-c','core.fsmonitor=false',
+        return subprocess.run(['git','-c','core.hooksPath='+str(self.hooks),'-c','core.fsmonitor=false','-c','core.longpaths=true',
             '-C',str(cwd or self.repository),*args],check=True,env=environment,
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0),capture_output=True,text=True,timeout=45).stdout
 
@@ -76,7 +76,14 @@ class WorktreeManager:
                     'dot_id':args['dot_id'],'work_item_id':request.work_item_id,'principal_id':request.principal_id}
             # Reserve metadata before Git. A crash becomes drift, never a second add.
             manifest.write_text(json.dumps({**result,'state':'creating'}))
-            self.git('worktree','add','-b',branch,str(target),base)
+            # Git for Windows can reject the absolute GIT_DIR used by its
+            # checkout subprocess even with core.longpaths. Register first,
+            # then populate the empty, newly owned tree by discovery from cwd.
+            self.git('worktree','add','--no-checkout','-b',branch,str(target),base)
+            context.checkpoint()
+            if set(target.iterdir())!={target/'.git'} or not self._registered(target,branch):
+                raise RuntimeError('new worktree changed before its initial checkout; reconcile')
+            self.git('read-tree','-m','-u',base,cwd=target)
             context.checkpoint()
             manifest.write_text(json.dumps({**result,'state':'ready'}))
             return {**result,'state':'ready','reused':False}

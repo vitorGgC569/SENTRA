@@ -8,6 +8,7 @@ import nacl from 'tweetnacl';
 import {primitives} from './primitives';
 import {ServerSession} from './server-session';
 import {isLocalIPv4,lanAddresses} from './lan-address';
+import {advertiseLan,type Advertisement} from './lan-advertisement';
 
 const lines=createInterface({input:process.stdin,crlfDelay:Infinity})[Symbol.asyncIterator]();
 const first=await lines.next();
@@ -30,14 +31,16 @@ const secret=p.decodeBase64(config.secret_key);
 if(secret.length!==32)throw Error('Stable host key required');
 const keys=nacl.box.keyPair.fromSecretKey(secret),publicKey=p.encodeBase64(keys.publicKey);
 const endpoint=`ws://${bind}:${config.port}/sentra/mobile/v1`;
+let advertisement:Advertisement|undefined;
 const http=createServer((req,res)=>{
  if(req.method!=='GET'||req.url!=='/sentra/mobile/health'){res.writeHead(404);res.end();return;}
  res.setHeader('Content-Type','application/json');res.setHeader('Cache-Control','no-store');
- res.end(JSON.stringify({ok:true,protocol_version:1,public_key:publicKey,endpoint,broker_available:target!==null}));
+ res.end(JSON.stringify({ok:true,protocol_version:1,public_key:publicKey,endpoint,broker_available:target!==null,discovery:advertisement?.status()||'starting'}));
 });
 const server=new WebSocketServer({server:http,path:'/sentra/mobile/v1',maxPayload:400000,perMessageDeflate:false});
-http.listen(config.port,bind,()=>process.stdout.write(JSON.stringify({ready:true,public_key:publicKey,
- endpoint,bind,addresses:lanAddresses(networkInterfaces(),bind),protocol_version:1,pid:process.pid})+'\n'));
+http.listen(config.port,bind,()=>{advertisement=advertiseLan(bind,config.port,publicKey);process.stdout.write(JSON.stringify({ready:true,public_key:publicKey,
+ endpoint,bind,addresses:lanAddresses(networkInterfaces(),bind),protocol_version:1,pid:process.pid})+'\n')});
+http.on('close',()=>advertisement?.close());
 // A broker update changes future requests only. Lost effects are never retried.
 void(async()=>{try{for await(const line of { [Symbol.asyncIterator]:()=>lines }){
  if(line.length>20000)throw Error('Control frame too large');

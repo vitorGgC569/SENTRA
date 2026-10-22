@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from .conversation_pool import FixedConversationRouter
+from .agents.router import ModelRouter
+
 import asyncio
 import hashlib
 import json
@@ -185,7 +188,7 @@ class OMAEngine:
         self.run_id = run_id
         self.objective = objective
         self.workspace_path = Path(workspace_path).resolve()
-        self.router = router
+        self.router: ModelRouter | FixedConversationRouter = router
         self.acceptance_criteria = acceptance_criteria or []
         self.validation_commands = validation_commands if validation_commands is not None else ["[[TEST|all]]"]
         self.max_parallel_workers = max_parallel_workers
@@ -1475,9 +1478,9 @@ class OMAEngine:
         # Compute policy: fixed initial validator set per task; standby roles
         # join only on disagreement / low confidence (bounded by max_agents).
         if self.compute_policy is not None:
-            active_roles: Optional[List[ValidatorRole]] = self._task_roles.get(task.id) or \
-                self.compute_policy.initial_for_task(task)
-            self._task_roles[task.id] = list(active_roles)
+            active_roles: Optional[List[ValidatorRole]] = (self._task_roles.get(task.id) or \
+                self.compute_policy.initial_for_task(task) or [])
+            self._task_roles[task.id] = list(active_roles or [])
         else:
             active_roles = None
         while task.current_repair_round <= task.max_repair_rounds:
@@ -1738,11 +1741,12 @@ class OMAEngine:
 
         if decision.decision == "APPROVED":
             print(f"[Task {task.id}] Internal reviewer approved; integrating verified candidate.")
-            test_results = await integrate_engine_candidate(
+            integrated_results = await integrate_engine_candidate(
                 self, task, candidate, test_results
             )
-            if test_results is None:
+            if integrated_results is None:
                 return False
+            test_results = integrated_results
             async with self._promotion_lock:
                 if not test_results["all_passed"]:
                     raise ValueError("candidate lacks passing objective evidence")

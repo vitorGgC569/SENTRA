@@ -6,6 +6,8 @@ the authenticated host; agent operations cannot register machines or origins.
 """
 from __future__ import annotations
 
+from typing import Any, Callable
+
 import asyncio
 from dataclasses import asdict
 import hashlib
@@ -28,17 +30,18 @@ class MachineHost:
         self.control, self.owner = control, owner
         from .machine_configuration import MachineConfigurationStore
         self.configurations = MachineConfigurationStore(control.store, owner)
-        self.restore_errors = []
-        self.memory_errors = []
+        self.restore_errors: list[dict[str, str]] = []
+        self.memory_errors: list[dict[str, Any]] = []
         self._experiences = None
         self._telemetry=None
         self._diagnostic_errors=0
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._closed = False
-        self._factories = {}
-        self._inventory = {}
-        self._configuration_handlers = {}
+        self._factories: dict[str, Callable] = {}
+        self._inventory: dict[str, dict[str, Any]] = {}
+        self._catalog_reads: set[asyncio.Task[Any]] = set()
+        self._configuration_handlers: dict[str, Callable] = {}
         self._runtime_host_resolver = None
         self._canvas_adapter = None
         self._thread = threading.Thread(target=self._serve, daemon=True,
@@ -76,6 +79,9 @@ class MachineHost:
         self._loop.run_forever()
 
     def _call(self, coroutine, *, timeout=150):
+        if threading.current_thread() is self._thread:
+            coroutine.close()
+            raise RuntimeError('synchronous machine host call from its own event loop; use the async host operation')
         if self._closed:
             coroutine.close()
             raise RuntimeError("machine host is closed")
@@ -172,7 +178,8 @@ class MachineHost:
         machine_id=self._machine_id(workspace_id,agent_id,'git-worktrees')
         if machine_id in self._inventory:return dict(self._inventory[machine_id])
         manager=WorktreeManager(root,self.control.durable.root/'git-worktrees'/machine_id)
-        bindings=tuple(GitWorktreeBinding(cap,manager,dot_id,control=self.control,owner=self.owner) for cap in ('git:worktree','git:worktree.inspect'))
+        from workspace.git_workflow import CAPABILITIES as GIT_WORKFLOW_CAPABILITIES
+        bindings=tuple(GitWorktreeBinding(cap,manager,dot_id,control=self.control,owner=self.owner) for cap in ('git:worktree','git:worktree.inspect',*GIT_WORKFLOW_CAPABILITIES))
         factory=CentralExecutorFactory(control=self.control,owner=self.owner,agent_id=agent_id)
         factory.register_execution(declare_git_worktree_machine(machine_id=machine_id,
             owner_principal_id=agent_id,bindings=bindings,policy=factory.policy))
@@ -180,7 +187,7 @@ class MachineHost:
         self._inventory[machine_id]={'machine_id':machine_id,'kind':'git-worktrees','workspace_id':workspace_id,
             'agent_id':agent_id,'dot_id':dot_id,'capabilities':[b.capability_id for b in bindings],
             'actions':{},  # Each Git capability is already a specific operation, with no action selector.
-            'registered':True,'grant_created':False,'publication_supported':False}
+            'registered':True,'grant_created':False,'publication_supported':True,'publication_requires_review':True}
         self.configurations.put(machine_id,{'kind':'git-worktrees','workspace_id':workspace_id,
             'workspace_root':str(root),'agent_id':agent_id,'dot_id':dot_id})
         return dict(self._inventory[machine_id])
@@ -237,7 +244,7 @@ class MachineHost:
         network_profiles = []
         for profile in profiles:
             if not isinstance(profile, dict) or set(profile) - {
-                "name", "mode", "allowed_origins", "methods", "resource_types", "max_requests", "max_redirects", "max_response_bytes"
+                "name", "mode", "allowed_origins", "methods", "resource_types", "max_requests", "max_redirects", "max_response_bytes", "remember_login"
             }:
                 raise ValueError("unsupported browser profile field")
             values = dict(profile)
@@ -672,6 +679,9 @@ class MachineHost:
                 elif config["kind"] in {"daytona","guacamole","rustdesk"}:
                     self.configure_session(workspace_id=config["workspace_id"],workspace_root=config["workspace_root"],
                         agent_id=config["agent_id"],kind=config["kind"],provider_config=config["provider_config"])
+                elif config["kind"].startswith("optional_connectors-"):
+                    from sentra_connectors.registration import restore_connector_read
+                    restore_connector_read(self, config)
                 else:
                     raise ValueError("unsupported persisted machine")
             except (ValueError, KeyError, FileNotFoundError, PermissionError, RuntimeError) as exc:
@@ -684,12 +694,12 @@ class MachineHost:
         return self._call(get(), timeout=10)
 
     def task_catalog(self, *, workspace_id, agent_ids=None, conversation_id=None):
-        async def get():
+        def read(configurations,factories):
             rows=self.control.list_work_items(self.owner,states=["RUNNING"],limit=1000)["items"]
             result=[]
             for item in rows:
                 if item.get("metadata",{}).get("workspace_id")!=workspace_id:continue
-                for ident,config in self._inventory.items():
+                for ident,config in configurations:
                     agent=config["agent_id"]
                     if (config["workspace_id"]!=workspace_id or item.get("assignee_agent_id")!=agent
                             or item.get("metadata",{}).get("machine_id")!=ident
@@ -697,7 +707,7 @@ class MachineHost:
                     scoped = config['kind'] in {'workspace-files', 'terminal', 'computer-local', 'virtualbox_vm','git-worktrees'}
                     if conversation_id is not None and scoped and item.get('metadata', {}).get('conversation_id') != conversation_id:
                         continue
-                    factory=self._factories[ident];caps=[]
+                    factory=factories[ident];caps=[]
                     for cap in sorted(set(item["required_capabilities"])&set(config["capabilities"])):
                         request=OperationRequest("op-discovery",agent,ident,cap,item["work_item_id"],"discovery",{})
                         if factory.policy(request).allowed is True:caps.append(cap)
@@ -707,6 +717,18 @@ class MachineHost:
                             **({"conversation_id": item.get("metadata", {}).get("conversation_id")}
                                if scoped else {})})
             return result
+        async def get():
+            # Catalog discovery performs synchronous SQLite/authority reads.
+            # Keep the host loop available for input, cancellation and admitted
+            # effects while those reads serialize on their own store locks.
+            configurations=[(ident,dict(config)) for ident,config in self._inventory.items()]
+            factories=dict(self._factories)
+            worker=asyncio.create_task(asyncio.to_thread(read,configurations,factories))
+            self._catalog_reads.add(worker)
+            worker.add_done_callback(self._catalog_reads.discard)
+            # Cancelling a caller cannot stop a SQLite worker. Retain and drain
+            # its ownership before the host/control store can be closed.
+            return await asyncio.shield(worker)
         return self._call(get(),timeout=15)
 
     def dispatch(self, *, workspace_id: str, work_item_id: str, machine_id: str,
@@ -815,6 +837,8 @@ class MachineHost:
             return
         async def cleanup():
             from .effect_boundary import _ResourceLock, ResourceEffectBusy
+            if any(not reader.done() for reader in self._catalog_reads):
+                raise RuntimeError('catalog readers have not stopped; machine host retained')
             for machine_id in self._factories:
                 probe = _ResourceLock(self.control.durable.root / "effect-locks", machine_id)
                 try:

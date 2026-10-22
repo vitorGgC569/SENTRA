@@ -17,7 +17,7 @@ MAX_SNAPSHOT_BYTES = 100_000_000
 
 
 def source_files(root: Path) -> dict[str, bytes]:
-    files = {}
+    files: dict[str, bytes] = {}
     size = 0
     for path in iter_workspace_files(root, max_files=10001):
         if len(files) == 10000:

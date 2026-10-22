@@ -19,8 +19,11 @@ const receiptStart=sw.indexOf("async function omaRecordDeliveryReceipt(");
 const receiptEnd=sw.indexOf("// Budgets MV3",receiptStart);
 const phaseStart=sw.indexOf("async function omaProgressPhase(");
 const phaseEnd=sw.indexOf("// Renova o lease",phaseStart);
+const activeStart=sw.indexOf('function omaActiveKey(tabId)');
+const activeEnd=sw.indexOf('async function omaLoadAllActive()',activeStart);
 assert(start>0 && end>start && receiptStart>end && receiptEnd>receiptStart && phaseStart>0 && phaseEnd>phaseStart);
-const production=sw.slice(start,end)+"\n"+sw.slice(receiptStart,receiptEnd)+"\n"+sw.slice(phaseStart,phaseEnd);
+assert(activeStart>0 && activeEnd>activeStart);
+const production=sw.slice(start,end)+"\n"+sw.slice(receiptStart,receiptEnd)+"\n"+sw.slice(phaseStart,phaseEnd)+"\n"+sw.slice(activeStart,activeEnd);
 const trace=[];
 let generated=0;
 const rand=()=> "identity-"+(++generated).toString().padStart(12,"0");
@@ -32,6 +35,7 @@ const record={
   sent:false
 };
 const store={};
+store.oma_active_337=record;
 const chrome={
   storage:{local:{
     async get(keys){
@@ -49,7 +53,7 @@ const chrome={
     return [{frameId:0,result:page.__sentraConversationEvidence.documentId}];
   }}
 };
-const message={id:"message-33777",metadata:
+const message={id:"message-33777",author:{role:'user'},metadata:
   config.scenario==="missing_metadata"?{}:{request_id:"request-metadata-12345"}};
 const reactRoot={tag:3,return:null,child:null,memoizedProps:{}};
 reactRoot.stateNode={current:reactRoot};
@@ -96,7 +100,8 @@ const ctx={
   crypto:{randomUUID:rand},URL,chrome,
   OMA_SOURCE_HASH:manifest.sentra_source_hash,
   omaEvidenceBusy:new Set(),omaOwnedTabIds:async()=>new Set([337,338]),
-  omaJobProvider:()=> "chatgpt",omaLoadActive:async()=>record,
+  omaJobProvider:()=> "chatgpt",OMA_ACTIVE_PREFIX:'oma_active_',
+  omaNoteError:async (_phase,error)=>{throw error;},
   omaRelay:relay,
 };
 vm.createContext(ctx);

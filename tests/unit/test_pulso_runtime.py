@@ -75,7 +75,9 @@ class FakeTemporalHandle:
 
     async def describe(self):
         status = SimpleNamespace(name="RUNNING")
-        return SimpleNamespace(status=status)
+        async def memo():
+            return self.memo
+        return SimpleNamespace(status=status, memo=memo, task_queue=self.task_queue)
 
 
 class FakeTemporalClient:
@@ -85,13 +87,17 @@ class FakeTemporalClient:
         self.handles: dict[str, FakeTemporalHandle] = {}
 
     async def start_workflow(self, workflow_type, inputs, *, id,
-                             task_queue, id_reuse_policy, memo):
-        assert id_reuse_policy == "reject_duplicate"
+                             task_queue, id_reuse_policy, retry_policy, execution_timeout, memo):
+        assert id_reuse_policy.name == "REJECT_DUPLICATE"
+        assert retry_policy.maximum_attempts == 1 and execution_timeout.total_seconds() == 3600
         handle = FakeTemporalHandle(id)
+        handle.memo = memo
+        handle.task_queue = task_queue
         self.handles[id] = handle
         return handle
 
-    def get_workflow_handle(self, workflow_id):
+    def get_workflow_handle(self, workflow_id, *, first_execution_run_id=None):
+        assert first_execution_run_id in (None, "t-run-1")
         return self.handles.setdefault(workflow_id,
                                        FakeTemporalHandle(workflow_id))
 
@@ -108,6 +114,19 @@ class FakeLangGraphClient:
 
     def __init__(self):
         self.threads: dict[str, dict] = {}
+        self.checkpointer = self
+
+    async def astream(self, inputs, config, *, stream_mode):
+        assert stream_mode == "updates"
+        yield await self.ainvoke(inputs, config)
+
+    async def aget_tuple(self, config):
+        return {"fixture_checkpoint": config["configurable"]["checkpoint_id"]}
+
+    async def afork_checkpoint(self, source, target):
+        self.threads[target["configurable"]["thread_id"]] = {
+            "values": dict(self.threads[source["configurable"]["thread_id"]]["values"])}
+        return target
 
     async def ainvoke(self, inputs, config):
         thread = config["configurable"]["thread_id"]
@@ -118,7 +137,9 @@ class FakeLangGraphClient:
     async def aget_state(self, config):
         thread = config["configurable"]["thread_id"]
         entry = self.threads.get(thread, {"values": {"k": "v"}})
-        return FakeGraphState(values=dict(entry["values"]))
+        state = FakeGraphState(values=dict(entry["values"]))
+        state.config = {"configurable": {**config["configurable"], "checkpoint_id": "fixture-checkpoint-1"}}
+        return state
 
     async def aupdate_state(self, config, values):
         thread = config["configurable"]["thread_id"]
@@ -139,6 +160,8 @@ def test_temporal_configure_requires_client(tmp_path):
 
 
 def test_temporal_start_signal_observe(tmp_path, monkeypatch):
+    from pulso_test_sdk import install_temporal_value_objects
+    install_temporal_value_objects(monkeypatch)
     adapter = TemporalRuntimeAdapter(str(tmp_path / "rt.sqlite3"),
                                      workspace=str(tmp_path))
     client = FakeTemporalClient()
@@ -196,13 +219,13 @@ def test_langgraph_start_advance_fork(tmp_path, monkeypatch):
         started = asyncio.run(adapter.start(
             scope, workflow_id="wf1", occurrence="occ1", inputs={"a": 1}))
         assert started["status"] == "STARTED"
-        assert started["history_rewritten"] is not True
+        assert started["output_proven"] is False
         advanced = asyncio.run(adapter.advance(
             scope, workflow_id="wf1", occurrence="occ1"))
         assert advanced["status"] in {"ADVANCED", "WAITING_INTERRUPT"}
         forked = asyncio.run(adapter.fork(
             scope, workflow_id="wf1", occurrence="occ1",
-            new_occurrence="occ2"))
+            new_occurrence="occ2", checkpoint_id="fixture-checkpoint-1"))
         assert forked["status"] == "FORKED"
         assert forked["history_rewritten"] is False
         observed = asyncio.run(adapter.observe(

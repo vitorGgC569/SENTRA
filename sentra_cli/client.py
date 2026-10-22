@@ -62,7 +62,7 @@ class ModelClient:
         self.on_before_http = None
         self._provider_admission_error = None
         self.on_web_delivery = None
-        self.last_web_delivery = None
+        self.last_web_delivery: dict[str, Any] | None = None
         # One logical Codex thread per CLI process. Every Responses request gets
         # a distinct native turn id so tool-round follow-ups cannot collide in
         # the Gateway's duplicate-turn / retry budget authority.
@@ -615,10 +615,15 @@ class ModelClient:
                 endpoint = ""
                 token = ""
 
-            if (
-                endpoint.startswith("http://127.0.0.1:")
-                and len(token) >= 40
-            ):
+            try:
+                target = urlsplit(endpoint)
+                authenticated_loopback = (target.scheme == "http" and target.hostname == "127.0.0.1"
+                    and bool(target.port) and target.path in {"", "/"}
+                    and not any((target.username, target.password, target.query, target.fragment))
+                    and len(token) >= 40 and all(character.isalnum() or character in "_-" for character in token))
+            except ValueError:
+                authenticated_loopback = False
+            if authenticated_loopback:
                 request = urllib.request.Request(
                     endpoint.rstrip("/") + "/v1/session/inspect",
                     data=b'{"detectCapabilities":false}',
@@ -1494,7 +1499,7 @@ class ModelClient:
             ) from exc
 
         deadline = time.monotonic() + max(self.config.timeout_s, 0.1)
-        reported_usage={}
+        reported_usage: dict[str, Any] = {}
         try:
             with response:
                 for raw_line in response:
@@ -1570,6 +1575,11 @@ class ModelClient:
         self.last_error = None
         self._provider_admission_error = None
         model = model_override or self.config.model
+        if not model:
+            self.last_error = "A model must be selected before sending."
+            self.last_delivery_state = "not_submitted"
+            yield "\n" + self.last_error + "\n"
+            return
         if model.startswith("sentra/codex/"):
             if any(message.get("images") for message in messages if isinstance(message, dict)):
                 self.last_error = "Selected Codex CLI transport cannot receive the validated VM screenshot; choose a gateway Responses model."

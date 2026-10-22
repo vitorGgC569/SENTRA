@@ -399,7 +399,7 @@ def test_ambiguous_refresh_stays_uncertain_on_retry_and_wrong_store_denied(tmp_p
         raise TimeoutError("synthetic ambiguous provider response")
     try:
         wrong_store = OAuthDPAPIVault(SQLiteControlPlaneStore(tmp_path / "other-state"))
-        with pytest.raises(PermissionError, match="central vault"):
+        with pytest.raises(PermissionError, match="Pacto local authority differs"):
             asyncio.run(bind.oauth_effect(wrong_store, exchange=uncertain, **args))
         assert not sends
         result = asyncio.run(bind.oauth_effect(vault, exchange=uncertain, **args))

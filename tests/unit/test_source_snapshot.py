@@ -40,6 +40,23 @@ def test_seal_copies_product_bytes_without_private_state_and_survives_checkout_e
     assert (destination / "main.py").read_bytes() == b"print('product')"
 
 
+def test_terminal_packaged_engine_is_sealed_without_copying_unrelated_dist_outputs(tmp_path):
+    root = _source(tmp_path)
+    names = ("integrations/orca-terminal/dist/engine.cjs",
+             "integrations/orca-terminal/dist/manifest.json")
+    for name in (*names, "integrations/orca-terminal/dist/build-cache.json"):
+        source = root / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"sealed terminal output")
+    candidate = tmp_path / "terminal-candidate"
+    proof = snapshot.create_source_snapshot(candidate, root)
+    assert all(name in proof["sources"] and (candidate / name).is_file() for name in names)
+    assert "integrations/orca-terminal/dist/build-cache.json" not in proof["sources"]
+    (candidate / names[0]).write_bytes(b"tampered engine")
+    with pytest.raises(RuntimeError, match="source snapshot changed"):
+        snapshot.verify_source_snapshot(candidate)
+
+
 @pytest.mark.parametrize("name", [
     "sentra_code_mode/guest/sentra_quickjs_guest.c",
     "sentra_canvas/static/chat.woff2",
@@ -118,4 +135,35 @@ def test_added_product_input_is_not_silently_accepted(tmp_path):
     snapshot.create_source_snapshot(destination, root)
     (destination / "sentra_code_mode/new.py").write_text("new input")
     with pytest.raises(RuntimeError, match="input set changed"):
+        snapshot.verify_source_snapshot(destination)
+
+
+def test_snapshot_preserves_standalone_runtime_legal_inputs_and_release_docs(tmp_path):
+    root = _source(tmp_path)
+    names = ("vendor/orca/LICENSE", "integrations/orca-terminal/vendor/orca/LICENSE",
+             "README.md", "SECURITY.md", "CHANGELOG.md")
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"reviewed packaged notice")
+    destination = tmp_path / "candidate"
+    proof = snapshot.create_source_snapshot(destination, root)
+    for name in names:
+        assert (destination / name).read_bytes() == b"reviewed packaged notice"
+        assert name in proof["sources"]
+    (destination / "vendor/orca/LICENSE").write_bytes(b"changed license")
+    with pytest.raises(RuntimeError, match="source snapshot changed"):
+        snapshot.verify_source_snapshot(destination)
+
+
+def test_snapshot_includes_connector_registration_and_detects_later_change(tmp_path):
+    root = _source(tmp_path)
+    connector = root / "sentra_connectors/registration.py"
+    connector.parent.mkdir()
+    connector.write_bytes(b"def restore(): return 'central-authority'")
+    destination = tmp_path / "candidate"
+    snapshot.create_source_snapshot(destination, root)
+    assert (destination / "sentra_connectors/registration.py").read_bytes() == connector.read_bytes()
+    (destination / "sentra_connectors/registration.py").write_bytes(b"changed")
+    with pytest.raises(RuntimeError, match="source snapshot changed"):
         snapshot.verify_source_snapshot(destination)

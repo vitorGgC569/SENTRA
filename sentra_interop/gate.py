@@ -12,7 +12,7 @@ import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, Protocol
 
 from sentra_runtime.contracts import Machine, OperationRequest, OperationResult, PolicyDecision
 
@@ -46,6 +46,12 @@ class DispatchOutcome:
     operation: OperationResult
     payload: Any = None
     duplicate: bool = False
+
+
+class Journal(Protocol):
+    async def reserve(self, request: OperationRequest) -> OperationResult | None: ...
+    async def finish(self, request: OperationRequest, result: OperationResult) -> None: ...
+    async def get(self, operation_id: str) -> OperationResult | None: ...
 
 
 class OperationJournal:
@@ -97,11 +103,11 @@ class InteropGate:
         self,
         machine: Machine,
         policy: PolicyEvaluator | None,
-        journal: OperationJournal | None = None,
+        journal: Journal | None = None,
     ) -> None:
         self.machine = machine
         self.policy = policy
-        self.journal = journal or OperationJournal()
+        self.journal: Journal = journal or OperationJournal()
 
     async def decision(self, request: OperationRequest) -> PolicyDecision:
         if not isinstance(request, OperationRequest):

@@ -78,7 +78,7 @@ def _source_fingerprint(root: Path | None = None) -> dict[str, str]:
         "browser", "integrations", "native_bridge", "orchestrator", "repository",
         "sentra_core", "sentra_mcp", "sentra_model_gateway", "sentra_remote",
         "sentra_cli", "sentra_canvas", "sentra_runtime", "sentra_executors", "sentra_code_mode",
-        "sentra_interop", "sentra_collab", "sentra_quality", "workspace",
+        "sentra_interop", "sentra_collab", "sentra_quality", "sentra_connectors", "workspace",
         "sentra_federation", "sentra_marketplace", "memory", "local_model", "skills/optional_connectors",
         "scripts/commander", "scripts/integrations", "edge_extension", "sentra_electron",
     )
@@ -88,7 +88,17 @@ def _source_fingerprint(root: Path | None = None) -> dict[str, str]:
     # builder; both must invalidate provenance before a new Setup is accepted.
     # Packaged license/notice text is part of the distributed artifact too.
     extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".cs", ".h", ".go", ".mod", ".sum", ".sh", ".wasm", ".rs", ".toml", ".lock", ".mjs", ".xpi"}
-    files = {root / name for name in ("main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt", "LICENSE")}
+    files = {root / name for name in (
+        "main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt", "LICENSE",
+        "README.md", "SECURITY.md", "CHANGELOG.md",
+        # These extensionless notices are mandatory inputs of mobile staging
+        # and the terminal engine seal, including in isolated source snapshots.
+        "vendor/orca/LICENSE", "integrations/orca-terminal/vendor/orca/LICENSE",
+        # These generated, sealed inputs are shipped by stage_terminal_runtime.
+        # Arbitrary dist/cache trees stay excluded from the snapshot.
+        "integrations/orca-terminal/dist/engine.cjs",
+        "integrations/orca-terminal/dist/manifest.json",
+    )}
     # The Setup bundles this onboarding guide, while the vendored xterm
     # licenses have no suffix and would otherwise be missed by the scan.
     files.update(root / name for name in (

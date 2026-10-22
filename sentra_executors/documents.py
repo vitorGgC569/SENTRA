@@ -6,6 +6,8 @@ CSV/TSV transformations use the standard library, not a Robot/Excel process.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import csv
 import io
 import json
@@ -184,7 +186,7 @@ def read_verifier_table(path: Path, binding: DocumentBinding, *, sheet=None, val
     elif path.suffix.lower() in {'.csv','.tsv'}:
         with path.open(encoding='utf-8-sig',newline='') as stream:
             reader=csv.DictReader(stream,delimiter='\t' if path.suffix.lower()=='.tsv' else ',')
-            columns,rows=reader.fieldnames,[]
+            columns,rows=list(reader.fieldnames or []),[]
             for row in reader:
                 rows.append(row)
                 if len(rows)>binding.max_rows: raise ExecutorFailure('verifier_dimension_limit')
@@ -211,7 +213,7 @@ def verify_artifact(binding: DocumentBinding, actual: str, expected: str, *, met
     if metric=='bytes':
         if options: raise ExecutorFailure('invalid_comparison_options')
         passed=digest(actual_path)==expected_digest
-        result={'passed':passed,'score':float(passed),'reason':'bytes_equal' if passed else 'bytes_differ'}
+        result: dict[str, Any] = {'passed':passed,'score':float(passed),'reason':'bytes_equal' if passed else 'bytes_differ'}
     elif metric=='table':
         allowed={'sheet','value_mode','ignore_case','strip','ignore_column_order','ignore_row_order',
                  'numeric_columns','key_columns','absolute_tolerance','relative_tolerance','max_mismatches'}
@@ -238,7 +240,7 @@ def verify_artifact(binding: DocumentBinding, actual: str, expected: str, *, met
                     if options.get('strip'): at,et=at.strip(),et.strip()
                     if options.get('ignore_case'): at,et=at.casefold(),et.casefold()
                     if at!=et: failures.append(f'page_{i}_text')
-            result={'passed':not failures,'score':0.0 if failures else 1.0,'failures':failures[:20]}
+            result = {'passed':not failures,'score':0.0 if failures else 1.0,'failures':failures[:20]}
     elif metric=='excel':
         result=compare_excel_artifacts(actual_path,expected_path,binding,**options)
     else: raise ExecutorFailure('unsupported_artifact_metric')
@@ -320,7 +322,7 @@ def evaluate_acceptance(binding: DocumentBinding, criteria: list[dict], *, conju
         raise ExecutorFailure('invalid_composite_criterion')
     for c in criteria:
         # Even short-circuited criteria must name authorized real artifacts.
-        binding.paths.resolve(c.get('actual')); binding.paths.resolve(c.get('expected'))
+        binding.paths.resolve(c['actual']); binding.paths.resolve(c['expected'])
     for criterion in criteria:
         if stop:
             results.append({'id':criterion['id'],'state':'NOT_EVALUATED'}); continue
@@ -408,7 +410,7 @@ def transform_table(columns: list[str], rows: list[dict], *, conversions=None,
         output_columns = list(group_by) + ['count'] + [f'sum_{c}' for c in sums or []]
         if len(output_columns) != len(set(output_columns)):
             raise ExecutorFailure('group_column_collision')
-        groups = {}
+        groups: dict[tuple, dict[str, Any]] = {}
         for row in result:
             key = tuple(row[c] for c in group_by)
             try:

@@ -9,6 +9,8 @@ logs and exports never leak document content.
 """
 from __future__ import annotations
 
+import binascii
+
 import base64
 import hashlib
 import json
@@ -79,7 +81,7 @@ def _decode_data_url(value: str) -> tuple[str, bytes]:
     mime, payload = match.group(1).lower(), match.group(2)
     try:
         raw = base64.b64decode(payload, validate=True)
-    except (ValueError, base64.binascii.Error) as exc:
+    except (ValueError, binascii.Error) as exc:
         raise ValueError("attachment payload is not valid base64") from exc
     return mime, raw
 
@@ -334,6 +336,8 @@ class AttachmentStore:
             receipts = []
             for item, descriptor in zip(items, descriptors):
                 match = _DATA_URL.fullmatch(str(item["data_url"]).strip())
+                if match is None:
+                    raise ValueError("invalid attachment data URL")
                 raw = _b64.b64decode(match.group(2), validate=True)
                 if hashlib.sha256(raw).hexdigest() != descriptor["sha256"]:
                     raise ValueError("attachment bytes do not match descriptor")
@@ -430,11 +434,14 @@ class AttachmentStore:
         """Shell wrapper: begin is idempotent by its own request_key."""
         if not isinstance(request_key, str) or not 1 <= len(request_key) <= 200:
             raise ValueError("attachment_upload_begin requires request_key 1..200")
+        kind, name = payload.get("kind"), payload.get("name")
+        total_bytes, total_sha256 = payload.get("total_bytes"), payload.get("total_sha256")
+        if (not isinstance(kind, str) or not isinstance(name, str)
+                or not isinstance(total_bytes, int) or not isinstance(total_sha256, str)):
+            raise ValueError("invalid attachment upload metadata")
         return self.upload_begin(owner, project_id=project_id,
-                                 kind=payload.get("kind"),
-                                 name=payload.get("name"),
-                                 total_bytes=payload.get("total_bytes"),
-                                 total_sha256=payload.get("total_sha256"), request_key=request_key,
+                                 kind=kind, name=name, total_bytes=total_bytes,
+                                 total_sha256=total_sha256, request_key=request_key,
                                  space_id=payload.get("space_id"),
                                  conversation_id=payload.get("conversation_id") or
                                  (payload.get("conversation") or {}).get("conversation_id"))
@@ -526,6 +533,10 @@ class AttachmentStore:
                            request_key: str | None) -> dict:
         """Shell wrapper: per-chunk request_key comes from the envelope."""
         upload_id = payload.get("upload_id")
+        index, data_url = payload.get("index"), payload.get("data_url")
+        if (not isinstance(upload_id, str) or not isinstance(index, int)
+                or not isinstance(data_url, str) or not isinstance(request_key, str)):
+            raise ValueError("invalid attachment upload chunk")
         db = self.store.connect("chat_access")
         try:
             row = db.execute("SELECT project_id FROM browser_attachment_uploads WHERE upload_id=?",
@@ -535,8 +546,7 @@ class AttachmentStore:
         if row is None or row["project_id"] != project_id:
             raise PermissionError("upload belongs to another project or is unknown")
         return self.upload_chunk(owner, upload_id=upload_id,
-                                 index=payload.get("index"),
-                                 data_url=payload.get("data_url"),
+                                 index=index, data_url=data_url,
                                  request_key=request_key,
                                  chunk_sha256=payload.get("chunk_sha256"))
 
@@ -546,7 +556,10 @@ class AttachmentStore:
         if not isinstance(request_key, str) or not 1 <= len(request_key) <= 200:
             raise ValueError("attachment_upload_complete requires request_key 1..200")
         conversation = payload.get("conversation") or {}
-        return self.upload_complete(owner, upload_id=payload.get("upload_id"),
+        upload_id = payload.get("upload_id")
+        if not isinstance(upload_id, str):
+            raise ValueError("invalid attachment upload ID")
+        return self.upload_complete(owner, upload_id=upload_id,
                                     project_id=project_id, request_key=request_key,
                                     space_id=payload.get("space_id"),
                                     conversation_id=payload.get("conversation_id") or conversation.get("conversation_id"),

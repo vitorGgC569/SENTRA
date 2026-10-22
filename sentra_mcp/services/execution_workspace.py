@@ -1,6 +1,8 @@
 """Durable execution-workspace abstraction over sandbox/worktree/remote backends."""
 from __future__ import annotations
 
+from .postgres_store import PostgresConnection
+
 import json
 import sqlite3
 import time
@@ -85,7 +87,7 @@ class ExecutionWorkspaceService:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> sqlite3.Connection | PostgresConnection:
         return self.store.connect("execution_workspace")
 
     @staticmethod

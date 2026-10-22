@@ -250,6 +250,8 @@ class HostResourceBudget:
         self.reservations = loaded
 
     def _read_file(self) -> dict:
+        if self.state_path is None:
+            raise ValueError("host resource budget state path unavailable")
         try:
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:

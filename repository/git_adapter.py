@@ -15,7 +15,7 @@ class GitAdapter:
         try:
             import git
             repo = git.Repo(self.repo_root, search_parent_directories=False)
-            if Path(repo.working_tree_dir).resolve() == self.repo_root:
+            if repo.working_tree_dir is not None and Path(repo.working_tree_dir).resolve() == self.repo_root:
                 self._repo = repo
         except Exception:
             pass

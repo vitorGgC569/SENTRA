@@ -1,6 +1,8 @@
 """Out-of-process JSON-RPC plugin workers using SENTRA managed processes."""
 from __future__ import annotations
 
+from .postgres_store import PostgresConnection
+
 import json
 import sqlite3
 import time
@@ -81,7 +83,7 @@ class PluginWorkerHost:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> sqlite3.Connection | PostgresConnection:
         return self.store.connect("plugin_worker")
 
     @staticmethod

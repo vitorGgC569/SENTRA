@@ -5,6 +5,8 @@ SDK/transport postconditions are provider reports, not sandbox attestation.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import hashlib
 import ipaddress
 import importlib.metadata
@@ -106,7 +108,9 @@ class DaytonaSessionBinding:
 
 class DaytonaSessionBackend:
     def __init__(self,journal:SessionJournal):
-        self.journal=journal; self.lock=threading.RLock(); self.clients={};self.handles={};self.log_streams={}
+        self.journal=journal; self.lock=threading.RLock(); self.clients: dict[str, Any] = {}
+        self.handles: dict[str, Any] = {}
+        self.log_streams: dict[str, Any] = {}
 
     def _sdk(self,b):
         cfg=b.connection

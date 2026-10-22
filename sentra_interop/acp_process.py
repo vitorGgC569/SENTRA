@@ -125,19 +125,19 @@ class ACPProcessOwner:
                 self.job.close()  # Kills descendants even when direct child already exited.
             else:
                 try:
-                    os.killpg(self.process.pid, signal.SIGTERM)
+                    getattr(os, "killpg")(self.process.pid, signal.SIGTERM)
                 except ProcessLookupError:
                     pass
                 # A reaped leader does not prove its group is gone.
                 deadline = asyncio.get_running_loop().time() + 1
                 while asyncio.get_running_loop().time() < deadline:
                     try:
-                        os.killpg(self.process.pid, 0)
+                        getattr(os, "killpg")(self.process.pid, 0)
                     except ProcessLookupError:
                         break
                     await asyncio.sleep(.025)
                 try:
-                    os.killpg(self.process.pid, signal.SIGKILL)
+                    getattr(os, "killpg")(self.process.pid, getattr(signal, "SIGKILL"))
                 except ProcessLookupError:
                     pass
             if self.process.returncode is None:

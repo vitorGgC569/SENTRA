@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..conversation_pool import FixedConversationRouter
+
 import json
 from typing import Any, Dict, List
 
@@ -22,7 +26,7 @@ Output JSON format:
 
 
 class JudgeAgent:
-    def __init__(self, router: ModelRouter):
+    def __init__(self, router: ModelRouter | FixedConversationRouter):
         self.router = router
 
     async def arbitrate(

@@ -56,7 +56,7 @@ class ActivepiecesLoopbackServer:
             raise ValueError("invalid trusted Activepieces fixture configuration")
         self.gate, self.principal_id, self.workspace_id = gate, principal_id, workspace_id
         self._token, self._handlers, self._allowlist = token, dict(handlers), dict(allowlist)
-        self._server = None
+        self._server: asyncio.AbstractServer | None = None
         self.port: int | None = None
         self._counts: dict[str, int] = {}
 
@@ -78,7 +78,8 @@ class ActivepiecesLoopbackServer:
         return dict(self._counts)
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        code, result = 400, {"error": "invalid_request"}
+        code = 400
+        result: dict[str, Any] = {"error": "invalid_request"}
         try:
             if writer.get_extra_info("peername")[0] != "127.0.0.1":
                 raise PermissionError()
@@ -91,12 +92,12 @@ class ActivepiecesLoopbackServer:
                 raise ValueError("unapproved action")
             headers = {}
             for _ in range(24):
-                line = await asyncio.wait_for(reader.readline(), 3)
-                if line == b"\r\n":
+                raw_line = await asyncio.wait_for(reader.readline(), 3)
+                if raw_line == b"\r\n":
                     break
-                if not line or len(line) > 2048:
+                if not raw_line or len(raw_line) > 2048:
                     raise ValueError("invalid header")
-                key, sep, value = line.decode("ascii").partition(":")
+                key, sep, value = raw_line.decode("ascii").partition(":")
                 if not sep or key.lower() in headers:
                     raise ValueError("duplicate or malformed header")
                 headers[key.lower()] = value.strip()
@@ -152,14 +153,15 @@ class ActivepiecesLoopbackServer:
             code, result = 401, {"error": "unauthorized"}
         except (ValueError, KeyError, TypeError, InteropMappingDenied,
                 asyncio.TimeoutError, asyncio.IncompleteReadError):
-            code, result = 400, {"error": "invalid_request"}
+            code = 400
+            result = {"error": "invalid_request"}
         except Exception:
             code, result = 500, {"error": "internal_error"}
         try:
-            data = _encode(result)
+            response_bytes = _encode(result)
             writer.write(f"HTTP/1.1 {code} OK\r\nContent-Type: application/json\r\n"
-                         f"Content-Length: {len(data)}\r\nConnection: close\r\n"
-                         "Cache-Control: no-store\r\n\r\n".encode("ascii") + data)
+                         f"Content-Length: {len(response_bytes)}\r\nConnection: close\r\n"
+                         "Cache-Control: no-store\r\n\r\n".encode("ascii") + response_bytes)
             await writer.drain()
         finally:
             writer.close()
@@ -209,12 +211,12 @@ class ActivepiecesActionClient:
                     raise ValueError("remote action refused or uncertain")
                 headers = {}
                 for _ in range(24):
-                    line = await reader.readline()
-                    if line == b"\r\n":
+                    raw_line = await reader.readline()
+                    if raw_line == b"\r\n":
                         break
-                    if not line or len(line) > 2048:
+                    if not raw_line or len(raw_line) > 2048:
                         raise ValueError("invalid response header")
-                    k, sep, v = line.decode("ascii").partition(":")
+                    k, sep, v = raw_line.decode("ascii").partition(":")
                     if not sep or k.lower() in headers:
                         raise ValueError("malformed response header")
                     headers[k.lower()] = v.strip()

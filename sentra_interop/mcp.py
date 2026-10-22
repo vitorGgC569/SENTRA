@@ -97,7 +97,10 @@ class ToolHiveMCPBoundary:
 
         async def invoke() -> Mapping[str, Any]:
             if getattr(client, "requires_authorized_call", False) is True:
-                result = await client.call_tool_authorized(request, tool_name, dict(arguments))
+                authorized_call = getattr(client, "call_tool_authorized", None)
+                if not callable(authorized_call):
+                    raise TypeError("authorized MCP call unavailable")
+                result = await authorized_call(request, tool_name, dict(arguments))
             else:
                 result = await client.call_tool(tool_name, dict(arguments))
             if not isinstance(result, Mapping):

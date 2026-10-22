@@ -34,6 +34,8 @@ def authority(tmp_path: Path):
     governance = GovernanceService(state, durable=durable)
     owner = "owner-one"
     durable.create_run(owner, run_id="run-test")
+    durable.assign_agent("run-test", owner, agent_id="builder", role="worker",
+                         state="ACTIVE", desired_state="ACTIVE")
     item = governance.create_work_item(
         "run-test", owner, work_item_id="WI-A", objective="Verify safe execution",
         assignee_agent_id="builder", required_capabilities=["lab.inspect"],

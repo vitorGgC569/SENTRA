@@ -26,7 +26,7 @@ def test_owned_windows_pty_start_write_read_physical_fences(tmp_path):
             assignee_agent_id="pty-agent",required_capabilities=[
                 "api:action:terminal.start","api:action:terminal.write_stdin",
                 "terminal:start","terminal:write","terminal:read",
-                "api:action:terminal.close","terminal:close"])
+                "api:action:terminal.close","terminal:close"],metadata={'workspace_id':ws['id']})
         cp.transition_work_item(wi,owner,"RUNNING")
         be=BrowserEvidenceService(tmp_path/"core")
         be.configure(extension_id=EXT,source_sha256=SHA,principal=owner,

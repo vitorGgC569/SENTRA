@@ -16,9 +16,9 @@ def fixture(tmp_path):
     (project / "src").mkdir(parents=True)
     (project / "scripts").mkdir()
     (project / "public").mkdir()
-    for name in ("build.mjs", "materialize.mjs", "source-inputs.mjs"):
+    for name in ("build.mjs", "build-island.mjs", "materialize.mjs", "source-inputs.mjs"):
         shutil.copy2(PROJECT / "scripts" / name, project / "scripts" / name)
-    for name in ("package.json", "package-lock.json", "index.html", "vite.config.js"):
+    for name in ("package.json", "package-lock.json", "index.html", "island.html", "vite.config.js", "vite.island.config.js"):
         (project / name).write_text("{}", encoding="utf-8")
     (project / "src/main.jsx").write_text("export default 'initial'", encoding="utf-8")
     (project / "public/bootstrap.js").write_text("bootstrap", encoding="utf-8")
@@ -45,7 +45,7 @@ def test_node_and_packager_agree_on_all_source_inputs(tmp_path):
     assert json.loads(result) == manifest["source_inputs"]
 
 
-@pytest.mark.parametrize("name", ["src/main.jsx", "public/bootstrap.js", "package-lock.json", "scripts/build.mjs"])
+@pytest.mark.parametrize("name", ["src/main.jsx", "public/bootstrap.js", "package-lock.json", "scripts/build.mjs", "scripts/build-island.mjs", "vite.island.config.js", "island.html"])
 def test_valid_output_hashes_cannot_certify_stale_sources(tmp_path, name):
     project, ui, _ = fixture(tmp_path)
     validate_desktop_bundle(ui)

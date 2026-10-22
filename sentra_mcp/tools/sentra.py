@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from mcp.server import MCPServer
+from sentra_mcp.tool_policy import ToolRegistrar
 from mcp.server.mcpserver.context import Context
 
 from ..errors import sanitize_error
@@ -42,7 +42,7 @@ def _sync_call(operation: Callable[[], dict[str, Any]]) -> ResponseEnvelope:
 
 
 def register_sentra_tools(
-    mcp: MCPServer,
+    mcp: ToolRegistrar,
     repository: RepositoryService,
     oma: OmaService,
     candidate_generation: CandidateGenerationService | None = None,

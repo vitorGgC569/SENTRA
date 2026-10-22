@@ -11,7 +11,7 @@ import hashlib
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from mcp.server import MCPServer
+from sentra_mcp.tool_policy import ToolRegistrar
 from mcp.server.mcpserver.context import Context
 from pydantic import Field
 
@@ -58,7 +58,7 @@ def _required(name: str, value: Any) -> Any:
 
 
 def register_durable_tools(
-    mcp: MCPServer,
+    mcp: ToolRegistrar,
     durable: DurableRunService,
     capabilities: CapabilityService,
     filesystem: FilesystemService,

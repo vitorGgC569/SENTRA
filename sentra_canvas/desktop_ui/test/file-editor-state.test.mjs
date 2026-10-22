@@ -63,3 +63,12 @@ test('production bridge stores no editor content in session storage after transp
   {execution_workspace_id:'project',editor:{machine_id:'m',work_item_id:'w'}},{content:'PRIVATE DRAFT',base_sha256:'a'.repeat(64)},'file.txt','durable-key');
  await assert.rejects(context.testBridge(request),/lost ACK/);assert.equal(calls.length,1);assert.deepEqual(writes,[]);
 });
+
+test('clean editors adopt another tab draft while local typing freezes and preserves both versions',async()=>{
+ const initial={content:'old'},remote={content:'other tab'},errors=[];
+ const writer=new FileDraftWriter(async()=>({saved:true,revision:2}),1,()=>{},initial);
+ assert.deepEqual(writer.observe({revision:2,draft:remote},initial),{draft:remote});assert.equal(writer.revision,2);writer.close();
+ const dirty=new FileDraftWriter(async()=>{throw Error('must not save after conflict')},1,(state,error)=>{if(error)errors.push(error)},initial);
+ dirty.schedule({content:'my typing'});assert.equal(dirty.observe({revision:2,draft:remote},{content:'my typing'}),null);
+ assert.ok(dirty.pending.includes('my typing'));assert.equal(errors.length,1);await assert.rejects(dirty.flush(),/outra janela/);dirty.close();
+});

@@ -152,6 +152,7 @@ class PulsoShellDispatch:
             "channel_claim": self._do_channel_claim,
             "channel_ack": self._do_channel_ack,
         }
+        self._idem: str | None = None
         if idempotency_database is not None:
             if workspace_root is None:
                 raise ValueError("idempotency database requires a workspace root")
@@ -176,9 +177,6 @@ class PulsoShellDispatch:
                             ("updated", "REAL NOT NULL DEFAULT 0")):
                         if column not in columns:
                             db.execute("ALTER TABLE pulso_shell_requests ADD COLUMN " + column + " " + definition)
-
-        else:
-            self._idem = None
 
     @contextmanager
     def _db(self):
@@ -647,6 +645,8 @@ class PulsoShellDispatch:
         params = ctx["params"]
         if params.get("provider") not in RUNTIME_PROVIDERS or params.get("operation") not in RUNTIME_OPERATIONS:
             raise PulsoShellDenied("unknown configured runtime operation")
+        if params.get("provider") == "temporal" and params.get("operation") == "fork":
+            raise PulsoShellDenied("fork is a LangGraph-only operation")
         return self._execute_resolver(self.runtime_resolver, ctx, params)
 
     def _do_runtime_observe(self, ctx: dict) -> dict:

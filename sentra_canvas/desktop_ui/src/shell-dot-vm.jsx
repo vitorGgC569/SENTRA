@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Cpu, Monitor, Pause, Play, Power, RefreshCw, Settings2 } from 'lucide-react';
 import { computerStatus } from './shell-computer-status.js';
 import { FailureNotice } from './shell-failure.jsx';
+import { ScopedInputQueue } from './shell-input-queue.js';
 
 // Physical PC scancodes; the installed guest's layout determines characters.
 const keys = { Escape:1, Digit1:2, Digit2:3, Digit3:4, Digit4:5, Digit5:6, Digit6:7, Digit7:8, Digit8:9, Digit9:10, Digit0:11, Minus:12, Equal:13, Backspace:14, Tab:15,
@@ -17,7 +18,10 @@ function scancodes(code, down) {
   return list;
 }
 
-export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote, onStatus, simple = false }) {
+export function ShellDotVm(props) {
+  return <ScopedShellDotVm key={JSON.stringify([props.dot.project_id,props.dot.space_id,props.dot.dot_id,props.conversation?.conversation_id])} {...props}/>;
+}
+function ScopedShellDotVm({ dot, conversation, bridge, visible = true, onRemote, onStatus, simple = false }) {
   const [status, setStatus] = useState(null), [frame, setFrame] = useState(null), [intervalMs, setIntervalMs] = useState(null);
   const [images, setImages] = useState([]);
   const [settings, setSettings] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(''), [pending, setPending] = useState(null);
@@ -26,9 +30,12 @@ export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote
   const [importFolder, setImportFolder] = useState('.');
   const [hostFolder, setHostFolder] = useState('');
   const alive = useRef(true), initialized = useRef(false), lastFrame = useRef(null), lock = useRef(false), held = useRef(new Set()), pointer = useRef(null), pointerTimer = useRef(null);
-  const state = useRef(null), pendingRef = useRef(null), inputQueue = useRef([]), sendingInput = useRef(false), screen = useRef(null), visibleRef = useRef(visible);
+  const state = useRef(null), pendingRef = useRef(null), inputOwner = useRef(null), screen = useRef(null), visibleRef = useRef(visible), inputQueue = useRef(null);
+  if (!inputQueue.current) inputQueue.current = new ScopedInputQueue(request => bridge(request), error => { held.current.clear(); if (alive.current) setError(error.message); });
   state.current = status; visibleRef.current = visible;
   const scope = { project_id:dot.project_id, space_id:dot.space_id, dot_id:dot.dot_id, conversation_id:conversation?.conversation_id };
+  const scopeKey=JSON.stringify(scope), renderedScope=useRef(scopeKey), statusScope=useRef(null);
+  renderedScope.current=scopeKey;
   const vm = status?.vm, running = vm?.vm_state === 'running', human = status?.input?.holder === 'human' && status.input.live === true;
   const existingVm = Boolean(vm?.vm_id && vm?.vm_state && vm.vm_state !== 'not_created');
   const view = computerStatus(status);
@@ -44,7 +51,8 @@ export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote
   }, [dot.dot_id, conversation?.conversation_id]);
   async function refresh() {
     const value = await bridge({ action:'dot_vm_status', ...scope });
-    if (!alive.current) return;
+    if (!alive.current || renderedScope.current!==scopeKey) return;
+    statusScope.current=scopeKey;
     setStatus(value);
     onStatus?.(value);
     if (!initialized.current) {
@@ -56,8 +64,18 @@ export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote
     alive.current = true; let active = true, fetching = false;
     async function load() { if (!active || fetching || !visible || document.hidden) return; fetching = true; try { await refresh(); } catch (e) { if (active) setError(e.message); } finally { fetching = false; } }
     void load(); const timer = setInterval(load, 4000);
-    return () => { active = false; alive.current = false; clearInterval(timer); clearTimeout(pointerTimer.current); };
+    return () => { active = false; void releaseKeys(); alive.current = false; clearInterval(timer); clearTimeout(pointerTimer.current); };
   }, [dot.dot_id, conversation?.conversation_id, visible]);
+  useEffect(() => { initialized.current=false; setStatus(null); setFrame(null); }, [scopeKey]);
+  useEffect(() => {
+    const release = () => { if (document.hidden) void releaseKeys(); };
+    const blur = () => { void releaseKeys(); };
+    document.addEventListener('visibilitychange', release); window.addEventListener('blur', blur);
+    return () => { document.removeEventListener('visibilitychange', release); window.removeEventListener('blur', blur); };
+  }, []);
+  useEffect(() => {
+    if (inputOwner.current && (!human || inputOwner.current.expected_epoch !== status?.input?.epoch)) void releaseKeys();
+  }, [human, status?.input?.epoch]);
   useEffect(() => {
     if (!running || !visible || !watching) { setFrame(null); lastFrame.current = null; return; }
     let active = true, timer;
@@ -133,21 +151,13 @@ export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote
     } catch (e) { setError(e.message); if (e.uncertain) setPending(request); else { pendingRef.current = null; setPending(null); } return false; }
     finally { lock.current = false; if (alive.current) setBusy(false); }
   }
-  function canInput() { return visibleRef.current && state.current?.input?.holder === 'human' && state.current.input.live && !pendingRef.current; }
-  async function drainInput() {
-    if (sendingInput.current) return;
-    sendingInput.current = true;
-    try {
-      while (inputQueue.current.length && canInput()) {
-        const argumentsValue = inputQueue.current.shift();
-        const value = await bridge({ action:'dot_vm_input', ...scope, arguments:argumentsValue,
-          expected_epoch:state.current.input.epoch, request_key:crypto.randomUUID() });
-        if (value.state !== 'SUCCEEDED') throw Error('Entrada da VM não confirmada; atualize a posse de controle.');
-      }
-    } catch (e) { inputQueue.current = []; held.current.clear(); if (alive.current) setError(e.message); }
-    finally { sendingInput.current = false; }
+  function canInput() { return statusScope.current===renderedScope.current && alive.current && !document.hidden && visibleRef.current && state.current?.input?.holder === 'human' && state.current.input.live && !pendingRef.current; }
+  function sendInput(argumentsValue) {
+    if (!canInput()) return false;
+    const owner={...scope,expected_epoch:state.current.input.epoch};
+    inputOwner.current=owner;
+    return inputQueue.current.enqueue({action:'dot_vm_input',...owner,arguments:argumentsValue,request_key:crypto.randomUUID()});
   }
-  function sendInput(argumentsValue) { if (!canInput() || inputQueue.current.length >= 32) return; inputQueue.current.push(argumentsValue); void drainInput(); }
   function keyboard(e, down) {
     if (!canInput()) return;
     const scans = scancodes(e.code, down); if (!scans) return;
@@ -156,9 +166,13 @@ export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote
     sendInput({ action:'input.key', scancodes:scans });
   }
   function releaseKeys() {
-    for (const code of held.current) { const scans = scancodes(code, false); if (scans) sendInput({ action:'input.key', scancodes:scans }); }
+    clearTimeout(pointerTimer.current);
+    const owner=inputOwner.current, requests=[];
+    for (const code of held.current) { const scans = scancodes(code, false); if (scans && owner) requests.push({ action:'dot_vm_input',...owner,arguments:{action:'input.key',scancodes:scans},request_key:crypto.randomUUID() }); }
     held.current.clear();
-    if (pointer.current) sendInput({ ...pointer.current, buttons:0 });
+    if (pointer.current && owner) requests.push({action:'dot_vm_input',...owner,arguments:{...pointer.current,buttons:0},request_key:crypto.randomUUID()});
+    pointer.current=null; inputOwner.current=null;
+    return inputQueue.current.release(requests);
   }
   function mouse(e) {
     if (!canInput() || !frame) return;
@@ -207,11 +221,11 @@ export function ShellDotVm({ dot, conversation, bridge, visible = true, onRemote
       <p>A VM pertence exclusivamente ao canvas deste Dot. Com acesso completo, o Dot pode iniciar a instalação e executar comandos dentro dela.</p><button disabled={busy || Boolean(pending) || !status?.hypervisor_available || vm?.provisioning_status === 'uncertain_requires_reconciliation'}>{busy ? 'Configurando…' : existingVm ? (vm?.conversation_authorized ? 'Salvar configuração existente' : 'Vincular esta conversa à VM') : form.iso_path.trim() ? 'Criar e instalar sistema' : 'Salvar · aguardando ISO'}</button>
     </form>}
     <div className={"dot-vm-frame" + (frame ? " has-frame" : "")} ref={screen} tabIndex={human ? 0 : -1} aria-label={human ? 'Desktop da VM com controle humano' : 'Desktop da VM observado'} onKeyDown={e => keyboard(e, true)} onKeyUp={e => keyboard(e, false)} onBlur={releaseKeys}>
-      {frame ? <img src={'data:image/png;base64,' + frame.image_base64} alt="Framebuffer atual da máquina virtual deste Dot" draggable={false} onPointerDown={mouse} onPointerUp={mouse} onPointerMove={mouse} onWheel={mouse} onContextMenu={e => { if (human) e.preventDefault(); }} /> : <div className="dot-computer-empty" role="status"><Monitor size={30} /><strong>{status == null ? "Conectando ao computador…" : running ? (watching ? "Aguardando a tela" : "Visualização pausada") : vm?.vm_state === "paused" ? "O computador está pausado" : ["poweroff", "saved"].includes(vm?.vm_state) ? "O computador está descansando" : vm?.vm_state === "not_created" ? "Prepare o computador do Dot" : "Tela indisponível"}</strong><p>{status == null ? "A tela aparecerá aqui." : running ? (watching ? "A primeira imagem aparece assim que estiver disponível." : "Retome a visualização quando quiser.") : ["poweroff", "saved", "paused"].includes(vm?.vm_state) ? "Retome quando precisar continuar." : "Abra as configurações para consultar o sistema."}</p></div>}
+      {frame ? <img src={'data:image/png;base64,' + frame.image_base64} alt="Framebuffer atual da máquina virtual deste Dot" draggable={false} onPointerDown={mouse} onPointerUp={mouse} onPointerMove={mouse} onPointerCancel={releaseKeys} onLostPointerCapture={releaseKeys} onWheel={mouse} onContextMenu={e => { if (human) e.preventDefault(); }} /> : <div className="dot-computer-empty" role="status"><Monitor size={30} /><strong>{status == null ? "Conectando ao computador…" : running ? (watching ? "Aguardando a tela" : "Visualização pausada") : vm?.vm_state === "paused" ? "O computador está pausado" : ["poweroff", "saved"].includes(vm?.vm_state) ? "O computador está descansando" : vm?.vm_state === "not_created" ? "Prepare o computador do Dot" : "Tela indisponível"}</strong><p>{status == null ? "A tela aparecerá aqui." : running ? (watching ? "A primeira imagem aparece assim que estiver disponível." : "Retome a visualização quando quiser.") : ["poweroff", "saved", "paused"].includes(vm?.vm_state) ? "Retome quando precisar continuar." : "Abra as configurações para consultar o sistema."}</p></div>}
     </div>
     <footer><span>{frame ? 'Quadro real' + (intervalMs ? ' · atualização em ' + (intervalMs / 1000).toFixed(1) + ' s' : '') + ' · captura ' + frame.capture_ms + ' ms' : 'Sem quadro atual'}</span><button className="dot-vm-watch" onClick={() => setWatching(value => !value)} disabled={!running}>{watching ? 'Pausar visualização' : 'Ver tela'}</button>
       {running || vm?.vm_state === 'paused' ? <><button disabled={busy || Boolean(pending) || human} onClick={() => mutate('dot_vm_execute', { arguments:{ action:vm.vm_state === 'paused' ? 'resume' : 'pause' } })}><Pause size={13} />{vm.vm_state === 'paused' ? 'Retomar VM' : 'Pausar VM'}</button><button disabled={busy || Boolean(pending) || human} onClick={() => mutate('dot_vm_execute', { arguments:{ action:'shutdown' } })}><Power size={13} />Desligar</button></> : vm?.vm_state && vm.vm_state !== 'not_created' && <button disabled={busy || Boolean(pending)} onClick={() => mutate('dot_vm_execute', { arguments:{ action:'start' } })}><Play size={13} />Acordar</button>}
-      <button className="dot-vm-handoff" disabled={busy || Boolean(pending) || !running} onClick={async () => { releaseKeys(); await mutate('dot_vm_handoff', { holder:human ? 'agent' : 'human', expected_epoch:status?.input?.epoch || 0 }); }}>{human ? 'Devolver ao Dot' : 'Assumir controle'}</button><button className="shell-icon" aria-label="Atualizar estado da VM" onClick={() => refresh().catch(e => setError(e.message))}><RefreshCw size={14} /></button></footer>
+      <button className="dot-vm-handoff" disabled={busy || Boolean(pending) || !running} onClick={async () => { await releaseKeys(); await mutate('dot_vm_handoff', { holder:human ? 'agent' : 'human', expected_epoch:status?.input?.epoch || 0 }); }}>{human ? 'Devolver ao Dot' : 'Assumir controle'}</button><button className="shell-icon" aria-label="Atualizar estado da VM" onClick={() => refresh().catch(e => setError(e.message))}><RefreshCw size={14} /></button></footer>
     <details className="dot-vm-advanced dot-vm-diagnostics"><summary>Sistema e instalação</summary>
     {status?.host && vm?.vm_state && <div className="dot-vm-budget"><Cpu size={13} /><span>{status.host.reserved_cpus}/{status.host.max_cpus} vCPU · {(status.host.reserved_memory_mb / 1024).toFixed(1)}/{(status.host.max_memory_mb / 1024).toFixed(1)} GiB reservados</span><small>Todas as VMs dos Dots juntas: até 50% dos processadores lógicos e da RAM física configurados.</small></div>}
     {installation && <p className="shell-notice">{installation.installed_os_verified ? 'Instalação persistente verificada' : 'Instalação persistente ainda não verificada'}{installation.desktop_ready_verified ? ' · desktop XFCE confirmado' : ''}{installation.verified_at ? ' · última verificação: ' + new Date(installation.verified_at * 1000).toLocaleString() : ''}. {vm?.vm_state !== 'running' ? 'A VM está desligada ou pausada.' : 'Use Verificar instalação para atualizar a confirmação.'}</p>}

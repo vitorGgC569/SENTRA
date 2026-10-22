@@ -291,6 +291,8 @@ def live_sentra_grant(tmp_path):
     durable = DurableRunService(state)
     gov = GovernanceService(state, durable=durable)
     durable.create_run("owner", run_id="run-1")
+    durable.assign_agent("run-1", "owner", agent_id="agent-1", role="worker",
+                         state="ACTIVE", desired_state="ACTIVE")
     gov.create_work_item("run-1", "owner", work_item_id="WI-1",
                          objective="Read-only security check",
                          assignee_agent_id="agent-1",

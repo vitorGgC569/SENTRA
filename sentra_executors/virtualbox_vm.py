@@ -20,7 +20,7 @@ from .rpa import effect_checkpoint, ExecutorFailure
 VM_CAPABILITIES = ('vm:observe', 'vm:manage', 'vm:input', 'vm:guest')
 VM_ACTIONS = {'vm:observe': ('status', 'frame', 'diagnostics', 'installation.plan', 'storage.candidate'),
     'vm:manage': ('provision', 'start', 'shutdown', 'pause', 'resume', 'restart', 'installation.boot_disk', 'installation.prepare', 'installation.launch', 'installation.reconcile', 'installation.advance', 'resource.cap', 'storage.enroll'),
-    'vm:input': ('input.key', 'input.mouse', 'input.tap', 'input.bios_dvd'), 'vm:guest': ('guest.run', 'installation.verify', 'project.import', 'project.import.reconcile')}
+    'vm:input': ('input.key', 'input.mouse', 'input.tap', 'input.drag', 'input.chord', 'input.bios_dvd'), 'vm:guest': ('guest.run', 'installation.verify', 'project.import', 'project.import.reconcile')}
 # Published on the shell bridge. The desktop button is Lumen's; this contract
 # does not draw one and does not claim a physical install or a guest copy.
 NEXT_AUTHORIZED_GUEST_STEP = {
@@ -210,7 +210,24 @@ class VirtualBoxClient:
                 return {'vm_id': binding.vm_id, 'input_sent': True,
                     'action': 'input.bios_dvd', 'keyboard_events_sent': 12,
                     'windows_setup_verified': False, 'automatic_retry': False}
-            if args['action'] == 'input.key':
+            if args['action'] == 'input.chord':
+                from .vm_atomic_input import chord_scancodes
+                make, release = chord_scancodes(args)
+                try:console.Keyboard.PutScancodes(make)
+                finally:console.Keyboard.PutScancodes(release)
+            elif args['action'] == 'input.drag':
+                from .vm_atomic_input import drag_points
+                points = drag_points(args)
+                screen = console.Display.GetScreenResolution(0)
+                if any(x > int(screen[0]) or y > int(screen[1]) for x, y in points):
+                    raise ValueError('pointer outside current framebuffer')
+                x, y = points[0]
+                try:
+                    for x, y in points:
+                        console.Mouse.PutMouseEventAbsolute(x, y, 0, 0, 1)
+                        time.sleep(0.015)
+                finally:console.Mouse.PutMouseEventAbsolute(x, y, 0, 0, 0)
+            elif args['action'] == 'input.key':
                 console.Keyboard.PutScancodes(args['scancodes'])
             else:
                 screen = console.Display.GetScreenResolution(0)
@@ -226,7 +243,8 @@ class VirtualBoxClient:
                 else:
                     console.Mouse.PutMouseEventAbsolute(args['x'], args['y'], args.get('wheel', 0), 0, args['buttons'])
         return {'vm_id': binding.vm_id, 'input_sent': True, 'action': args['action'],
-                **({'pointer_released':True} if args['action']=='input.tap' else {})}
+                **({'pointer_released':True} if args['action'] in {'input.tap','input.drag'} else {}),
+                **({'keyboard_released':True} if args['action']=='input.chord' else {})}
 
     def diagnostics(self, binding, cfg):
         """Bounded read-only host evidence, without guessing guest readiness.
@@ -345,6 +363,7 @@ class VirtualBoxExecutor(GuardedExecutor):
         if action not in VM_ACTIONS[request.capability_id]:
             raise ValueError('unsupported virtual machine action')
         fields = {'input.key': {'scancodes'}, 'input.mouse': {'x', 'y', 'buttons', 'wheel'}, 'input.tap': {'x','y'},
+            'input.drag': {'points'}, 'input.chord': {'keys'},
             'storage.enroll': {'expected_candidate_sha256'},
             'guest.run': {'command', 'timeout_seconds'}, 'project.import': {'relative_path', 'host_folder', 'request_key'},
             'installation.reconcile': {'detach_storage', 'request_key'},
@@ -384,6 +403,12 @@ class VirtualBoxExecutor(GuardedExecutor):
                 raise ValueError('virtual machine identity is host-owned')
         if action == 'input.key' and (not isinstance(args.get('scancodes'), list) or not 1 <= len(args['scancodes']) <= 32 or any(type(n) is not int or not 0 <= n <= 255 for n in args['scancodes'])):
             raise ValueError('bounded keyboard scancodes required')
+        if action == 'input.chord':
+            from .vm_atomic_input import chord_scancodes
+            chord_scancodes(args)
+        if action == 'input.drag':
+            from .vm_atomic_input import drag_points
+            drag_points(args)
         if action == 'input.bios_dvd' and set(args) != {'action'}:
             raise ValueError('BIOS DVD input has no user-selectable parameters')
         if action == 'input.mouse' and (any(type(args.get(k)) is not int for k in ('x', 'y', 'buttons')) or not 1 <= args['x'] <= 8192 or not 1 <= args['y'] <= 8192 or not 0 <= args['buttons'] <= 7 or type(args.get('wheel', 0)) is not int or not -16 <= args.get('wheel', 0) <= 16):
@@ -632,7 +657,7 @@ class VirtualBoxExecutor(GuardedExecutor):
                     or not dvd.lower().endswith('.iso') or not dvd):
                 raise ExecutorFailure('windows_dvd_boot_preconditions_unverified')
             return self.client.input(binding, args)
-        if action in {'input.key', 'input.mouse', 'input.tap'}:
+        if action in {'input.key', 'input.mouse', 'input.tap', 'input.drag', 'input.chord'}:
             return self.client.input(binding, args)
         if action == 'guest.run':
             from sentra_executors.guest_execution import is_proven_guest_executor, resolve_guest_executor

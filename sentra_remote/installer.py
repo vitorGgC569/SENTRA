@@ -13,7 +13,12 @@ import urllib.request
 import uuid
 import zipfile
 from pathlib import Path
-from typing import Any, Callable
+from inspect import signature as _install_signature
+from typing import TYPE_CHECKING, Any, Callable, TypedDict
+
+if TYPE_CHECKING:
+    import tkinter as tk
+    from tkinter import ttk
 
 from sentra_version import PRODUCT_VERSION
 
@@ -943,6 +948,11 @@ def _install_product(
     return result
 
 
+# The guarded facade accepts **options to pass through to the existing product
+# installer. Preserve its public parameter/default contract for setup clients.
+setattr(install, "__signature__", _install_signature(_install_product))
+
+
 def verify_installed_local(*, install_dir: Path, launch: bool = True, state_dir: Path | None = None,
                            stop_after_doctor: bool = False,
                            progress: ProgressCallback | None = None) -> dict[str, Any]:
@@ -1117,7 +1127,26 @@ def uninstall(
     return {"ok": True, "kept_config": keep_config, "cleanup_scheduled": False}
 
 
+class _InstallerSelection(TypedDict):
+    """UI-thread snapshot passed unchanged to the installation worker."""
+    install_dir: Path
+    workspace: Path | None
+    profile: str
+    access_scope: str
+    install_git: bool
+    install_docker: bool
+
+
 class InstallerWizard:
+    # installer_ui.build creates these controls before the window is shown.
+    openai_expanded: bool
+    openai_fields: list[tk.Widget]
+    openai_toggle: ttk.Button
+    advanced_frame: tk.Frame
+    advanced_button: ttk.Button
+    install_button: ttk.Button
+    connect_hint: tk.Label
+
     def __init__(self) -> None:
         from .gui_runtime import prepare_gui_runtime
         prepare_gui_runtime()
@@ -1290,7 +1319,7 @@ class InstallerWizard:
         self.root.update_idletasks()
 
         # Tk variables must be read on the UI thread, not by the worker.
-        selected = {"install_dir": Path(self.install_dir.get()),
+        selected: _InstallerSelection = {"install_dir": Path(self.install_dir.get()),
                     "workspace": Path(self.workspace.get()) if self.workspace.get().strip() else None,
                     "profile": self.profile.get(), "access_scope": self.access_scope.get(),
                     "install_git": self.git_var.get(), "install_docker": self.docker_var.get()}
@@ -1438,7 +1467,9 @@ class InstallerWizard:
 
         def notify(event: str, message: str) -> None:
             if event in {"browser_session", "opened", "progress", "workspace_required"}:
-                self.root.after(0, lambda text=message: self.connect_hint.configure(text=text))
+                def update_hint(text: str = message) -> None:
+                    self.connect_hint.configure(text=text)
+                self.root.after(0, update_hint)
 
         def worker() -> None:
             try:

@@ -75,7 +75,9 @@ def test_native_usage_blocks_followup_before_any_new_submission(tmp_path,monkeyp
     ledger=agent._ledger();owner="cli:"+agent.store.principal
     ledger.budgets.set_policy(owner,scope_type="instance",limits={"input_tokens":70})
     calls=[]
-    def native(config,messages,model,delivery,*,usage_callback=None):
+    def native(config,messages,model,delivery,*,usage_callback=None,checkpoint=None):
+        if checkpoint is not None:
+            checkpoint()
         ident="fixture-native-"+str(len(calls))
         delivery("codex-cli",ident,"submitted")
         calls.append(ident)

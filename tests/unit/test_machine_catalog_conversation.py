@@ -9,6 +9,7 @@ def test_shell_catalog_filters_other_conversations_before_policy_and_exposes_vm_
         required_capabilities=['vm:observe'],metadata=dict(workspace_id='workspace',machine_id='vm',conversation_id=cid))
         for cid in ('own','other')]
     host=object.__new__(MachineHost);host.owner='owner'
+    host._catalog_reads=set()
     host._call=lambda coroutine,**kwargs:asyncio.run(coroutine)
     host.control=SimpleNamespace(list_work_items=lambda *a,**k:{'items':rows},
         durable=SimpleNamespace(run_status=lambda *a,**k:{'state':'RUNNING'}))

@@ -18,4 +18,13 @@ class CatalogTests(unittest.TestCase):
   self.assertIsNone(validate_catalog([r],lambda _:self.fail('Foreign fetch')))
  def test_size_mismatch(self):
   r=self.release();r['assets'][0]['size']=1;self.assertIsNone(validate_catalog([r],self.metadata))
+ def test_new_mobile_metadata_requires_preserved_signer_and_version(self):
+  from scripts.site.build import ROOT
+  import json
+  policy=json.loads((ROOT/'scripts/site/android-preview-signing.json').read_text())
+  metadata=self.metadata(None);metadata['android'].update(version_code=3,package=policy['package'],signing_certificate_sha256=policy['certificate_sha256'])
+  self.assertEqual(validate_catalog([self.release()],lambda _:metadata)['version_code'],3)
+  for key,value in [('version_code',2),('package','foreign'),('signing_certificate_sha256','b'*64)]:
+   bad={**metadata,'android':{**metadata['android'],key:value}}
+   self.assertIsNone(validate_catalog([self.release()],lambda _:bad))
 if __name__=='__main__':unittest.main()

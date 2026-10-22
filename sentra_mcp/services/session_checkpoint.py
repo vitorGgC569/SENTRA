@@ -1,6 +1,8 @@
 """Durable logical-session checkpoints for replaceable provider conversations."""
 from __future__ import annotations
 
+from .postgres_store import PostgresConnection
+
 import hashlib
 import json
 import sqlite3
@@ -224,7 +226,7 @@ class SessionCheckpointService:
                        "WHERE key='os_crypto'")
             db.commit()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> sqlite3.Connection | PostgresConnection:
         return self.store.connect("session_checkpoint")
 
     def _row(self, row: sqlite3.Row) -> dict[str, Any]:

@@ -5,6 +5,8 @@ configured and admitted by SENTRA PolicyDecision beforehand.
 """
 from __future__ import annotations
 
+from sentra_runtime.effect_boundary import CentralEffectContext
+
 import asyncio
 import contextvars
 import json
@@ -81,13 +83,13 @@ class ACPStdioTransport:
         self._expired_ids: set[int] = set()
         self._sequence = 0
         self._write_lock = asyncio.Lock()
-        self._updates: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue(maxsize=128)
+        self._updates: asyncio.Queue[Mapping[str, Any] | None] = asyncio.Queue(maxsize=128)
         self._dead: BaseException | None = None
         self._closed = False
         self.request_handler = None
-        self._contexts = {}
-        self._server_tasks = set()
-        self._server_operations = {}
+        self._contexts: dict[int, CentralEffectContext | None] = {}
+        self._server_tasks: set[asyncio.Task] = set()
+        self._server_operations: dict[asyncio.Task, str] = {}
         self._read_task = asyncio.create_task(self._read_loop(), context=contextvars.Context())
 
     @classmethod
@@ -179,7 +181,7 @@ class ACPStdioTransport:
                 )
                 spawned_owner = owner
                 return process, owner
-            boundary = (context.run_async if callable(physical_context) else
+            boundary = (context.run_async if context is not None and callable(physical_context) else
                         launch_hook or (context.run_async if context is not None else None))
             process, owner = await asyncio.wait_for(boundary(spawn) if boundary else spawn(),
                                                    timeout=spawn_timeout)
@@ -444,10 +446,15 @@ class ACPSessionAdapter:
         self._scope: tuple[str, str, str] | None = None
         self._negotiation_attempted = False
         self._initialization_lock = asyncio.Lock()
-        self.client_capabilities = {}
+        self.client_capabilities: dict[str, Any] = {}
         self.session_id: str | None = None
         self._cancel_requested = False
         self._session_lock = asyncio.Lock()
+
+    def _local_id(self) -> str:
+        if self.local_session_id is None:
+            raise EffectRejected("durable ACP session ID unavailable")
+        return self.local_session_id
 
     def _failure(self, request: OperationRequest, message: str) -> DispatchOutcome:
         return DispatchOutcome(OperationResult(request.operation_id, "FAILED", error=message))
@@ -474,19 +481,19 @@ class ACPSessionAdapter:
         async def admitted():
             nonlocal reserved
             if self.store is not None and not callable(getattr(self.gate, "physical_context", None)):
-                self.store.reserve(self.local_session_id, method, request)
+                self.store.reserve(self._local_id(), method, request)
                 reserved = True
             return await effect()
         try:
             result = await self.gate.execute(request, admitted, timeout=timeout)
         except BaseException:
-            if reserved:
+            if reserved and self.store is not None:
                 self.store.finish(request, "UNCERTAIN")
             raise
-        if reserved:
+        if reserved and self.store is not None:
             self.store.finish(request, result.operation.state)
         if self.store is not None and result.operation.state == "UNCERTAIN" and self.session_id:
-            self.store.set_state(self.local_session_id, "UNCERTAIN")
+            self.store.set_state(self._local_id(), "UNCERTAIN")
         return result
 
     async def _initialize(self, timeout: float) -> None:
@@ -548,11 +555,15 @@ class ACPSessionAdapter:
               request: OperationRequest) -> None:
         identity(session_id)
         if self.store is not None:
-            self.store.bind(self.local_session_id, self.provider, session_id,
+            if self.protocol_version is None:
+                raise EffectRejected("ACP protocol is not initialized")
+            self.store.bind(self._local_id(), self.provider, session_id,
                             str(directory), self.protocol_version, request)
         self.session_id = session_id
         self._scope = (request.principal_id, request.machine_id, request.work_item_id)
         self._cancel_requested = False
+        if self.state is None or self.protocol_version is None:
+            raise EffectRejected("ACP protocol is not initialized")
         self.state.setup(response)
 
     async def open(self, request: OperationRequest, *, cwd: str, timeout: float = 30) -> DispatchOutcome:
@@ -560,7 +571,7 @@ class ACPSessionAdapter:
             directory = self._directory(cwd)
             self._check(request, "acp:session", {"cwd": str(directory)})
             if self.store is not None and self.store.get(
-                self.local_session_id, provider=self.provider, request=request) is not None:
+                self._local_id(), provider=self.provider, request=request) is not None:
                 raise EffectRejected("durable ACP mapping exists; use explicit reattach")
         except (ValueError, OSError) as exc:
             return self._failure(request, str(exc))
@@ -569,7 +580,7 @@ class ACPSessionAdapter:
                 if self.session_id is not None:
                     raise EffectRejected("ACP session already established")
                 if self.store is not None and self.store.get(
-                    self.local_session_id, provider=self.provider, request=request) is not None:
+                    self._local_id(), provider=self.provider, request=request) is not None:
                     raise EffectRejected("ACP mapping already exists")
                 await self._initialize(timeout)
                 response = await self.transport.request("session/new", {
@@ -589,7 +600,7 @@ class ACPSessionAdapter:
             self._check(request, "acp:load" if load_history else "acp:resume",
                         {"session_id": session_id, "cwd": str(directory)})
             if self.store is not None:
-                old = self.store.get(self.local_session_id, provider=self.provider, request=request)
+                old = self.store.get(self._local_id(), provider=self.provider, request=request)
                 if old is None or old.state == "DELETED" or old.session_id != session_id or old.cwd != str(directory):
                     raise EffectRejected("ACP resume mapping mismatch")
         except (ValueError, OSError) as exc:
@@ -615,7 +626,7 @@ class ACPSessionAdapter:
         if self.store is None:
             return self._failure(request, "ACP durable store unavailable")
         try:
-            binding = self.store.get(self.local_session_id, provider=self.provider, request=request)
+            binding = self.store.get(self._local_id(), provider=self.provider, request=request)
             if binding is None or binding.state == "DELETED":
                 raise EffectRejected("ACP durable session unavailable")
         except ValueError as exc:
@@ -665,7 +676,7 @@ class ACPSessionAdapter:
             identity(session_id)
             self._check(request, "acp:" + action, {"session_id": session_id})
             if self.store is not None:
-                binding = self.store.get(self.local_session_id, provider=self.provider, request=request)
+                binding = self.store.get(self._local_id(), provider=self.provider, request=request)
                 if binding is None or binding.session_id != session_id or binding.state == "DELETED":
                     raise EffectRejected("ACP session mapping mismatch")
             elif session_id != self.session_id:
@@ -680,7 +691,7 @@ class ACPSessionAdapter:
                     raise EffectRejected("ACP lifecycle method not advertised")
                 response = await self.transport.request(method, {"sessionId": session_id}, timeout)
                 if self.store is not None:
-                    self.store.set_state(self.local_session_id, "DELETED" if action == "delete" else "CLOSED")
+                    self.store.set_state(self._local_id(), "DELETED" if action == "delete" else "CLOSED")
                 if session_id == self.session_id:
                     self.session_id = None
                 return dict(response)
@@ -752,7 +763,7 @@ class ACPSessionAdapter:
         except ValueError as exc:
             return self._failure(request, str(exc))
 
-        async def effect() -> Mapping[str, Any]:
+        async def effect() -> Mapping[str, Any] | OperationResult:
             async with self._session_lock:
                 if self.session_id != session_id:
                     raise EffectRejected("ACP session changed before prompt")
@@ -803,9 +814,9 @@ class ACPSessionAdapter:
         if existing is not None:
             return existing
         local_receipt = self.store is not None and not callable(getattr(self.gate, "physical_context", None))
-        if local_receipt:
+        if local_receipt and self.store is not None:
             try:
-                self.store.reserve(self.local_session_id, "session/cancel", request)
+                self.store.reserve(self._local_id(), "session/cancel", request)
             except EffectRejected:
                 blocked = OperationResult(request.operation_id, "FAILED", error="durable ACP cancellation already recorded")
                 await self.gate.journal.finish(request, blocked)
@@ -824,7 +835,7 @@ class ACPSessionAdapter:
         state = OperationResult(request.operation_id, "UNCERTAIN",
                                 error="cancellation requested; not remotely confirmed")
         await self.gate.journal.finish(request, state)
-        if local_receipt:
+        if local_receipt and self.store is not None:
             self.store.finish(request, "UNCERTAIN")
         return state
 
@@ -839,6 +850,8 @@ class ACPSessionAdapter:
             if not isinstance(event, Mapping):
                 raise ACPProtocolError("invalid ACP update")
             try:
+                if self.state is None:
+                    raise ACPProtocolError("ACP protocol is not initialized")
                 self.state.apply(event)
             except (ValueError, TypeError) as exc:
                 raise ACPProtocolError(str(exc)) from exc
@@ -847,5 +860,5 @@ class ACPSessionAdapter:
     def detach(self) -> None:
         """Drop local attachment only; never close/delete/resend remotely."""
         if self.store is not None and self.session_id is not None:
-            self.store.set_state(self.local_session_id, "DETACHED")
+            self.store.set_state(self._local_id(), "DETACHED")
         self.session_id = None

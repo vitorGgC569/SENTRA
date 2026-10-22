@@ -252,7 +252,7 @@ class OpenHandsLocalStream:
             return OperationResult(request.operation_id,"FAILED",
                                    error="OpenHands cancel scope mismatch")
 
-        async def invoke() -> dict[str, bool]:
+        async def invoke() -> dict[str, bool] | OperationResult:
             if self._pending_cancel is not None:
                 raise OpenHandsLocalError("cancellation already requested")
             self._pending_cancel = asyncio.get_running_loop().create_future()

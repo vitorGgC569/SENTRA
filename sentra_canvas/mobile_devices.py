@@ -23,7 +23,8 @@ class DeviceRegistry:
         with self.db() as db:
             db.executescript('''CREATE TABLE IF NOT EXISTS mobile_invites(id TEXT PRIMARY KEY,owner TEXT,hash TEXT,expires REAL,used INTEGER);
             CREATE TABLE IF NOT EXISTS mobile_devices(id TEXT PRIMARY KEY,owner TEXT,public_key TEXT,name TEXT,state TEXT,token_hash TEXT,protected_token TEXT,scope TEXT,expires REAL);
-            CREATE TABLE IF NOT EXISTS mobile_claim_receipts(device_id TEXT PRIMARY KEY,owner TEXT,protected_token TEXT,expires REAL);''')
+            CREATE TABLE IF NOT EXISTS mobile_claim_receipts(device_id TEXT PRIMARY KEY,owner TEXT,protected_token TEXT,expires REAL);
+            CREATE TABLE IF NOT EXISTS mobile_rotation_receipts(device_id TEXT PRIMARY KEY,owner TEXT,request_key TEXT,old_hash TEXT,protected_token TEXT,expires REAL);''')
     @contextmanager
     def db(self):
         conn=sqlite3.connect(self.path,timeout=10);conn.row_factory=sqlite3.Row
@@ -85,10 +86,33 @@ class DeviceRegistry:
         if not row or row['state']!='active' or row['expires']<time.time() or not hmac.compare_digest(row['public_key'],public_key) or not hmac.compare_digest(row['token_hash'] or '',self.digest(token)):
             raise PermissionError('mobile device revoked, expired or invalid')
         return json.loads(row['scope'])
+    def rotate(self,device_id,token,public_key,request_key):
+        """Recover the same rotation after a lost response; never rotate twice on retry."""
+        from sentra_remote.secrets import protect_secret,unprotect_secret
+        if not isinstance(request_key,str) or not 8<=len(request_key)<=128:
+            raise ValueError('durable credential rotation key required')
+        with self.db() as db:
+            row=db.execute('SELECT * FROM mobile_devices WHERE id=? AND owner=?',(device_id,self.owner)).fetchone()
+            if not row or row['state']!='active' or row['expires']<time.time() or not hmac.compare_digest(row['public_key'],public_key):
+                raise PermissionError('mobile device revoked, expired or invalid')
+            receipt=db.execute('SELECT * FROM mobile_rotation_receipts WHERE device_id=? AND owner=?',(device_id,self.owner)).fetchone()
+            if (receipt and receipt['request_key']==request_key and receipt['expires']>time.time()
+                    and hmac.compare_digest(receipt['old_hash'],self.digest(token))):
+                return {'credential':unprotect_secret(receipt['protected_token']),'device_id':device_id,'scope':json.loads(row['scope'])}
+            if not hmac.compare_digest(row['token_hash'] or '',self.digest(token)):
+                raise PermissionError('mobile device revoked, expired or invalid')
+            replacement=secrets.token_urlsafe(36)
+            db.execute('INSERT OR REPLACE INTO mobile_rotation_receipts VALUES(?,?,?,?,?,?)',
+                (device_id,self.owner,request_key,row['token_hash'],protect_secret(replacement),time.time()+86400))
+            db.execute('UPDATE mobile_devices SET token_hash=?,expires=? WHERE id=? AND owner=?',
+                (self.digest(replacement),time.time()+30*86400,device_id,self.owner))
+            db.execute('DELETE FROM mobile_claim_receipts WHERE device_id=? AND owner=?',(device_id,self.owner))
+            return {'credential':replacement,'device_id':device_id,'scope':json.loads(row['scope'])}
     def revoke(self,device_id):
         with self.db() as db:
             db.execute("UPDATE mobile_devices SET state='revoked',token_hash=NULL,protected_token=NULL WHERE id=? AND owner=?",(device_id,self.owner))
             db.execute('DELETE FROM mobile_claim_receipts WHERE device_id=? AND owner=?',(device_id,self.owner))
+            db.execute('DELETE FROM mobile_rotation_receipts WHERE device_id=? AND owner=?',(device_id,self.owner))
         return {'revoked':True}
 
 
@@ -128,6 +152,7 @@ def gateway_call(canvas,body):
     devices=registry(canvas);method=body['method'];public_key=body['public_key']
     if method=='pair':return devices.pair(body['invite_id'],body['invite'],public_key,body['name'])
     if method=='claim':return devices.claim(body['device_id'],public_key)
+    if method=='rotate':return devices.rotate(body['device_id'],body['credential'],public_key,body['request_key'])
     if method != 'request':raise ValueError('unsupported mobile method')
     scope=devices.authenticate(body['device_id'],body['credential'],public_key)
     request=body.get('request')
@@ -144,8 +169,8 @@ def gateway_call(canvas,body):
             with closing(control.store.connect('shell')) as db:
                 conversation=control.shell._entity(db,canvas._runtime().owner,scope['project_id'],'conversation',selector['conversation_id'],space_id=scope['space_id'])
             if conversation.get('dot_id')!=scope['dot_id']:raise PermissionError('original conversation outside paired Dot')
-    if action=='dot_vm_input' and (not isinstance(request.get('arguments'),dict) or request['arguments'].get('action')!='input.tap'):
-        raise PermissionError('mobile VM input currently supports host-owned atomic taps only')
+    if action=='dot_vm_input' and (not isinstance(request.get('arguments'),dict) or request['arguments'].get('action') not in {'input.tap','input.drag','input.chord'}):
+        raise PermissionError('mobile VM input requires a host-owned atomic gesture')
     if action=='dot_computer_action':
         machine_request=request.get('request',{})
         if (not isinstance(machine_request,dict) or machine_request.get('action')!='machine_execute' or

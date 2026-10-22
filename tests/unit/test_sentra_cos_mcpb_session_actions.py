@@ -159,6 +159,38 @@ def test_mcp_session_wrong_owner_denied_without_get_or_delete(fixture):
     assert not any(item[0] in {"GET", "DELETE"} for item in SessionServer.seen)
 
 
+def test_short_finite_sse_body_stays_uncertain_without_second_get(fixture, monkeypatch):
+    cp, registry, ws = fixture
+    original_reply = SessionServer._reply
+
+    def short_reply(handler, status, body=b"", content_type="application/json", session=False):
+        if handler.command != "GET":
+            return original_reply(handler, status, body, content_type, session)
+        handler.send_response(status)
+        handler.send_header("Content-Type", content_type)
+        handler.send_header("Content-Length", str(len(body) + 9))
+        handler.end_headers()
+        # The complete SSE event does not fulfill the declared HTTP body.
+        handler.wfile.write(body)
+
+    monkeypatch.setattr(SessionServer, "_reply", short_reply)
+    for cap in ("mcp:http-connect", "mcp:list", "mcp:echo", "mcp:events"):
+        _grant(cp, cap)
+    source = asyncio.run(registry.execute(owner=OWNER, workspace=str(ws),
+        server_id="local-session", run_id=RUN, work_item_id=WORK,
+        agent_id=AGENT, tool_name="echo", arguments={},
+        operation_id="op-session-init", idempotency_key="idem-session-init"))
+    assert source.operation.state == "SUCCEEDED", source
+    details = _args(ws, "events", "short-body")
+    result = asyncio.run(registry.session_action(**details))
+    assert result.operation.state == "UNCERTAIN", result
+    assert cp.durable.operation_status(details["operation_id"], OWNER)["state"] == "UNCERTAIN"
+    assert sum(item[0] == "GET" for item in SessionServer.seen) == 1
+    with pytest.raises(PermissionError, match="uncertain"):
+        asyncio.run(registry.session_action(**details))
+    assert sum(item[0] == "GET" for item in SessionServer.seen) == 1
+
+
 def test_get_delete_crash_recovery_marks_uncertain_without_http_replay(fixture):
     import time
     cp, registry, ws = fixture

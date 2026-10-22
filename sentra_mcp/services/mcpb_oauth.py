@@ -6,6 +6,8 @@ a crash or ambiguous HTTP response leaves UNCERTAIN and cannot retry.
 """
 from __future__ import annotations
 
+from typing import Any
+
 import base64
 import hashlib
 import http.client
@@ -264,7 +266,7 @@ class MCPBOAuthPKCE:
         self.authorize_url, self.token_url = authorize_url, token_url
         self.client_id, self.redirect_uri = client_id, _loopback(redirect_uri)
         self.scopes, self.vault, self.clock = scopes, vault, clock
-        self.pending = {}
+        self.pending: dict[str, dict[str, Any]] = {}
         self.lock = threading.RLock()
 
     def begin(self, owner, workspace, server_id, *, approved=False):

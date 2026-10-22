@@ -57,7 +57,7 @@ def descriptor():
 
 def native_provider(host,*,lost_response=False):
     httpx=pytest.importorskip("httpx",reason="native AP HTTP dependency not installed")
-    center,_,_,request,root=host
+    center,control,_,request,root=host
     piece=descriptor(); props={"text":"hello"}
     step={"name":"echo-step","type":"PIECE","settings":{"pieceName":piece.name,"pieceVersion":piece.version,"actionName":"echo","input":props}}
     binding=ActivepiecesHTTPBinding(piece.name,piece.version,"echo","project","ap-flow","ap-version","echo-step",digest(step),digest(props))
@@ -84,7 +84,7 @@ def native_provider(host,*,lost_response=False):
     client=httpx.AsyncClient(transport=httpx.MockTransport(router))
     backend=ActivepiecesHTTPBackend(WorkflowHTTPClient(base_url="http://127.0.0.1:9001/api",token="explicit-fixture",enabled=True,client=client),bindings=[binding])
     provider=ActivepiecesPieceProvider(center.protocol_gate(),catalog=ActivepiecesCatalog([piece]),
-        store=ActivepiecesProjectionStore(root/"pieces.sqlite",workspace=root),backend=backend,input_resolver=lambda request:props)
+        store=ActivepiecesProjectionStore(root/"pieces.sqlite",workspace=root,control=control),backend=backend,input_resolver=lambda request:props)
     for cap in CAPS: center.bind_provider(cap,provider.host_handler)
     return provider,piece,props,calls,state,client
 

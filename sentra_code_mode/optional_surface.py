@@ -38,7 +38,7 @@ def resolve_optional_tools(policy, declared: Mapping[str, Any]) -> dict[str, Any
             "homologated": False,
             "denied_listed": sorted(policy.denied),
         }
-        raise OptionalSurfaceRefused(receipt["reason"], receipt)
+        raise OptionalSurfaceRefused(str(receipt["reason"]), receipt)
     if not isinstance(policy, AllowPolicy):
         raise ValueError("allow or deny-only exposure required")
     if not isinstance(declared, Mapping):
@@ -56,7 +56,7 @@ def resolve_optional_tools(policy, declared: Mapping[str, Any]) -> dict[str, Any
                 "grants_created": False,
                 "homologated": False,
             }
-            raise OptionalSurfaceRefused(receipt["reason"], receipt)
+            raise OptionalSurfaceRefused(str(receipt["reason"]), receipt)
     enabled = []
     closed = []
     for name, handler in declared.items():

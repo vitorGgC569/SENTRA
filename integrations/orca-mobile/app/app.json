@@ -13,6 +13,7 @@
       "infoPlist": {
         "NSLocalNetworkUsageDescription": "Conectar \u00e0s m\u00e1quinas SENTRA que voc\u00ea parear na rede local.",
         "NSCameraUsageDescription": "Escanear o QR tempor\u00e1rio de pareamento do SENTRA.",
+        "NSBonjourServices": ["_sentra._tcp"],
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
@@ -22,7 +23,10 @@
       "package": "app.sentra.mobile",
       "permissions": [
         "CAMERA",
-        "INTERNET"
+        "INTERNET",
+        "ACCESS_NETWORK_STATE",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_MULTICAST_STATE"
       ]
     },
     "plugins": [

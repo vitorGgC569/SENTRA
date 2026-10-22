@@ -87,7 +87,7 @@ def register_resources(
     async def sentra_project_summary() -> str:
         status = await repository.status()
         data = {
-            "workspace": str(repository.workspace),
+            "workspace": status["workspace"],
             "git_status": status["result"],
             "oma": oma.health(),
         }

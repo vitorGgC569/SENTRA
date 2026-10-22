@@ -83,12 +83,13 @@ window.SentraMachinePanel = (() => {
     const kind = field(configure, "Recurso", select([["documents", "Planilhas, tabelas e PDF"], ["browser", "Navegador isolado"],["openhands","Servidor OpenHands"]]));
     const origins = field(configure, "Sites permitidos para o navegador, um por linha", element("textarea", undefined, {placeholder: "https://example.com", rows: 3}));
     const submitForms = field(configure, "Permitir envio de formulários aos sites escolhidos", element("input", undefined, {type: "checkbox"}));
+    const rememberLogin = field(configure, "Lembrar login neste Dot, protegido neste Windows", element("input", undefined, {type: "checkbox"}));
     const ohServer=field(configure,"Servidor OpenHands",input("http://127.0.0.1:8000"));
     const ohProfile=field(configure,"ID do perfil de agente no servidor",input("Perfil configurado no OpenHands"));
     const ohWorkspace=field(configure,"Diretório de trabalho no servidor",input("/workspace"));
     const ohSecret=field(configure,"Credencial cadastrada no SENTRA, quando necessária",input("ID da credencial"));
     function showConfiguration(){
-      for(const control of [origins,submitForms])control.parentElement.hidden=kind.value!=="browser";
+      for(const control of [origins,submitForms,rememberLogin])control.parentElement.hidden=kind.value!=="browser";
       for(const control of [ohServer,ohProfile,ohWorkspace,ohSecret])control.parentElement.hidden=kind.value!=="openhands";
     }
     kind.addEventListener("change",showConfiguration);showConfiguration();
@@ -101,7 +102,7 @@ window.SentraMachinePanel = (() => {
           const allowed = origins.value.split(/\r?\n/).map(x => x.trim()).filter(Boolean).map(x => new URL(x).origin);
           if (!allowed.length) throw Error("Informe os sites permitidos para esta sessão.");
           body.profiles = [{name: "sites-escolhidos", mode: "allowlist", allowed_origins: [...new Set(allowed)],
-            methods: submitForms.checked ? ["GET", "HEAD", "POST", "OPTIONS"] : ["GET", "HEAD"], max_redirects: 8}];
+            methods: submitForms.checked ? ["GET", "HEAD", "POST", "OPTIONS"] : ["GET", "HEAD"], max_redirects: 8, remember_login:rememberLogin.checked}];
         }
         if(kind.value==="openhands"){
           body.provider_config={enabled:true,base_url:ohServer.value.trim(),agent_profile_id:ohProfile.value.trim(),

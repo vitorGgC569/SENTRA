@@ -7,6 +7,9 @@ WorkItem/Operation policy must additionally permit all effects.
 """
 from __future__ import annotations
 
+import binascii
+from typing import Any
+
 import base64
 from dataclasses import dataclass
 import json
@@ -47,7 +50,7 @@ def _b64(value: str) -> bytes:
         raise IdentityDenied("invalid base64url")
     try:
         return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
-    except (ValueError, base64.binascii.Error) as exc:
+    except (ValueError, binascii.Error) as exc:
         raise IdentityDenied("malformed base64url") from exc
 
 
@@ -80,7 +83,7 @@ class PinnedKeycloakJWTVerifier:
             raise ValueError("trusted JWKS key list required")
         self.issuer, self.audience = issuer.rstrip("/"), audience
         self.max_token_seconds, self.clock_skew_seconds = max_token_seconds, clock_skew_seconds
-        self._keys = {}
+        self._keys: dict[str, Any] = {}
         for entry in pinned_jwks["keys"]:
             if (not isinstance(entry, dict) or entry.get("kty") != "RSA"
                     or entry.get("alg", "RS256") != "RS256"

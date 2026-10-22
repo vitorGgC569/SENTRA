@@ -64,7 +64,7 @@ class ToolGateway:
         from .docker_runner import create_runner
         self.cmd_runner = create_runner(self.workspace_path, profiles, execution)
         self.git_manager = GitManager(self.workspace_path)
-        self._idempotency_cache: Dict[str, Any] = {}
+        self._idempotency_cache: Dict[tuple[str, str, str | None], tuple[str, Dict[str, Any]]] = {}
         self._execution_audit_log: List[Dict[str, Any]] = []
 
     def check_permission(self, role: str, permission: Permission) -> None:

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from mcp.server import MCPServer
+from sentra_mcp.tool_policy import ToolRegistrar
 from mcp.server.mcpserver.context import Context
 from mcp.server.auth.middleware.auth_context import get_access_token
 
@@ -42,7 +42,7 @@ def _fail(exc: Exception) -> ResponseEnvelope:
 
 
 def register_governance_tools(
-    mcp: MCPServer,
+    mcp: ToolRegistrar,
     control_plane: Any,
     *,
     specialized: bool = False,

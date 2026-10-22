@@ -759,7 +759,7 @@ class DecisionReceiptLedger:
             raise
         finally:
             db.close()
-        if hidden:
+        if hidden or view is None:
             self._emit("isolation_refused")
             raise AuditRefusal("isolation: chain not visible to this owner and dot")
         return view

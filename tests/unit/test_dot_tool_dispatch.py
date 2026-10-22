@@ -24,6 +24,10 @@ from sentra_runtime.dot_tool_dispatch import (
 
 @pytest.fixture
 def shell_setup(tmp_path, monkeypatch):
+    # Dispatch is exercised with injected runners; installed host tools are not
+    # part of this unit fixture and must never be launched here.
+    monkeypatch.setattr("sentra_canvas.dot_tool_runner.resolve_adapters",
+        lambda project_dir: {"codex":["synthetic-codex"], "opencode":["synthetic-opencode"]})
     with running_canvas(tmp_path) as (app, server):
         monkeypatch.setattr(app, "model_catalog", lambda: {"models": ["sentra/chatgpt-web/gpt-6", "sentra/test-two"]})
         ws = app.create_workspace("Dot_dispatch_test")["id"]
@@ -401,6 +405,10 @@ def test_guest_dispatch_uses_guestcontrol_only_with_dot_credentials(shell_setup,
         "target_dot_id": ctx["worker"]["dot_id"],
         "instruction": "Inspect inside the guest",
     }
+    from orchestrator.providers.fleet_admission import FleetAdmissionError
+    with pytest.raises(FleetAdmissionError, match="process id is not a guest execution"):
+        execute_dot_tool_dispatch(control, owner, intent=intent, request_key="guest-pid-refused", **common)
+    common["guest_process"] = {"verified":False, "vm_registry_bound":True, "vm_id":"owned-guest-vm"}
     blocked = execute_dot_tool_dispatch(
         control, owner, intent=intent, request_key="guest-cred-block-" + uuid.uuid4().hex,
         **common,

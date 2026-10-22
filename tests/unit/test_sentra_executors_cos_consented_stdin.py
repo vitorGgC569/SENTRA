@@ -33,7 +33,8 @@ def test_consented_stdin_durable_operation_single_delivery(tmp_path):
     cp,_,args=_central(tmp_path)
     cp.create_work_item("run-api",OWNER,work_item_id="WI-stdin-consent",
         objective="Physical ConPTY test",assignee_agent_id="agent-001",
-        required_capabilities=["api:action:terminal.write_stdin","terminal:write"])
+        required_capabilities=["api:action:terminal.write_stdin","terminal:write"],
+        metadata={'workspace_id':'ws-stdin-tested'})
     cp.transition_work_item("WI-stdin-consent",OWNER,"RUNNING")
     auth=lambda owner,purpose,proof: OWNER if owner==OWNER and proof.startswith("approved-click-") else None
     consent=ActionConsentService(tmp_path/"state",owner_authenticator=auth)

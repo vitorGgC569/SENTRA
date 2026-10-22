@@ -17,7 +17,11 @@ pytestmark=pytest.mark.skipif(os.name!="nt",reason="Windows protected task state
 def wait(check,timeout=15):
     end=time.monotonic()+timeout
     while time.monotonic()<end:
-        value=check()
+        try:
+            value=check()
+        except FileNotFoundError:
+            # The task outbox publishes its Run and WorkItem asynchronously.
+            value=None
         if value:return value
         time.sleep(.05)
     raise AssertionError("persistent queue condition did not complete")

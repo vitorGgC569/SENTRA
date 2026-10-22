@@ -10,7 +10,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from mcp.server import MCPServer
+from sentra_mcp.tool_policy import ToolRegistrar
 from mcp.server.mcpserver.context import Context
 from pydantic import Field
 
@@ -80,7 +80,7 @@ async def _async(fn: Callable[[], Awaitable[dict[str, Any]]]) -> ResponseEnvelop
 
 
 def register_commander_tools(
-    mcp: MCPServer,
+    mcp: ToolRegistrar,
     *,
     search: SearchSessionService,
     runtime_config: RuntimeConfigService,

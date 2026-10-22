@@ -7,6 +7,9 @@ full-intent/fencing authority. Never auto-registers with Canvas host.
 """
 from __future__ import annotations
 
+from typing import Callable
+from sentra_runtime.contracts import PolicyDecision
+
 from contextvars import ContextVar
 from dataclasses import dataclass
 import inspect
@@ -55,13 +58,13 @@ class CentralExecutorFactory:
         self.control = control
         self.owner = owner
         self.agent_id = agent_id
-        self.policy = BoundWorkItemPolicy(
+        self.policy: Callable[[OperationRequest], PolicyDecision] = BoundWorkItemPolicy(
             owner=owner, principal_type="agent",
             authorization=control.authorization, governance=control.governance,
         )
         # Policy is NOT enough to invoke a backend directly: require a
         # dispatch scope activated only after durable gate approval.
-        self._dispatch_fingerprint = ContextVar(
+        self._dispatch_fingerprint: ContextVar[str | None] = ContextVar(
             "sentra_central_effect_fingerprint", default=None)
         self.registry = ExecutorRegistry(authorize=self._registry_policy)
         # No fallback to DurableRunService.create_operation: it lacks full
@@ -166,6 +169,9 @@ class CentralExecutorFactory:
                                      resource_id='input:' + resource)
         if declaration.machine.kind == 'playwright_browser':
             from .browser_sessions import PersistentPlaywrightBackend
+            from .playwright_browser import PlaywrightBrowserExecutor
+            if not isinstance(declaration.adapter, PlaywrightBrowserExecutor):
+                raise TypeError('playwright browser declaration requires its registered executor')
             if not isinstance(declaration.adapter.backend, PersistentPlaywrightBackend):
                 declaration.adapter.backend = PersistentPlaywrightBackend.for_control(
                     declaration.adapter.backend, self.control, registered.machine.machine_id)

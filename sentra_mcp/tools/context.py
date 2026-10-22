@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from mcp.server import MCPServer
+from sentra_mcp.tool_policy import ToolRegistrar
 from mcp.server.mcpserver.context import Context
 
 from ..errors import SentraSemanticError, error_envelope
@@ -43,7 +43,7 @@ def _required(name: str, value: Any) -> Any:
     return value
 
 
-def register_context_tools(mcp: MCPServer, control_plane: ControlPlaneService) -> None:
+def register_context_tools(mcp: ToolRegistrar, control_plane: ControlPlaneService) -> None:
     """Register one stable context tool; authority remains in the Control Plane."""
 
     @mcp.tool()

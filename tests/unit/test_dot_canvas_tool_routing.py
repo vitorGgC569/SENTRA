@@ -12,6 +12,9 @@ from sentra_canvas.store import Denied
 class ControlStore:
     def __init__(self, path):
         self.path = path
+        with self.connect("shell") as db:
+            db.execute("CREATE TABLE shell_entities(owner TEXT, project_id TEXT, space_id TEXT, kind TEXT, body TEXT)")
+            db.execute("CREATE TABLE shell_messages(owner TEXT, project_id TEXT, space_id TEXT, conversation_id TEXT, role TEXT, created_at REAL)")
     def connect(self, _area):
         db = sqlite3.connect(self.path)
         db.row_factory = sqlite3.Row

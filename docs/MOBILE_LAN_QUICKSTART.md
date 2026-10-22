@@ -15,6 +15,17 @@ Pairing does not grant unrestricted execution. The host continues to apply its e
 
 ## If the phone cannot connect
 
+The next APK built from the 2026-10-22 closure sources adds **Buscar endereços na
+LAN** beside saved pairings. It scans `_sentra._tcp` for up to eight seconds and
+shows address hints only for already paired host keys. Tap **Verificar e
+conectar** to authenticate that saved identity before the address is persisted.
+An mDNS announcement never grants access or resends commands. Unknown hosts
+still require a fresh QR and desktop approval. QR recovery and manual address
+entry remain available when multicast or native discovery is unavailable.
+Most private VPNs do not forward local multicast, so use the VPN's reachable
+private address in that case. This feature still requires physical-device
+acceptance after rebuilding; the existing preview2 APK predates it.
+
 - Keep the host running and the LAN connection activated. A QR code from a stopped host cannot establish a connection.
 - Check the selected address in **Dispositivos**. DHCP changes, switching networks or switching to a VPN can make an older address unreachable. The mobile app can update a saved host address without replacing its pinned identity.
 - Check whether the Wi-Fi is a guest network or isolates clients. Two devices using the same network name may still be unable to reach each other.

@@ -377,7 +377,7 @@ def mcp_policy_status(settings: ProductSettings, health: dict[str, Any]) -> dict
     policy = health.get("policy")
     if not isinstance(policy, dict):
         return {"ok": False, "reason": "runtime_policy_unverified", "expected": expected}
-    actual = {}
+    actual: dict[str, Any] = {}
     for name in ("enabled_surfaces", "tool_allowlist"):
         values = policy.get(name)
         if not isinstance(values, list) or not all(isinstance(item, str) for item in values):

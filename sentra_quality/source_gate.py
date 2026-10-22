@@ -121,8 +121,10 @@ class SourceGate:
         for record in entries:
             if not isinstance(record, dict) or record.get("status") != "ok":
                 raise GateFailure("source not successfully cloned")
-            pin = ProjectPin(record.get("name"), record.get("upstream"),
-                             record.get("revision"))
+            if not all(isinstance(record.get(key), str) for key in ("name", "upstream", "revision")):
+                raise GateFailure("invalid source pin strings")
+            pin = ProjectPin(record["name"], record["upstream"],
+                             record["revision"])
             if pin.name in self.pins:
                 raise GateFailure("duplicate project in source manifest")
             self.pins[pin.name] = pin
@@ -140,8 +142,10 @@ class SourceGate:
             for entry in approvals:
                 if not isinstance(entry, dict):
                     raise GateFailure("invalid trusted source pin")
-                candidate = ProjectPin(entry.get("name"), entry.get("upstream"),
-                                       entry.get("revision"))
+                if not all(isinstance(entry.get(key), str) for key in ("name", "upstream", "revision")):
+                    raise GateFailure("invalid trusted source pin strings")
+                candidate = ProjectPin(entry["name"], entry["upstream"],
+                                       entry["revision"])
                 if candidate.name in approved:
                     raise GateFailure("duplicate trusted source pin")
                 approved[candidate.name] = candidate

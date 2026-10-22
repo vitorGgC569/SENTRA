@@ -6,6 +6,8 @@ send blocks the pool: restarting is not authorization to replay a prompt.
 """
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
+
 import asyncio
 import hashlib
 import inspect
@@ -602,6 +604,7 @@ class FixedConversationRouter:
             raise ValueError("rotation brief is required")
         if len(text) > 20000:
             raise ValueError("rotation brief exceeds 20000 characters")
+        process_lock: AbstractContextManager
         if self._path:
             from .runtime import RunLock
             self._path.parent.mkdir(parents=True, exist_ok=True)

@@ -68,7 +68,7 @@ class CentralInteropAdapter:
             raise ValueError("trusted owner and run required")
         self.control, self.run_id, self.owner = control, run_id, owner
         self.machine = machine
-        self.policy = BoundWorkItemPolicy(
+        self.policy: Callable[[OperationRequest], PolicyDecision] = BoundWorkItemPolicy(
             owner=owner, principal_type=principal_type,
             authorization=control.authorization, governance=control.governance,
         )
@@ -76,7 +76,7 @@ class CentralInteropAdapter:
         self._providers: dict[str, Callable] = {}
         self._provider_constraints: dict[str, dict] = {}
         self._transport_gate: DurableInteropGate | None = None
-        self.durable_gate = None
+        self.durable_gate: DurableOperationGate | None = None
 
     def protocol_gate(self, *, capabilities: frozenset[str] | None = None,
                       constraints: Mapping | None = None) -> DurableInteropGate:

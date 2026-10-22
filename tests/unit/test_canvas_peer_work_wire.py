@@ -212,6 +212,9 @@ def test_real_canvas_core_authorizes_outgoing_peer_offer_only_with_grant(tmp_pat
         ws=app.create_workspace("TransportQA")["id"]
         agent=app.create_agent(ws,"OwnerAgent","sentra/test",start=False)
         run=app._runtime().run(ws)
+        app._runtime().control.ensure_agent(
+            run["run_id"], app._runtime().owner, agent_id=agent["id"], role=agent["role"],
+        )
         gov=app._runtime().governance
         gov.create_work_item(
             run["run_id"],app._runtime().owner,

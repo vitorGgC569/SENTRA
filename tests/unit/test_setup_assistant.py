@@ -21,7 +21,7 @@ def test_installer_reopens_existing_local_setup_instead_of_reinstall(tmp_path):
     folder = tmp_path / "Commander"
     folder.mkdir()
     (folder / installer.INSTALL_MARKER).write_text(
-        json.dumps({"product": "SENTRA Desktop", "version": "test"}),
+        json.dumps({"product": "SENTRA Desktop", "version": installer.PRODUCT_VERSION}),
         encoding="utf-8",
     )
     for name in (*installer.PRODUCTS, "tunnel-client.exe"):
@@ -61,6 +61,18 @@ def test_installer_routes_credentials_to_existing_install(tmp_path):
 
     wizard._install.assert_called_once_with(require_openai=True)
     wizard._open_existing_install.assert_not_called()
+
+
+def test_installer_does_not_reopen_an_outdated_complete_payload_as_current(tmp_path):
+    import json
+    from sentra_remote import installer
+    folder=tmp_path/'Commander';folder.mkdir()
+    (folder/installer.INSTALL_MARKER).write_text(json.dumps({'product':'SENTRA Desktop','version':'previous-version'}))
+    for name in (*installer.PRODUCTS,'tunnel-client.exe'):(folder/name).write_bytes(b'old fixture')
+    wizard=object.__new__(installer.InstallerWizard)
+    wizard.install_dir=Mock(get=lambda:str(folder));wizard.tunnel_id=Mock(get=lambda:'');wizard.runtime_key=Mock(get=lambda:'')
+    wizard._open_existing_install=Mock();wizard._install=Mock();wizard._primary_action()
+    wizard._open_existing_install.assert_not_called();wizard._install.assert_called_once_with(require_openai=False)
 
 
 def test_local_model_download_requires_consent(tmp_path, monkeypatch):

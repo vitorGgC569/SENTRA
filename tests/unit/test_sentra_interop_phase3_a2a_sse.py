@@ -150,3 +150,26 @@ def test_a2a_sse_slow_consumer_write_buffer_is_bounded(tmp_path):
             raise AssertionError("backpressure bypass")
     with pytest.raises(A2ASSEDenied,match="slow consumer"):
         asyncio.run(server._drain(FakeWriter(),b"secret"))
+
+
+def test_a2a_sse_close_disconnects_active_reader_before_waiting_for_server(tmp_path):
+    async def scenario():
+        _, ledger_fn, _ = fixture(tmp_path)
+        token = secrets.token_urlsafe(32)
+        server = await A2ASSEServer(ledger_fn(), token=token).start()
+        client = A2ASSEClient(port=server.port, token=token, principal_id="alice",
+                              work_item_id="work-one", task_id="task-1")
+        code, reader, writer = await client.connect()
+        assert code == 200
+        try:
+            await asyncio.wait_for(server.close(), 1)
+            await asyncio.wait_for(reader.read(), 1)
+            assert reader.at_eof()
+            await asyncio.sleep(HEARTBEAT_SECONDS * 2)
+            assert not server._clients
+        finally:
+            writer.close()
+            await asyncio.wait_for(writer.wait_closed(), 1)
+            await server.close()
+    from sentra_interop.a2a_sse import HEARTBEAT_SECONDS
+    asyncio.run(scenario())

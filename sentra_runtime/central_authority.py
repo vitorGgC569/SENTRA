@@ -46,7 +46,8 @@ class CentralDurableIntentAuthority:
             from sentra_mcp.services.budget_policy import BudgetPolicyService
             same_store = budgets.store is durable.store if isinstance(budgets, BudgetPolicyService) else False
             if isinstance(budgets, BudgetPolicyService) and getattr(budgets.store, "backend", "sqlite") == "sqlite":
-                same_store = budgets.store.path_for("governance").parent == durable.root
+                governance_path = budgets.store.path_for("governance")
+                same_store = governance_path is not None and governance_path.parent == durable.root
             if not isinstance(budgets,BudgetPolicyService) or not same_store:
                 raise ValueError("machine budget must share this central authority")
         self.budgets=budgets

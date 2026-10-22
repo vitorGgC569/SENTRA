@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from ..conversation_pool import FixedConversationRouter
+
 import json
 import uuid
 from typing import Any, Dict, List, Optional
@@ -45,7 +49,7 @@ targets.
 
 
 class RepairAgent:
-    def __init__(self, router: ModelRouter, agent_id: str = "repair.primary"):
+    def __init__(self, router: ModelRouter | FixedConversationRouter, agent_id: str = "repair.primary"):
         self.router = router
         self.agent_id = agent_id
 

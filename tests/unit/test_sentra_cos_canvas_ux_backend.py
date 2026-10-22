@@ -177,11 +177,92 @@ def test_watcher_clock_reversal_nan_and_transient_disappearance_fail_closed(tmp_
             watcher.poll(now=invalid)
     with pytest.raises(ValueError, match="backward"):
         watcher.poll(now=4)
-    file.rename(tmp_path / "moved.py")
+    # A same-directory rename is recoverable by physical file identity. A
+    # disappearance outside that bounded directory must still fail closed.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    file.rename(elsewhere / "moved.py")
     with pytest.raises(FileNotFoundError):
         watcher.poll(now=6)
     assert watcher.committed == hashlib.sha256(b"initial").hexdigest()
-    (tmp_path / "moved.py").rename(file)
+    (elsewhere / "moved.py").rename(file)
     file.write_text("new", encoding="utf-8")
     assert watcher.poll(now=6)["state"] == "pending"
     assert watcher.poll(now=7)["state"] == "changed"
+
+
+def test_watcher_recovers_a_verified_same_directory_rename_without_writing(tmp_path):
+    source = tmp_path / "before.py"
+    source.write_text("initial", encoding="utf-8")
+    watcher = ProjectRevisionWatcher(tmp_path, source.name)
+    first = watcher.poll(now=1)
+    if watcher._identity is None:
+        pytest.skip("filesystem does not expose stable rename identity")
+    moved = source.rename(tmp_path / "after.py")
+    renamed = watcher.poll(now=2)
+    assert renamed["state"] == "renamed"
+    assert renamed["path"] == "after.py" and renamed["previous_path"] == "before.py"
+    assert renamed["read_only"] is True and renamed["grants_created"] is False
+    assert renamed["sha256"] == first["sha256"] == watcher.committed
+    assert moved.read_text(encoding="utf-8") == "initial"
+    assert watcher.poll(now=3)["state"] == "unchanged"
+
+
+def test_watcher_missing_file_identity_never_infers_a_rename_from_matching_bytes(tmp_path, monkeypatch):
+    monkeypatch.setattr("sentra_canvas.project_review._rename_identity", lambda *_: None)
+    source = tmp_path / "before.py"
+    source.write_text("same bytes", encoding="utf-8")
+    watcher = ProjectRevisionWatcher(tmp_path, source.name)
+    first = watcher.poll(now=1)
+    source.rename(tmp_path / "after.py")
+    with pytest.raises(FileNotFoundError):
+        watcher.poll(now=2)
+    assert watcher.relative == "before.py"
+    assert watcher.committed == first["sha256"]
+
+
+def test_watcher_unreadable_rename_preserves_original_path_and_committed_revision(tmp_path):
+    source = tmp_path / "before.py"
+    source.write_text("initial", encoding="utf-8")
+    watcher = ProjectRevisionWatcher(tmp_path, source.name)
+    first = watcher.poll(now=1)
+    if watcher._identity is None:
+        pytest.skip("filesystem does not expose stable rename identity")
+    moved = source.rename(tmp_path / "after.py")
+    moved.write_bytes(b"x" * (128 * 1024 + 1))
+    with pytest.raises(ValueError, match="limit"):
+        watcher.poll(now=2)
+    assert watcher.relative == "before.py"
+    assert watcher.committed == first["sha256"]
+    assert watcher._last_now == 1
+    moved.write_text("readable", encoding="utf-8")
+    assert watcher.poll(now=2)["state"] == "renamed"
+    assert watcher.poll(now=3)["state"] == "pending"
+    assert watcher.poll(now=4)["state"] == "changed"
+
+
+def test_watcher_replaced_rename_candidate_is_not_adopted(tmp_path, monkeypatch):
+    from sentra_canvas import project_review
+    source = tmp_path / "before.py"
+    source.write_text("initial", encoding="utf-8")
+    watcher = ProjectRevisionWatcher(tmp_path, source.name)
+    first = watcher.poll(now=1)
+    if watcher._identity is None:
+        pytest.skip("filesystem does not expose stable rename identity")
+    moved = source.rename(tmp_path / "after.py")
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("unrelated", encoding="utf-8")
+    original_read = project_review.project_revision
+
+    def replaced_after_read(root, relative):
+        value = original_read(root, relative)
+        if relative == moved.name:
+            replacement.replace(moved)
+        return value
+
+    monkeypatch.setattr(project_review, "project_revision", replaced_after_read)
+    with pytest.raises(FileNotFoundError, match="identity"):
+        watcher.poll(now=2)
+    assert watcher.relative == "before.py"
+    assert watcher.committed == first["sha256"]
+    assert watcher._last_now == 1

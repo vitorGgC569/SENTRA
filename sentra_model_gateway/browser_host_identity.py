@@ -30,10 +30,16 @@ def _host_post(descriptor: dict, path: str, payload: dict) -> dict:
         connection.request("POST", path, json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(),
             {"Authorization": "Bearer " + token, "Content-Type": "application/json"})
         response = connection.getresponse()
+        declared = response.getheader("Content-Length")
+        if (response.status != 200 or declared is not None and
+                (not declared.isascii() or not declared.isdecimal() or int(declared) > 128_000)):
+            raise PermissionError("Browser Host identity snapshot unavailable")
         body = response.read(128_001)
         if response.status != 200 or len(body) > 128_000:
             raise PermissionError("Browser Host identity snapshot unavailable")
         snapshot = json.loads(body)
+    except (OSError, http.client.HTTPException, ValueError, UnicodeError):
+        raise PermissionError("Browser Host identity snapshot unavailable") from None
     finally:
         connection.close()
     if not isinstance(snapshot, dict) or snapshot.get("ok") is not True:

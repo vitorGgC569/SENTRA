@@ -5,6 +5,8 @@ Actual tools/call authorization belongs to ToolHiveMCPBoundary (injected client)
 """
 from __future__ import annotations
 
+from sentra_runtime.effect_boundary import CentralEffectContext
+
 import asyncio
 import contextvars
 import json
@@ -78,12 +80,12 @@ class MCPStdioClient:
         self._dead: Exception | None = None
         self._closed = False
         self._initialized = False
-        self.server_capabilities = {}
+        self.server_capabilities: dict[str, Any] = {}
         self.protocol_version = None
-        self.notifications = asyncio.Queue(maxsize=128)
+        self.notifications: asyncio.Queue[Mapping[str, Any]] = asyncio.Queue(maxsize=128)
         self.request_handler = None
-        self._contexts = {}
-        self._server_tasks = set()
+        self._contexts: dict[int, CentralEffectContext | None] = {}
+        self._server_tasks: set[asyncio.Task] = set()
         self._reader = asyncio.create_task(self._reader_loop(),context=contextvars.Context())
 
     @classmethod

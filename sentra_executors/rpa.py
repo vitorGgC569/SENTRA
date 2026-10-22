@@ -211,7 +211,7 @@ def dependency(name: str, minimum: tuple[int, ...]):
 
 
 def dependency_versions() -> dict:
-    result = {}
+    result: dict[str, str | None] = {}
     for name in ("playwright", "openpyxl", "pypdf"):
         try:
             result[name] = importlib.metadata.version(name)

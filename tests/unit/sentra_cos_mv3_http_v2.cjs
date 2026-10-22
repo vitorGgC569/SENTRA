@@ -43,7 +43,7 @@ const dataStore = {
   }
 };
 const owner="local-operator";
-const msg={id:"message-abcdef123",metadata:{request_id:"request-abcdef123"}};
+const msg={id:"message-abcdef123",author:{role:'user'},metadata:{request_id:"request-abcdef123"}};
 const rootFiber={tag:3, child:null, return:null, memoizedProps:{}};
 rootFiber.stateNode={current:rootFiber};
 const child={tag:5,return:rootFiber,memoizedProps:{

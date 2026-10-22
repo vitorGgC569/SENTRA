@@ -162,15 +162,28 @@ class A2ASSEServer:
         return self
 
     async def close(self) -> None:
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-            self._server=None
-        for w in tuple(self._clients):
+        server, self._server = self._server, None
+        if server:
+            server.close()
+        clients = tuple(self._clients)
+        for w in clients:
             w.close()
-        if self._clients:
-            await asyncio.gather(*(w.wait_closed() for w in tuple(self._clients)),
-                                 return_exceptions=True)
+        if clients:
+            try:
+                await asyncio.wait_for(asyncio.gather(
+                    *(w.wait_closed() for w in clients), return_exceptions=True,
+                ), DRAIN_TIMEOUT)
+            except asyncio.TimeoutError:
+                for w in clients:
+                    w.transport.abort()
+        if server:
+            # Python 3.12 waits for accepted transports here. Stop those before
+            # awaiting the listener, and bound Windows reset cleanup as well.
+            try:
+                await asyncio.wait_for(server.wait_closed(), DRAIN_TIMEOUT)
+            except asyncio.TimeoutError:
+                for w in clients:
+                    w.transport.abort()
 
     def _read_request(self) -> OperationRequest:
         return OperationRequest("sse-read-"+self.ledger.task_id,
@@ -317,7 +330,7 @@ class A2ASSEClient:
     @staticmethod
     async def next_event(reader:asyncio.StreamReader,*,timeout:float=2
                          )->Mapping[str,Any]|None:
-        values={}
+        values: dict[str, Any]={}
         while True:
             line=await asyncio.wait_for(reader.readline(),timeout)
             if not line:

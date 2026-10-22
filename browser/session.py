@@ -4,7 +4,7 @@ import asyncio
 import os
 from pathlib import Path
 from typing import Optional
-from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Playwright
 from .response_capture import ProgressCallback, emit_progress, supports_kwarg
 from .site_adapter import ChatSiteAdapter
 
@@ -64,7 +64,7 @@ class BrowserSession:
             except Exception:
                 pass
             self.user_data_dir = root / f"edge-{role}"
-        self._playwright = None
+        self._playwright: Playwright | None = None
         self.browser: Optional[Browser] = None
         self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
@@ -172,6 +172,8 @@ class BrowserSession:
                     )
                     self._using_persistent_context = True
                     self.browser = None  # persistent context owns the browser
+                    if self.context is None:
+                        raise RuntimeError("persistent browser context unavailable")
                     pages = list(self.context.pages)
                     self.page = pages[0] if pages else await self.context.new_page()
                 except Exception as edge_err:

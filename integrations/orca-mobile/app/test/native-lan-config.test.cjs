@@ -13,4 +13,7 @@ test('Expo native mods carry Android LAN transport and iOS local-network intent'
  assert.ok(mods.ios.infoPlist.NSLocalNetworkUsageDescription.length>10);
  assert.notEqual(mods.ios.infoPlist.NSAppTransportSecurity.NSAllowsArbitraryLoads,true);
  assert.equal(config.scheme,'sentra');
+ assert.ok(mods.ios.infoPlist.NSBonjourServices.includes('_sentra._tcp'));
+ const permissions=mods.android.manifest.manifest['uses-permission'].map(row=>row.$['android:name']);
+ for(const permission of ['ACCESS_NETWORK_STATE','ACCESS_WIFI_STATE','CHANGE_WIFI_MULTICAST_STATE'])assert.ok(permissions.includes('android.permission.'+permission));
 });

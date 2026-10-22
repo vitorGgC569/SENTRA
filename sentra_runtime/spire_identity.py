@@ -1,3 +1,4 @@
+from typing import Any
 """Owned official Go SPIFFE client; identity from agent-attested process only.
 
 No constructor contacts SPIRE. start() is explicit host bootstrap after final
@@ -75,7 +76,11 @@ class SpireWorkloadIdentityClient:
         self.config,self.clock,self.on_identity_change=config,clock,on_identity_change
         self.process=self.owner=self.reader=None
         self._lock=threading.RLock(); self._write_lock=asyncio.Lock()
-        self._credentials={}; self._x509_bundles={}; self._jwt_bundles={}; self._pending={}; self._ready=asyncio.Event()
+        self._credentials: dict[str, Any] = {}
+        self._x509_bundles: dict[str, Any] = {}
+        self._jwt_bundles: dict[str, Any] = {}
+        self._pending: dict[str, asyncio.Future] = {}
+        self._ready=asyncio.Event()
         self._healthy=False; self._error=None
     @property
     def configuration_sha256(self): return identity_digest(self.config.__dict__)

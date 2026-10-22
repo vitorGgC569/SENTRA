@@ -16,7 +16,7 @@ TARGETS = [
     "sentra_mcp/services/context_projection.py",
     "orchestrator/providers/extension_provider.py",
 ]
-MAX_ERRORS = 47
+MAX_ERRORS = 0
 
 
 def main() -> int:
@@ -27,6 +27,10 @@ def main() -> int:
         stderr=subprocess.STDOUT,
     )
     output = proc.stdout or ""
+    if proc.returncode not in (0, 1) or "errors prevented further checking" in output:
+        print(output, end="")
+        print("Mypy did not complete its checks; the baseline cannot be evaluated.", file=sys.stderr)
+        return 1
     match = re.search(r"Found (\d+) errors? in", output)
     errors = int(match.group(1)) if match else (0 if proc.returncode == 0 else MAX_ERRORS + 1)
     print(output, end="")

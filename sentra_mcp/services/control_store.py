@@ -8,7 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 import sqlite3
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from .postgres_store import PostgresConnection
 
 
 CONTROL_PLANE_NAMESPACES = {
@@ -49,12 +52,16 @@ class ControlPlaneStore(Protocol):
     """Connection factory used by control-plane services."""
 
     backend: str
+    state_root: Path
 
     def path_for(self, namespace: str) -> Path | None:
         """Return a local database path when the backend has one."""
 
-    def connect(self, namespace: str) -> sqlite3.Connection:
+    def connect(self, namespace: str, *, shared: bool = False) -> sqlite3.Connection | PostgresConnection:
         """Return a configured DB-API connection for a logical namespace."""
+
+    def assert_active(self) -> None:
+        """Reject access after the selected authority changes."""
 
     def describe(self) -> dict[str, object]:
         """Return non-secret backend metadata for diagnostics."""
@@ -62,6 +69,7 @@ class ControlPlaneStore(Protocol):
 
 class AuthoritySQLiteConnection(sqlite3.Connection):
     """Existing connections cannot keep writing after authority cutover."""
+    authority_store: SQLiteControlPlaneStore
     def _active(self):
         store = getattr(self,"authority_store",None)
         if store is not None:
@@ -102,6 +110,7 @@ class SQLiteControlPlaneStore:
         root = Path(state_root).resolve() / "durable"
         root.mkdir(parents=True, exist_ok=True)
         self.root = root
+        self.state_root = root.parent
         self.timeout_seconds = float(timeout_seconds)
         if self.timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")

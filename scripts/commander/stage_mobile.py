@@ -33,10 +33,14 @@ def stage_mobile_runtime(destination,node):
      ('ORCA (Lovecast Inc., pinned adaptation)',ROOT/'vendor/orca/LICENSE'),
      ('ws',ROOT/'integrations/orca-mobile/transport/node_modules/ws/LICENSE'),
      ('TweetNaCl',ROOT/'integrations/orca-mobile/transport/node_modules/tweetnacl/LICENSE'),
-     ('@noble/hashes',ROOT/'integrations/orca-mobile/transport/node_modules/@noble/hashes/LICENSE')):
+     ('@noble/hashes',ROOT/'integrations/orca-mobile/transport/node_modules/@noble/hashes/LICENSE'),
+     *((name,ROOT/'integrations/orca-mobile/transport/node_modules'/name/'LICENSE') for name in
+       ('multicast-dns','dns-packet','thunky','@leichtgewicht/ip-codec'))):
   notices.append('\n=== '+name+' ===\n'+source_license.read_text(encoding='utf-8'))
  (destination/'THIRD_PARTY_NOTICES.txt').write_text('\n'.join(notices),encoding='utf-8')
  source_inputs={p.relative_to(ROOT).as_posix():sha(p) for p in sorted((ROOT/'integrations/orca-mobile/transport/src').rglob('*')) if p.is_file()}
+ for name in ('package.json','package-lock.json'):
+  dependency=ROOT/'integrations/orca-mobile/transport'/name;source_inputs[dependency.relative_to(ROOT).as_posix()]=sha(dependency)
  manifest={'schema':1,'protocol_version':1,'node_version':version,'files':{name:sha(destination/name) for name in FILES if name!='runtime.json'},'source_inputs':source_inputs,'authority':'existing scoped SENTRA mobile gateway'}
  (destination/'runtime.json').write_text(json.dumps(manifest,indent=2)+'\n',encoding='utf-8')
  return validate_mobile_runtime(destination)

@@ -6,6 +6,8 @@ the durable grants stored here plus the explicit local-owner shortcut.
 """
 from __future__ import annotations
 
+from contextlib import AbstractContextManager
+
 import fnmatch
 import json
 import sqlite3
@@ -132,7 +134,7 @@ class AuthorizationService:
                 """
             )
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> AbstractContextManager:
         return self._namespace("authorization")
 
     @contextmanager
@@ -630,7 +632,9 @@ class AuthorizationService:
                     "reason": "policy veto chain unavailable",
                     "vetos": []}
         chain = vetos if isinstance(vetos, PolicyVetoChain) else PolicyVetoChain(vetos)
-        context = kwargs.get("context") if isinstance(kwargs.get("context"), dict) else {}
+        context = kwargs.get("context") or {}
+        if not isinstance(context, dict):
+            raise ValueError("authorization context must be a mapping")
         request = build_veto_request(
             owner,
             principal_type=str(kwargs.get("principal_type", "agent")),

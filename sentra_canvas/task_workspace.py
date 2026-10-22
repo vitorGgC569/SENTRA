@@ -137,20 +137,39 @@ def review(canvas,project_id,params,*,allowed_dot_ids=None):
     control=canvas._shell_service();owner=canvas._runtime().owner
     _,members=dots_for_root(control,owner,project_id,params['dot_id'],params['space_id'])
     members={dot['dot_id']:dot for dot in members};entries=[];skipped=[]
-    for cid in ids:
+    def selected_entry(cid):
         with closing(control.store.connect('shell')) as db:
             convo=control.shell._entity(db,owner,project_id,'conversation',cid,space_id=params['space_id'])
         member=members.get(convo['dot_id'])
         if member is None or allowed_dot_ids is not None and member['dot_id'] not in allowed_dot_ids:
             raise PermissionError('review conversation belongs to another Canvas or unconnected Dot')
         selected=binding(control,owner,project_id,cid,member['agent_id'])
-        if selected is None:skipped.append(cid);continue
+        if selected is None:return None
         record=control.execution_workspaces.info(selected['execution_workspace_id'],owner)
         metadata=record['metadata']
-        entries.append((WorktreeManager(metadata['repository'],metadata['manager_state']),selected))
+        return WorktreeManager(metadata['repository'],metadata['manager_state']),selected
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(4,len(ids))) as pool:
+        for cid,entry in zip(ids,pool.map(selected_entry,ids)):
+            if entry is None:skipped.append(cid)
+            else:entries.append(entry)
     if not entries:raise ValueError('no isolated coding work exists in the selected conversations')
     value=preview(entries)
-    return {**value,'skipped_conversations':skipped,'resources':[
-        {'dot_id':item['dot_id'],'conversation_id':item['conversation_id'],
-         'execution_workspace_id':item['execution_workspace_id'],'branch':item['branch'],'diff_stat':item['diff_stat']}
-        for _,item in entries]}
+    from workspace.git_workflow import plan
+    host=canvas._machine_service()
+    resources=[]
+    for manager,item in entries:
+        resource={'dot_id':item['dot_id'],'conversation_id':item['conversation_id'],
+            'execution_workspace_id':item['execution_workspace_id'],'branch':item['branch'],'diff_stat':item['diff_stat']}
+        # Multi-worktree conflict rehearsal already performs bounded snapshots.
+        # Fetch the richer file/remote plan only for the one branch whose next
+        # step the owner is reviewing; avoid N full manifests in one HTTP read.
+        if len(entries)>1:
+            resources.append(resource);continue
+        machines=[m for m in host.inventory(project_id) if m['agent_id']==item['principal_id'] and m['kind']=='git-worktrees']
+        jobs=host.task_catalog(workspace_id=project_id,agent_ids={item['principal_id']},conversation_id=item['conversation_id'])
+        job=next((w for w in jobs if any(m['machine_id']==w['machine_id'] for m in machines) and any(c.startswith('git:') and c not in {'git:worktree','git:worktree.inspect'} for c in w['capabilities'])),None)
+        resources.append({**resource,
+            'review':plan(manager,item['worktree_id']),
+            'workflow':{'machine_id':job['machine_id'],'work_item_id':job['work_item_id'],'capabilities':job['capabilities']} if job else None})
+    return {**value,'skipped_conversations':skipped,'resources':resources}

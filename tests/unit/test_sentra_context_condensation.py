@@ -124,8 +124,10 @@ def test_cli_default_history_uses_context_projection_without_extra_provider(tmp_
     ident=store.open(tmp_path)
     for row in messages(70): store.append(ident,row["role"],row["content"])
     agent=SentraAgent.__new__(SentraAgent)
+    from sentra_cli.config import CLIConfig
+    agent.config=CLIConfig(workspace=tmp_path, state_root=tmp_path)
     agent.store,agent.session_id=store,ident
-    agent.canvas=SimpleNamespace(is_available=False)
+    agent.canvas=SimpleNamespace(is_available=False, is_shell_scope=False)
     agent._turn_id,agent._context_summary_config=None,None
     agent.context_condenser=RollingContextCondenser(max_chars=20000,summary_chars=1000,keep_recent=4)
     history=agent._history()

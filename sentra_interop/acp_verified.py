@@ -45,7 +45,8 @@ def canonical(data: Mapping[str, Any]) -> bytes:
 def _semver(value: str) -> tuple[int, int, int]:
     if not isinstance(value,str) or not VERSION.fullmatch(value):
         raise ACPVerificationDenied("ACP version must be pinned stable semver")
-    return tuple(int(x) for x in value.split("."))
+    major, minor, patch = (int(x) for x in value.split("."))
+    return major, minor, patch
 
 
 def _check_path(value: str, root: Path, *, is_file: bool) -> Path:
@@ -185,7 +186,7 @@ class ACPVerifiedResolver:
             plan = installation_plan
             if (not isinstance(plan, ACPInstallationPlan) or plan.agent_id != provider
                 or plan.version != version or plan.channel != "stable"
-                or plan.distribution_kind != "binary" or plan.environment
+                or plan.distribution_kind != "binary" or not isinstance(plan.executable_relative, str) or plan.environment
                 or not isinstance(installed_directory, str)):
                 raise ACPVerificationDenied("installed plan requires an independently verified binary with no environment")
             directory = _check_path(installed_directory, self.root, is_file=False)

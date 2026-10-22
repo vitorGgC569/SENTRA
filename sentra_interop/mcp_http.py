@@ -30,7 +30,9 @@ def _sse(response):
     total = 0
     data, kind = [], "message"
     while True:
-        line = response.fp.readline(MAX_REPLY + 1)
+        # HTTPResponse decodes transfer chunks; reading fp directly would feed
+        # hexadecimal chunk sizes into the SSE parser and skip its framing.
+        line = response.readline(MAX_REPLY + 1)
         total += len(line)
         if not line or total > MAX_REPLY:
             raise MCPHttpError("MCP SSE event truncated or oversized")
@@ -84,7 +86,7 @@ class LoopbackMCPHttpClient:
         self._closed = False
         self._uncertain = False
         self._streamable = streamable
-        self._session_id = None
+        self._session_id: str | None = None
 
     @property
     def session_active(self):
@@ -131,6 +133,8 @@ class LoopbackMCPHttpClient:
             body = response.read(MAX_REPLY + 1)
             if len(body) > MAX_REPLY:
                 raise MCPHttpError("MCP HTTP reply exceeds size limit")
+            if size is not None and len(body) != int(size):
+                raise MCPHttpError("MCP HTTP response truncated")
             return body
         except (OSError, http.client.HTTPException, TimeoutError) as exc:
             raise MCPHttpError("MCP transport unavailable; response is uncertain") from None
@@ -266,6 +270,8 @@ class LoopbackMCPHttpClient:
             data = response.read(MAX_REPLY + 1)
             if len(data) > MAX_REPLY:
                 raise MCPHttpError("MCP GET stream oversized")
+            if length is not None and len(data) != int(length):
+                raise MCPHttpError("MCP GET stream truncated")
             events, current, previous = [], {}, last_event_id
             for raw in data.replace(b"\r\n", b"\n").split(b"\n\n"):
                 if not raw.strip():

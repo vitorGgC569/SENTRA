@@ -226,6 +226,11 @@ def _imported_guest_workspace(record, os_family):
     imported = record.get("last_project_import") if isinstance(record, dict) else None
     if not isinstance(imported, dict) or imported.get("receipt_state") != "SUCCEEDED":
         return None
+    # New mappings retain the VM identity from the central import receipt.
+    # Older records remain usable in their existing registry, but an explicit
+    # different VM can never inherit another guest's imported directory.
+    if "vm_id" in imported and (not imported["vm_id"] or imported["vm_id"] != record.get("vm_id")):
+        return None
     path = imported.get("guest_path")
     if not isinstance(path, str):
         return None

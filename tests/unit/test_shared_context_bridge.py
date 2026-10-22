@@ -159,7 +159,7 @@ def test_control_plane_context_projection_includes_authoritative_goal(tmp_path):
 
 def test_control_plane_context_bridge_preserves_gemini_provider(tmp_path):
     durable = DurableRunService(tmp_path / "durable-gemini")
-    context = ContextBusService(tmp_path / "context-gemini")
+    context = ContextBusService(tmp_path / "durable-gemini")
     try:
         run = durable.create_run("owner-gemini")
         control = ControlPlaneService(durable, context)
@@ -194,7 +194,7 @@ def test_control_plane_context_bridge_preserves_gemini_provider(tmp_path):
 
 def test_control_plane_reconciles_legacy_wrong_gemini_provider(tmp_path):
     durable = DurableRunService(tmp_path / "durable-legacy-gemini")
-    context = ContextBusService(tmp_path / "context-legacy-gemini")
+    context = ContextBusService(tmp_path / "durable-legacy-gemini")
     try:
         run = durable.create_run("owner-legacy")
         control = ControlPlaneService(durable, context)
@@ -231,7 +231,7 @@ def test_control_plane_reconciles_legacy_wrong_gemini_provider(tmp_path):
 
 def test_control_plane_rejects_cross_agent_chat_rebinding(tmp_path):
     durable = DurableRunService(tmp_path / "durable-chat-ownership")
-    context = ContextBusService(tmp_path / "context-chat-ownership")
+    context = ContextBusService(tmp_path / "durable-chat-ownership")
     try:
         run = durable.create_run("owner-chat")
         control = ControlPlaneService(durable, context)

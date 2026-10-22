@@ -189,7 +189,7 @@ class WebContinuation:
                 "delivery": delivery, "target_receipt_exact": exact,
                 "collector_message_attested": browser_attested,
                 "account_identity_attested": False,
-                "message_id": evidence.get("message_id") if exact else None,
+                "message_id": evidence.get("message_id") if exact and isinstance(evidence, dict) else None,
                 "automatic_retry": False,
                 "requires_operator_reconciliation": bool(
                     continuation["requires_operator_reconciliation"] or

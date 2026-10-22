@@ -9,6 +9,8 @@ secrets, work products, skills and plugin capability manifests.
 """
 from __future__ import annotations
 
+from .postgres_store import PostgresConnection
+
 import hashlib
 import json
 import math
@@ -140,7 +142,7 @@ class GovernanceService:
         self.clock = clock
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    def _connect(self) -> sqlite3.Connection | PostgresConnection:
         return self.store.connect("governance")
 
     def _init_schema(self) -> None:
@@ -812,6 +814,8 @@ class GovernanceService:
             if expected_state is not None:
                 if row["state"] != expected_state or _load(row["blockers_json"], []):
                     raise GovernanceConflict("work item admission state changed or is blocked")
+            if str(row["state"]) == "RECOVERING":
+                raise GovernanceConflict("complete recovery handoff before normal execution resumes")
             if row["run_id"] != run_id or row["state"] not in {"PENDING", "QUEUED", "RUNNING"} or _load(row["blockers_json"], []):
                 raise GovernanceConflict("work item cannot execute in this run/state")
             if agent_id and row["assignee_agent_id"] not in {None, agent_id}:
@@ -823,10 +827,6 @@ class GovernanceService:
                 ).fetchone()
                 if dependency_row is None or dependency_row["state"] != "COMPLETED":
                     raise GovernanceConflict("work item dependency is not completed")
-            if str(row["state"]) == "RECOVERING":
-                raise GovernanceConflict(
-                    "complete recovery handoff before normal execution resumes"
-                )
             row = self._self_heal_lock(db, row, owner, "execution_run_id")
             current = row["execution_run_id"]
             if current and current != run_id:

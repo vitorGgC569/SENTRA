@@ -794,7 +794,6 @@ class GatewayServer(ThreadingHTTPServer):
     def __init__(self, config: GatewayConfig):
         self.config = config
         self._web_transport = None
-        self.turn_authority = None
         # Reserve exclusive ownership before touching state or private tokens.
         # A competing process must fail without mutating the active host.
         super().__init__((config.host, config.port), GatewayHandler)
@@ -855,7 +854,7 @@ class GatewayServer(ThreadingHTTPServer):
             "restart_attempts": 0,
         }
         self._inference_metrics_lock = threading.RLock()
-        self._inference_outcomes = deque(maxlen=512)
+        self._inference_outcomes: deque[tuple[float, int | None]] = deque(maxlen=512)
 
     def record_inference_outcome(self, status: int | None) -> None:
         # Observe responses only; a failure is NEVER consent to replay POST.
@@ -1353,8 +1352,9 @@ class GatewayServer(ThreadingHTTPServer):
         super().server_close()
         if self._web_transport is not None:
             self._web_transport.close()
-        if self.turn_authority is not None:
-            self.turn_authority.durable.close()
+        authority = getattr(self, "turn_authority", None)
+        if authority is not None:
+            authority.durable.close()
 
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -2180,7 +2180,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 body,
                 body_reencoded=True,
                 rewrite_web_model_namespace=managed_web_model,
-                delivery_capability=capability if capability and metadata.get("sentra_durable_web") is True else None,
+                delivery_capability=capability if capability and metadata is not None and metadata.get("sentra_durable_web") is True else None,
                 request_correlation_id=gateway_request_id,
             )
             proxy_failed = proxy_status is None or proxy_status >= 400

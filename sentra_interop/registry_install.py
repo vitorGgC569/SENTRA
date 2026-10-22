@@ -189,6 +189,7 @@ def build_installation_plan(entry, *, system: str, architecture: str,
     diagnostics = ["LAUNCH_AUTHORIZATION_REQUIRED", "ARTIFACT_TRUST_REQUIRED"]
     steps = []
     package = selected.package
+    deps: tuple[str, ...]
     archive = checksum = relative = runner = None
     env = selected.env
     if selected.kind == "binary":
@@ -222,7 +223,10 @@ def build_installation_plan(entry, *, system: str, architecture: str,
         diagnostics.append("WINDOWS_NPX_CMD_REQUIRES_APPROVED_NATIVE_LAUNCHER")
     if env:
         diagnostics.append("ENVIRONMENT_REQUIRES_SEPARATE_ADMISSION")
-    steps.extend((ACPPlanStep("resolve_absolute_entrypoint", runner or relative),
+    entrypoint = runner or relative
+    if not isinstance(entrypoint, str) or not entrypoint:
+        raise ValueError("distribution entrypoint missing")
+    steps.extend((ACPPlanStep("resolve_absolute_entrypoint", entrypoint),
                   ACPPlanStep("authorize_launch_request", entry.agent_id)))
     return ACPInstallationPlan(entry.agent_id, entry.version, entry.channel, platform, selected.kind,
         package, archive, checksum, relative, runner, tuple(argv), env, deps, tuple(diagnostics),

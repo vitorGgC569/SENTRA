@@ -85,7 +85,7 @@ def resource_for_declaration(declaration):
 
 def needs_input(request):
     action = request.arguments.get('action')
-    return action in {'click', 'fill', 'invoke', 'set_value', 'toggle', 'select', 'input.key', 'input.mouse', 'input.tap', 'clipboard.write',
+    return action in {'click', 'fill', 'invoke', 'set_value', 'toggle', 'select', 'input.key', 'input.mouse', 'input.tap', 'input.drag', 'input.chord', 'clipboard.write',
                       'computer.focus', 'computer.invoke', 'computer.set_value'} or (
         action == 'write' and request.arguments.get('opcode') in {'key', 'mouse', 'touch'})
 

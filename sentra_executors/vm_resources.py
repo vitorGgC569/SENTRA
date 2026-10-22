@@ -94,7 +94,7 @@ def measure(client: Any, binding: Any) -> dict[str, Any]:
     marker = getattr(binding, "marker", None)
     if marker is not None and info.get("description") != marker:
         raise ValueError("vm marker mismatch")
-    configured = {
+    configured: dict[str, Any] = {
         "vm_id": vm_id,
         "state": str(info.get("VMState") or "unknown"),
         "cpus": _as_int(info.get("cpus"), "cpus"),
@@ -270,10 +270,10 @@ def prepare_authorized_change(
     if state not in _OBSERVED_STATES:
         reasons.append("state mismatch")
     try:
-        observed_memory = int(observed.get("memory_mb"))
-        observed_cpus = int(observed.get("cpus"))
-        previous_cap = int(observed.get("cpu_execution_cap"))
-    except (TypeError, ValueError):
+        observed_memory = int(observed["memory_mb"])
+        observed_cpus = int(observed["cpus"])
+        previous_cap = int(observed["cpu_execution_cap"])
+    except (TypeError, ValueError, KeyError):
         reasons.append("observed shape")
         observed_memory = observed_cpus = previous_cap = 0
     if not reasons and (observed_memory != shown["memory_mb"] or observed_cpus != shown["cpus"]):
@@ -298,9 +298,9 @@ def prepare_authorized_change(
             "vm_id": observed_vm,
             "state": state,
             "load": {
-                "ram_percent": host.get("ram_percent"),
-                "available_mb": host.get("available_mb"),
-                "cpu_percent": host.get("cpu_percent"),
+                "ram_percent": (host or {}).get("ram_percent"),
+                "available_mb": (host or {}).get("available_mb"),
+                "cpu_percent": (host or {}).get("cpu_percent"),
             },
             "previous_cap": previous_cap,
             "planned_cap": shown["cpu_execution_cap"],
@@ -438,7 +438,7 @@ def apply_authorized_cap(
         observed_cpus = int(info.get("cpus"))
         observed_memory = int(info.get("memory"))
         previous_cap = int(info.get("CPUExecutionCap") or 100)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, KeyError):
         return _refuse(shown, "observed shape")
     if observed_cpus != shown["cpus"] or observed_memory != shown["memory_mb"]:
         return _refuse(shown, "memory or cpu count would change")
@@ -466,9 +466,9 @@ def apply_authorized_cap(
         "vm_id": str(info.get("UUID")).lower(),
         "state": state,
         "load": {
-            "ram_percent": host.get("ram_percent"),
-            "available_mb": host.get("available_mb"),
-            "cpu_percent": host.get("cpu_percent"),
+            "ram_percent": (host or {}).get("ram_percent"),
+            "available_mb": (host or {}).get("available_mb"),
+            "cpu_percent": (host or {}).get("cpu_percent"),
             "admission_allowed": decision["allowed"],
         },
         "previous_cap": previous_cap,

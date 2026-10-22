@@ -212,9 +212,9 @@ def _session_body(manager: MemoryManager) -> Dict[str, Any]:
         working[str(agent_id)] = {"messages": messages, "variables": variables}
     tasks: Dict[str, Any] = {}
     for task_id in sorted(manager.task_memories):
-        mem = manager.task_memories[task_id]
+        task_mem = manager.task_memories[task_id]
         candidates = []
-        for candidate in mem.candidates[-10:]:
+        for candidate in task_mem.candidates[-10:]:
             data = candidate.to_dict()
             candidates.append({
                 "candidate_id": data.get("candidate_id"),
@@ -225,26 +225,26 @@ def _session_body(manager: MemoryManager) -> Dict[str, Any]:
                 "created_by": data.get("created_by"),
             })
         findings = []
-        for item in mem.findings_history[-20:]:
+        for item in task_mem.findings_history[-20:]:
             encoded = json.dumps(_json_copy(item, what="finding"), ensure_ascii=False)
             if len(encoded) > 1000:
                 raise ValueError("finding exceeds 1000 chars")
             findings.append(json.loads(encoded))
         tasks[str(task_id)] = {
-            "iterations": mem.iterations,
+            "iterations": task_mem.iterations,
             "candidates": candidates,
             "findings_history": findings,
         }
     cache_rows = []
     for row in manager.semantic_cache.export_entries()[-20:]:
-        candidate = row.get("candidate") or {}
+        cached_candidate = row.get("candidate") or {}
         cache_rows.append({
             "objective": _clip(str(row.get("objective") or ""), 500),
             "candidate": {
-                "candidate_id": candidate.get("candidate_id"),
-                "task_id": candidate.get("task_id"),
-                "summary": _clip(str(candidate.get("summary") or ""), 500),
-                "status": candidate.get("status", "CREATED"),
+                "candidate_id": cached_candidate.get("candidate_id"),
+                "task_id": cached_candidate.get("task_id"),
+                "summary": _clip(str(cached_candidate.get("summary") or ""), 500),
+                "status": cached_candidate.get("status", "CREATED"),
             },
         })
     return {
@@ -317,14 +317,14 @@ def build_turn_memory(
         kind = entry.get("kind") if isinstance(entry.get("kind"), str) else "message"
         seq = entry.get("seq")
         step_id = f"m{seq}" if isinstance(seq, int) and seq >= 0 else None
-        text = entry.get("content") if isinstance(entry.get("content"), str) else ""
+        text = str(entry.get("content")) if isinstance(entry.get("content"), str) else ""
         if kind == "handoff" and not text.strip():
             text = "handoff"
         add(step_id, text, "blocked" if kind == "provider_error" else "done")
     for index, call in enumerate(calls or []):
         if not isinstance(call, dict):
             continue
-        operation = call.get("operation") if isinstance(call.get("operation"), str) else ""
+        operation = str(call.get("operation")) if isinstance(call.get("operation"), str) else ""
         kind = call.get("kind") if isinstance(call.get("kind"), str) else "call"
         title = operation.strip() or kind
         raw_id = call.get("id")
@@ -361,14 +361,14 @@ def _apply_session(manager: MemoryManager, body: Dict[str, Any]) -> None:
     for task_id, raw in (body.get("tasks") or {}).items():
         if not isinstance(raw, dict):
             raise ValueError("task memory entry must be an object")
-        mem = manager.get_task_memory(str(task_id))
-        mem.iterations = 0
+        task_mem = manager.get_task_memory(str(task_id))
+        task_mem.iterations = 0
         for candidate in raw.get("candidates") or []:
-            mem.add_candidate(Candidate.from_dict(candidate))
+            task_mem.add_candidate(Candidate.from_dict(candidate))
         stored = raw.get("iterations")
         if type(stored) is int and stored >= 0:
-            mem.iterations = stored
-        mem.findings_history = list(raw.get("findings_history") or [])
+            task_mem.iterations = stored
+        task_mem.findings_history = list(raw.get("findings_history") or [])
     knowledge = body.get("run_knowledge") or {}
     if not isinstance(knowledge, dict):
         raise ValueError("run knowledge must be an object")

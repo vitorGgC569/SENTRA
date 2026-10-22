@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = "Stop"
 # One installation engine. Never copy a partial Python checkout onto a client.
 # The Setup executable carries this payload. This script only launches that package.
-# product_version = "1.0.0"
+# product_version = "1.0.1"
 # LICENSE
 # docs/frentes-18/comercial/README.md
 # docs/frentes-18/comercial/LICENCA.md

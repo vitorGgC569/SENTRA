@@ -4,6 +4,8 @@ The upstream wire protocol is preserved. This module is not a remote-machine
 attestation service and never interprets guacd ready as authenticated guest ID.
 """
 from __future__ import annotations
+
+from typing import Any
 import codecs
 import base64
 import hashlib
@@ -170,7 +172,7 @@ class _GuacdConnection:
 
 class GuacamoleBackend:
     def __init__(self,journal:SessionJournal):
-        self.journal=journal;self.connections={};self.lock=threading.RLock()
+        self.journal=journal;self.connections: dict[str, Any] = {};self.lock=threading.RLock()
 
     def shutdown(self):
         with self.lock:

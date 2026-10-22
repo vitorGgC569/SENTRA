@@ -165,6 +165,7 @@ def test_vm_frame_directive_delivers_authenticated_png_without_exposing_base64()
     assert "frame_available" in safe
     bridge = CanvasBridge.__new__(CanvasBridge)
     bridge.is_available = True
+    bridge.is_shell_scope = False
     bridge.workspace = "C:/authorized"
     collected = []
     bridge._request = lambda body: collected.append(body) or {"state":"SUCCEEDED"}
@@ -176,6 +177,7 @@ def test_vm_input_has_scoped_canonical_arguments_and_persistent_identity():
     from sentra_cli.canvas import CanvasBridge
     bridge = CanvasBridge.__new__(CanvasBridge)
     bridge.is_available = True
+    bridge.is_shell_scope = False
     bridge.workspace = "C:/authorized"
     collected = []
     bridge._request = lambda body: collected.append(body) or {"state":"SUCCEEDED"}

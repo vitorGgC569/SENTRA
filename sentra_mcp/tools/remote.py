@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from mcp.server import MCPServer
+from sentra_mcp.tool_policy import ToolRegistrar
 from mcp.server.mcpserver.context import Context
 
 from sentra_remote.gateway import RemoteGatewayService
@@ -46,7 +46,7 @@ def _sync(fn: Callable[[], dict[str, Any]]) -> ResponseEnvelope:
         return _failure(exc)
 
 
-def register_remote_tools(mcp: MCPServer, remote: RemoteGatewayService) -> None:
+def register_remote_tools(mcp: ToolRegistrar, remote: RemoteGatewayService) -> None:
     @mcp.tool()
     def sentra_pair_device(
         name: str,

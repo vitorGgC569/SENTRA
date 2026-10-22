@@ -1,6 +1,8 @@
 """Operator-owned settings and explicit provider routing for the operational CLI."""
 from __future__ import annotations
 
+from orchestrator.decisioning import DecisionProvider
+
 import os
 import re
 from pathlib import Path
@@ -53,7 +55,7 @@ def configure_decisioning(router: ModelRouter, config: Dict[str, Any]) -> ModelR
 
     from .decisioning import DecisionController, SystemOneHTTPProvider
 
-    providers = []
+    providers: list[DecisionProvider] = []
     names = set()
     for index, spec in enumerate(specs):
         if not isinstance(spec, dict):

@@ -549,7 +549,7 @@ class ShellCoordinatorService:
             acknowledgement = _decode(request["protected_result"]) if request["protected_result"] else None
             value = acknowledgement.get("value") if isinstance(acknowledgement, dict) else None
             known_status = message["status"] in {"queued", "running", "dispatched", "waiting_approval", "not_submitted"}
-            if (isinstance(value, dict) and acknowledgement.get("ok") is True
+            if (isinstance(value, dict) and isinstance(acknowledgement, dict) and acknowledgement.get("ok") is True
                     and value.get("message_id") == message["message_id"]
                     and value.get("conversation_id") == cid and known_status
                     and request["state"] not in {"claimed", "dispatching", "uncertain", "rejected"}):

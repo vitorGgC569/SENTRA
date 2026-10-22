@@ -61,7 +61,7 @@ def _refuse_uncertain(operation_id: str, raw: Mapping[str, Any], receipt: Any) -
         raise TrioClosureError("UNCERTAIN operation is not resent")
 
 
-def _receipt(raw: Mapping[str, Any], *, lane: str | None) -> dict[str, Any]:
+def _receipt(raw: object, *, lane: str | None) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise TrioClosureError("receipt is required")
     if raw.get("ack_only") is True or raw.get("status") in {"ADMITTED", "ACK"}:

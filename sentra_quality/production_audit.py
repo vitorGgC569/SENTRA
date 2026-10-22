@@ -84,7 +84,9 @@ def _refuse_admission_shape(admission: dict[str, Any]) -> None:
         raise AuditRefusal("fleet admission required")
     if admission.get("inference_executed") is True:
         raise AuditRefusal("admission must not claim inference")
-    lanes = admission.get("lanes") if isinstance(admission.get("lanes"), list) else []
+    lanes = admission.get("lanes") or []
+    if not isinstance(lanes, list):
+        raise AuditRefusal("fleet admission lanes must be a list")
     for lane in lanes:
         if isinstance(lane, dict) and (
             lane.get("delivery_state") == "UNCERTAIN" or lane.get("execution_uncertain") is True

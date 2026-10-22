@@ -153,9 +153,12 @@ class DaytonaSandboxLifecycle:
             params_type = getattr(self.client, "CreateSandboxFromSnapshotParams", None)
             if params_type is None:
                 try:
-                    from daytona import CreateSandboxFromSnapshotParams as params_type
+                    from daytona import CreateSandboxFromSnapshotParams
+                    params_type = CreateSandboxFromSnapshotParams
                 except ImportError as exc:
                     raise RuntimeError("daytona_sdk_not_installed") from exc
+            if params_type is None:
+                raise RuntimeError("daytona_sdk_params_unavailable")
             params = params_type(
                 name=spec.name, snapshot=spec.trusted_snapshot,
                 public=False, network_block_all=True, env_vars={},

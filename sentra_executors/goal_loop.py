@@ -307,6 +307,13 @@ class BoundedGoalLoop:
     def advance(self, owner: str, loop_id: str, *, objective: str,
                 operator_approved: bool = False,
                 estimated_cost_usd: float | None = None) -> dict[str, Any]:
+        return self._advance(owner, loop_id, objective=objective,
+            operator_approved=operator_approved, estimated_cost_usd=estimated_cost_usd)
+
+    def _advance(self, owner: str, loop_id: str, *, objective: str,
+                 operator_approved: bool = False,
+                 estimated_cost_usd: float | None = None,
+                 host_quote: tuple[str, str, int, str] | None = None) -> dict[str, Any]:
         if operator_approved is not True:
             raise PermissionError("each new iteration requires human approval")
         if not isinstance(objective,str) or not 1 <= len(objective) <= 4000:
@@ -375,6 +382,16 @@ class BoundedGoalLoop:
                            (loop_id,step,key,digest,_encode({"objective":objective})))
                 db.execute("INSERT INTO goal_loop_cost_reservations VALUES(?,?,?)",
                            (loop_id,step,micro))
+            if host_quote is not None:
+                quote_id, revision, quote_micro, objective_sha = host_quote
+                if quote_micro != micro or objective_sha != digest:
+                    raise GoalLoopConflict("host quote does not match the reserved step")
+                existing = db.execute("SELECT * FROM goal_loop_host_quotes WHERE loop_id=? AND step=?", (loop_id, step)).fetchone()
+                if existing and (existing["quote_id"], existing["price_revision"], existing["micro_usd"], existing["objective_sha256"]) != host_quote:
+                    raise GoalLoopConflict("durable host quote/objective changed")
+                if existing is None:
+                    db.execute("INSERT INTO goal_loop_host_quotes(loop_id,step,quote_id,price_revision,micro_usd,objective_sha256) VALUES(?,?,?,?,?,?)",
+                        (loop_id, step, quote_id, revision, micro, digest))
         # Cross-database crash gap is closed by GovernanceService.external_key
         # idempotency. Pending step is resumed only with identical objective.
         item = self.control.create_work_item(
@@ -424,6 +441,8 @@ class HostPricedGoalLoop(BoundedGoalLoop):
                 quote_id TEXT NOT NULL, price_revision TEXT NOT NULL,
                 micro_usd INTEGER NOT NULL CHECK(micro_usd >= 0),
                 PRIMARY KEY(loop_id,step))""")
+            from sentra_interop.workflow_storage import ensure_column
+            ensure_column(db,"goal_loop_host_quotes","objective_sha256","TEXT")
 
     def advance(self, owner: str, loop_id: str, *, objective: str,
                 operator_approved: bool = False,
@@ -446,23 +465,11 @@ class HostPricedGoalLoop(BoundedGoalLoop):
                 type(quote_id) is not str or not 8<=len(quote_id)<=128 or
                 type(revision) is not str or not 1<=len(revision)<=64):
             raise ValueError("invalid bounded host price quote")
-        # Pin the host quote before the WorkItem admission crash gap.
+        # Quote, step and cost reserve commit together before the WorkItem
+        # admission crash gap. A rejected budget cannot pin a nonexistent step.
         objective_sha=hashlib.sha256(objective.encode()).hexdigest()
-        with projection_db(None,store=self.store) as db:
-            db.execute("BEGIN IMMEDIATE")
-            previous=db.execute("SELECT step,work_item_id FROM goal_loop_steps WHERE loop_id=? ORDER BY step DESC LIMIT 1",(loop_id,)).fetchone()
-            step=previous["step"] if previous and not previous["work_item_id"] else previous["step"]+1 if previous else 1
-            from sentra_interop.workflow_storage import ensure_column
-            ensure_column(db,"goal_loop_host_quotes","objective_sha256","TEXT")
-            existing=db.execute("SELECT * FROM goal_loop_host_quotes WHERE loop_id=? AND step=?",(loop_id,step)).fetchone()
-            if existing and (existing["quote_id"],existing["price_revision"],existing["micro_usd"],existing["objective_sha256"])!=(quote_id,revision,micro,objective_sha):
-                raise GoalLoopConflict("durable host quote/objective changed")
-            if existing is None:
-                db.execute("INSERT INTO goal_loop_host_quotes(loop_id,step,quote_id,price_revision,micro_usd,objective_sha256) VALUES(?,?,?,?,?,?)",
-                    (loop_id,step,quote_id,revision,micro,objective_sha))
-        result=super().advance(owner,loop_id,objective=objective,
-            operator_approved=True,estimated_cost_usd=micro/1_000_000)
-        if result["step"]!=step:
-            raise GoalLoopConflict("goal step changed concurrently; reconcile existing WorkItem")
+        result=self._advance(owner,loop_id,objective=objective,
+            operator_approved=True,estimated_cost_usd=micro/1_000_000,
+            host_quote=(quote_id,revision,micro,objective_sha))
         return {**result,"host_priced":True,"quote_id":quote_id,
                 "price_revision":revision,"reserved_cost_usd":micro/1_000_000}

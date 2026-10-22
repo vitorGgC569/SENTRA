@@ -168,7 +168,7 @@ class A2AEnvelope:
         # Proto JSON uses text/data keys rather than an explicit "type".
         normalized=normalize_parts(parts)
         return cls(identity, _required(task_id, "task_id"), _required(context_id, "context_id"),
-                   event_id, sequence, state, tuple(normalized))
+                   event_id, sequence, _required(state, "state"), tuple(normalized))
 
     @classmethod
     def from_stream_response(

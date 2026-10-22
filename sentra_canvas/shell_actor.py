@@ -33,6 +33,14 @@ def _redact_guest_secret(value, secret):
 def _vm_input_identity(arguments):
     """Identity of one VM click or key chord. A different chord is a different effect."""
     action = arguments.get("action") if isinstance(arguments, dict) else None
+    if action in {'input.drag', 'input.chord'}:
+        from sentra_executors.vm_atomic_input import chord_scancodes, drag_points
+        try:
+            value = chord_scancodes(arguments)[0] if action == 'input.chord' else drag_points(arguments)
+        except (ValueError, TypeError):
+            return None
+        return ('keyboard' if action == 'input.chord' else 'mouse', action,
+                json.dumps(value, separators=(',', ':')))
     if action=='input.tap':
         if set(arguments)!={'action','x','y'} or any(type(arguments.get(k)) is not int for k in ('x','y')):return None
         return 'mouse',f"tap:{arguments['x']}:{arguments['y']}",None

@@ -223,7 +223,7 @@ class SentraMCPServer:
                         "input":tool.parameters,
                         "output":tool.output_schema}
                        for tool in registered]
-            contracts.sort(key=lambda contract:contract["name"])
+            contracts.sort(key=lambda contract:str(contract["name"]))
             canonical=json.dumps(contracts,sort_keys=True,separators=(",",":"),
                                  ensure_ascii=False,default=str).encode("utf-8")
             self.connector_proof.record_local_schema(

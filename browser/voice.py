@@ -227,7 +227,7 @@ class OpenAIRealtimeTransport:
         self.api_key = api_key
         self._ephemeral: str = ""
         self._ephemeral_expires: float = 0.0
-        self.response_headers = {}
+        self.response_headers: dict[str, str] = {}
         from .realtime_sideband import RealtimeSideband
         self.sideband = RealtimeSideband(provider["base_url"], api_key)
 
@@ -262,7 +262,7 @@ class OpenAIRealtimeTransport:
     def exchange_offer(self, offer_sdp: str, *, model: str | None = None) -> dict[str, str]:
         from urllib.parse import quote as _quote
 
-        session = {"type": "realtime", "model": model or self.provider["model"],
+        session: dict[str, Any] = {"type": "realtime", "model": model or self.provider["model"],
                    "tools": [], "audio": {"input": {"transcription": {
                        "model": "gpt-4o-mini-transcribe"}}}}
         if self.provider.get("voice"):
@@ -392,7 +392,7 @@ class VoiceRuntime:
         self.ledger = VoiceSessionLedger(store)
         self.store = store
         self.clock = clock
-        self._cached_transport = None
+        self._cached_transport: OpenAIRealtimeTransport | None = None
 
     # -- availability ----------------------------------------------------
     def voice_availability(self, project_id: str, owner: str) -> dict[str, Any]:
@@ -495,7 +495,7 @@ class VoiceRuntime:
                 reserved_call_id = existing["call_id"]
                 db.rollback()
                 return self._reconcile_start(owner, project_id, request_key,
-                                             reserved_call_id, conversation_id)
+                                             reserved_call_id, conversation_id or "")
             call_id = CALL_ID_PREFIX + uuid.uuid4().hex
             db.execute("INSERT INTO voice_requests VALUES(?,?,?,?,?,?)",
                        (owner, project_id, request_key, fingerprint, call_id, None))
@@ -985,7 +985,7 @@ class VoiceRuntime:
                 self._transport().close_call(str(row["provider_call_ref"] or ""))
             except VoiceUnavailable as exc:
                 provider_error = str(exc)[:200]
-            result: dict[str, Any] = {"call_id": call_id, "status": target,
+            result = {"call_id": call_id, "status": target,
                                       "idempotent_replay": False}
             if action == "voice_revoke":
                 result["transcript_sealed"] = True

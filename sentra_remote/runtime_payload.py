@@ -108,7 +108,7 @@ def load_installed_component(name: str) -> InstalledComponent:
         raise ValueError('unknown installed runtime component')
     if getattr(sys, 'frozen', False) is not True or not getattr(sys, '_MEIPASS', None):
         raise InstalledRuntimeUnavailable('embedded installed runtime pins unavailable in source mode')
-    resource_root = Path(sys._MEIPASS).absolute()
+    resource_root = Path(getattr(sys, "_MEIPASS")).absolute()
     resource = _safe_file(resource_root, PIN_RESOURCE, maximum=1024 * 1024)
     raw = resource.read_bytes()
     if len(raw) > 1024 * 1024:

@@ -155,9 +155,13 @@ class DurableOperationGate:
         # The caller-provided executor MUST also enforce the fencing token at
         # its physical effect boundary; checking here alone has a TOCTOU race.
         try:
-            result = await (fenced_effect(_request_snapshot(intent)[0], receipt)
-                            if fenced_effect is not None
-                            else effect(_request_snapshot(intent)[0]))
+            if fenced_effect is None and effect is None:
+                raise DurableAdmissionUnavailable("effect callback unavailable")
+            if fenced_effect is not None:
+                result = await fenced_effect(_request_snapshot(intent)[0], receipt)
+            else:
+                assert effect is not None
+                result = await effect(_request_snapshot(intent)[0])
             if (not isinstance(result, OperationResult)
                     or result.operation_id != intent.operation_id):
                 raise RuntimeError("invalid external effect receipt")

@@ -8,6 +8,8 @@ idempotency/status contracts; this module does not assert control of other hosts
 """
 from __future__ import annotations
 
+from typing import BinaryIO
+
 import asyncio
 from contextvars import ContextVar
 import hashlib
@@ -38,7 +40,7 @@ class _ResourceLock:
     def __init__(self, root: Path, machine_id: str):
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path = root / (hashlib.sha256(machine_id.encode()).hexdigest() + ".lock")
-        self.stream = None
+        self.stream: BinaryIO | None = None
 
     def acquire(self, timeout: float) -> None:
         if self.stream is not None:
@@ -57,7 +59,7 @@ class _ResourceLock:
                     msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
                 else:
                     import fcntl
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    getattr(fcntl, "flock")(fd, getattr(fcntl, "LOCK_EX") | getattr(fcntl, "LOCK_NB"))
                 self.stream = stream
                 return
             except (OSError, BlockingIOError):
@@ -77,7 +79,7 @@ class _ResourceLock:
                 msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+                getattr(fcntl, "flock")(stream.fileno(), getattr(fcntl, "LOCK_UN"))
         finally:
             stream.close()
 
@@ -102,11 +104,11 @@ class CentralEffectContext:
         self._output_resolver = output_resolver
         self._serial = threading.Lock()
         self._lost = threading.Event()
-        self._owned_async=set()
+        self._owned_async: set[asyncio.Task] = set()
         self._borrowed_guard=threading.Lock()
         self._borrowed_count=0
         self._deferred_end=None
-        self._owned_blocking=set()
+        self._owned_blocking: set[asyncio.Task] = set()
         self._had_blocking=False
 
     def checkpoint(self) -> None:

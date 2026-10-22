@@ -174,7 +174,9 @@ class AuthenticatedWebReceiptBroker:
                                     evidence=evidence,identity_epoch=identity_epoch)
 
     def require_attested(self, owner: str, *, run_id: str, job_id: str,
-                         evidence: dict) -> dict:
+                         evidence: object) -> dict:
+        if not isinstance(evidence, dict):
+            raise WebReceiptAttestationError("browser collector evidence must be a mapping")
         with self.store.connect("session_checkpoint") as db:
             row=db.execute("SELECT * FROM authenticated_web_receipts "
                            "WHERE owner=? AND run_id=? AND job_id=?",

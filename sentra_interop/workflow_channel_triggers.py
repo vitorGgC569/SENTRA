@@ -257,14 +257,14 @@ class ChannelWorkflowTrigger:
         if row is None or row["admitted_operation_id"] != operation_id or progress.get("capability_id") != "workflow:signal" or progress.get("work_item_id") != work_item_id:
             raise ChannelTriggerConflict("acknowledgement must reference the exact admitted workflow signal")
         from sentra_runtime.contracts import OperationRequest
-        from .gate import _fingerprint
+        from sentra_runtime.executor import _request_snapshot
         request = OperationRequest(operation_id, progress["principal_id"], progress["machine_id"],
             "workflow:signal", work_item_id, "pulso:" + row["dispatch_key"],
             {"workflow_id": row["workflow_id"], "namespace": row["namespace"], "name": row["signal_name"],
              "signal_id": row["signal_id"], "payload_sha256": row["payload_sha256"]})
         with self.control.durable.lock:
             recorded = self.control.durable._operation_row(operation_id, owner)["intent_sha256"]
-        if recorded != _fingerprint(request):
+        if recorded != _request_snapshot(request)[1]:
             raise ChannelTriggerConflict("central workflow signal fingerprint mismatch")
         return self._service(owner).ack(claim_id=claim_id, work_item_id=work_item_id,
             operation_id=operation_id, receipt_id=receipt_id)

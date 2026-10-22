@@ -172,6 +172,8 @@ class A2ALoopbackServer:
             if not isinstance(task, Mapping):
                 raise ValueError("invalid task")
             task_id = task.get("id") or task.get("taskId")
+            if not isinstance(task_id, str):
+                raise ValueError("invalid task ID")
             current_state = await self.boundary.state(task_id)
             event = A2AEnvelope.from_stream_response(
                 payload, identity=self.identity,
@@ -234,9 +236,9 @@ class A2ALoopbackServer:
                     arguments={"task_id": task_id, "context_id": self.mapper.work_item_id},
                 )
                 async with self._event_lock:
-                    receipt = self._cancel_receipts.get(request.operation_id)
-                    if receipt is not None:
-                        if (receipt != (request.idempotency_key, task_id)
+                    cancel_receipt = self._cancel_receipts.get(request.operation_id)
+                    if cancel_receipt is not None:
+                        if (cancel_receipt != (request.idempotency_key, task_id)
                             or not (await self.gate.decision(request)).allowed):
                             return 403, {"error": "forbidden"}
                         return 200, {"state": "CANCELLED", "taskId": task_id,

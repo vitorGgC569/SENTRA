@@ -132,20 +132,25 @@ def project_vm_execution(value, arguments, result):
                 copied['desktop_ready_verified'] = False
             updates['installation_verification'] = copied
             updates['installation_verification']['verified_at'] = time.time()
-        if inner == 'project.import' and evidence.get('receipt_state') == 'SUCCEEDED':
+        if inner in {'project.import', 'project.import.reconcile'} and evidence.get('receipt_state') == 'SUCCEEDED':
             guest_path = evidence.get('guest_path')
             host_folder = evidence.get('host_folder')
             normalized = guest_path.strip() if isinstance(guest_path, str) else ''
             same_as_host = isinstance(host_folder, str) and host_folder.strip() == normalized
+            vm_id = value.get('vm_id')
+            same_vm = vm_id is None or evidence.get('vm_id') == vm_id
             if (normalized and not same_as_host
+                    and same_vm
                     and not any(char in normalized for char in "\n\r'\"$;`|&<>\0")
                     and not any(part == '..' for part in normalized.replace('\\', '/').split('/'))):
                 updates['last_project_import'] = {
                     key: evidence[key] for key in ('status', 'guest_path', 'files', 'source_bytes', 'sha256',
-                        'receipt_state', 'selection', 'host_folder') if key in evidence}
+                        'receipt_state', 'selection', 'host_folder', 'vm_id') if key in evidence}
                 updates['last_project_import']['replayed'] = evidence.get('replayed') is True
                 updates['last_project_import']['physical_effects_performed'] = evidence.get('physical_effects_performed') is True
                 updates['last_project_import']['replays_duplicate_operation'] = False
+                updates['last_project_import']['reconciled_uncertain'] = evidence.get('reconciled_uncertain') is True
+                updates['last_project_import']['bidirectional_sync'] = False
     elif result.get('state') == 'UNCERTAIN' and inner == 'provision':
         updates['provisioning_status'] = 'uncertain_requires_reconciliation'
     return updates

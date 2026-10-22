@@ -107,9 +107,10 @@ def test_bind_provider_borrows_exact_outer_intent_and_restart_never_replays(host
         assert durable.operation_status(operation.operation_id,"owner")["state"]=="SUCCEEDED"
         assert (await center.start(operation)).state=="SUCCEEDED"
         assert calls==[operation.operation_id] and len(target.read_text().splitlines())==1
-        restarted=CheckpointedWorkflowWorker(center.protocol_gate(),store=WorkflowCheckpointStore(root/"workflow.sqlite",workspace=root),
+        restarted=CheckpointedWorkflowWorker(center.protocol_gate(),store=WorkflowCheckpointStore(root/"workflow.sqlite",workspace=root,store=bridge.configured_store),
             definitions=[definition],bindings=[binding],worker_version="worker1")
         outcome=await restarted.advance(request("workflow:resume",{"workflow_id":"flow","namespace":""}),workflow_id="flow",resume=True)
+        assert outcome.operation.state == "SUCCEEDED", outcome.operation
         assert outcome.payload["status"]=="SUCCEEDED" and outcome.payload["ready"]==[]
         assert len(calls)==1
         with worker.store.db() as db:

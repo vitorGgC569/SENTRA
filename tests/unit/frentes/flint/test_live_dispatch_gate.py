@@ -72,6 +72,8 @@ def _runner(argv, prompt, nonce_info):
 
 
 def test_live_dispatch_admits_the_lane_and_reconciles_three_receipts(tmp_path, monkeypatch):
+    monkeypatch.setattr("sentra_canvas.dot_tool_runner.resolve_adapters",
+        lambda project_dir: {"codex":["synthetic-codex"], "opencode":["synthetic-opencode"]})
     with running_canvas(tmp_path) as (app, server):
         monkeypatch.setattr(app, "model_catalog", lambda: {"models": ["sentra/chatgpt-web/gpt-6"]})
         ws = app.create_workspace("Flint_live_gate")["id"]
@@ -235,11 +237,16 @@ def test_live_dispatch_admits_the_lane_and_reconciles_three_receipts(tmp_path, m
         assert early["physical_inference"] is False
         for child_id in children:
             assert control.work_item_info(child_id, owner)["state"] == "COMPLETED"
-        prepared = prepare_live_trio(placement="host", operation_id=parent_operation)
+        # This unit case exercises missing prerequisites independently of the
+        # developer's installed CLIs/accounts. Earlier central dispatch gates
+        # and receipt checks above ran without this prerequisite-only override.
+        with monkeypatch.context() as prerequisites:
+            prerequisites.setattr("orchestrator.providers.fleet_admission._file_exists", lambda _path: False)
+            prepared = prepare_live_trio(placement="host", operation_id=parent_operation)
         assert prepared["executed"] is False
         assert prepared["vboxmanage_used"] is False
         assert prepared["physical_inference"] is False
-        assert "opencode authenticated integration" in prepared["prerequisites"]
+        assert {"opencode executable", "codex executable"} <= set(prepared["prerequisites"])
         with pytest.raises(PermissionError, match="verified guest process"):
             prepare_live_trio(placement="guest", operation_id=parent_operation)
         with pytest.raises(PermissionError, match="not resent"):
@@ -377,6 +384,10 @@ def test_guest_placement_blocks_without_an_executor_and_calls_an_injected_one(tm
             process_alive=lambda: True, connected_agents=lambda _p, _a: [worker["agent_id"]],
             runner=boom, placement="guest", guest_process=verified,
         )
+        with pytest.raises(PermissionError, match="process id is not a guest execution"):
+            execute_dot_tool_dispatch(control, owner, intent=_intent("sentra-cli", worker["dot_id"]),
+                request_key="guest-pid-refused-"+uuid.uuid4().hex, **common)
+        common["guest_process"] = {"verified":False, "vm_registry_bound":True, "vm_id":"owned-guest-vm"}
         blocked_key = "guest-block-" + uuid.uuid4().hex
         blocked = execute_dot_tool_dispatch(
             control, owner, intent=_intent("sentra-cli", worker["dot_id"]),

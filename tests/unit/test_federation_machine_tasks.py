@@ -50,6 +50,38 @@ def pair(left, right):
     right.confirm(left.identity.node_id, code)
 
 
+def wait_receiver_receipt(right, intent_id):
+    # A sender socket deadline says nothing about receiver completion. Observe
+    # the existing protected projection; never dispatch the intent again.
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        saved = right.journal.get(intent_id) or {}
+        if saved.get("receipt"):
+            return saved["receipt"]
+        time.sleep(.02)
+    pytest.fail("receiver did not persist the existing intent receipt")
+
+
+def delegate_for_review(left, right, requested=None):
+    requested = task() if requested is None else requested
+    before = set(left.journal.intents())
+    try:
+        return left.delegate(right.identity.node_id, SCOPE, requested)
+    except FederationUncertain:
+        # Setup for review tests must also honor a lost delivery response under
+        # load. Reconcile exactly that intent; do not invoke delegate twice.
+        created = set(left.journal.intents()) - before
+        assert len(created) == 1
+        intent_id = created.pop()
+        receipt = wait_receiver_receipt(right, intent_id)
+        assert receipt["result_ready"] is True, receipt
+        left.restore_link(right.identity.node_id)
+        assert left.reconcile(right.identity.node_id, intent_id)["disposition"] == "found"
+        recovered = left.journal.get(intent_id)["receipt"]
+        verify_result_receipt(recovered, objective=requested, scope=SCOPE)
+        return recovered
+
+
 @pytest.fixture
 def peers(tmp_path):
     controls, gateways = [], []
@@ -88,7 +120,7 @@ def peers(tmp_path):
 def test_real_non_arithmetic_task_artifact_and_review(peers):
     left, right, _, control, host, workspace = peers
     request = task()
-    receipt = left.delegate(right.identity.node_id, SCOPE, request)
+    receipt = delegate_for_review(left, right, request)
     assert receipt["result_ready"] is True, receipt
     assert receipt["effect_executed"] is True
     assert receipt["review_approved"] is False
@@ -172,7 +204,7 @@ def test_task_capability_grant_is_separate_from_federation_grant(peers):
 def test_receipt_binds_exact_task_scope_and_step_operations(peers):
     left, right, _, _, _, _ = peers
     request = task()
-    receipt = left.delegate(right.identity.node_id, SCOPE, request)
+    receipt = delegate_for_review(left, right, request)
     assert receipt["result_ready"], receipt
     with pytest.raises(FederationDenied):
         verify_result_receipt(receipt, objective=task("different"), scope=SCOPE)
@@ -198,7 +230,7 @@ def test_wire_never_carries_authority(change):
 
 def test_pairing_and_revocation_persist_with_protected_journal(peers):
     left, right, _, control, host, _ = peers
-    receipt = left.delegate(right.identity.node_id, SCOPE, task())
+    receipt = delegate_for_review(left, right)
     assert receipt["result_ready"], receipt
     path = right.journal._path
     raw = path.read_text(encoding="utf-8")
@@ -226,7 +258,7 @@ def test_pairing_and_revocation_persist_with_protected_journal(peers):
 
 def test_other_paired_peer_cannot_review_or_read_another_peers_task(peers, tmp_path):
     left, right, _, _, _, _ = peers
-    receipt = left.delegate(right.identity.node_id, SCOPE, task())
+    receipt = delegate_for_review(left, right)
     assert receipt["result_ready"], receipt
     control = ControlPlaneService.from_store(tmp_path / "third" / "control")
     owner = "third-owner"
@@ -250,7 +282,7 @@ def test_other_paired_peer_cannot_review_or_read_another_peers_task(peers, tmp_p
 
 def test_review_revalidates_local_and_remote_grants(peers):
     left, right, local, remote, _, _ = peers
-    receipt = left.delegate(right.identity.node_id, SCOPE, task())
+    receipt = delegate_for_review(left, right)
     assert receipt["result_ready"], receipt
     remote_grant = next(g for g in remote.authorization.list_grants(right.owner)["items"]
                         if g["capability"] == "federation.review")
@@ -354,10 +386,18 @@ def revoke_authority(right, control, left, authority, *, capability="federation.
 
 @pytest.mark.parametrize("authority", ["grant", "pair"])
 @pytest.mark.parametrize("boundary", ["after_steps", "artifact_registered"])
-def test_revocation_after_last_effect_keeps_results_private_and_never_replays(peers, monkeypatch, authority, boundary):
+@pytest.mark.parametrize("delayed_projection", [False, True])
+def test_revocation_after_last_effect_keeps_results_private_and_never_replays(peers, monkeypatch, authority, boundary, delayed_projection):
     left, right, _, control, _, workspace = peers
     waiting, release = threading.Event(), threading.Event()
     artifacts = []
+    if delayed_projection:
+        put = right.journal.put
+        def project_after_sender_deadline(record):
+            if record.get("receipt", {}).get("remote_state") == "UNCERTAIN":
+                time.sleep(5.2)
+            return put(record)
+        monkeypatch.setattr(right.journal, "put", project_after_sender_deadline)
     if boundary == "after_steps":
         original = control.governance.submit_for_policy
         submitted = []
@@ -386,8 +426,7 @@ def test_revocation_after_last_effect_keeps_results_private_and_never_replays(pe
             release.set()
         with pytest.raises(FederationUncertain):
             future.result(timeout=15)
-    saved = next(iter(right.journal.intents().values()))
-    receipt = saved["receipt"]
+    receipt = wait_receiver_receipt(right, next(iter(left.journal.intents())))
     assert receipt["remote_state"] == "UNCERTAIN" and receipt["result_ready"] is False, receipt
     assert receipt["effect_executed"] is True and receipt["automatic_resend"] is False
     assert not any(receipt.get(k) for k in ("result_document", "artifact_id", "artifact_sha256"))
@@ -465,7 +504,7 @@ def test_final_tls_checkpoint_drops_result_when_authority_was_revoked(peers, mon
 @pytest.mark.parametrize("boundary", ["last_child", "aggregate_completed", "delivery"])
 def test_review_revocation_preserves_partial_decisions_and_resumes_without_io(peers, monkeypatch, boundary):
     left, right, _, control, _, workspace = peers
-    receipt = left.delegate(right.identity.node_id, SCOPE, task())
+    receipt = delegate_for_review(left, right)
     before = workspace.joinpath("entrega.txt").stat().st_mtime_ns
     waiting, release = threading.Event(), threading.Event()
     if boundary == "delivery":
@@ -526,7 +565,7 @@ def test_review_revocation_preserves_partial_decisions_and_resumes_without_io(pe
 @pytest.mark.parametrize("journal_gap", ["none", "receiver", "sender"])
 def test_lost_review_receipt_survives_sender_restart_and_observes_central_completion(peers, monkeypatch, journal_gap):
     left, right, local, remote, _, workspace = peers
-    receipt = left.delegate(right.identity.node_id, SCOPE, task())
+    receipt = delegate_for_review(left, right)
     before = workspace.joinpath("entrega.txt").stat().st_mtime_ns
     if journal_gap == "receiver":
         original_mark = right.journal.mark

@@ -18,7 +18,7 @@ def _services(tmp_path: Path):
     return durable, context, control
 
 
-def test_work_item_separates_authority_from_execution_and_self_heals_locks(tmp_path: Path) -> None:
+def test_work_item_rejects_cross_run_execution_and_self_heals_checkout_locks(tmp_path: Path) -> None:
     durable, context, control = _services(tmp_path)
     try:
         owner = "owner-a"
@@ -35,27 +35,28 @@ def test_work_item_separates_authority_from_execution_and_self_heals_locks(tmp_p
         assert item["run_id"] == authority["run_id"]
         assert item["checkout_run_id"] is None
 
-        started = control.start_work_item_execution(
-            item["work_item_id"], owner, run_id=executor_a["run_id"]
-        )
-        assert started["checkout_run_id"] == executor_a["run_id"]
-        assert started["execution_run_id"] == executor_a["run_id"]
+        with pytest.raises(GovernanceConflict, match="run/state"):
+            control.start_work_item_execution(item["work_item_id"], owner, run_id=executor_a["run_id"])
+        assert control.work_item_info(item["work_item_id"], owner)["execution_run_id"] is None
+        checked_out = control.checkout_work_item(item["work_item_id"], owner, run_id=executor_a["run_id"])
+        assert checked_out["checkout_run_id"] == executor_a["run_id"]
 
         wrong_release = control.release_work_item_locks(
             item["work_item_id"], owner, run_id=executor_b["run_id"]
         )
         assert wrong_release["cleared"] == []
-        assert wrong_release["work_item"]["execution_run_id"] == executor_a["run_id"]
+        assert wrong_release["work_item"]["checkout_run_id"] == executor_a["run_id"]
 
         durable.transition_run(executor_a["run_id"], owner, "SUCCEEDED")
         checked_out = control.checkout_work_item(
             item["work_item_id"], owner, run_id=executor_b["run_id"]
         )
         assert checked_out["checkout_run_id"] == executor_b["run_id"]
-        resumed = control.start_work_item_execution(
-            item["work_item_id"], owner, run_id=executor_b["run_id"]
-        )
-        assert resumed["execution_run_id"] == executor_b["run_id"]
+        with pytest.raises(GovernanceConflict, match="run/state"):
+            control.start_work_item_execution(item["work_item_id"], owner, run_id=executor_b["run_id"])
+        control.release_work_item_locks(item["work_item_id"], owner, run_id=executor_b["run_id"])
+        started = control.start_work_item_execution(item["work_item_id"], owner, run_id=authority["run_id"])
+        assert started["execution_run_id"] == authority["run_id"]
     finally:
         context.close()
         durable.close()

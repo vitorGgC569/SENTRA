@@ -38,7 +38,7 @@ def test_refreshing_signed_endpoint_never_retries_a_request_after_possible_effec
     finally:server.shutdown();server.server_close();thread.join(5)
 
 
-@pytest.mark.parametrize('action,deadline',[('context',30),('machine_list',30),('dispatch',130),('coordinator_intent',130),('checkpoint',8)])
+@pytest.mark.parametrize('action,deadline',[('context',30),('machine_list',30),('dispatch',130),('coordinator_intent',130),('checkpoint',30)])
 def test_shell_deadlines_keep_one_request_identity_and_never_retry(tmp_path,monkeypatch,action,deadline):
     monkeypatch.setenv('SENTRA_CANVAS_AGENT_TOKEN','t'*40);monkeypatch.setenv('SENTRA_CANVAS_AGENT_PORT','12345')
     monkeypatch.setenv('SENTRA_CANVAS_AGENT_SCOPE','shell');seen=[]

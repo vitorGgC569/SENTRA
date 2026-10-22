@@ -65,7 +65,7 @@ def _bridge(tmp_path, **kwargs):
         str(tmp_path / "chan.sqlite3"), workspace=str(tmp_path),
         secret_resolver=lambda secret_id: "s3cr3t" if secret_id == "sec1" else "",
         trigger_admitter=fake_admitter, trigger_lookup=fake_lookup,
-        outbound_sender=lambda channel, recipient, payload_sha: {
+        outbound_sender=lambda request, channel, recipient, payload: {
             "provider_message_id": "pm-1"},
         external_unsubscriber=lambda channel, external_id: {
             "removed": True, "reference": external_id},
@@ -110,6 +110,9 @@ def test_channel_enable_ingest_dedupe_disable(tmp_path):
 
 
 def test_channel_outbound_two_stage_receipt(tmp_path):
+    from pulso_test_authority import make_authority
+    from sentra_runtime.contracts import OperationRequest
+    from sentra_interop.workflow_contracts import digest
     bridge = _bridge(tmp_path)
     bridge.enable(owner="o", subscription_id="sub1", channel="telegram",
                   project_id="ws1", allow_workspaces=["ws-team"],
@@ -119,14 +122,34 @@ def test_channel_outbound_two_stage_receipt(tmp_path):
         owner="o", subscription_id="sub1", recipient="U123",
         payload={"text": "digest ready"}, dedupe_key="ntfy-0001")
     assert staged["state"] == "STAGED"
-    sent = asyncio.run(bridge.send_staged(dedupe_key="ntfy-0001"))
+    with pytest.raises(ChannelDenied, match="admitted"):
+        asyncio.run(bridge.send_staged(dedupe_key="ntfy-0001"))
+    bridge.bind_sender(owner="o", subscription_id="sub1", connector_id="tg1", operator_approved=True)
+    authority = make_authority(tmp_path / "central", "channel:send", owner="o")
+    async def provider(request):
+        return await bridge.send_staged(dedupe_key="ntfy-0001")
+    authority.bind_provider("channel:send", provider)
+    request = OperationRequest("op-send", "agent1", "machine1", "channel:send", "wi1", "send-0001",
+        {"connector_id":"tg1", "recipient":"U123", "text_sha256":digest("digest ready")})
+    try:
+        result = asyncio.run(authority.start(request))
+        assert result.state == "SUCCEEDED", result
+        sent = result.evidence["payload"]
+    finally:
+        authority.control.durable.close()
     assert sent["state"] == "SENT"
     assert sent["delivered"] is False
     with pytest.raises(ChannelDenied):
         bridge.mark_delivered(dedupe_key="missing", receipt_id="r1")
-    delivered = bridge.mark_delivered(dedupe_key="ntfy-0001", receipt_id="rcpt-7")
+    receipt = {"provider_receipt":{"external_message_id":"pm-1"}}
+    bridge.channel_service = SimpleNamespace(owner="o", owner_receipt=lambda **kwargs: receipt)
+    bridge.note_provider_ack(owner="o", dedupe_key="ntfy-0001", operation_id="op-send")
+    with pytest.raises(ChannelDenied, match="provider ACK is insufficient"):
+        bridge.mark_delivered(dedupe_key="ntfy-0001", receipt_id="op-send")
+    receipt["recipient_receipt"] = {"status":"delivered"}
+    delivered = bridge.mark_delivered(dedupe_key="ntfy-0001", receipt_id="op-send")
     assert delivered["state"] == "DELIVERED"
-    assert delivered["receipt_id"] == "rcpt-7"
+    assert delivered["receipt_id"] == "op-send"
 
 
 # -- timezone scheduling -------------------------------------------------
@@ -177,16 +200,11 @@ def test_conpty_gc_plan_review_only(tmp_path):
 
     path = str(tmp_path / "ctrl.sqlite3")
 
-    @contextmanager
     def connect(name):
         assert name == "execution_workspace"
         conn = sqlite3.connect(path, timeout=10)
         conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        return conn
 
     control = SimpleNamespace(store=SimpleNamespace(connect=connect))
     ledger = PersistentConPTYLedger(control)
@@ -217,7 +235,7 @@ def test_channel_resolve_send_server_side(tmp_path):
     assert resolved == {"connector_id": "tg-connector-1",
                         "recipient": "U123", "text": "digest ready",
                         "subscription_id": "sub1", "dedupe_key": "ntfy-0002"}
-    with pytest.raises(ChannelDenied):
+    with pytest.raises(PermissionError, match="another owner"):
         bridge.resolve_send("someone-else", "ntfy-0002")
 
 
@@ -230,16 +248,11 @@ def test_terminal_write_gate_fenced(tmp_path):
 
     path = str(tmp_path / "ctrl.sqlite3")
 
-    @contextmanager
     def connect(name):
         assert name == "execution_workspace"
         conn = sqlite3.connect(path, timeout=10)
         conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        return conn
 
     control = SimpleNamespace(store=SimpleNamespace(connect=connect))
     canvas = SimpleNamespace(store=SimpleNamespace(
@@ -254,8 +267,8 @@ def test_terminal_write_gate_fenced(tmp_path):
     fenced = gate.request("canvas:vitor", workspace_id="ws1",
                           terminal_id="t1", data="ls\n", principal="vitor")
     assert fenced["capability_id"] == "terminal:write"
-    assert fenced["arguments"]["payload_sha256"] == hashlib.sha256(
-        b"ls\n").hexdigest()
+    from sentra_executors.conpty_sessions import text_digest
+    assert fenced["arguments"]["payload_sha256"] == text_digest("ls\n")
     assert fenced["scope"]["run_id"] == "run1"
     assert fenced["effects_started"] is False
     with pytest.raises(PermissionError):
@@ -273,14 +286,10 @@ def test_policy_pause_and_cost_gate(tmp_path):
 
     path = str(tmp_path / "gov.sqlite3")
 
-    @contextmanager
     def connect():
         conn = sqlite3.connect(path, timeout=10)
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        conn.row_factory = sqlite3.Row
+        return conn
 
     store = RoutinePolicyStore(connect)
     routine = {"routine_id": "r1", "owner": "o",

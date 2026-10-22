@@ -380,7 +380,7 @@ def classify_surface(name: str, image_path: str = "", command_line: str = "") ->
 
 def sample_surfaces(processes: Iterable[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Sum RSS and CPU time for canvas, terminal, and VM processes only."""
-    buckets = {
+    buckets: dict[str, Any] = {
         name: {"rss_bytes": 0, "cpu_time_s": 0.0, "pids": set()}
         for name in _SURFACES
     }

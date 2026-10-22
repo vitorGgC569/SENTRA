@@ -208,7 +208,9 @@ class CLIConfig:
         if env_token:
             return (env_token,)
 
-        candidates: list[Path] = [self.state_root / "web-models" / "gateway-admin.token"]
+        candidates: list[Path] = []
+        if self.state_root is not None:
+            candidates.append(self.state_root / "web-models" / "gateway-admin.token")
         try:
             from sentra_remote.product import ProductPaths
 

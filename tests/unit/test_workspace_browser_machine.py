@@ -24,7 +24,7 @@ def test_workspace_browser_observation_receipt_and_revocation(shell):
         actor=dot(call,'Browser');conversation=call('conversation_create',dot_id=actor['dot_id'])
         origin='http://127.0.0.1:'+str(server.server_port)
         machine=app.center_configure_machine(scope['project_id'],actor['agent_id'],'browser',
-            profiles=[{'name':'test','mode':'loopback','allowed_origins':[origin]}],headless=True)
+            profiles=[{'name':'test','mode':'loopback','allowed_origins':[origin],'remember_login':True}],headless=True)
         control=app._shell_service();owner=app._runtime().owner;run=app._runtime().run(scope['project_id'])
         item=control.create_work_item(run['run_id'],owner,objective='Observe local fixture through actual browser',
             assignee_agent_id=actor['agent_id'],required_capabilities=['browser:operate'],
@@ -44,7 +44,7 @@ def test_workspace_browser_observation_receipt_and_revocation(shell):
         session=opened['evidence']['session_id']
         navigated=execute({'action':'navigate','session_id':session,'url':origin+'/fixture'})
         assert navigated['state']=='SUCCEEDED',navigated
-        observed=execute({'action':'observe','session_id':session,'include_image':True})
+        observed=execute({'action':'observe','session_id':session,'include_image':True,'include_design':True})
         assert observed['state']=='SUCCEEDED',observed
         assert 'Review draft' in observed['evidence']['semantic_summary']
         image=observed['evidence']['viewport_image']
@@ -53,6 +53,9 @@ def test_workspace_browser_observation_receipt_and_revocation(shell):
         assert image['sha256']==hashlib.sha256(raw).hexdigest()
         assert image['page_id']==observed['evidence']['page_id']
         assert image['observation_id']==observed['evidence']['observation_id']
+        designed=next(e for e in observed['evidence']['elements'] if e['role']=='button')
+        assert designed['design']['box']['width']>0
+        assert designed['design']['selector'] and designed['design']['styles']['font-size']
         receipt=app.shell_bridge({'action':'dot_computer_read',**scope,'dot_id':actor['dot_id'],
             'conversation_id':conversation['conversation_id'],'request':{'action':'machine_observe','target_operation_id':observed['operation_id']}})['value']
         assert receipt['state']=='SUCCEEDED'
@@ -85,6 +88,11 @@ def test_workspace_browser_observation_receipt_and_revocation(shell):
         assert gateway_call(app,query)['value']['operation']['operation_id']==opened['operation_id']
         devices.revoke(paired['device_id'])
         with pytest.raises(PermissionError):gateway_call(app,query)
+        assert execute({'action':'profile.forget','profile':'test'})['state']=='SUCCEEDED'
+        assert execute({'action':'close','session_id':session})['state']=='SUCCEEDED'
+        forgotten=execute({'action':'profile.forget','profile':'test'})
+        assert forgotten['state']=='SUCCEEDED' and forgotten['evidence']['login_persistence']=='forgotten'
         control.authorization.revoke(grant['grant_id'],owner)
         with pytest.raises(PermissionError):execute({'action':'navigate','session_id':session,'url':origin+'/must-not-run'})
+        with pytest.raises(PermissionError):execute({'action':'profile.forget','profile':'test'})
     finally:server.shutdown();server.server_close();thread.join(timeout=5)

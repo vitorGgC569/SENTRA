@@ -1,7 +1,8 @@
 """Persist Playwright session identity and evidence without replaying a browser.
 
 An ephemeral browser cannot reattach across process death. Recovery exposes LOST
-and retained evidence; it never restores cookies or repeats navigation/input.
+and retained evidence, without repeating navigation/input. An explicit new open
+may restore an opted-in protected login; it never revives the lost process.
 """
 from __future__ import annotations
 
@@ -27,6 +28,8 @@ class PersistentPlaywrightBackend:
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         journal = SessionJournal(str(directory / 'browser.sqlite3'),
             AuthorizedPaths((str(directory),), (str(directory),)))
+        from .browser_profiles import BrowserProfiles
+        backend.profile_store=BrowserProfiles(directory)
         return cls(backend, journal)
 
     @staticmethod
@@ -43,6 +46,12 @@ class PersistentPlaywrightBackend:
                                          limit=arguments.get('limit', 64))
             if action == 'diagnostics' and 'session_id' not in arguments:
                 return self.backend.run(binding, arguments)
+            if action == 'profile.forget':
+                prior=self.journal.reserve_effect(arguments['_operation_id'],scope,arguments)
+                if prior is not None:return prior
+                result=self.backend.run(binding,arguments)
+                self.journal.complete_effect(arguments['_operation_id'],result)
+                return result
             row = None
             if action == 'open':
                 prior = self.journal.reserve_effect(arguments['_operation_id'], scope, arguments)
@@ -117,5 +126,5 @@ class PersistentPlaywrightBackend:
 
     def shutdown(self):
         # Journal remains available to the next host. Do not report recovery of
-        # cookies/pages/processes; the real backend shuts down only what it owns.
+        # pages/processes; the real backend shuts down only what it owns.
         self.backend.shutdown()

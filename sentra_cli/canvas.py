@@ -179,9 +179,12 @@ class CanvasBridge:
                      "Content-Type":"application/json"})
         opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),_NoRedirect())
         timeout = 130 if body.get("action") in {"machine_execute", "vm_create", "vm_frame", "vm_input", "verify_result", "isolate_work", "review_worktrees"} else 8
-        if body.get('action') in {'context','machine_list'}:
+        if body.get('action') in {'context','machine_list','checkpoint'}:
             # These reads enumerate several independently authorized resources.
             # Parallel Windows worktrees can exceed the old eight-second bound.
+            # Admission checkpoints are also single read-only revalidations;
+            # a busy host must not strand an otherwise live model turn after
+            # metadata effects. The authority/fence is still checked on reply.
             # This widens one read deadline; no request is retried.
             timeout=30
         if self.is_shell_scope and body.get('action') in {

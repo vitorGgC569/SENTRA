@@ -162,6 +162,7 @@ class RealPlaywrightAcceptance(unittest.TestCase):
         Handler.cross_origin = f'http://127.0.0.2:{self.cross_server.server_port}'
         binding = PlaywrightBrowserBinding('browser.real', (
             NetworkProfile('loopback', 'loopback', (self.url,)),
+            NetworkProfile('remembered', 'loopback', (self.url,), remember_login=True),
             NetworkProfile('two-origins','loopback',(self.url,Handler.cross_origin)),NetworkProfile('offline')),
             artifact_paths=AuthorizedPaths((str(self.root),), (str(self.root),)))
         self.backend = PlaywrightBrowserBackend()
@@ -172,6 +173,7 @@ class RealPlaywrightAcceptance(unittest.TestCase):
         self.registry = ExecutorRegistry(authorize=policy)
         self.declaration.register(self.registry)
         self.counter = 0
+        self.binding = binding
 
     async def invoke(self, **arguments):
         self.counter += 1
@@ -239,6 +241,54 @@ class RealPlaywrightAcceptance(unittest.TestCase):
             self.assert_success(await self.invoke(action='network', session_id=second, profile='offline'))
             denied = await self.invoke(action='navigate', session_id=second, url=self.url + '/form')
             self.assertEqual(denied.error, 'browser_navigation_network_denied')
+        asyncio.run(scenario())
+
+    def test_explicit_protected_login_survives_owned_browser_restart(self):
+        from sentra_executors.browser_profiles import BrowserProfiles
+        async def scenario():
+            self.backend.profile_store = BrowserProfiles(self.root / 'protected-profiles')
+            first = self.assert_success(await self.invoke(action='open', profile='remembered'))
+            sid = first['session_id']
+            self.assert_success(await self.invoke(action='navigate', session_id=sid, url=self.url + '/form'))
+            observed = self.assert_success(await self.invoke(action='observe', session_id=sid))
+            self.assert_success(await self.invoke(action='fill', session_id=sid, text='remembered acceptance',
+                **self.reference(observed, 'textbox', 'Name')))
+            observed = self.assert_success(await self.invoke(action='observe', session_id=sid))
+            self.assert_success(await self.invoke(action='click', session_id=sid,
+                **self.reference(observed, 'button', 'Save')))
+            self.assert_success(await self.invoke(action='close', session_id=sid))
+            self.backend.shutdown()
+            self.backend = PlaywrightBrowserBackend()
+            self.addCleanup(self.backend.shutdown)
+            self.backend.profile_store = BrowserProfiles(self.root / 'protected-profiles')
+            policy = lambda request: PolicyDecision(True, 'explicit restart acceptance')
+            declaration = declare_playwright_browser_machine(machine_id='real-browser',
+                owner_principal_id='acceptance', bindings=(self.binding,), policy=policy, backend=self.backend)
+            self.registry = ExecutorRegistry(authorize=policy)
+            declaration.register(self.registry)
+            second = self.assert_success(await self.invoke(action='open', profile='remembered'))
+            self.assertEqual(second['login_persistence'], 'restored')
+            sid = second['session_id']
+            self.assert_success(await self.invoke(action='navigate', session_id=sid, url=self.url + '/form'))
+            observed = self.assert_success(await self.invoke(action='observe', session_id=sid))
+            text = self.assert_success(await self.invoke(action='read', session_id=sid,
+                **self.reference(observed, 'document')))['text']
+            self.assertIn('remembered acceptance', text)
+            self.assert_success(await self.invoke(action='fill',session_id=sid,text='updated acceptance',
+                **self.reference(observed,'textbox','Name')))
+            observed=self.assert_success(await self.invoke(action='observe',session_id=sid))
+            self.assert_success(await self.invoke(action='click',session_id=sid,**self.reference(observed,'button','Save')))
+            self.assert_success(await self.invoke(action='navigate',session_id=sid,url=self.url+'/form'))
+            observed=self.assert_success(await self.invoke(action='observe',session_id=sid))
+            text=self.assert_success(await self.invoke(action='read',session_id=sid,**self.reference(observed,'document')))['text']
+            self.assertIn('updated acceptance',text)
+            self.assertNotIn('remembered acceptance',text)
+            self.assert_success(await self.invoke(action='profile.forget',profile='remembered'))
+            self.assert_success(await self.invoke(action='close', session_id=sid))
+            self.assert_success(await self.invoke(action='profile.forget',profile='remembered'))
+            empty=self.assert_success(await self.invoke(action='open',profile='remembered'))
+            self.assertEqual(empty['login_persistence'],'empty')
+            self.assert_success(await self.invoke(action='close',session_id=empty['session_id']))
         asyncio.run(scenario())
 
     def test_redirect_never_reaches_unapproved_origin(self):

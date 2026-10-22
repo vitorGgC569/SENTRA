@@ -571,10 +571,11 @@ class PeerGateway:
         if self.drop_before_receipt and pinned_pem is not None and frame.get("kind") != "hello":
             # The drop is applied after the bytes are written, below.
             pass
-        raw = socket.create_connection((host, port), timeout=5)
-        raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        tls = self._client_context(pinned_pem).wrap_socket(raw, server_hostname=None)
+        raw = tls = None
         try:
+            raw = socket.create_connection((host, port), timeout=5)
+            raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            tls = self._client_context(pinned_pem).wrap_socket(raw, server_hostname=None)
             key = __import__("base64").b64encode(__import__("os").urandom(16)).decode("ascii")
             tls.sendall(
                 (
@@ -616,8 +617,10 @@ class PeerGateway:
         except (OSError, ssl.SSLError, TimeoutError, json.JSONDecodeError, UnicodeError) as exc:
             raise FederationUncertain("link lost before receipt") from exc
         finally:
+            connection = tls if tls is not None else raw
             try:
-                tls.close()
+                if connection is not None:
+                    connection.close()
             except OSError:
                 pass
 
@@ -638,8 +641,12 @@ class PeerGateway:
 
     def _handle(self, client):
         try:
+            # An unauthenticated peer must not retain a bounded listener slot
+            # forever by opening TCP and never finishing TLS/HTTP framing.
+            client.settimeout(5)
+            client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             tls = self._server_ctx.wrap_socket(client, server_side=True)
-        except ssl.SSLError:
+        except OSError:
             client.close()
             self._slots.release()
             return

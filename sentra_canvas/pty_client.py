@@ -57,10 +57,16 @@ class PtyDaemonClient:
             environment={k:v for k,v in os.environ.items() if not k.startswith('_PYI_') and k!='_MEIPASS2'}
             environment['PYINSTALLER_RESET_ENVIRONMENT']='1'
             flags=(subprocess.DETACHED_PROCESS|subprocess.CREATE_NEW_PROCESS_GROUP) if os.name=='nt' else 0
-            subprocess.Popen(argv,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=flags,start_new_session=os.name!='nt')
-            for _ in range(50):
+            child=subprocess.Popen(argv,env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=flags,start_new_session=os.name!='nt')
+            # A cold frozen application can take more than five seconds while
+            # Windows scans its payload. Poll only the one launched owner;
+            # waiting never repeats create/write effects or spawns a fallback.
+            deadline=time.monotonic()+30
+            while time.monotonic()<deadline:
                 try:return cls(state)
-                except (OSError,ValueError,KeyError,RuntimeError):time.sleep(.1)
+                except (OSError,ValueError,KeyError,RuntimeError):
+                    if child.poll() is not None:raise TerminalError('PTY daemon exited during startup; no fallback spawn') from None
+                    time.sleep(.1)
             raise TerminalError("PTY daemon did not become available; no fallback spawn")
         finally:lock.close()
 

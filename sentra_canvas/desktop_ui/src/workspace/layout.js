@@ -16,9 +16,23 @@ export function restoreLayout(storage,key,fallback=initialLayout){try{const raw=
 export function saveLayout(storage,key,value){if(!validateLayout(value))throw Error('Invalid workspace layout');try{storage?.setItem('sentra-workspace-v1:'+key,JSON.stringify(value));}catch{/* Quota/private mode affects layout only. */}}
 export function moveTab(state,from,to,id,before){
  const source=state.panes[from],target=state.panes[to];if(!source||!target)return state;
- const tab=source.tabs.find(t=>t.id===id);if(!tab)return state;
+ const tab=source.tabs.find(t=>t.id===id);if(!tab||from!==to&&target.tabs.length>=30)return state;
  const panes={...state.panes,[from]:{...source,tabs:source.tabs.filter(t=>t.id!==id)}};
  const dest=from===to?panes[from]:target;const tabs=dest.tabs.filter(t=>t.id!==id);let at=tabs.findIndex(t=>t.id===before);if(at<0)at=tabs.length;tabs.splice(at,0,tab);
  panes[to]={...dest,tabs,active:id};if(from!==to&&source.active===id)panes[from].active=panes[from].tabs.at(-1)?.id||null;
  return {...state,panes,focused:to};
+}
+
+// Edge drops are a single presentation transaction. They never create sessions.
+export function dropTabAtEdge(state,from,to,id,edge,newId){
+ if(!['left','right','top','bottom'].includes(edge)||!state.panes[to]||!state.panes[from]?.tabs.some(t=>t.id===id)||groups(state.tree).length>=8||state.panes[newId])return state;
+ const before=['left','top'].includes(edge),next=leaf(newId);
+ const split=old=>({type:'split',direction:['left','right'].includes(edge)?'horizontal':'vertical',ratio:.5,first:before?next:old,second:before?old:next});
+ const prepared={...state,tree:updateTree(state.tree,to,split),panes:{...state.panes,[newId]:{tabs:[],active:null}}};
+ return moveTab(prepared,from,newId,id);
+}
+export function dropEdge(rect,x,y){
+ const dx=Math.min(48,rect.width*.2),dy=Math.min(48,rect.height*.2);
+ const choices=[['left',(x-rect.left)/dx],['right',(rect.right-x)/dx],['top',(y-rect.top)/dy],['bottom',(rect.bottom-y)/dy]].filter(([,distance])=>distance>=0&&distance<=1).sort((a,b)=>a[1]-b[1]);
+ return choices[0]?.[0]||null;
 }

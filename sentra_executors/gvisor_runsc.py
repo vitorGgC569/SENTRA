@@ -113,7 +113,7 @@ def validate_oci_bundle(binding: RunscBinding) -> str:
     root = payload.get("root")
     process = payload.get("process")
     linux = payload.get("linux")
-    if (any(type(x) is not dict for x in (root, process, linux))
+    if (not isinstance(root, dict) or not isinstance(process, dict) or not isinstance(linux, dict)
             or set(root) != {"path", "readonly"}
             or set(process) != {"args", "cwd", "env", "user",
                                 "noNewPrivileges", "capabilities"}

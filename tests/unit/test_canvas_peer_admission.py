@@ -40,6 +40,7 @@ def local_item(hosts, *,remote_peer=None,remote_subject="WI-REMOTE"):
     app,ws,local,origin,a,b,alice,bob=hosts
     rt=app._runtime()
     run=rt.run(ws)
+    rt.control.ensure_agent(run["run_id"], rt.owner, agent_id=local["id"], role=local["role"])
     item=rt.governance.create_work_item(
         run["run_id"],rt.owner,
         work_item_id="WI-LOCAL",

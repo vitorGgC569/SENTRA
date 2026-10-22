@@ -62,6 +62,7 @@ class ContextBusService:
         store=None,
     ) -> None:
         from .control_store import create_control_plane_store
+        from .postgres_store import PostgresConnection
         self.store = store or create_control_plane_store(state_root)
         if getattr(self.store, "backend", "sqlite") == "postgres":
             state_root = self.store.state_root
@@ -74,6 +75,8 @@ class ContextBusService:
         self.lock = threading.RLock()
         if getattr(self.store, "backend", "sqlite") == "postgres":
             self.db = self.store.connect("context")
+            if not isinstance(self.db, PostgresConnection):
+                raise TypeError("native PostgreSQL connection required")
             self.lock = self.db.scope_lock()
         else:
             self.store.assert_active()
@@ -204,7 +207,8 @@ class ContextBusService:
             self.db.commit()
 
     def close(self) -> None:
-        if self.store.backend == "postgres":
+        from .postgres_store import PostgresConnection
+        if isinstance(self.db, PostgresConnection):
             with self.db._mutex:
                 self.db.close()
             return

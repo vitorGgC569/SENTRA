@@ -1,8 +1,9 @@
 """Real, opt-in Playwright executor. Does not change the read-only lab adapter.
 
 The sync Playwright API is confined to one actor thread (GuardedExecutor's
-to_thread pool does not preserve thread affinity). No persistent profile or
-remote CDP attachment: internal CDP belongs solely to the launched browser.
+to_thread pool does not preserve thread affinity). Contexts are isolated; named
+profiles can explicitly restore owner-protected login state. There is no remote
+CDP attachment: internal CDP belongs solely to the launched browser.
 Browser routing is an application control, not OS network containment.
 """
 from __future__ import annotations
@@ -27,7 +28,7 @@ from .rpa import (AuthorizedPaths, DiagnosedExecutor, ExecutorFailure,
 BROWSER_ACTIONS = frozenset({'open', 'close', 'navigate', 'observe', 'click',
                             'fill', 'read', 'screenshot', 'evidence', 'network',
                             'diagnostics', 'capture.start', 'capture.stop',
-                            'session.list', 'session.status', 'session.events', 'session.export'})
+                            'session.list', 'session.status', 'session.events', 'session.export', 'profile.forget'})
 RESOURCE_TYPES = frozenset({'document', 'stylesheet', 'image', 'media', 'font',
                            'script', 'xhr', 'fetch', 'texttrack', 'eventsource', 'other'})
 
@@ -63,9 +64,10 @@ class NetworkProfile:
     max_requests: int = 1000
     max_redirects: int = 8
     max_response_bytes: int = 16 * 1024 * 1024
+    remember_login: bool = False
 
     def __post_init__(self):
-        if (not self.name or self.mode not in {'offline', 'loopback', 'allowlist'} or
+        if (type(self.remember_login) is not bool or not self.name or self.mode not in {'offline', 'loopback', 'allowlist'} or
                 not self.methods or not set(self.methods) <= {'GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'} or
                 not self.resource_types or not set(self.resource_types) <= RESOURCE_TYPES or
                 type(self.max_requests) is not int or not 1 <= self.max_requests <= 10000 or
@@ -163,6 +165,7 @@ class _Session:
     capture: dict | None = None
     created_at: float = field(default_factory=time.monotonic)
     last_action: str = 'open'
+    login_persistence: str = 'disabled'
     network_mutation_dispatched: bool = False
 
     def record(self, kind, **data):
@@ -273,6 +276,20 @@ _META = """el => {
        'date','datetime-local','month','time','week'].includes(el.type)))};
 }"""
 
+_DESIGN_META = """el => {
+  const style=getComputedStyle(el), parts=[]; let current=el;
+  for(let i=0; current && current.nodeType===1 && i<6; i++, current=current.parentElement) {
+    const tag=current.tagName.toLowerCase();
+    if(current.id) { parts.unshift(tag+'#'+CSS.escape(current.id).slice(0,128)); break; }
+    const siblings=Array.from(current.parentElement?.children||[]).filter(n=>n.tagName===current.tagName);
+    parts.unshift(tag+(siblings.length>1?':nth-of-type('+(siblings.indexOf(current)+1)+')':''));
+  }
+  const properties=['color','background-color','font-family','font-size','font-weight',
+    'line-height','display','position','padding','margin','border-radius','gap','align-items','justify-content'];
+  return {selector:parts.join(' > ').slice(0,1024),styles:Object.fromEntries(
+    properties.map(key=>[key,style.getPropertyValue(key).slice(0,256)]))};
+}"""
+
 
 class _TargetChannel:
     """CDP non-flattened child transport; policy is armed before target runs.
@@ -336,6 +353,26 @@ class PlaywrightBrowserBackend:
         self._diagnostics = {}
         self._browser_handle = None
         self._deadline_terminated = False
+        self.profile_store = None
+
+    @staticmethod
+    def _profile_binding(binding):
+        from dataclasses import asdict
+        return hashlib.sha256(json.dumps(asdict(binding),sort_keys=True,default=str).encode()).hexdigest()
+
+    def _save_login(self,session):
+        if not session.profile.remember_login or session.login_persistence=='forgotten':return
+        if self.profile_store is None:raise ExecutorFailure('browser_login_store_unavailable')
+        effect_checkpoint()
+        state=session.context.storage_state()
+        self.profile_store.save(session.scope,self._profile_binding(session.binding),session.profile.name,state)
+        session.login_persistence='saved'
+
+    def _try_save_login(self,session):
+        try:self._save_login(session)
+        except Exception:
+            session.login_persistence='unavailable'
+            session.record('login_persistence_unavailable')
 
     def run(self, binding, arguments):
         if arguments['action'] == 'diagnostics':
@@ -580,6 +617,7 @@ class PlaywrightBrowserBackend:
             'state': 'closed' if closed else ('page_closed' if s.page.is_closed() else 'open'),
             'last_action': s.last_action, 'age_seconds': round(time.monotonic()-s.created_at, 3),
             'profile': s.profile.name, 'request_count': s.requests, 'event_sequence': s.sequence,
+            'login_persistence':s.login_persistence,
             'evidence_bytes':s.event_bytes,
             'frames_observed': len(s.frame_ids), 'guarded_targets': len(s.channels),
             'capture_state': s.capture['state'] if s.capture else 'inactive',
@@ -596,6 +634,10 @@ class PlaywrightBrowserBackend:
             raise ExecutorFailure('browser_session_limit')
         self._launch(b, deadline)
         profile = next(p for p in b.network_profiles if p.name == a['profile'])
+        saved=None
+        if profile.remember_login:
+            if self.profile_store is None:raise ExecutorFailure('browser_login_store_unavailable')
+            saved=self.profile_store.load(a['_scope'],self._profile_binding(b),profile.name)
         before_contexts = set(self._root.send('Target.getBrowserContexts')['browserContextIds'])
         effect_checkpoint()
         context = self._browser.new_context(accept_downloads=False, service_workers='block',
@@ -603,9 +645,18 @@ class PlaywrightBrowserBackend:
             viewport={'width': 1280, 'height': 800})
         try:
             context.add_init_script(script=_INIT)
+            if saved is not None:
+                # Playwright's storage_state restore creates an internal page
+                # before our target guards exist. Restore into this context
+                # without creating any unguarded page or weakening CDP pauses.
+                context.add_cookies(saved.get('cookies',[]))
+                origins=json.dumps(saved.get('origins',[]),ensure_ascii=True)
+                marker=json.dumps('__sentra_login_restore_'+uuid.uuid4().hex)
+                context.add_init_script(script="(() => { const key="+marker+"; if(sessionStorage.getItem(key))return; const origins="+origins+"; const item=origins.find(value=>value.origin===location.origin); if(item){sessionStorage.setItem(key,'1');for(const entry of item.localStorage || [])localStorage.setItem(entry.name,entry.value);} })();")
             # Create after HTTP and websocket controls are installed.
             session = _Session(context, None, b, a['_scope'], profile,
                                events=deque(maxlen=b.evidence_events), active_deadline=deadline)
+            session.login_persistence='restored' if saved is not None else 'empty' if profile.remember_login else 'disabled'
             added_contexts = set(self._root.send('Target.getBrowserContexts')['browserContextIds']) - before_contexts
             if len(added_contexts) != 1:
                 raise ExecutorFailure('browser_context_identity_ambiguous')
@@ -648,7 +699,7 @@ class PlaywrightBrowserBackend:
             self._sessions[sid] = session
             self._cache_diagnostics(sid, session)
             return {'session_id': sid, 'page_id': session.page_id, 'profile': profile.name,
-                    'isolated_context': True, 'providers': dependency_versions()}
+                    'isolated_context': True,'login_persistence':session.login_persistence, 'providers': dependency_versions()}
         except Exception:
             context.close()
             raise
@@ -659,15 +710,15 @@ class PlaywrightBrowserBackend:
             raise ExecutorFailure('browser_session_scope_mismatch')
         return s
 
-    def _observe(self, s, deadline):
+    def _observe(self, s, deadline, include_design=False):
         for attempt in range(3):
-            try: return self._observe_once(s,deadline)
+            try: return self._observe_once(s,deadline,include_design)
             except ExecutorFailure as exc:
                 if exc.code!='page_changed_during_observation' or attempt==2 or time.monotonic()>=deadline:
                     raise
         raise ExecutorFailure('page_changed_during_observation')
 
-    def _observe_once(self, s, deadline):
+    def _observe_once(self, s, deadline, include_design=False):
         s.invalidate()
         s.observations += 1
         frames = list(s.page.frames)
@@ -693,7 +744,9 @@ class PlaywrightBrowserBackend:
                     url=redacted_url(frame.url), name=frame.name[:128], **scan))
                 # Playwright CSS locators pierce open shadow roots. Handles,
                 # not re-resolved nth selectors, are retained for later actions.
-                locator = frame.locator('body,button,a[href],input,textarea,select,[role],[contenteditable=true],h1,h2,h3,summary')
+                selector='body,button,a[href],input,textarea,select,[role],[contenteditable=true],h1,h2,h3,summary'
+                if include_design:selector+=',main,section,article,header,footer,nav,div,span,img,label,p'
+                locator = frame.locator(selector)
                 count = locator.count()
                 for index in range(min(count, s.binding.max_elements * 10)):
                     if time.monotonic() >= deadline:
@@ -707,7 +760,12 @@ class PlaywrightBrowserBackend:
                     handles.append(handle)
                     if handle.is_visible():
                         ref = f'e{len(elements)}'
-                        elements.append(dict(handle.evaluate(_META), element_ref=ref, frame_id=fid))
+                        metadata=dict(handle.evaluate(_META), element_ref=ref, frame_id=fid)
+                        if include_design:
+                            box=handle.bounding_box()
+                            if box and all(isinstance(box.get(k),(int,float)) and abs(box[k])<=1_000_000 for k in ('x','y','width','height')):
+                                metadata['design']={**handle.evaluate(_DESIGN_META),'box':box}
+                        elements.append(metadata)
                         s.references[ref], s.reference_frames[ref] = handle, frame
                     else:
                         handle.dispose()
@@ -764,12 +822,24 @@ class PlaywrightBrowserBackend:
         try:
             if action == 'open':
                 return self._new_session(b, a, deadline)
+            if action == 'profile.forget':
+                if self.profile_store is None:raise ExecutorFailure('browser_login_store_unavailable')
+                identity=self.profile_store.identity(a['_scope'],self._profile_binding(b),a['profile'])
+                effect_checkpoint()
+                # Forget the saved login, without claiming to log out a live
+                # page. Fence every matching context against saving it again.
+                for item in self._sessions.values():
+                    if self.profile_store.identity(item.scope,self._profile_binding(item.binding),item.profile.name)==identity:
+                        item.login_persistence='forgotten'
+                self.profile_store.forget(a['_scope'],self._profile_binding(b),a['profile'])
+                return {'profile':a['profile'],'login_persistence':'forgotten'}
             s = self._session(b, a)
             s.active_deadline = deadline
             s.network_mutation_dispatched=False
             s.last_action = action
             self._cache_diagnostics(a['session_id'], s)
             if action == 'close':
+                self._try_save_login(s)
                 if s.capture is not None: raise ExecutorFailure('browser_capture_export_required_before_close')
                 s.invalidate()
                 dispatched = True
@@ -821,6 +891,8 @@ class PlaywrightBrowserBackend:
                 return {'artifact': artifact, 'capture_state': 'exported', 'prior_state': previous}
             if action == 'network':
                 profile = next(p for p in b.network_profiles if p.name == a['profile'])
+                if profile.name!=s.profile.name and (profile.remember_login or s.profile.remember_login):
+                    raise ExecutorFailure('persistent_login_profile_requires_new_session')
                 s.invalidate()
                 effect_checkpoint()
                 dispatched = True
@@ -843,7 +915,7 @@ class PlaywrightBrowserBackend:
                 return {'url': redacted_url(s.page.url), 'status': response.status if response else None,
                         'page_id': s.page_id, 'requires_new_observation': True}
             if action == 'observe':
-                observation = self._observe(s, deadline)
+                observation = self._observe(s, deadline, a.get('include_design',False))
                 if a.get('include_image'):
                     effect_checkpoint()
                     payload = s.page.screenshot(type='jpeg', quality=70, full_page=False, timeout=timeout)
@@ -907,6 +979,7 @@ class PlaywrightBrowserBackend:
                                   evidence={'provider_exception_type': type(exc).__name__}) from exc
         finally:
             if s is not None and a.get('session_id') in self._sessions:
+                if time.monotonic()<deadline-1:self._try_save_login(s)
                 self._cache_diagnostics(a['session_id'], s)
 
     def shutdown(self):
@@ -958,8 +1031,8 @@ class PlaywrightBrowserExecutor(DiagnosedExecutor):
         action = a.get('action')
         if type(action) is not str or action not in b.actions:
             raise ValueError('browser_action_denied')
-        fields = {'open': {'profile'}, 'close': set(), 'network': {'profile'},
-            'navigate': {'url'}, 'observe': {'include_image'}, 'screenshot': {'output'},
+        fields = {'open': {'profile'}, 'profile.forget':{'profile'}, 'close': set(), 'network': {'profile'},
+            'navigate': {'url'}, 'observe': {'include_image','include_design'}, 'screenshot': {'output'},
             'evidence': {'after_sequence'}, 'diagnostics': set(),
             'capture.start': set(), 'capture.stop': {'output'},
             'session.list': {'limit'}, 'session.status': set(),
@@ -967,18 +1040,20 @@ class PlaywrightBrowserExecutor(DiagnosedExecutor):
             'click': {'observation_id', 'page_id', 'revision', 'element_ref', 'role', 'name','frame_id'},
             'fill': {'observation_id', 'page_id', 'revision', 'element_ref', 'role', 'name','frame_id','text'},
             'read': {'observation_id', 'page_id', 'revision', 'element_ref', 'role', 'name','frame_id'}}[action]
-        if set(a) - ({'action'} | fields | ({'session_id'} if action not in {'open','session.list'} else set())):
+        if set(a) - ({'action'} | fields | ({'session_id'} if action not in {'open','session.list','profile.forget'} else set())):
             raise ValueError('invalid_browser_arguments')
-        if action not in {'open', 'diagnostics', 'session.list'} and (type(a.get('session_id')) is not str or not a['session_id']):
+        if action not in {'open', 'diagnostics', 'session.list','profile.forget'} and (type(a.get('session_id')) is not str or not a['session_id']):
             raise ValueError('browser_session_required')
         if action == 'diagnostics' and 'session_id' in a and (type(a['session_id']) is not str or not a['session_id']):
             raise ValueError('invalid_diagnostic_session')
-        if action in {'open', 'network'} and a.get('profile') not in {p.name for p in b.network_profiles}:
+        if action in {'open', 'network','profile.forget'} and a.get('profile') not in {p.name for p in b.network_profiles}:
             raise ValueError('declared_network_profile_required')
         if action == 'navigate':
             origin(a.get('url'))
         if action == 'observe' and 'include_image' in a and type(a['include_image']) is not bool:
             raise ValueError('invalid_browser_image_request')
+        if action == 'observe' and 'include_design' in a and type(a['include_design']) is not bool:
+            raise ValueError('invalid_browser_design_request')
         if action in {'click', 'fill', 'read'}:
             if any(type(a.get(k)) is not str or not a[k] for k in ('observation_id', 'page_id', 'element_ref')):
                 raise ValueError('observation_reference_required')

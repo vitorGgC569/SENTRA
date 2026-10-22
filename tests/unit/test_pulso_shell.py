@@ -72,16 +72,11 @@ class FakeCanvas:
 
 
 def _control_store(path):
-    @contextmanager
     def connect(name):
         assert name == "execution_workspace"
         conn = sqlite3.connect(path, timeout=10)
         conn.row_factory = sqlite3.Row
-        try:
-            with conn:
-                yield conn
-        finally:
-            conn.close()
+        return conn
     return connect
 
 
@@ -115,7 +110,7 @@ class FakeControl:
 
 
 def _dispatch(tmp_path, **kwargs):
-    control = kwargs.pop("control", object())
+    control = kwargs.pop("control", FakeControl())
     governance = kwargs.pop("governance", FakeGovernance())
     return PulsoShellDispatch(control, governance,
                               idempotency_database=str(tmp_path / "shell.sqlite3"),
@@ -166,15 +161,21 @@ def test_shell_schedule_reads(tmp_path):
     assert single["value"]["routine"]["routine_id"] == "r1"
 
 
-def test_shell_workflow_intent_builds_without_effect(tmp_path):
+def test_shell_workflow_requires_executing_resolver(tmp_path):
     dispatch = _dispatch(tmp_path)
-    intent = dispatch.dispatch(
-        action="workflow_intent", owner="owner1", project_id="ws1",
-        request_key="wf-req-12345678",
-        params={"intent_kind": "advance", "workflow_id": "wf1",
-                "namespace": ""})
-    assert intent["value"]["capability_id"] == "workflow:advance"
-    assert intent["value"]["effects_started"] is False
+    params={"intent_kind": "advance", "workflow_id": "wf1", "namespace": ""}
+    with pytest.raises(PulsoShellDenied, match="resolver unavailable"):
+        dispatch.dispatch(action="workflow_intent", owner="owner1", project_id="ws1",
+                          request_key="wf-no-resolver", params=params)
+    calls=[]
+    def resolver(action, context, values):
+        calls.append((action, values))
+        return {"operation_id":"op-fixture-accepted", "state":"ACCEPTED"}
+    dispatch.workflow_resolver=resolver
+    result=dispatch.dispatch(action="workflow_intent", owner="owner1", project_id="ws1",
+                             request_key="wf-with-resolver", params=params)
+    assert calls==[("execute",params)]
+    assert result["value"]=={"operation_id":"op-fixture-accepted", "state":"ACCEPTED"}
 
 
 def test_shell_workflow_reads_need_resolver(tmp_path):
@@ -201,13 +202,13 @@ def test_shell_action_catalog_matches_contract(tmp_path):
                 "goal_status", "goal_set", "goal_open", "goal_advance",
                 "goal_stop", "workflow_intent", "workflow_observe",
                 "workflow_output", "runtime_intent", "runtime_observe",
-                "terminal_list", "terminal_read",
+                "terminal_list", "terminal_read", "terminal_intent",
                 "terminal_write", "receipt_get",
                 "channel_list", "channel_enable", "channel_renew",
                 "channel_disable", "channel_revoke", "channel_send_intent",
                 "channel_inbox", "channel_claim", "channel_ack"}
     assert SHELL_ACTIONS == expected
-    assert len(SHELL_ACTIONS) == 31
+    assert len(SHELL_ACTIONS) == 32
 
 
 def _canvas(tmp_path, principal="vitor"):
@@ -324,7 +325,8 @@ def test_shell_terminal_scope_from_server_ledger(tmp_path):
     ledger.register("canvas:vitor", workspace_id="ws1", terminal_id="t1",
                     run_id="run1", work_item_id="wi1", principal_id="agent1",
                     name="main", shell="powershell")
-    dispatch = _dispatch(tmp_path, control=control, canvas=_canvas(tmp_path))
+    dispatch = _dispatch(tmp_path, control=control, canvas=_canvas(tmp_path),
+                         terminal_resolver=lambda action,ctx,params: {"head":"hello-terminal"})
     viewed = dispatch.dispatch(action="terminal_read", owner="canvas:vitor",
                                project_id="ws1", request_key="term-key-1",
                                params={"terminal_id": "t1"})
@@ -336,15 +338,19 @@ def test_shell_terminal_scope_from_server_ledger(tmp_path):
 
 
 def test_shell_runtime_intent_builder(tmp_path):
-    dispatch = _dispatch(tmp_path)
+    captured=[]
+    def resolver(action, ctx, params):
+        captured.append((action,params))
+        return {"operation_id":"op-fixture-runtime", "state":"ACCEPTED"}
+    dispatch = _dispatch(tmp_path, runtime_resolver=resolver)
     intent = dispatch.dispatch(
         action="runtime_intent", owner="owner1", project_id="ws1",
         request_key="rt-key-1234",
         params={"provider": "temporal", "operation": "signal",
                 "workflow_id": "wf1", "occurrence": "occ1",
                 "payload": {"cursor": 3}})
-    assert intent["value"]["provider"] == "temporal"
-    assert intent["value"]["effects_started"] is False
+    assert captured[0][0]=="execute" and captured[0][1]["provider"]=="temporal"
+    assert intent["value"]=={"operation_id":"op-fixture-runtime", "state":"ACCEPTED"}
     with pytest.raises(PulsoShellDenied):
         dispatch.dispatch(
             action="runtime_intent", owner="owner1", project_id="ws1",
@@ -357,6 +363,7 @@ def test_shell_runtime_intent_builder(tmp_path):
             request_key="rt-key-9999",
             params={"provider": "temporal", "operation": "fork",
                     "workflow_id": "wf1", "occurrence": "occ1"})
+    dispatch.runtime_resolver=None
     with pytest.raises(PulsoShellDenied):
         dispatch.dispatch(action="runtime_observe", owner="owner1",
                           project_id="ws1",
@@ -365,6 +372,17 @@ def test_shell_runtime_intent_builder(tmp_path):
 
 
 class FakeTriggerBridge:
+    def signal_payload(self,owner,dispatch_key):
+        assert owner=="owner1" and dispatch_key=="channel:tg1:e100"
+        return {"fixture":"event"}
+
+    def mark_admitted(self, *, dispatch_key, operation_id):
+        self.admitted=(dispatch_key,operation_id)
+
+    def confirm_dispatch(self,owner,*,dispatch_key,work_item_id,operation_id):
+        assert self.admitted==(dispatch_key,operation_id) and work_item_id=="wi1"
+        return {"status":"acknowledged", "operation_id":operation_id}
+
     def claim_for_workflow(self, owner, *, connector_id, event_id,
                            consumer_id, expected_revision, lease_seconds):
         assert consumer_id.startswith("pulso-trigger:")
@@ -388,17 +406,28 @@ class FakeTriggerBridge:
 
 
 def test_shell_channel_claim_ack(tmp_path):
-    dispatch = _dispatch(tmp_path, trigger_bridge=FakeTriggerBridge())
+    bridge=FakeTriggerBridge()
+    control=FakeControl()
+    receipts={}
+    def operation_status(operation_id,owner):
+        assert owner=="owner1"
+        return receipts[operation_id]
+    control.durable.operation_status=operation_status
+    def resolver(action,ctx,params):
+        from sentra_interop.workflow_shell_host import server_operation_id
+        operation_id=server_operation_id(ctx,"workflow:signal")
+        receipts[operation_id]={"state":"SUCCEEDED","progress":{"work_item_id":"wi1"}}
+        return {"operation_id":operation_id,"state":"SUCCEEDED"}
+    dispatch = _dispatch(tmp_path, control=control, trigger_bridge=bridge,workflow_resolver=resolver)
     claimed = dispatch.dispatch(
         action="channel_claim", owner="owner1", project_id="ws1",
         request_key="ch-claim-1",
         params={"connector_id": "tg1", "event_id": "e100",
                 "expected_revision": 1})
-    assert claimed["value"]["capability_id"] == "workflow:signal"
-    assert claimed["value"]["dispatch_idempotency_key"] == "channel:tg1:e100"
+    assert claimed["value"]["state"]=="SUCCEEDED"
+    assert claimed["value"]["channel_ack"]["status"]=="acknowledged"
     acked = dispatch.dispatch(
         action="channel_ack", owner="owner1", project_id="ws1",
         request_key="ch-ack-0001",
-        params={"claim_id": "claim-1", "work_item_id": "wi1",
-                "operation_id": "op1"})
+        params={"claim_id": "claim-1", "target_operation_id":claimed["value"]["operation_id"]})
     assert acked["value"]["status"] == "acknowledged"

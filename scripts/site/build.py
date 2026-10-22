@@ -14,9 +14,14 @@ def validate_catalog(releases,fetch):
   apk=assets['SENTRA-Android-preview.apk'];m=metadata.get('android',{})
   if metadata.get('schema')!=1 or m.get('sha256')!=apk.get('digest','').removeprefix('sha256:') or not re.fullmatch('[a-f0-9]{64}',m.get('sha256','')):continue
   if m.get('size')!=apk['size'] or metadata.get('tag')!=release['tag_name']:continue
+  if 'version_code' in m:
+   policy=json.loads((ROOT/'scripts/site/android-preview-signing.json').read_text())
+   if (type(m['version_code']) is not int or m['version_code']<policy['minimum_version_code'] or
+       m.get('package')!=policy['package'] or m.get('signing_certificate_sha256')!=policy['certificate_sha256']):continue
   url=apk['browser_download_url'];notes=release['html_url']
   if not url.startswith('https://github.com/'+REPO+'/releases/download/') or not notes.startswith('https://github.com/'+REPO+'/releases/tag/'):continue
-  return {'url':url,'release':notes,'sha256':m['sha256'],'size':apk['size'],'version':release['tag_name']}
+  return {'url':url,'release':notes,'sha256':m['sha256'],'size':apk['size'],'version':release['tag_name'],
+          **({k:m[k] for k in ('version_code','signing_certificate_sha256')} if 'version_code' in m else {})}
  return None
 
 def build(out,releases=None,fetch=None):

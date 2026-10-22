@@ -135,3 +135,9 @@
 .sw-browser-frame img { width:100%; height:auto; display:block; }
 .sw-browser-frame figcaption { padding:8px 12px; color:var(--sw-muted); font-size:11px; }
 .sw-browser-elements { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+
+/* Presentation-only edge split targets and keyboard session switcher. */
+.sentra-workspace .sw-pane{position:relative}
+.sentra-workspace .sw-edge-drop{position:absolute;z-index:12;pointer-events:none;background:color-mix(in srgb,var(--accent,#77a6ff) 25%,transparent);border:2px solid var(--accent,#77a6ff);border-radius:8px}
+.sentra-workspace .sw-edge-drop.left{inset:38px 50% 0 0}.sentra-workspace .sw-edge-drop.right{inset:38px 0 0 50%}.sentra-workspace .sw-edge-drop.top{inset:38px 0 50% 0}.sentra-workspace .sw-edge-drop.bottom{inset:50% 0 0 0}
+.sw-quick-results{display:flex;flex-direction:column;max-height:55vh;overflow:auto;gap:4px;margin-top:12px}.sw-quick-results button{display:flex;text-align:left;justify-content:space-between;gap:12px;padding:9px}.sw-quick-results small{opacity:.65;white-space:nowrap}

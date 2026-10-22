@@ -182,7 +182,7 @@ def test_next_installer_copies_license_docs_and_audit_closure():
     assert report["copies_comercial"] is True
     assert report["copies_sentra_quality"] is True
     assert report["version_matches"] is True
-    assert report["marker_version"] == PRODUCT_VERSION == "1.0.0"
+    assert report["marker_version"] == PRODUCT_VERSION
     assert "sentra_quality/decision_receipt_audit.py" not in report["missing"]
     assert report["paywall"] is False
     assert report["local_use_blocked"] is False

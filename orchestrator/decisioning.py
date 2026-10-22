@@ -141,7 +141,7 @@ class SystemOneHTTPProvider:
             model=str(data.get("model") or self.model),
             answers=answers,
             latency_ms=latency_ms,
-            usage=usage,
+            usage=usage or {},
         )
 
     async def decide(

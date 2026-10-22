@@ -548,7 +548,7 @@ def seal_fleet_admission(control: Any, admission: dict[str, Any]) -> dict[str, A
     from sentra_quality.decision_receipt_audit import AuditRefusal, DecisionReceiptLedger
     from sentra_quality.production_audit import record_fleet_admission
 
-    refused = {
+    refused: dict[str, Any] = {
         "central_receipt_reached": False,
         "authorizes_effect": False,
         "homologated": False,
