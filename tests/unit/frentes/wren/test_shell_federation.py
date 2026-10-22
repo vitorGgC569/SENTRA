@@ -1,6 +1,7 @@
 """Canvas shell adapter for the installation peer gateway."""
 from contextlib import closing
 import json
+import time
 
 import pytest
 
@@ -34,6 +35,26 @@ def _allow(control, owner, capability, project):
         owner, principal_type="user", principal_id=owner,
         capability=capability, scope_type="project", scope_id=project,
     )
+
+
+def _close_after_existing_workers(host, *, timeout=45):
+    """A timed-out waiter can finish before its physical worker releases I/O.
+
+    Each refused close leaves the host/store owned. Wait only for that exact
+    barrier; never cancel a worker, resend its operation or force store closure.
+    An unrelated error or a worker that exceeds the bound still fails the test.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            host.close()
+            return
+        except RuntimeError as exc:
+            if str(exc) != "physical workers have not stopped; machine host retained":
+                raise
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(min(.025, max(0, deadline - time.monotonic())))
 
 
 def test_home_does_not_listen_and_mutations_use_the_canvas_control(tmp_path):
@@ -197,6 +218,86 @@ def test_home_does_not_listen_and_mutations_use_the_canvas_control(tmp_path):
             for session in getattr(app, "_federation_gateways", {}).values():
                 session.gateway.close()
             if getattr(app, "_machine_host", None) is not None:
-                app._machine_host.close()
+                _close_after_existing_workers(app._machine_host)
             app._runtime().close()
             app._shell_service().durable.close()
+
+
+def test_cleanup_waits_for_real_timed_out_worker_without_replay_or_forced_close(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+    import threading
+    from sentra_mcp.services.control_plane import ControlPlaneService
+    from sentra_runtime.machine_host import MachineHost
+
+    control = ControlPlaneService.from_store(tmp_path / "control")
+    owner, agent, project = "wren-owner", "wren-agent", "wren-project"
+    root = tmp_path / "workspace"
+    root.mkdir()
+    run = control.durable.create_run(owner, workspace=str(root))
+    control.ensure_agent(run["run_id"], owner, agent_id=agent, role="worker")
+    host = MachineHost(control, owner=owner)
+    machine = host.configure_workspace_files(workspace_id=project, workspace_root=str(root), agent_id=agent)
+    item = control.create_work_item(run["run_id"], owner, objective="One real bounded write",
+        assignee_agent_id=agent, required_capabilities=["workspace:file.write"],
+        metadata={"workspace_id": project, "machine_id": machine["machine_id"]})
+    control.start_work_item_execution(item["work_item_id"], owner, run_id=run["run_id"], agent_id=agent)
+    control.authorization.grant(owner, principal_type="agent", principal_id=agent,
+        capability="workspace:file.write", scope_type="work_item", scope_id=item["work_item_id"])
+    adapter = host._factories[machine["machine_id"]]._declarations[machine["machine_id"]].adapter
+    binding = adapter.bindings["workspace:file.write"]
+    adapter.bindings["workspace:file.write"] = replace(binding, timeout_seconds=2)
+    execute = adapter._execute
+    entered, release, refused = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+
+    def held_write(selected, arguments):
+        value = execute(selected, arguments)
+        calls.append(arguments["path"])
+        entered.set()
+        assert release.wait(15), "fixture did not release its owned worker"
+        return value
+
+    monkeypatch.setattr(adapter, "_execute", held_write)
+    original_close = host.close
+
+    def observed_close():
+        try:
+            return original_close()
+        except RuntimeError as exc:
+            if str(exc) == "physical workers have not stopped; machine host retained":
+                refused.set()
+            raise
+
+    monkeypatch.setattr(host, "close", observed_close)
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            pending = pool.submit(host.dispatch, workspace_id=project, work_item_id=item["work_item_id"],
+                machine_id=machine["machine_id"], capability_id="workspace:file.write",
+                operation_id="op-wren-held", idempotency_key="op-wren-held",
+                arguments={"action": "write", "path": "owned.txt", "content": "one publication"})
+            try:
+                assert entered.wait(5)
+                result = pending.result(timeout=5)
+                assert result["state"] == "UNCERTAIN"
+                with pytest.raises(RuntimeError, match="physical workers have not stopped"):
+                    _close_after_existing_workers(host, timeout=0)
+                assert host._closed is False
+                refused.clear()
+                closing = pool.submit(_close_after_existing_workers, host, timeout=10)
+                assert refused.wait(3)
+                assert closing.done() is False
+                assert host.inventory(project)[0]["machine_id"] == machine["machine_id"]
+                assert control.durable.operation_status("op-wren-held", owner)["state"] == "UNCERTAIN"
+                release.set()
+                closing.result(timeout=5)
+                assert host._closed is True
+                assert calls == ["owned.txt"]
+                assert (root / "owned.txt").read_text(encoding="utf-8") == "one publication"
+                assert control.durable.operation_status("op-wren-held", owner)["state"] == "UNCERTAIN"
+            finally:
+                release.set()
+    finally:
+        release.set()
+        _close_after_existing_workers(host)
+        control.durable.close()

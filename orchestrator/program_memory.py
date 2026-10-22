@@ -244,7 +244,18 @@ class ProgramMemory:
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp_name, path)
+            # Windows readers or scanners can briefly deny delete sharing.
+            # Keep the same fsynced snapshot and the caller's ownership lock;
+            # retrying publication must never repeat the learning operation.
+            for attempt in range(6):
+                try:
+                    os.replace(tmp_name, path)
+                    break
+                except PermissionError as exc:
+                    if (os.name != "nt" or getattr(exc, "winerror", None) not in {5, 32, 33}
+                            or attempt == 5):
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
         except Exception:
             try:
                 os.unlink(tmp_name)

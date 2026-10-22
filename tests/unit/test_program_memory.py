@@ -187,6 +187,129 @@ def test_cross_instance_writes_do_not_lose_updates(tmp_path):
     }
 
 
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_windows_publication_retries_only_same_fsynced_snapshot(tmp_path, monkeypatch, winerror):
+    import os
+    from types import SimpleNamespace
+    from orchestrator import program_memory as module
+
+    mem = _mem(tmp_path)
+    replace = os.replace
+    publications = []
+    pauses = []
+
+    def temporary_denial(source, target):
+        publications.append((source, target, module.Path(source).read_text(encoding="utf8")))
+        if len(publications) <= 2:
+            error = PermissionError("transient Windows sharing refusal")
+            error.winerror = winerror
+            raise error
+        replace(source, target)
+
+    # Replace this module's facade only, without changing pathlib or other IO.
+    monkeypatch.setattr(module, "os", SimpleNamespace(
+        name="nt", fdopen=os.fdopen, fsync=os.fsync,
+        replace=temporary_denial, unlink=os.unlink,
+    ))
+    monkeypatch.setattr(module, "time", SimpleNamespace(sleep=pauses.append))
+    mem._atomic_write_json(mem.candidates_file, {"one": ["snapshot"]})
+    assert len(publications) == 3
+    assert len(set(publications)) == 1
+    assert pauses == [0.01, 0.02]
+    assert json.loads(mem.candidates_file.read_text()) == {"one": ["snapshot"]}
+    assert not list(mem.memory_dir.glob("*.tmp.*"))
+
+
+@pytest.mark.parametrize("platform,winerror,expected_attempts", [
+    ("nt", 5, 6), ("nt", 32, 6), ("nt", 33, 6),
+    ("nt", None, 1), ("nt", 87, 1), ("posix", 5, 1),
+])
+def test_publication_refusal_is_bounded_preserves_previous_and_cleans_temp(
+        tmp_path, monkeypatch, platform, winerror, expected_attempts):
+    import os
+    from types import SimpleNamespace
+    from orchestrator import program_memory as module
+
+    mem = _mem(tmp_path)
+    previous = b'{"previous": true}\n'
+    mem.candidates_file.write_bytes(previous)
+    attempts = []
+    pauses = []
+    error = PermissionError("publication refused")
+    if winerror is not None:
+        error.winerror = winerror
+
+    def refuse(source, target):
+        attempts.append((source, target))
+        raise error
+
+    monkeypatch.setattr(module, "os", SimpleNamespace(
+        name=platform, fdopen=os.fdopen, fsync=os.fsync,
+        replace=refuse, unlink=os.unlink,
+    ))
+    monkeypatch.setattr(module, "time", SimpleNamespace(sleep=pauses.append))
+    with pytest.raises(PermissionError) as caught:
+        mem._atomic_write_json(mem.candidates_file, {"unpublished": True})
+    assert caught.value is error
+    assert len(attempts) == expected_attempts
+    assert len(set(attempts)) == 1
+    assert len(pauses) == expected_attempts - 1
+    assert mem.candidates_file.read_bytes() == previous
+    assert not list(mem.memory_dir.glob("*.tmp.*"))
+
+
+def test_windows_real_delete_sharing_refusal_reuses_snapshot(tmp_path, monkeypatch):
+    import ctypes
+    import os
+    from ctypes import wintypes
+    from types import SimpleNamespace
+    from orchestrator import program_memory as module
+
+    if os.name != "nt":
+        pytest.skip("Windows native delete-sharing semantics")
+    mem = _mem(tmp_path)
+    mem.candidates_file.write_text('{"previous": true}\n', encoding="utf8")
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.LPVOID, wintypes.DWORD, wintypes.DWORD,
+                                  wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.CloseHandle.restype = wintypes.BOOL
+    # Read/write sharing is allowed; delete sharing deliberately remains held.
+    handle = kernel.CreateFileW(str(mem.candidates_file), 0x80000000, 3,
+                                None, 3, 0x80, None)
+    assert handle != wintypes.HANDLE(-1).value
+    replace = os.replace
+    observed = []
+    snapshot_paths = []
+
+    def real_replace(source, target):
+        nonlocal handle
+        snapshot_paths.append(source)
+        try:
+            replace(source, target)
+        except PermissionError as exc:
+            observed.append(exc.winerror)
+            assert kernel.CloseHandle(handle)
+            handle = None
+            raise
+
+    monkeypatch.setattr(module, "os", SimpleNamespace(
+        name="nt", fdopen=os.fdopen, fsync=os.fsync,
+        replace=real_replace, unlink=os.unlink,
+    ))
+    try:
+        mem._atomic_write_json(mem.candidates_file, {"published": ["once"]})
+    finally:
+        if handle is not None:
+            assert kernel.CloseHandle(handle)
+    assert len(observed) == 1 and observed[0] in {5, 32, 33}
+    assert len(snapshot_paths) == 2 and len(set(snapshot_paths)) == 1
+    assert json.loads(mem.candidates_file.read_text()) == {"published": ["once"]}
+    assert not list(mem.memory_dir.glob("*.tmp.*"))
+
+
 def test_memory_writes_are_idempotent_by_content(tmp_path):
     mem = _mem(tmp_path)
     refs = {"run_id": "run-idem", "task_id": "T-1"}

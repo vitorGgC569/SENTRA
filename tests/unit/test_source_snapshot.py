@@ -57,6 +57,40 @@ def test_terminal_packaged_engine_is_sealed_without_copying_unrelated_dist_outpu
         snapshot.verify_source_snapshot(candidate)
 
 
+def test_desktop_source_seal_includes_vendor_licenses_and_public_font_formats(tmp_path):
+    root = _source(tmp_path)
+    names = ("sentra_canvas/desktop_ui/src/vendor/coucou/LICENSE",
+             "sentra_canvas/desktop_ui/public/fonts/regular.woff2")
+    for name in names:
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"required desktop seal input")
+    candidate = tmp_path / "desktop-candidate"
+    proof = snapshot.create_source_snapshot(candidate, root)
+    assert all((candidate / name).read_bytes() == (root / name).read_bytes() for name in names)
+    assert all(name in proof["sources"] for name in names)
+    (candidate / names[0]).write_bytes(b"changed license")
+    with pytest.raises(RuntimeError, match="source snapshot changed"):
+        snapshot.verify_source_snapshot(candidate)
+
+
+def test_repository_snapshot_covers_desktop_and_terminal_sealed_inputs():
+    from scripts.commander.build_canvas import desktop_source_inputs
+
+    root = Path(__file__).resolve().parents[2]
+    sources = build._source_fingerprint(root)
+    for name, digest in desktop_source_inputs(root / "sentra_canvas/desktop_ui").items():
+        assert sources.get("sentra_canvas/desktop_ui/" + name) == digest, name
+    engine = root / "integrations/orca-terminal/dist/manifest.json"
+    if not engine.is_file():
+        # A clean checkout builds this generated input before making a snapshot.
+        return
+    terminal = json.loads(engine.read_text(encoding="utf-8"))
+    for name, digest in terminal["sources"].items():
+        assert sources.get("integrations/orca-terminal/" + name) == digest, name
+    assert sources["integrations/orca-terminal/dist/engine.cjs"] == terminal["output"]
+
+
 @pytest.mark.parametrize("name", [
     "sentra_code_mode/guest/sentra_quickjs_guest.c",
     "sentra_canvas/static/chat.woff2",

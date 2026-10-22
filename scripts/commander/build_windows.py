@@ -120,7 +120,9 @@ def _source_fingerprint(root: Path | None = None) -> dict[str, str]:
     # only the suffixes used for source modules below.
     data_trees = (
         "docs", "sentra_canvas/assets", "sentra_canvas/static",
-        "sentra_canvas/desktop_ui/src/assets", "sentra_remote/human_ui",
+        # The desktop source seal covers every src/public byte, including
+        # extensionless upstream licenses and future font/media formats.
+        "sentra_canvas/desktop_ui/src", "sentra_canvas/desktop_ui/public", "sentra_remote/human_ui",
         "sentra_remote/provider_notices", "edge_extension",
         "sentra_code_mode/guest/licenses",
     )

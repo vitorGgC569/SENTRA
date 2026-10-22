@@ -5,7 +5,9 @@ import argparse
 import hashlib
 import os
 import shutil
+import struct
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -14,12 +16,68 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import msilib
-from msilib import CAB, Directory, Feature, add_data, add_tables, init_database, schema, sequence, text
+from msilib import CAB, Directory, Feature, FCICreate, add_data, add_stream, add_tables, init_database, schema, sequence, text
 
 from sentra_version import PRODUCT_VERSION
 
 MANUFACTURER = "SENTRA"
 UPGRADE_CODE = "{" + str(uuid.uuid5(uuid.NAMESPACE_URL, "https://sentra.local/windows-desktop")).upper() + "}"
+
+# CPython's FCI wrapper limits each compressed CAB to INT_MAX bytes. Bound the
+# uncompressed input instead, leaving ample room for incompressible data and
+# CAB headers. Legal/source archives remain ordinary required payload files.
+MAX_CABINET_INPUT_BYTES = 1024 ** 3
+
+
+def _cabinet_partitions(files, limit: int):
+    if type(limit) is not int or not 1 <= limit <= MAX_CABINET_INPUT_BYTES:
+        raise ValueError("CAB input bound must be between 1 byte and 1 GiB")
+    groups, current, total = [], [], 0
+    for filename, logical in files:
+        size = Path(filename).stat().st_size
+        if size > limit:
+            raise ValueError("individual MSI file exceeds bounded CAB input: " + filename)
+        if current and total + size > limit:
+            groups.append(current)
+            current, total = [], 0
+        current.append((filename, logical))
+        total += size
+    if current:
+        groups.append(current)
+    return groups
+
+
+class _PartitionedCAB(CAB):
+    """Keep CAB's global File sequencing while embedding independent media."""
+
+    def __init__(self, name: str, temporary_root: Path, *, input_limit: int | None = None):
+        super().__init__(name)
+        self.temporary_root = Path(temporary_root)
+        self.input_limit = MAX_CABINET_INPUT_BYTES if input_limit is None else input_limit
+
+    def commit(self, db):
+        partitions = _cabinet_partitions(self.files, self.input_limit)
+        if not partitions or self.index != len(self.files):
+            raise ValueError("MSI CAB file sequence is empty or inconsistent")
+        self.temporary_root.mkdir(parents=True, exist_ok=True)
+        last_sequence = 0
+        with tempfile.TemporaryDirectory(prefix="cab-", dir=self.temporary_root) as temporary:
+            for disk, files in enumerate(partitions, 1):
+                stream_name = f"{Path(self.name).stem}-{disk:04d}.cab"
+                cabinet = Path(temporary) / stream_name
+                FCICreate(str(cabinet), files)
+                with cabinet.open("rb") as stream:
+                    header = stream.read(36)
+                size = cabinet.stat().st_size
+                if (len(header) != 36 or header[:4] != b"MSCF" or size >= 2147483647
+                        or struct.unpack_from("<I", header, 8)[0] != size
+                        or struct.unpack_from("<H", header, 28)[0] != len(files)):
+                    raise ValueError("MSI cabinet size/header is invalid")
+                last_sequence += len(files)
+                add_data(db, "Media", [(disk, last_sequence, None,
+                                      "#" + stream_name, None, None)])
+                add_stream(db, stream_name, str(cabinet))
+            db.Commit()
 
 
 def _product_code(version: str) -> str:
@@ -151,7 +209,7 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
         ),
     ])
 
-    cab = CAB("sentra.cab")
+    cab = _PartitionedCAB("sentra.cab", output.parent / ".msi-cab-temp")
     target = Directory(db, cab, None, str(source), "TARGETDIR", "SourceDir")
     local = Directory(db, cab, target, ".", "LocalAppDataFolder", ".")
     vendor = Directory(db, cab, local, ".", "SENTRAHome", "SENTRA")

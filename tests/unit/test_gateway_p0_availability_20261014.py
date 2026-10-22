@@ -143,6 +143,10 @@ def test_upstream_connect_failure_is_correlated_and_never_retried(tmp_path, monk
     assert matching["model.gateway.forwarded"]["automatic_retry"] is False
 
 def test_inference_health_separates_http_liveness_from_503_and_recovers(tmp_path, monkeypatch):
+    # Windows GetTickCount64 has a 15.625ms resolution: sleeping 10ms may
+    # leave the monotonic value unchanged. Advance only this module clock.
+    clock = [100.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(monotonic=lambda: clock[0]))
     gateway = module.GatewayServer(module.GatewayConfig(
         upstream="http://127.0.0.1:9", port=0,
         state_root=tmp_path / "state",
@@ -158,8 +162,11 @@ def test_inference_health_separates_http_liveness_from_503_and_recovers(tmp_path
         assert result["upstream_5xx_count"] == 5
         assert result["failure_rate_percent"] == 83.3
         assert result["automatic_retry"] is False
-        module.time.sleep(0.01)
-        assert gateway.inference_health(window_s=0)["state"] == "OBSERVING"
+        assert gateway.inference_health(window_s=0)["sample_count"] == 6
+        clock[0] += 1.0
+        expired = gateway.inference_health(window_s=0)
+        assert expired["state"] == "OBSERVING"
+        assert expired["sample_count"] == 0
         for status in [200] * 8:
             gateway.record_inference_outcome(status)
         assert gateway.inference_health()["state"] == "HEALTHY"

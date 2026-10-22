@@ -19,6 +19,7 @@ qualification are separate results. Overlapping test reruns are not added togeth
 | Mobile continuity | Protected Unicode-safe chunked chat/terminal drafts; exact conversation scope; foreground sequential refresh with backoff and stale-result fencing; paired scope navigation; pinned-host address recovery; recoverable credential rotation and revocation. |
 | LAN discovery | Host mDNS advertisement and explicit bounded discovery of already-paired hosts. An encrypted host identity probe precedes credential use. Discovery is not execution permission. |
 | Installer | Required Platform project/expiry validation, exact parsed loopback host checks, bounded browser-host responses, installer introspection/default compatibility and typed UI-thread worker options. Installer/setup tests: 130 passed. |
+| Packaging | Snapshot includes every desktop src/public seal input, required extensionless licenses, connectors and the sealed generated terminal engine. Actual repository-seal coverage and tamper tests guard against incomplete isolated builds. Bounded CAB partitions preserve global MSI file/media sequence and legal payloads. A streaming multipart preview utility verifies original/part hashes and generates a no-overwrite PowerShell reassembly helper. |
 | Interoperability | A2A/SSE shutdown drains accepted clients. HTTP SSE consumes dechunked bytes and refuses truncated declared bodies. Federation closes failed handshakes and bounds accepted connections. Actual HTTP framing regressions preserve uncertain/no-replay behavior. |
 | Task accounting | Quote, step and cost reservation share a transaction. A rejected budget request no longer pins a quote for a later step. Canonical central intent hashes are used for workflow signal acknowledgement. |
 | Remote adapters | Existing protected GitHub/Drive machine registrations restore through their existing adapter. Explicit guest reconciliation records VM identity and rejects a replaced VM. No substitute host directory or fabricated remote provider result. |
@@ -53,6 +54,10 @@ qualification are separate results. Overlapping test reruns are not added togeth
   retaining the original path after refused reads and rejecting an identity
   replaced during the read. Snapshot/provenance/version scope: **63 passed**;
   terminal generated-input snapshot/tamper follow-up: **27 passed**.
+- MSI partitioning and adjacent release scope: **32 passed**, including actual
+  FCI compression, MSI File/Media/_Streams tables and byte-for-byte extraction
+  through the native Windows CAB API. Multipart utility: **25 passed, one
+  symlink-privilege skip**, with real PowerShell reconstruction and refusals.
 - Failure/integration matrix in a normal Windows user context: **183 passed,
   12 skipped**. Full unit qualification is recorded separately below.
 
