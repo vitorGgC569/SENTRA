@@ -17,7 +17,7 @@ No unsigned IPA or simulator bundle is offered as a phone installation.
 
 ## Installed Windows delivery
 
-The final local Canvas build from source `743414d9d281cc0c4b141bff220d99e48dae0e0e`
+The initial local Canvas build from source `743414d9d281cc0c4b141bff220d99e48dae0e0e`
 was applied to the physical installed Commander directory, with a separate
 backup and 208 verified file updates. Its Canvas SHA-256 is
 `f2cf5fdd7322f50bbe9e5c980ab2d79fa1b7dbd883c4e31be26976c49356e18b`.
@@ -30,6 +30,26 @@ passed listener shutdown, repeated shutdown, restart and identity preservation.
 LAN is enabled again; repeated activation reuses the existing listener. The
 pairing offer has a 120-second lifetime and matches the current host identity.
 No physical phone was used in these checks.
+
+After the prolonged failure below, the corrected build from
+`c8c8a59d59380ba1538a9c25a39a8e492aae7fcd` was installed with its own backup.
+The current Canvas SHA-256 is
+`9101113016ecc815adc73253072f84e3eb868a06719076c81ac4e98547ae507f`.
+The installed window is visible, LAN is ready and the host public identity is
+unchanged. Nine frozen gateway/runtime checks passed again. Live history,
+checkpoint, rollback and journal regressions passed 29 tests. The separate
+installed disk-contention check completed five exclusive-lock cycles and 132
+live reads with a maximum observed response of 125 ms. This measured scoped
+result is separate from the still-required 30-minute qualification.
+
+The corrected installed executable then passed a 120-second workload run with
+three live ConPTY sessions, three Canvas reopenings, 36 checkpoint reads,
+unchanged worker PIDs, one physical input delivery per duplicated request and
+an orderly owned-daemon shutdown. Its report is
+`.tmp/sentra-delivery/installed-soak-live-isolated/report.json`; the exclusive
+disk-lock measurements are in the adjacent `disk-contention.json`. A new
+1,800-second run uses the separate `installed-soak-live-isolated-long` directory.
+Check its final report; startup or a `running` state does not qualify it.
 
 The 1,800-second installed-daemon run at
 `.tmp/sentra-delivery/installed-soak-final/report.json` failed after 854 seconds

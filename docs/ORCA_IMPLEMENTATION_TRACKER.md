@@ -14,7 +14,10 @@
 - [x] Layout remoto adotado apenas sem alterações locais pendentes; retomada móvel é uma dica de navegação.
 - [ ] Homologação prolongada do daemon instalado: o primeiro ensaio de 30 min falhou;
   quota/custo por registro e batching corrigidos; ensaio congelado de 120 s com
-  36 checkpoints válidos passou, repetição prolongada instalada ainda necessária.
+  36 checkpoints válidos passou. A repetição instalada falhou após 854 s por
+  timeout de observação. O build instalado `c8c8a59` separa leituras ao vivo do
+  bloqueio de disco; cinco ciclos com bloqueio exclusivo e 132 leituras passaram,
+  mas ainda é necessário concluir uma nova repetição prolongada.
 - [ ] Aparelhos físicos e rota VPN real. Sem conta Apple Developer/canal de instalação iOS.
 
 Direção atual do proprietário: conexão direta por LAN ou VPN; relay público deixou de ser

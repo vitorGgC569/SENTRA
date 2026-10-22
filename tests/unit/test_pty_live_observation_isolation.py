@@ -70,3 +70,18 @@ def test_archived_read_waiting_for_disk_never_holds_live_producer_condition(tmp_
         assert results and host.read('w','t')['text'] == 'firstsecond'
     finally:
         assert host.close()
+
+
+def test_failed_geometry_transaction_never_publishes_uncommitted_projection(tmp_path):
+    host = open_history(tmp_path, snapshots_enabled=False)
+    try:
+        host.register('w', 't', 'runtime')
+        with host.db_lock, host.db:
+            host.db.execute("""CREATE TRIGGER refuse_geometry BEFORE UPDATE OF geometry_sequence
+                ON sessions BEGIN SELECT RAISE(ABORT, 'test disk failure'); END""")
+        host.resize('t', 72, 18)
+        assert host.flush() is False
+        assert host.geometry('t') == {'cols':100, 'rows':28, 'geometry_sequence':0}
+        assert host.status('t')['persistence_error'] is not None
+    finally:
+        assert host.close()
