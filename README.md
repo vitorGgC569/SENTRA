@@ -237,7 +237,26 @@ The experimental Canvas workspace, terminal, and mobile work reuses selected com
 
 ## Contributors
 
-- **[Vitor Gabriel Gomes — @vitorGgC569](https://github.com/vitorGgC569)** — project creator and maintainer.
-- **[@Predo-kn](https://github.com/Predo-kn)** — Windows installer corrections and improvements, including the native Web response consolidation in [PR #1](https://github.com/vitorGgC569/SENTRA/pull/1).
+<table>
+  <tr>
+    <td align="center" width="240">
+      <a href="https://github.com/vitorGgC569">
+        <img src="https://github.com/vitorGgC569.png?size=160" width="80" height="80" alt="Vitor Gabriel Gomes's GitHub avatar" /><br />
+        <strong>Vitor Gabriel Gomes</strong>
+      </a><br />
+      <sub>@vitorGgC569</sub><br /><br />
+      Project creator and maintainer
+    </td>
+    <td align="center" width="240">
+      <a href="https://github.com/Predo-kn">
+        <img src="https://github.com/Predo-kn.png?size=160" width="80" height="80" alt="Predo-kn's GitHub avatar" /><br />
+        <strong>Predo-kn</strong>
+      </a><br />
+      <sub>@Predo-kn</sub><br /><br />
+      Windows installer fixes and improvements<br />
+      <sub>Native Web response consolidation · <a href="https://github.com/vitorGgC569/SENTRA/pull/1">PR #1</a></sub>
+    </td>
+  </tr>
+</table>
 
 Contributions through issues, documentation, reproducible bug reports, and pull requests are welcome. See the [complete contributor history](https://github.com/vitorGgC569/SENTRA/graphs/contributors).
