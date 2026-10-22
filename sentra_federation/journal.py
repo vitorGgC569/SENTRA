@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import os
 import threading
+import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -127,9 +129,25 @@ class Journal:
     def _dump(self, data):
         protected = _encode({"owner": self.owner, "node_id": self.node_id, "data": data})
         raw = json.dumps({"schema": 2, "protected": protected}, separators=(",", ":")).encode("utf-8")
-        temp = self._path.with_suffix(".json.tmp")
-        with temp.open("wb") as handle:
-            handle.write(raw)
-            handle.flush()
-            os.fsync(handle.fileno())
-        temp.replace(self._path)
+        descriptor, name = tempfile.mkstemp(prefix=".journal-", suffix=".tmp", dir=self._path.parent)
+        temp = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Windows scanners/readers can briefly deny a rename after the
+            # writer closed. Retry only publication of these same fsynced,
+            # encrypted bytes while the existing journal lease remains held.
+            # This never repeats a peer request or re-executes an intent.
+            deadline = time.monotonic() + .75
+            while True:
+                try:
+                    temp.replace(self._path)
+                    break
+                except PermissionError as exc:
+                    if getattr(exc, "winerror", None) not in {5, 32, 33} or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(.025)
+        finally:
+            temp.unlink(missing_ok=True)
