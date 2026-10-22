@@ -31,10 +31,12 @@ LAN is enabled again; repeated activation reuses the existing listener. The
 pairing offer has a 120-second lifetime and matches the current host identity.
 No physical phone was used in these checks.
 
-The 1,800-second corrected installed-daemon run is recorded separately at
-`.tmp/sentra-delivery/installed-soak-final/report.json`. A `running` report is
-not a passing qualification. The final result must be checked before declaring
-the prolonged test complete. This is a local patch, not a new full Setup/tag.
+The 1,800-second installed-daemon run at
+`.tmp/sentra-delivery/installed-soak-final/report.json` failed after 854 seconds
+with a concurrent observation timeout. It retained one successful Canvas reopen,
+249 checkpoint observations and an orderly shutdown of its owned daemon. It is
+not a passing prolonged qualification. The failed database remains intact and
+passes SQLite integrity checking. This is a local patch, not a full Setup/tag.
 
 [Android pairing and network troubleshooting](MOBILE_LAN_QUICKSTART.md).
 
@@ -116,6 +118,22 @@ passed 120 seconds of workloads, three Canvas reopenings and 36 valid checkpoint
 reads. The new installed binary still needs the prolonged repeat; this short
 run does not qualify it. The harness now explicitly fails if a workload exits
 early or a checkpoint loses coverage.
+
+The subsequent 854-second timeout exposed live geometry queries waiting for the
+same database lock used by protected transcript writes. Geometry is now a bounded
+projection of committed records, seeded on restore and updated only after a
+successful transaction. Archived reads no longer hold the producer condition
+while waiting for disk. Two regression tests deliberately hold the disk lock
+and verify that live observation/enqueue still progress; existing history and
+checkpoint tests also pass. This fixes a demonstrated coupling, but does not
+yet prove it was the only cause of prolonged observation stalls.
+
+Separately, the federation journal now publishes unique, fsynced encrypted staging
+files and retries only transient Windows rename denial for at most 750 ms under
+its existing owner lease. Failure preserves the last journal. This does not
+retry network requests or execution. Sharing-denial, permanent-denial, cleanup
+and concurrent-peer regressions pass. A wider federation subset passed 51 cases
+but still failed two peer-admission Grant fixtures; those failures are not waived.
 
 Reports: `.tmp/sentra-delivery/installed-soak-v2/report.json` and
 `.tmp/sentra-delivery/installed-soak-30min/report.json`.

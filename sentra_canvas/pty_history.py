@@ -38,6 +38,7 @@ class PtyHistory:
         self.condition = threading.Condition()
         self.pending = OrderedDict()
         self.sizes, self.heads, self.durable, self.gaps = {}, {}, {}, {}
+        self.geometries = {}
         self.sequences={};self.mirrors=set();self.snapshot_dirty=set();self.snapshot_errors={}
         self.snapshot_invalid=set();self.snapshot_force=False;self.snapshot_at={}
         self.restore_lock=threading.RLock()
@@ -103,6 +104,8 @@ class PtyHistory:
                 self.db.execute('PRAGMA user_version=2')
                 self.checkpoint_known={row[0] for row in self.db.execute('SELECT terminal_id FROM checkpoints')}
                 self._trim()
+                self.geometries = {row['terminal_id']: {key: row[key] for key in ('cols','rows','geometry_sequence')}
+                    for row in self.db.execute('SELECT terminal_id,cols,rows,geometry_sequence FROM sessions')}
         except BaseException:
             self.db.close()
             raise
@@ -119,6 +122,7 @@ class PtyHistory:
                             (terminal_id, workspace_id, runtime_id, 'reserved', time.time(),1))
         with self.condition:
             self.heads[terminal_id] = self.durable[terminal_id] = 0
+            self.geometries[terminal_id] = {'cols':100,'rows':28,'geometry_sequence':0}
             self.sequences[terminal_id]=0
             if self.snapshots and self.snapshots.available:
                 if self.queued_bytes+self.inflight_bytes+CHUNK_OVERHEAD<=self.queue_limit:
@@ -360,6 +364,7 @@ class PtyHistory:
                         self._capture(capture)
                     else:
                         protected_batch=[]
+                        geometry_updates={}
                         for event in batch:
                             text=event[1];protected=self.protect(text) if text else None
                             if text and (not isinstance(protected,str) or not protected.startswith(('dpapi:','keyring:'))):
@@ -377,10 +382,12 @@ class PtyHistory:
                                     self.db.execute('UPDATE sessions SET cols=?,rows=?,geometry_sequence=? WHERE terminal_id=?',
                                         (geometry['cols'],geometry['rows'],sequence,ident))
                                     self.db.execute('DELETE FROM geometry WHERE terminal_id=? AND sequence NOT IN (SELECT sequence FROM geometry WHERE terminal_id=? ORDER BY sequence DESC LIMIT 128)',(ident,ident))
+                                    geometry_updates[ident]={'cols':geometry['cols'],'rows':geometry['rows'],'geometry_sequence':sequence}
                             for terminal_id,head in heads.items():
                                 self.db.execute('UPDATE sessions SET head=MAX(head,?),updated=? WHERE terminal_id=?',(head,time.time(),terminal_id))
                             pruned=self._trim()
                         with self.condition:
+                            self.geometries.update(geometry_updates)
                             for terminal,left,right in pruned:self._gap(terminal,left,right)
                             for start,text,*_ in batch:
                                 if text:self.durable[ident]=max(self.durable.get(ident,0),start+len(text))
@@ -435,9 +442,10 @@ class PtyHistory:
         return terminal_id in self.checkpoint_known or bool(self.snapshots and self.snapshots.available)
 
     def geometry(self,terminal_id):
-        with self.db_lock:
-            row=self.db.execute('SELECT cols,rows,geometry_sequence FROM sessions WHERE terminal_id=?',(terminal_id,)).fetchone()
-            return dict(row) if row else {}
+        # Live output must not wait on a history fsync/trim. Publish only the
+        # geometry from a committed transaction; restored sessions seed this
+        # bounded (at most 512 sessions) projection at startup.
+        with self.condition:return dict(self.geometries.get(terminal_id,{}))
 
     def checkpoint(self,workspace_id,terminal_id):
         with self.restore_lock:return self._checkpoint(workspace_id,terminal_id)
@@ -502,7 +510,7 @@ class PtyHistory:
         if type(cursor) is not int or cursor < 0:
             raise ValueError('invalid history cursor')
         # Pending output is not a gap: advancing past it would lose late commits.
-        with self.condition, self.db_lock:
+        with self.db_lock:
             row = self.db.execute('SELECT * FROM sessions WHERE terminal_id=? AND workspace_id=?',
                                   (terminal_id, workspace_id)).fetchone()
             if row is None:
@@ -510,6 +518,9 @@ class PtyHistory:
             chunks = self.db.execute('SELECT start,end,protected FROM chunks WHERE terminal_id=? AND end>? ORDER BY start LIMIT 8',
                                      (terminal_id, cursor)).fetchall()
             base = self.db.execute('SELECT MIN(start) FROM chunks WHERE terminal_id=?', (terminal_id,)).fetchone()[0]
+        # Do not hold the producer condition while waiting for disk. The older
+        # committed head bounds this read even if producers advance meanwhile.
+        with self.condition:
             pending_starts = [item[0] for item in self.pending.get(terminal_id, [])]
             if self.inflight_terminal == terminal_id:
                 pending_starts.append(self.inflight_start)

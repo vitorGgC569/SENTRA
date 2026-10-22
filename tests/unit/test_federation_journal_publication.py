@@ -11,6 +11,20 @@ def fixture_journal(tmp_path):
     return Journal(tmp_path / 'journal', owner='test-owner', node_id='test-node')
 
 
+def test_concurrent_peer_projections_keep_every_record_and_owner_lease(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from sentra_core.conversations import ConversationBusy
+    journal = fixture_journal(tmp_path)
+    second = fixture_journal(tmp_path)
+    with journal._locked():
+        with pytest.raises(ConversationBusy):
+            second.peers()
+    with ThreadPoolExecutor(max_workers=8) as workers:
+        list(workers.map(lambda n: journal.save_peer({'node_id': 'peer-' + str(n)}), range(32)))
+    assert set(second.peers()) == {'peer-' + str(n) for n in range(32)}
+    assert not list(journal._path.parent.glob('.journal-*.tmp'))
+
+
 def test_transient_windows_share_denial_publishes_the_same_protected_snapshot(tmp_path, monkeypatch):
     journal = fixture_journal(tmp_path)
     original = journal._path.read_bytes()
