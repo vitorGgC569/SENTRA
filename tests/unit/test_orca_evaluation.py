@@ -1,6 +1,7 @@
 import json
 import pytest
 from sentra_canvas.evaluation import prepare_state,seed,prepare_assets
+from sentra_canvas import evaluation
 from sentra_canvas.service import Canvas
 
 
@@ -18,7 +19,16 @@ def test_evaluation_marker_is_validated_before_reuse(tmp_path):
     with pytest.raises(ValueError,match='Unknown evaluation'):prepare_state(state)
 
 
-def test_evaluation_has_own_resources_and_asset_entry(tmp_path):
+def test_evaluation_has_own_resources_and_asset_entry(tmp_path,monkeypatch):
+    # This unit test covers isolated copying/navigation, not renderer compilation.
+    # Native workspace acceptance exercises the real generated renderer separately.
+    source=tmp_path/'fixture-source'
+    static=source/'sentra_canvas/static/desktop-assets';static.mkdir(parents=True)
+    (static/'bootstrap.js').write_text('// isolated bootstrap fixture',encoding='utf-8')
+    build=source/'sentra_canvas/desktop_ui/.tmp/orca-workspace-build';build.mkdir(parents=True)
+    (build/'desktop.js').write_text('// compiled renderer fixture',encoding='utf-8')
+    (build/'index.html').write_text('<html><head><title>SENTRA Desktop</title></head><body></body></html>',encoding='utf-8')
+    monkeypatch.setattr(evaluation,'ROOT',source)
     state=prepare_state(tmp_path/'evaluation')
     app=Canvas(state/'workspace',state_dir=state)
     try:
@@ -32,5 +42,15 @@ def test_evaluation_has_own_resources_and_asset_entry(tmp_path):
         assert 'Avaliação ORCA' in html and 'evaluation-bootstrap.js' in html
         script=(target/'desktop-assets/evaluation-bootstrap.js').read_text(encoding='utf-8')
         assert 'sentra-orca-workspace-enabled' in script and scope['dot_id'] in script
+        assert (target/'desktop-assets/desktop.js').read_bytes()==(build/'desktop.js').read_bytes()
+        assert (target/'desktop-assets/bootstrap.js').read_bytes()==(static/'bootstrap.js').read_bytes()
         assert not (target/'broker.json').exists()
     finally:app.shutdown()
+
+
+def test_evaluation_refuses_missing_compiled_renderer(tmp_path,monkeypatch):
+    monkeypatch.setattr(evaluation,'ROOT',tmp_path/'missing-source')
+    state=prepare_state(tmp_path/'evaluation')
+    with pytest.raises(RuntimeError,match='Run build:orca-validation first'):
+        prepare_assets(state,{'dot_id':'fixture'})
+    assert not (state/'evaluation-ui').exists()
