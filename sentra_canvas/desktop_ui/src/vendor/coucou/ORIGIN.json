@@ -3,13 +3,14 @@
   "commit": "1e5180921c1326fc72e41d313e3e2855e9c10162",
   "license": "MIT",
   "files_sha256": {
-    "style.css": "4f859033ac550f3a4c60af35d01cb1570f6749e96e7871f0103a03a9211c8d47",
-    "core/layout.ts": "f44363c788b7addf5f8d280d0672ae2915e683ac1e5a18d7c4380e5d9bc0b6bb",
-    "core/anim.ts": "996ffe5031fb36219570f66f3325a99d852c4760a3df1f64bed39c5acdda1fc7",
-    "core/diff.ts": "f0dbe996b1bd1c43756fa90f3378538e31b45111d576284a0d76c57a4bd5f23a",
-    "island/fsm.ts": "239cba31e40d7524477888b22e8051719d3a308de3013f4d11fbb5050b8d845a",
-    "views/icons.ts": "af7c5d124acb302cf58a846a892e4454d880dfb09eae76797d2f2d86094a14c1",
-    "views/ticker.ts": "131820c3184a4f8de5453df9e3492b2df39740da9d79b2d3f6396d2f84eee8e2"
+    "style.css": "4622d777af493393568fbfbe0a9a9d80dde9f53118d319bb50b3e4e5849a05ab",
+    "core/layout.ts": "95090677e0725809622598c569a118027b94d778f24fc21d9d3b1f400dd2d99f",
+    "core/anim.ts": "3c1a3354050f7d276ef7a347a72f6c4ee6a09b8a0a7c84de9cb8d818d25ca334",
+    "core/diff.ts": "deeb3ed45ccc8834739a23e7c0bee38a5871ed7452e068ccdf3aae68de4370f7",
+    "island/fsm.ts": "8c79c8c6b43a6c159a579f22e33750df6c6135950fc2d58a12f7584042052c13",
+    "views/icons.ts": "fbbbca49e1d8d4639a869f2cecd8d9f6dd5d3abe21de7ab5b30d8437eaecad3e",
+    "views/ticker.ts": "e9d6d1909cd220cab4691ff3f3c0ab9eeb971b93916cb6cc802dd94d068bb969"
   },
-  "scope": "Original island styles, geometry, timing, ticker and icon paths. SENTRA data adapter and characters are separate. No Mochi assets or sounds."
+  "scope": "Original island styles, geometry, timing, ticker and icon paths. SENTRA data adapter and characters are separate. No Mochi assets or sounds.",
+  "hash_mode": "upstream-raw-sha256 (LF); verified against the pinned commit"
 }

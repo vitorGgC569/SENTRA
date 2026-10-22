@@ -95,3 +95,10 @@ def test_supervisor_updates_future_requests_and_reports_broker_downtime(monkeypa
     assert messages[0]=={'type':'broker_update','available':False}
     assert messages[1]['broker']=='http://127.0.0.1:10002' and messages[1]['runtime_id']=='after'
     assert all('request' not in item for item in messages)
+
+
+def test_private_overlay_vpn_range_does_not_enable_public_listener():
+    for value in ('100.64.0.1','100.100.5.9','100.127.255.254'):
+        assert local_ipv4(value,loopback=False)
+    for value in ('100.63.255.255','100.128.0.1','8.8.8.8','0.0.0.0'):
+        assert not local_ipv4(value,loopback=False)

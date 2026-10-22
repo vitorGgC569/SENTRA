@@ -20,7 +20,7 @@ def local_ipv4(value, *, loopback=True):
         return False
     return ((loopback and address.is_loopback) or any(address in network for network in
         (ipaddress.IPv4Network('10.0.0.0/8'), ipaddress.IPv4Network('172.16.0.0/12'),
-         ipaddress.IPv4Network('192.168.0.0/16'))))
+         ipaddress.IPv4Network('192.168.0.0/16'), ipaddress.IPv4Network('100.64.0.0/10'))))
 
 
 def atomic_json(path, value):
@@ -86,7 +86,7 @@ def host_status(state):
                 'endpoint': host['endpoint'], 'public_key': host['public_key'],
                 'addresses': [endpoint.hostname], 'lan': not loopback,
                 'protocol_version': 1, 'reason': 'Loopback: acessível apenas neste computador.' if loopback else
-                'Conecte o celular à mesma rede. A conexão Wi-Fi será conferida no aparelho.'}
+                'Conecte o celular à mesma LAN ou VPN privada e confira o endereço alcançável no aparelho.'}
     except (OSError, ValueError, KeyError, TypeError, RuntimeError):
         return {'available': False, 'status': 'unavailable', 'lan': False,
                 'reason': 'Gateway LAN indisponível ou identidade não confirmada.'}

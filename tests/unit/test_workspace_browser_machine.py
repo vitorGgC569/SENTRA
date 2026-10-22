@@ -44,9 +44,15 @@ def test_workspace_browser_observation_receipt_and_revocation(shell):
         session=opened['evidence']['session_id']
         navigated=execute({'action':'navigate','session_id':session,'url':origin+'/fixture'})
         assert navigated['state']=='SUCCEEDED',navigated
-        observed=execute({'action':'observe','session_id':session})
+        observed=execute({'action':'observe','session_id':session,'include_image':True})
         assert observed['state']=='SUCCEEDED',observed
         assert 'Review draft' in observed['evidence']['semantic_summary']
+        image=observed['evidence']['viewport_image']
+        raw=base64.b64decode(image['base64'],validate=True)
+        assert raw.startswith(b'\xff\xd8') and len(raw)<=1024*1024
+        assert image['sha256']==hashlib.sha256(raw).hexdigest()
+        assert image['page_id']==observed['evidence']['page_id']
+        assert image['observation_id']==observed['evidence']['observation_id']
         receipt=app.shell_bridge({'action':'dot_computer_read',**scope,'dot_id':actor['dot_id'],
             'conversation_id':conversation['conversation_id'],'request':{'action':'machine_observe','target_operation_id':observed['operation_id']}})['value']
         assert receipt['state']=='SUCCEEDED'

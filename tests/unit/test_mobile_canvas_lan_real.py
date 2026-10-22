@@ -35,7 +35,8 @@ def test_encrypted_mobile_canvas_pairing_scope_and_revocation(shell):
     with socket.socket() as reservation:
         reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
     flags=getattr(subprocess,'CREATE_NO_WINDOW',0)
-    gateway=subprocess.Popen([node,str(tsx),str(transport/'src/gateway.ts')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,creationflags=flags)
+    bundle=os.environ.get('SENTRA_GATEWAY_BUNDLE')
+    gateway=subprocess.Popen([node,bundle] if bundle else [node,str(tsx),str(transport/'src/gateway.ts')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,creationflags=flags)
     phone=None
     try:
         gateway.stdin.write(json.dumps({'bind':'127.0.0.1','port':port,'broker':'http://127.0.0.1:'+str(server.server_port),

@@ -28,3 +28,13 @@ test('changing an IP preserves the pinned identity, credential, key and Dot scop
  for(const invalid of ['http://192.168.1.9:5197','ws://user:pass@192.168.1.9','ws://192.168.1.9/other','ws://192.168.1.9/?token=secret'])
   assert.throws(()=>directEndpoint(invalid));
 });
+
+
+test('private overlay VPN addresses remain direct, pinned and manually selected',()=>{
+ for(const ip of ['100.64.0.1','100.100.5.9','100.127.255.254'])assert.equal(isLocalIPv4(ip,false),true);
+ for(const ip of ['100.63.255.255','100.128.0.1','8.8.8.8'])assert.equal(isLocalIPv4(ip,false),false);
+ const interfaces={WiFi:[nic('192.168.1.8')],Tailscale:[nic('100.100.5.9')]};
+ assert.equal(lanAddresses(interfaces,'auto')[0].address,'192.168.1.8');
+ assert.equal(lanAddresses(interfaces,'100.100.5.9')[0].virtual,true);
+ assert.equal(directEndpoint('100.100.5.9:5197'),'ws://100.100.5.9:5197/sentra/mobile/v1');
+});

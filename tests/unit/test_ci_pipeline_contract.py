@@ -40,6 +40,13 @@ def test_release_and_ci_workflows_parse_as_yaml():
         assert isinstance(data["jobs"], dict)
 
 
+def test_whitespace_check_has_parent_commit_in_shallow_checkout():
+    data = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    checkout = next(step for step in data['jobs']['contract']['steps']
+                    if step.get('uses', '').startswith('actions/checkout@'))
+    assert checkout['with']['fetch-depth'] >= 2
+
+
 def test_ci_lanes_gate_windows_canvas_and_web_models():
     data = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     assert data["permissions"] == {"contents": "read"}

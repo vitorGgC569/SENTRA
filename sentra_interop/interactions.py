@@ -58,19 +58,23 @@ class ProtocolInteractionService:
                         (self.owner,iid,workspace,request.operation_id,peer,method,_encode(asdict(request)),
                          _encode(params),sha,"PENDING",time.time()+timeout,None,None))
         finally:db.close()
-        while True:
-            db=self.control.store.connect("interop_interactions")
-            try:row=db.execute("SELECT * FROM protocol_inputs WHERE owner=? AND interaction=?",(self.owner,iid)).fetchone()
-            finally:db.close()
-            if row["state"]=="ANSWERED":
-                if policy(request).allowed is not True:raise EffectRejected("protocol input grant revoked")
-                answer=_decode(row["answer"])
-                self._consume(iid)
-                return answer
-            if time.time()>=row["expires"] or policy(request).allowed is not True:
-                self._consume(iid,"EXPIRED")
-                return {"outcome":{"outcome":"cancelled"}} if method=="session/request_permission" else {"action":"cancel"}
-            await asyncio.sleep(.2)
+        try:
+            while True:
+                db=self.control.store.connect("interop_interactions")
+                try:row=db.execute("SELECT * FROM protocol_inputs WHERE owner=? AND interaction=?",(self.owner,iid)).fetchone()
+                finally:db.close()
+                if row["state"]=="ANSWERED":
+                    if policy(request).allowed is not True:raise EffectRejected("protocol input grant revoked")
+                    answer=_decode(row["answer"])
+                    self._consume(iid)
+                    return answer
+                if time.time()>=row["expires"] or policy(request).allowed is not True:
+                    self._consume(iid,"EXPIRED")
+                    return {"outcome":{"outcome":"cancelled"}} if method=="session/request_permission" else {"action":"cancel"}
+                await asyncio.sleep(.2)
+        except asyncio.CancelledError:
+            self._consume(iid,"CANCELLED")
+            raise
 
     def _consume(self,iid,state="CONSUMED"):
         db=self.control.store.connect("interop_interactions")

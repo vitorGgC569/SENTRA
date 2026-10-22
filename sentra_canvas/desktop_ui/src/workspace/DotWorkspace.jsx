@@ -88,6 +88,15 @@ export function DotWorkspace({dot,roots,bridge,conversations=[],onSelect,onCreat
     profileRef.current=next;setProfile(next);layoutKey.current=value.layout_scope;setLayout(nextLayout);setScopeKey(value.layout_scope);
     observedTerminals.current=new Set((value.resources?.terminals||[]).map(t=>t.id));
    }else{
+    // Adopt a remote layout only when the local writer has no unsaved edit.
+    // Layout restoration points at existing resources and never starts them.
+    if(!drag.current&&!busy&&!document.querySelector('[role=dialog]')&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName)){
+     const saved=await bridge({action:'workspace_presentation_get',...scope});
+     if(!alive.current||ticket!==generation.current)return;
+     if(saved.scope!==value.layout_scope)throw Error('Layout recebido de outro contexto.');
+     const adopted=writer.current?.observe(saved);
+     if(adopted){profileRef.current=adopted;setProfile(adopted);const next=adopted.layouts[modeRef.current];if(next)setLayout(next)}
+    }
     const added=(value.resources?.terminals||[]).filter(t=>!observedTerminals.current?.has(t.id));
     observedTerminals.current=new Set((value.resources?.terminals||[]).map(t=>t.id));
     if(added.length&&profileRef.current.focusPanels&&!document.querySelector('[role=dialog]')&&!['INPUT','TEXTAREA'].includes(document.activeElement?.tagName))add(null,'terminals',added[0].id);

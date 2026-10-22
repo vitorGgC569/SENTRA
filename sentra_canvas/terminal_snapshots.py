@@ -7,6 +7,7 @@ from pathlib import Path
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import uuid
 import zlib
@@ -22,6 +23,15 @@ class TerminalSnapshots:
         self.responses=queue.Queue(2);self.lock=threading.Lock()
         root=Path(__file__).resolve().parents[1]/'integrations/orca-terminal'
         node=os.environ.get('SENTRA_TERMINAL_NODE') or shutil.which('node')
+        if getattr(sys,'frozen',False):
+            try:
+                from scripts.commander.stage_mobile import validate_mobile_runtime
+                from scripts.commander.stage_terminal import validate_terminal_runtime
+                install=Path(sys.executable).resolve().parent
+                root=install/'sentra-terminal';node=install/'sentra-mobile/node.exe'
+                validate_mobile_runtime(node.parent);validate_terminal_runtime(root)
+            except (OSError,ValueError,KeyError,TypeError):
+                self.error='snapshot_runtime_integrity_unconfirmed';return
         if not node or not (root/'dist/engine.cjs').is_file():
             self.error='snapshot_runtime_unavailable';return
         try:

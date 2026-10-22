@@ -7,6 +7,7 @@ import subprocess
 import queue
 import threading
 import time
+import sys
 from pathlib import Path
 from .broker import read_endpoint
 from .instance_lock import InstanceLock
@@ -36,26 +37,33 @@ def discard_output(output):
     for _ in output:
         pass
 
-def main():
+def main(argv=None):
     parser=argparse.ArgumentParser();parser.add_argument('--state',type=Path,required=True)
     parser.add_argument('--bind',default='auto');parser.add_argument('--port',type=int,default=5197)
-    parser.add_argument('--node',type=Path,required=True)
-    args=parser.parse_args()
+    parser.add_argument('--node',type=Path)
+    args=parser.parse_args(argv)
     if args.bind != 'auto' and not local_ipv4(args.bind):raise ValueError('private LAN IPv4 or auto required')
     if not 1 <= args.port <= 65535:raise ValueError('valid LAN listener port required')
     state=args.state.resolve(strict=True);broker=read_endpoint(state)
     if broker is None:raise RuntimeError('authorized Canvas broker not available')
-    root=Path(__file__).resolve().parents[1]/'integrations'/'orca-mobile'/'transport'
-    tsx=root/'node_modules'/'tsx'/'dist'/'cli.mjs'
-    if not tsx.is_file():raise RuntimeError('install transport dependencies first')
     environment={k:v for k,v in os.environ.items() if k.upper() in {'SYSTEMROOT','WINDIR','TEMP','TMP','PATH'}}
-    node=args.node.resolve(strict=True)
+    if getattr(sys,'frozen',False):
+        from scripts.commander.stage_mobile import validate_mobile_runtime
+        runtime=Path(sys.executable).resolve().parent/'sentra-mobile'
+        validate_mobile_runtime(runtime)
+        command=[str(runtime/'node.exe'),str(runtime/'gateway.mjs')]
+    else:
+        if args.node is None:raise ValueError('Explicit development Node executable required')
+        root=Path(__file__).resolve().parents[1]/'integrations'/'orca-mobile'/'transport'
+        tsx=root/'node_modules'/'tsx'/'dist'/'cli.mjs'
+        if not tsx.is_file():raise RuntimeError('install transport dependencies first')
+        command=[str(args.node.resolve(strict=True)),str(tsx),str(root/'src'/'gateway.ts')]
     lease=InstanceLock(state/'mobile-host.lock')
     process=None
     descriptor=state/'mobile-host.json'
     try:
         config={'bind':args.bind,'port':args.port,**broker_update(broker),'secret_key':host_secret(state),'supervised':True}
-        process=subprocess.Popen([str(node),str(tsx),str(root/'src'/'gateway.ts')],
+        process=subprocess.Popen(command,
             stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,encoding='utf-8',env=environment,
             creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         process.stdin.write(json.dumps(config)+'\n');process.stdin.flush()
@@ -78,5 +86,32 @@ def main():
                 try:process.wait(timeout=2)
                 except subprocess.TimeoutExpired:process.terminate();process.wait(timeout=10)
         descriptor.unlink(missing_ok=True);lease.close()
+
+
+
+def start_installed_host(state,bind='auto'):
+    from .process_lifetime import launch_independent
+    if bind!='auto' and not local_ipv4(bind,loopback=False):raise ValueError('Select a private LAN/VPN interface')
+    if not getattr(sys,'frozen',False):raise RuntimeError('Use the packaged Canvas to activate the installed mobile gateway')
+    from scripts.commander.stage_mobile import validate_mobile_runtime
+    validate_mobile_runtime(Path(sys.executable).resolve().parent/'sentra-mobile')
+    state=Path(state).resolve();guard=InstanceLock(state/'mobile-start.lock')
+    try:
+        if host_status_ready(state):return {'started':False,'already_running':True}
+        try:owner=InstanceLock(state/'mobile-host.lock')
+        except RuntimeError:raise RuntimeError('Mobile gateway still owns this state; inspect its connection before restarting') from None
+        else:owner.close()
+        launch_independent([sys.executable,'--mobile-host','--state',str(state),'--bind',bind],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        deadline=time.monotonic()+20
+        while time.monotonic()<deadline:
+            if host_status_ready(state):return {'started':True}
+            time.sleep(.1)
+        raise RuntimeError('Mobile gateway readiness unconfirmed; no duplicate launch was attempted')
+    finally:guard.close()
+
+def host_status_ready(state):
+    from .mobile_network import host_status
+    return host_status(state).get('available') is True
+
 
 if __name__=='__main__':main()

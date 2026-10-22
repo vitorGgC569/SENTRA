@@ -821,8 +821,18 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     from scripts.commander.stage_electron import stage_electron_surface, validate_electron_payload
     stage_electron_surface(electron_source, electron_payload)
     validate_electron_payload(electron_payload)
+    from scripts.commander.stage_mobile import stage_mobile_runtime
+    mobile_payload = dist / 'sentra-mobile'
+    node = shutil.which('node')
+    if not node:raise RuntimeError('Node 24 is required to stage the standalone mobile gateway')
+    stage_mobile_runtime(mobile_payload, Path(node))
+    from scripts.commander.stage_terminal import stage_terminal_runtime
+    terminal_payload = dist / 'sentra-terminal'
+    stage_terminal_runtime(terminal_payload)
     installer_extra: list[str] = [
         "--add-data", f"{electron_payload}{os.pathsep}payload/sentra-electron",
+        "--add-data", f"{mobile_payload}{os.pathsep}payload/sentra-mobile",
+        "--add-data", f"{terminal_payload}{os.pathsep}payload/sentra-terminal",
     ]
     installer_extra += ['--add-data', f"{dist / 'runtime'}{os.pathsep}payload/runtime",
                         '--add-data', f"{dist / 'runtime-components.json'}{os.pathsep}payload"]

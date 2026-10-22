@@ -27,6 +27,7 @@
 /sentra_canvas/desktop_ui/** text=auto eol=lf
 /sentra_canvas/static/desktop-assets/** text=auto eol=lf
 /sentra_canvas/static/desktop.html text eol=lf
+/sentra_electron/island/** text=auto eol=lf
 
 # Guest sources must run in Bash on Windows; upstream legal files are byte pins.
 /sentra_code_mode/guest/*.sh text eol=lf

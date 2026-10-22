@@ -24,6 +24,9 @@ def main(argv=None):
         # which owns its lifetime instead of the developer application's job.
         arguments.remove('--windows-interactive-launch')
         os.environ['SENTRA_DESKTOP_LAUNCH_CONTEXT'] = 'windows-interactive'
+    if arguments and arguments[0]=='--mobile-host':
+        from .mobile_host import main as mobile_main
+        return mobile_main(arguments[1:])
     if len(arguments)==2 and arguments[0]=='--pty-daemon':
         return canvas_main(arguments)
     if any(arg == "--root" or arg.startswith("--root=") for arg in arguments):

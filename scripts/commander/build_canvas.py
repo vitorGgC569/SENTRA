@@ -15,7 +15,8 @@ if str(ROOT) not in sys.path:
 def desktop_source_inputs(project: Path) -> dict[str, str]:
     """Same explicit inputs as desktop_ui/scripts/source-inputs.mjs."""
     names = {"package.json", "package-lock.json", "index.html", "vite.config.js",
-             "scripts/build.mjs", "scripts/materialize.mjs", "scripts/source-inputs.mjs"}
+             "scripts/build.mjs", "scripts/build-island.mjs", "scripts/materialize.mjs", "scripts/source-inputs.mjs",
+             "island.html", "vite.island.config.js"}
     for folder in ("src", "public"):
         names.update(path.relative_to(project).as_posix() for path in (project / folder).rglob("*") if path.is_file())
     result = {}

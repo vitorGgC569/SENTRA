@@ -87,6 +87,7 @@ class ACPStdioTransport:
         self.request_handler = None
         self._contexts = {}
         self._server_tasks = set()
+        self._server_operations = {}
         self._read_task = asyncio.create_task(self._read_loop(), context=contextvars.Context())
 
     @classmethod
@@ -255,7 +256,15 @@ class ACPStdioTransport:
                 if future.cancelled():
                     self._expired_ids.add(request_id)
                 self._pending.pop(request_id, None)
-                self._contexts.pop(request_id,None)
+            # A completed/cancelled prompt must not leave an answerable peer
+            # permission behind for the next turn. This does not assert that
+            # remote effects rolled back when the result is uncertain.
+            context = self._contexts.pop(request_id,None)
+            if context is not None:
+                retired=[task for task,operation in tuple(self._server_operations.items())
+                         if operation==context.request.operation_id]
+                for server_task in retired:server_task.cancel()
+                await asyncio.gather(*retired,return_exceptions=True)
 
     async def notify(self, method: str, params: Mapping[str, Any]) -> None:
         if method not in ALLOWED_NOTIFY_METHODS or not isinstance(params, Mapping):
@@ -347,6 +356,8 @@ class ACPStdioTransport:
         contexts=[c for key,c in self._contexts.items() if c is not None and key in self._pending]
         context=contexts[0] if len(contexts)==1 else None
         token=current_effect_context.set(context)
+        task=asyncio.current_task()
+        if context is not None:self._server_operations[task]=context.request.operation_id
         try:
             if (context is None or not callable(self.request_handler)
                     or msg["method"] not in {"session/request_permission","elicitation/create"}):
@@ -357,13 +368,27 @@ class ACPStdioTransport:
                 context.checkpoint()
                 response={"jsonrpc":"2.0","id":msg["id"],"result":value}
             await self._write(response)
+        except asyncio.CancelledError:
+            # Resolve the peer's permission promise even after the prompt fence
+            # has ended. This literal denial grants no authority and cannot
+            # carry a previously selected option into a later turn.
+            if msg['method'] in {'session/request_permission','elicitation/create'}:
+                denial={'outcome':{'outcome':'cancelled'}} if msg['method']=='session/request_permission' else {'action':'cancel'}
+                cleanup_token=current_effect_context.set(None)
+                try:
+                    await self._write({'jsonrpc':'2.0','id':msg['id'],'result':denial})
+                except Exception:pass
+                finally:current_effect_context.reset(cleanup_token)
+            raise
         except Exception:
             try:
                 self.process.stdin.write(_frame({"jsonrpc":"2.0","id":msg["id"],
                     "error":{"code":-32000,"message":"interaction unavailable"}}))
                 await self.process.stdin.drain()
             except Exception:pass
-        finally:current_effect_context.reset(token)
+        finally:
+            self._server_operations.pop(task,None)
+            current_effect_context.reset(token)
 
     async def close(self) -> None:
         self._closed = True

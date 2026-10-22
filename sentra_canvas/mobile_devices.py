@@ -10,7 +10,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-MOBILE_ACTIONS=frozenset({'dot_canvas_get','workspace_inventory','workspace_request_status','conversation_list','conversation_get',
+MOBILE_ACTIONS=frozenset({'dot_canvas_get','workspace_inventory','workspace_presentation_get','workspace_request_status','conversation_list','conversation_get',
     'message_list','message_send','message_request_status','coordinator_approval_list','coordinator_approval_reply','document_list','document_get','project_file_list',
     'project_file_preview','project_file_diff','dot_computer_get','dot_computer_read',
     'dot_computer_action','dot_vm_status','dot_vm_frame','dot_vm_input','dot_vm_handoff'})
@@ -97,6 +97,9 @@ def registry(canvas):return DeviceRegistry(canvas.state_dir/'mobile-devices.sqli
 
 def owner_control(canvas,body):
     action=body.get('action');devices=registry(canvas)
+    if action=='start' and set(body)=={'action','bind'}:
+        from .mobile_host import start_installed_host
+        return start_installed_host(canvas.state_dir,body['bind'])
     if action=='status' and set(body)=={'action'}:
         from .mobile_network import host_status
         return host_status(canvas.state_dir)

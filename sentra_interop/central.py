@@ -89,7 +89,8 @@ class CentralInteropAdapter:
                           tuple(c for c in self.machine.capabilities if c.capability_id in selected))
         from sentra_runtime.observations import is_observation
         authority = CentralDurableIntentAuthority(self.control.durable, release_on_terminal=True,budgets=self.control.budgets,
-            observation_predicate=lambda request:is_interop_observation(request,self.machine.kind))
+            observation_predicate=lambda request:is_interop_observation(request,self.machine.kind),
+            allow_acp_interrupts=self.machine.kind=='acp')
         policy = PinnedCentralPolicy(self.decision, constraints)
         return DurableInteropGate(machine, policy, authority=authority,
                                   run_id=self.run_id, owner=self.owner,

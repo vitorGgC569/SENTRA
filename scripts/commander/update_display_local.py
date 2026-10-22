@@ -32,6 +32,14 @@ def apply_patch(install: Path, payload: Path, backup: Path, state: Path, *, surf
     if not surface_only and not binary.is_file():
         raise FileNotFoundError('Updated Canvas executable missing')
     names = ['sentra-canvas.exe', *('sentra-electron/' + name for name in SURFACE_REQUIRED)]
+    if not surface_only and (payload / 'sentra-mobile').is_dir():
+        from scripts.commander.stage_mobile import validate_mobile_runtime, FILES
+        validate_mobile_runtime(payload / 'sentra-mobile')
+        names.extend('sentra-mobile/' + name for name in FILES)
+    if not surface_only and (payload / 'sentra-terminal').is_dir():
+        from scripts.commander.stage_terminal import validate_terminal_runtime
+        manifest = validate_terminal_runtime(payload / 'sentra-terminal')
+        names.extend('sentra-terminal/' + name for name in [*manifest['files'],'runtime.json'])
     if surface_only:
         names = [name for name in names if name != 'sentra-canvas.exe'
                  and (not (install / name).is_file() or sha(install / name) != sha(payload / name))]

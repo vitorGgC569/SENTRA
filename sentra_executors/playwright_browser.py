@@ -843,7 +843,25 @@ class PlaywrightBrowserBackend:
                 return {'url': redacted_url(s.page.url), 'status': response.status if response else None,
                         'page_id': s.page_id, 'requires_new_observation': True}
             if action == 'observe':
-                return self._observe(s, deadline)
+                observation = self._observe(s, deadline)
+                if a.get('include_image'):
+                    effect_checkpoint()
+                    payload = s.page.screenshot(type='jpeg', quality=70, full_page=False, timeout=timeout)
+                    if len(payload) > min(b.max_screenshot_bytes, 1024 * 1024):
+                        raise ExecutorFailure('browser_viewport_image_limit')
+                    # A picture does not keep stale semantic references alive.
+                    after = {s.frame_ids[f]: f.evaluate(_FRESH) for f in s.page.frames
+                             if f in s.frame_ids}
+                    if after != observation['frame_revisions'] or len(s.page.frames) != len(after):
+                        s.invalidate()
+                        raise ExecutorFailure('page_changed_during_observation')
+                    effect_checkpoint()
+                    observation = {**observation, 'viewport_image': {
+                        'mime': 'image/jpeg', 'base64': base64.b64encode(payload).decode('ascii'),
+                        'sha256': hashlib.sha256(payload).hexdigest(), 'bytes': len(payload),
+                        'width': 1280, 'height': 800, 'captured_at': time.time(),
+                        'page_id': s.page_id, 'observation_id': observation['observation_id']}}
+                return observation
             if action in {'click', 'fill', 'read'}:
                 handle, metadata = self._reference(s, a)
                 if action == 'read':
@@ -941,7 +959,7 @@ class PlaywrightBrowserExecutor(DiagnosedExecutor):
         if type(action) is not str or action not in b.actions:
             raise ValueError('browser_action_denied')
         fields = {'open': {'profile'}, 'close': set(), 'network': {'profile'},
-            'navigate': {'url'}, 'observe': set(), 'screenshot': {'output'},
+            'navigate': {'url'}, 'observe': {'include_image'}, 'screenshot': {'output'},
             'evidence': {'after_sequence'}, 'diagnostics': set(),
             'capture.start': set(), 'capture.stop': {'output'},
             'session.list': {'limit'}, 'session.status': set(),
@@ -959,6 +977,8 @@ class PlaywrightBrowserExecutor(DiagnosedExecutor):
             raise ValueError('declared_network_profile_required')
         if action == 'navigate':
             origin(a.get('url'))
+        if action == 'observe' and 'include_image' in a and type(a['include_image']) is not bool:
+            raise ValueError('invalid_browser_image_request')
         if action in {'click', 'fill', 'read'}:
             if any(type(a.get(k)) is not str or not a[k] for k in ('observation_id', 'page_id', 'element_ref')):
                 raise ValueError('observation_reference_required')

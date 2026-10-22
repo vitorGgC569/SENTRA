@@ -28,7 +28,7 @@ class CentralDurableIntentAuthority:
 
     def __init__(self, durable: DurableRunService, *, ttl_s: float = 60.0,
                  release_on_terminal: bool = False, budgets=None,observation_predicate=None, allow_cleanup=False,
-                 budget_provider="sentra-machines"):
+                 budget_provider="sentra-machines", allow_acp_interrupts=False):
         if not isinstance(durable, DurableRunService):
             raise TypeError("real SENTRA DurableRunService required")
         if type(ttl_s) not in (float, int) or not 1 <= ttl_s <= 3600:
@@ -52,12 +52,29 @@ class CentralDurableIntentAuthority:
         self.budgets=budgets
         if observation_predicate is not None and not callable(observation_predicate):raise ValueError("trusted observation classifier required")
         self.observation_predicate=observation_predicate
+        # Trusted host configuration only. Interrupts retain their own physical
+        # admission/fence; they are not reads and cannot borrow a prompt's lease.
+        if type(allow_acp_interrupts) is not bool:raise ValueError('invalid ACP interrupt configuration')
+        self.allow_acp_interrupts=allow_acp_interrupts
 
     def _observation(self,request):
         return self.observation_predicate is not None and self.observation_predicate(request) is True
 
     def _resource(self,request: OperationRequest) -> str:
+        if self.allow_acp_interrupts and request.capability_id in {'acp:cancel','acp:transport_close'}:
+            return 'machine-interrupt:'+request.capability_id+':'+request.machine_id
         return ("machine-observation:" if self._observation(request) else "machine:")+request.machine_id
+
+    def physical_resource(self, request: OperationRequest) -> str:
+        resource=self._resource(request)
+        if resource.startswith('machine-interrupt:'):
+            return resource
+        # ACP projections/listing are reviewed protocol reads. They must remain
+        # observable while a prompt is running; this does not extend to other
+        # machines or classify a cancellation as a read.
+        if self.allow_acp_interrupts and request.capability_id in {'acp:events','acp:state','acp:list'}:
+            return resource
+        return request.machine_id
 
     def reserve_intent(
         self, *, run_id: str, owner: str, request: OperationRequest,

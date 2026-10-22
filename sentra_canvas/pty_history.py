@@ -83,10 +83,26 @@ class PtyHistory:
                     sequence INTEGER,cursor INTEGER,protected TEXT,bytes INTEGER,updated REAL)''')
                 self.db.execute('''CREATE TABLE IF NOT EXISTS geometry(terminal_id TEXT,sequence INTEGER,
                     cursor INTEGER,cols INTEGER,rows INTEGER,PRIMARY KEY(terminal_id,sequence))''')
+                # Account for row/index overhead as well as ciphertext. Tiny
+                # ConPTY frames otherwise exhaust SQLite pages below the quota.
+                # Transactional triggers keep this O(1), including rollback and
+                # replacement, instead of summing the whole transcript per byte.
+                self.db.execute('CREATE TABLE IF NOT EXISTS history_budget(id INTEGER PRIMARY KEY CHECK(id=1),used INTEGER NOT NULL)')
+                self.db.execute('''INSERT OR REPLACE INTO history_budget VALUES(1,
+                    (SELECT COALESCE(SUM(bytes+256),0) FROM chunks)+
+                    (SELECT COALESCE(SUM(bytes+256),0) FROM checkpoints))''')
+                for table in ('chunks', 'checkpoints'):
+                    for event, delta in (('INSERT', 'NEW.bytes+256'),
+                                         ('DELETE', '-OLD.bytes-256'),
+                                         ('UPDATE', 'NEW.bytes-OLD.bytes')):
+                        self.db.execute(f'''CREATE TRIGGER IF NOT EXISTS budget_{table}_{event}
+                            AFTER {event} ON {table} BEGIN
+                            UPDATE history_budget SET used=used+({delta}) WHERE id=1; END''')
                 # Do not reattach an OS PID or recreate a process after host loss.
                 self.db.execute("UPDATE sessions SET state='history_restored',tail_uncertain=1 WHERE state='live'")
                 self.db.execute('PRAGMA user_version=2')
                 self.checkpoint_known={row[0] for row in self.db.execute('SELECT terminal_id FROM checkpoints')}
+                self._trim()
         except BaseException:
             self.db.close()
             raise
@@ -240,25 +256,38 @@ class PtyHistory:
         except Exception as exc:self.snapshot_errors[ident]=type(exc).__name__
 
     def _trim(self):
-        used=self.db.execute('SELECT (SELECT COALESCE(SUM(bytes),0) FROM chunks)+(SELECT COALESCE(SUM(bytes),0) FROM checkpoints)').fetchone()[0]
+        used=self.db.execute('SELECT used FROM history_budget WHERE id=1').fetchone()[0]
         pruned=[]
-        while used>self.disk_limit:
-            row=self.db.execute('''SELECT c.terminal_id,c.start,c.bytes,c.end FROM chunks c JOIN checkpoints p
-                ON c.terminal_id=p.terminal_id WHERE c.sequence<=p.sequence ORDER BY c.created,c.terminal_id,c.start LIMIT 1''').fetchone()
-            if row:
-                self.db.execute('DELETE FROM chunks WHERE terminal_id=? AND start=?',(row[0],row[1]))
-                used-=row[2];pruned.append((row[0],row[1],row[3]));continue
+        # A little headroom avoids repeated single-row eviction under a flood.
+        target=int(self.disk_limit*.9) if used>self.disk_limit else self.disk_limit
+        while used>target:
+            # Bound scans per batch. Without this, migrating a large legacy
+            # transcript with no usable checkpoints scans it once per row.
+            rows=[]
+            if self.db.execute('SELECT 1 FROM checkpoints LIMIT 1').fetchone():
+                rows=self.db.execute('''SELECT c.terminal_id,c.start,c.bytes,c.end FROM chunks c JOIN checkpoints p
+                    ON c.terminal_id=p.terminal_id WHERE c.sequence<=p.sequence
+                    ORDER BY c.created,c.terminal_id,c.start LIMIT 256''').fetchall()
+            if rows:
+                for row in rows:
+                    self.db.execute('DELETE FROM chunks WHERE terminal_id=? AND start=?',(row[0],row[1]))
+                    used-=row[2]+CHUNK_OVERHEAD;pruned.append((row[0],row[1],row[3]))
+                    if used<=target:break
+                continue
             row=self.db.execute('''SELECT p.terminal_id,p.bytes FROM checkpoints p JOIN sessions s ON s.terminal_id=p.terminal_id
                 WHERE p.sequence<s.sequence ORDER BY p.updated LIMIT 1''').fetchone()
             if not row:
-                chunk=self.db.execute('SELECT terminal_id,start,bytes,end FROM chunks ORDER BY created,terminal_id,start LIMIT 1').fetchone()
-                if chunk:
-                    self.db.execute('DELETE FROM chunks WHERE terminal_id=? AND start=?',(chunk[0],chunk[1]))
-                    used-=chunk[2];pruned.append((chunk[0],chunk[1],chunk[3]));continue
+                chunks=self.db.execute('SELECT terminal_id,start,bytes,end FROM chunks ORDER BY created,terminal_id,start LIMIT 256').fetchall()
+                if chunks:
+                    for chunk in chunks:
+                        self.db.execute('DELETE FROM chunks WHERE terminal_id=? AND start=?',(chunk[0],chunk[1]))
+                        used-=chunk[2]+CHUNK_OVERHEAD;pruned.append((chunk[0],chunk[1],chunk[3]))
+                        if used<=target:break
+                    continue
                 row=self.db.execute('SELECT terminal_id,bytes FROM checkpoints ORDER BY updated LIMIT 1').fetchone()
             if not row:break
             self.db.execute('DELETE FROM checkpoints WHERE terminal_id=?',(row[0],))
-            self.checkpoint_known.discard(row[0]);used-=row[1]
+            self.checkpoint_known.discard(row[0]);used-=row[1]+CHUNK_OVERHEAD
         return pruned
 
     def _save_checkpoint(self,ident,frame):
@@ -324,7 +353,9 @@ class PtyHistory:
                         if text and (not isinstance(protected,str) or not protected.startswith(('dpapi:','keyring:'))):
                             raise RuntimeError('OS protected history required')
                         with self.db_lock,self.db:
-                            if text:self.db.execute('INSERT OR REPLACE INTO chunks(terminal_id,start,end,protected,bytes,created,sequence) VALUES(?,?,?,?,?,?,?)',
+                            if text:self.db.execute('''INSERT INTO chunks(terminal_id,start,end,protected,bytes,created,sequence) VALUES(?,?,?,?,?,?,?)
+                                ON CONFLICT(terminal_id,start) DO UPDATE SET end=excluded.end,protected=excluded.protected,
+                                bytes=excluded.bytes,created=excluded.created,sequence=excluded.sequence''',
                                 (ident,start,start+len(text),protected,len(protected.encode('utf-8')),time.time(),sequence))
                             if ident is not None:
                                 self.db.execute('UPDATE sessions SET sequence=?,head=MAX(head,?) WHERE terminal_id=?',(sequence,start+len(text),ident))

@@ -37,6 +37,17 @@ export function taskState(row){
 export class PresentationWriter{
  constructor(save,revision,onError=()=>{}){this.save=save;this.revision=revision;this.onError=onError;this.pending=null;this.busy=false;this.closed=false;this.conflict=false;this.timer=null;this.last=null}
  schedule(profile){if(this.closed||this.conflict)return;this.pending=JSON.stringify(profile);clearTimeout(this.timer);this.timer=setTimeout(()=>void this.flush(),250)}
+ observe(value){
+  if(this.closed||this.conflict||!Number.isSafeInteger(value?.revision)||value.revision<=this.revision)return null;
+  if(!validProfile(value.profile))throw Error('O layout recebido não pôde ser validado.');
+  if(this.busy||this.pending&&this.pending!==this.last){
+   this.conflict=true;clearTimeout(this.timer);
+   this.onError(Error('O layout mudou em outro dispositivo. Suas alterações locais foram preservadas. Reabra o Canvas para escolher a versão salva.'));
+   return null;
+  }
+  this.revision=value.revision;this.last=JSON.stringify(value.profile);this.pending=null;
+  return value.profile;
+ }
  async flush(){clearTimeout(this.timer);if(this.busy||this.conflict||!this.pending)return;const wire=this.pending;this.pending=null;if(wire===this.last)return;this.busy=true;
   try{const value=await this.save(JSON.parse(wire),this.revision);if(value.saved!==true){this.conflict=true;throw Error('O layout mudou em outra janela. Reabra o Canvas para carregar a versão salva.')}this.revision=value.revision;this.last=wire}
   catch(error){this.conflict=true;this.onError(error)}finally{this.busy=false;if(this.pending&&!this.conflict)void this.flush()}

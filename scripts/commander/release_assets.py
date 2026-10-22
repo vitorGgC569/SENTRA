@@ -69,6 +69,12 @@ def build_staging(dist: Path, staging: Path, tunnel_archive: Path) -> Path:
     electron_payload = dist / "sentra-electron"
     validate_electron_payload(electron_payload)
     _copy_tree(electron_payload, staging / "sentra-electron")
+    from scripts.commander.stage_mobile import validate_mobile_runtime
+    validate_mobile_runtime(dist / 'sentra-mobile')
+    _copy_tree(dist / 'sentra-mobile', staging / 'sentra-mobile')
+    from scripts.commander.stage_terminal import validate_terminal_runtime
+    validate_terminal_runtime(dist / 'sentra-terminal')
+    _copy_tree(dist / 'sentra-terminal', staging / 'sentra-terminal')
     if not (dist / 'runtime-components.json').is_file() or not (dist / 'runtime').is_dir():
         raise FileNotFoundError('materialized native/QuickJS runtime components missing')
     _copy_tree(dist / 'runtime', staging / 'runtime')

@@ -10,7 +10,9 @@ test('terminal observation drains bounded Unicode pages with one in-flight read 
  const reads:number[]=[],delivered:string[]=[],errors:Error[]=[];let active=0,maximum=0;
  const feed=new TerminalFeed('t',async cursor=>{reads.push(cursor);maximum=Math.max(maximum,++active);await pause();active--;
   return cursor===0?frame(0,'🐋x',{has_more:true}):frame(2,'done')},value=>{delivered.push(value.text)},error=>errors.push(error));
- feed.start();feed.start();await new Promise(resolve=>setTimeout(resolve,60));
+ feed.start();feed.start();const deadline=Date.now()+2000;
+ while(delivered.length<2&&errors.length===0&&Date.now()<deadline)await pause();
+ feed.stop();
  assert.deepEqual(reads,[0,2]);assert.deepEqual(delivered,['🐋x','done']);assert.equal(maximum,1);assert.equal(feed.after,6);assert.deepEqual(errors,[]);
 });
 

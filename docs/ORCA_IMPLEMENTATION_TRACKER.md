@@ -1,5 +1,26 @@
 # Execução integral ORCA → SENTRA
 
+### 22/10 — conexão direta LAN/VPN, Android e aceite real de agentes
+
+- [x] APK ARM64 assinado de avaliação publicado em `mobile-preview-20261022-1`.
+- [x] GitHub Pages com capturas próprias de demonstração, notas e download verificado por hash.
+- [x] Endereços RFC1918 e VPN privada `100.64.0.0/10`; interface virtual escolhida explicitamente.
+- [x] Gateway Node empacotável, ativado em Dispositivos; sem npm/tsx no computador do usuário.
+- [x] OpenCode 1.19.3: geração, aprovação única com arquivo real, cancelamento confirmado,
+  load da mesma sessão e perda de transporte sem replay (modelo gratuito anunciado pelo provedor).
+- [x] Três Dots reais em worktrees diferentes, com aproximadamente 234 s de sobreposição,
+  resultados conferidos, conflito introduzido detectado e retomada do broker sem recriar recursos.
+- [x] Página gráfica observada da sessão Playwright existente, com identidade, hash e limite de imagem.
+- [x] Layout remoto adotado apenas sem alterações locais pendentes; retomada móvel é uma dica de navegação.
+- [ ] Homologação prolongada do daemon instalado: o primeiro ensaio de 30 min falhou;
+  quota de histórico e custo por registro corrigidos, repetição ainda necessária.
+- [ ] Aparelhos físicos e rota VPN real. Sem conta Apple Developer/canal de instalação iOS.
+
+Direção atual do proprietário: conexão direta por LAN ou VPN; relay público deixou de ser
+requisito desta entrega. SSH/conectores e demais critérios continuam identificados abaixo.
+[Escopo, evidência e pendências atuais](DELIVERY_ACCEPTANCE_2026-10-22.md).
+
+
 ### 22/10 — consumidores de terminal e respostas obsoletas
 
 - [x] Oito leituras concorrentes no Desktop, uma por consumidor, FIFO de 128 identidades.
@@ -143,14 +164,14 @@ incertos; instalação e sessões existentes preservadas durante o desenvolvimen
 - [ ] Arquivos: editor, conflitos, watchers agrupados, revisão por linhas e previews.
 - [ ] Navegador: página gráfica compartilhada, identidade estável e Design Mode.
 - [ ] Computador: entrada completa com posse, release e invalidação de callbacks.
-- [ ] ACP: geração real, aprovação, cancelamento, interrupção e retomada.
-- [ ] Git: agente/editor/terminal usam worktree correta; três trabalhos concorrentes.
+- [x] ACP/OpenCode 1.19.3: geração real, aprovação, cancelamento, interrupção e retomada (v1).
+- [x] Git local: agente/editor/terminal usam worktree correta; três trabalhos reais concorrentes. Mapeamento guest permanece separado.
 - [ ] Git: conflitos, limpeza e publicação estruturada/autorizada.
 - [ ] Coordenação: transições/gates/checkpoints transacionais, concorrência e replay.
 - [ ] Mobile: terminal interativo/streaming e rascunhos escopados persistentes.
 - [ ] Mobile: máquina/projeto/Space/Dot, descoberta LAN, rotação e revogação.
 - [ ] Mobile: Android e iPhone físicos; suspensão/reconexão/gestos/entrada seguros.
-- [ ] Remoto: SSH, relay E2EE opcional, push e conectores GitHub/Linear.
+- [ ] Remoto direto: homologar rota VPN, SSH e conectores GitHub/Linear. Relay/push público fora da entrega LAN/VPN atual.
 - [ ] Distribuição: dependências/licenças revisadas e builds nativos assinados.
 - [ ] Implantação: migrações, recuperação, drenagem e ativação gradual homologadas.
 

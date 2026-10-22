@@ -290,6 +290,26 @@ def _copy_product_files(install_dir: Path) -> list[str]:
                         dirs_exist_ok=True)
         validate_electron_payload(electron_target)
 
+    mobile_source = source / 'sentra-mobile'
+    if mobile_source.exists():
+        from scripts.commander.stage_mobile import validate_mobile_runtime
+        validate_mobile_runtime(mobile_source)
+        mobile_target = (install_dir / 'sentra-mobile').resolve()
+        if not mobile_target.is_relative_to(install_dir.resolve()):
+            raise ValueError('Mobile runtime installation escaped product directory')
+        shutil.copytree(_filesystem_path(mobile_source), _filesystem_path(mobile_target), dirs_exist_ok=True)
+        validate_mobile_runtime(mobile_target)
+
+    terminal_source = source / 'sentra-terminal'
+    if terminal_source.exists():
+        from scripts.commander.stage_terminal import validate_terminal_runtime
+        validate_terminal_runtime(terminal_source)
+        terminal_target = (install_dir / 'sentra-terminal').resolve()
+        if not terminal_target.is_relative_to(install_dir.resolve()):
+            raise ValueError('Terminal runtime installation escaped product directory')
+        shutil.copytree(_filesystem_path(terminal_source), _filesystem_path(terminal_target), dirs_exist_ok=True)
+        validate_terminal_runtime(terminal_target)
+
     docs = docs_source()
     start_here = docs / "START_HERE.md"
     if not start_here.is_file():
@@ -335,6 +355,10 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         folders.append((registration_source, "runtime/codex-registration"))
     if electron_source.exists():
         folders.append((electron_source, "sentra-electron"))
+    if mobile_source.exists():
+        folders.append((mobile_source, 'sentra-mobile'))
+    if terminal_source.exists():
+        folders.append((terminal_source, 'sentra-terminal'))
     for folder, prefix in folders:
         owned.extend(_owned_tree_files(folder, prefix))
     if getattr(sys, "frozen", False):

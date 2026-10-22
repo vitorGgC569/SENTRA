@@ -68,6 +68,33 @@ def test_disk_quota_prunes_old_records_and_reports_gap(tmp_path):
     finally:host.close()
 
 
+def test_tiny_frames_account_for_rows_and_budget_updates_roll_back(tmp_path):
+    host=history(tmp_path,disk_limit=16*1024)
+    try:
+        host.register('w','t','r')
+        for i in range(600):
+            host.append('t',i,'x')
+            if i%40==39:assert host.flush()
+        assert host.flush()
+        with host.db_lock:
+            actual=host.db.execute('SELECT COALESCE(SUM(bytes+256),0) FROM chunks').fetchone()[0]
+            assert actual==host.db.execute('SELECT used FROM history_budget').fetchone()[0]
+            assert actual<=host.disk_limit
+            try:
+                with host.db:
+                    host.db.execute('DELETE FROM chunks')
+                    raise RuntimeError('rollback')
+            except RuntimeError:pass
+            assert host.db.execute('SELECT used FROM history_budget').fetchone()[0]==actual
+        assert host.read('w','t')['truncated']
+        assert host.error is None
+    finally:host.close()
+    host=history(tmp_path,disk_limit=16*1024)
+    try:
+        assert host.db.execute('SELECT used FROM history_budget').fetchone()[0]<=host.disk_limit
+    finally:host.close()
+
+
 def test_resize_flood_respects_per_session_budget_including_inflight_output(tmp_path):
     entered=threading.Event();release=threading.Event()
     def slow(value):entered.set();assert release.wait(5);return protected(value)

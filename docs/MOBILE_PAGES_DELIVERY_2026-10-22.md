@@ -25,7 +25,7 @@ reconnect, background suspension, revocation and remote input on real hardware.
 
 ## iPhone
 
-There is no published iOS installation channel yet. The page explicitly states
+The owner has no Apple Developer account. There is no published iOS installation channel yet. The page explicitly states
 that status. An Apple distribution certificate/provisioning profile and a valid
 TestFlight or other permitted signed distribution channel are needed before an
 installation button can be enabled. An unsigned IPA or a simulator bundle is
@@ -39,6 +39,19 @@ contains later local changes. The local installed Canvas patch has its own
 build identity. Stable Windows publication retains the existing independent QA
 and signing gate. No stable release is created by the mobile preview workflow.
 
+## Direct LAN / VPN
+
+The owner selected direct connectivity, not a public relay. The desktop gateway
+is explicitly enabled from Devices and binds a local private interface. Automatic
+selection prefers physical LAN; private overlay VPN interfaces must be selected
+by their reachable IPv4 address. RFC1918 and 100.64.0.0/10 addresses are supported.
+A VPN must be configured separately on both peers; no public port forwarding,
+cloud account or public relay is required. E2EE identity pinning, expiring QR,
+owner confirmation, scoped device permissions and revocation still apply.
+A passing local protocol test is not evidence of routing on a physical VPN.
+
 The full ORCA migration remains open: interactive browser/computer surfaces,
-orphan recovery/layout synchronization, real ACP/three-worktree acceptance,
-remote relay/SSH/connectors, physical devices and final signed distribution.
+orphan recovery/layout synchronization qualification,
+SSH/connectors, physical devices and final signed distribution.
+
+Current acceptance, pinned ACP and concurrent worktree evidence: [delivery report](DELIVERY_ACCEPTANCE_2026-10-22.md).

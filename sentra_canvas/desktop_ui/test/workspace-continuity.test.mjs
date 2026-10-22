@@ -37,3 +37,18 @@ test('first-use suggestion only stages a draft and never replaces pending or typ
  s.setItem('sentra_shell_draft:p:b',JSON.stringify({content:'',pending:{request_key:'uncertain'}}));
  assert.equal(stageConversationDraft(s,{...c,conversation_id:'b'},'new'),false);
 });
+
+
+test('clean layout adopts a newer host revision without creating resources',()=>{
+ const w=new PresentationWriter(async()=>{throw Error('Must not write while observing')},2);
+ const profile=emptyProfile();assert.equal(w.observe({revision:3,profile}),profile);
+ assert.equal(w.revision,3);assert.equal(w.observe({revision:2,profile}),null);w.close();
+});
+test('remote layout cannot overwrite unsaved local changes or cross an in-flight save',()=>{
+ const errors=[],w=new PresentationWriter(async()=>{},1,e=>errors.push(e.message));
+ w.schedule(rememberPanel(emptyProfile(),{id:'activity',kind:'activity'}));
+ assert.equal(w.observe({revision:2,profile:emptyProfile()}),null);
+ assert.equal(w.conflict,true);assert.ok(w.pending);assert.equal(errors.length,1);w.close();
+ const other=new PresentationWriter(async()=>{},1);other.busy=true;
+ assert.equal(other.observe({revision:2,profile:emptyProfile()}),null);assert.equal(other.conflict,true);other.close();
+});

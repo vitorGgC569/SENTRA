@@ -21,6 +21,54 @@ from sentra_runtime.contracts import Capability, Machine, OperationRequest, Poli
 CAPS = ("launch", "session", "prompt", "cancel", "resume", "load", "list", "close", "delete", "config", "mode")
 
 
+def test_cancelled_peer_question_cannot_leak_into_the_next_prompt(tmp_path):
+    from sentra_mcp.services.control_plane import ControlPlaneService
+    from sentra_interop.interactions import ProtocolInteractionService
+    control=ControlPlaneService.from_store(tmp_path/'central')
+    owner='owner';run=control.durable.create_run(owner,workspace=str(tmp_path))
+    control.ensure_agent(run['run_id'],owner,agent_id='worker',role='worker')
+    item=control.create_work_item(run['run_id'],owner,objective='Permission cancellation',
+        assignee_agent_id='worker',required_capabilities=['acp:prompt'],metadata={'workspace_id':'workspace'})
+    service=ProtocolInteractionService(control,owner=owner)
+    req=OperationRequest('permission-op','worker','machine','acp:prompt',item['work_item_id'],'permission-key',{})
+    async def case():
+        task=asyncio.create_task(service.ask({'id':1,'method':'session/request_permission',
+            'params':{'sessionId':'session','options':[]}},req,lambda _:PolicyDecision(True,'test')))
+        await asyncio.sleep(.01)
+        assert len(service.pending(workspace_id='workspace'))==1
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):await task
+        assert service.pending(workspace_id='workspace')==[]
+    try:asyncio.run(case())
+    finally:control.durable.close()
+
+
+def test_retired_prompt_denies_the_peer_permission_even_after_its_fence_expires():
+    from types import SimpleNamespace
+    class Writer:
+        def __init__(self):self.messages=[]
+        def write(self,frame):self.messages.append(json.loads(frame))
+        async def drain(self):pass
+        def close(self):pass
+    async def case():
+        process=SimpleNamespace(stdin=Writer(),stdout=asyncio.StreamReader(),returncode=0)
+        transport=ACPStdioTransport(process);entered=asyncio.Event();valid=True
+        def checkpoint():
+            if not valid:raise PermissionError('expired original fence')
+        async def ask(*args):entered.set();await asyncio.sleep(10)
+        transport.request_handler=ask
+        transport._contexts[1]=SimpleNamespace(request=SimpleNamespace(operation_id='prompt'),checkpoint=checkpoint)
+        transport._pending[1]=asyncio.get_running_loop().create_future()
+        task=asyncio.create_task(transport._answer_server({'id':44,'method':'session/request_permission'}))
+        try:
+            await entered.wait();valid=False;task.cancel()
+            with pytest.raises(asyncio.CancelledError):await task
+            assert process.stdin.messages==[{'jsonrpc':'2.0','id':44,'result':{'outcome':{'outcome':'cancelled'}}}]
+            assert not transport._server_operations
+        finally:await transport.close()
+    asyncio.run(case())
+
+
 def request(name, capability, arguments, *, principal="tester"):
     return OperationRequest("acp-wave-" + name, principal, "machine", "acp:" + capability,
                             "work", "key-" + name, arguments)
@@ -432,3 +480,37 @@ def test_real_central_authority_launch_session_and_prompt_use_existing_journal(t
         asyncio.run(case())
     finally:
         durable.close()
+
+
+def test_central_cancel_has_its_own_fence_while_prompt_owns_physical_io(tmp_path):
+    from sentra_mcp.services.control_plane import ControlPlaneService
+    from sentra_interop.central import CentralInteropAdapter
+    from sentra_runtime.contracts import OperationResult
+    control=ControlPlaneService.from_store(tmp_path/'central')
+    owner='owner';run=control.durable.create_run(owner,workspace=str(tmp_path))
+    control.ensure_agent(run['run_id'],owner,agent_id='agent',role='worker')
+    caps=['acp:prompt','acp:cancel'];item=control.create_work_item(run['run_id'],owner,objective='Interrupt owned prompt',assignee_agent_id='agent',required_capabilities=caps)
+    control.start_work_item_execution(item['work_item_id'],owner,run_id=run['run_id'],agent_id='agent')
+    grants={cap:control.authorization.grant(owner,principal_type='agent',principal_id='agent',capability=cap,scope_type='work_item',scope_id=item['work_item_id']) for cap in caps}
+    center=CentralInteropAdapter(control=control,run_id=run['run_id'],owner=owner,machine=Machine('machine','acp',owner,tuple(Capability(cap,cap) for cap in caps)))
+    def req(key,cap):return OperationRequest(key,'agent','machine',cap,item['work_item_id'],key,{'local_id':'existing'})
+    async def scenario():
+        started=asyncio.Event();cancelled=asyncio.Event()
+        async def prompt(request):
+            started.set();await asyncio.wait_for(cancelled.wait(),3)
+            return OperationResult(request.operation_id,'CANCELLED')
+        async def cancel(request):
+            cancelled.set();return OperationResult(request.operation_id,'UNCERTAIN',{'notification_sent':True})
+        center.bind_provider('acp:prompt',prompt);center.bind_provider('acp:cancel',cancel)
+        task=asyncio.create_task(center.start(req('prompt','acp:prompt')))
+        await asyncio.wait_for(started.wait(),3)
+        stopped=await asyncio.wait_for(center.start(req('cancel','acp:cancel')),3)
+        assert stopped.state=='UNCERTAIN';assert (await task).state=='CANCELLED'
+        rows={row['operation_id']:row for row in control.durable.db.execute("SELECT * FROM operations WHERE operation_id IN ('prompt','cancel')")}
+        assert rows['prompt']['resource_key']=='machine:machine'
+        assert rows['cancel']['resource_key']=='machine-interrupt:acp:cancel:machine'
+        assert rows['cancel']['kind']=='sentra.machine'
+        control.authorization.revoke(grants['acp:cancel']['grant_id'],owner)
+        assert (await center.start(req('revoked','acp:cancel'))).state=='FAILED'
+    try:asyncio.run(scenario())
+    finally:control.durable.close()

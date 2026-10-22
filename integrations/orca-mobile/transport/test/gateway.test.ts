@@ -22,7 +22,8 @@ test('real LAN gateway pins crypto identity and never replays effects on reconne
  t.after(()=>broker.close());
  const reservation=createServer();reservation.listen(0,'127.0.0.1');await once(reservation,'listening');
  const port=(reservation.address() as any).port;await new Promise<void>(resolve=>reservation.close(()=>resolve()));
- const child=spawn(process.execPath,[fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs',import.meta.url)),fileURLToPath(new URL('../src/gateway.ts',import.meta.url))],{stdio:['pipe','pipe','pipe']});
+ const bundled=process.env.SENTRA_GATEWAY_BUNDLE;
+ const child=spawn(process.execPath,bundled?[bundled]:[fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs',import.meta.url)),fileURLToPath(new URL('../src/gateway.ts',import.meta.url))],{stdio:['pipe','pipe','pipe']});
  t.after(()=>child.kill());
  const ready=new Promise<any>((resolve,reject)=>{let buffer='';const timer=setTimeout(()=>reject(Error('gateway startup timeout')),5000);child.stdout.on('data',data=>{buffer+=data;if(buffer.includes('\n')){clearTimeout(timer);resolve(JSON.parse(buffer.split('\n')[0]))}});child.once('exit',()=>{clearTimeout(timer);reject(Error('gateway exited before readiness'))});});
  child.stdin.end(JSON.stringify({bind:'127.0.0.1',port,broker:'http://127.0.0.1:'+(broker.address() as any).port,bearer:'test-host-only',secret_key:randomBytes(32).toString('base64')}));

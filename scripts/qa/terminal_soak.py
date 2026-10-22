@@ -1,6 +1,6 @@
 """Disposable Windows installed-daemon soak; never attaches to user terminals."""
 from pathlib import Path
-import argparse,base64,concurrent.futures,json,os,subprocess,sys,time
+import argparse,base64,concurrent.futures,json,os,subprocess,sys,time,traceback
 ROOT=Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
 from sentra_canvas.pty_client import PtyDaemonClient,DaemonPTY
@@ -12,7 +12,7 @@ def run(binary,state,seconds):
  state.mkdir(parents=True);report={'state':'running','installed_binary':str(binary),'seconds_requested':seconds,'synthetic_workloads':True,'user_state_used':False}
  output=state/'report.json'
  def save():output.write_text(json.dumps(report,indent=2),encoding='utf-8')
- save();process=None;app=None;client=None;terms=[];start=time.monotonic()
+ save();process=None;app=None;client=None;terms=[];start=time.monotonic();stage='startup';last_save=0
  def daemon():
   env={**os.environ,'PYINSTALLER_RESET_ENVIRONMENT':'1','SENTRA_PTY_DAEMON':'1'}
   proc=subprocess.Popen([str(binary),'--pty-daemon',str(state/'canvas/pty-host')],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW)
@@ -30,6 +30,7 @@ def run(binary,state,seconds):
   ws=app.create_workspace('Soak')['id'];work=Path(app.store.workspace(ws)['path'])
   duration=seconds+120
   for i in range(3):
+   stage='create_terminal_'+str(i)
    code="from pathlib import Path;import time,threading,sys;Path('started-%d').open('a').write('once');threading.Thread(target=lambda:[Path('input-%d').open('a').write(x) for x in sys.stdin],daemon=True).start();end=time.monotonic()+%d;n=0\nwhile time.monotonic()<end:\n print('\\x1b[2K\\rTAG%d '+str(n)+' 🦊 界 \\x1b[32mRUN\\x1b[0m',flush=True);n+=1;time.sleep(.05)"%(i,i,duration,i)
    t=app._start(ws,'Soak_'+str(i),'cmd',[sys.executable,'-u','-c',code]);terms.append(t)
   pids={t['id']:app._sessions[t['id']].pty.pid for t in terms};runtime=client.runtime_id;cursors={t['id']:0 for t in terms};reads=0;bytes_read=0;restarts=0;last_restart=0
@@ -40,23 +41,29 @@ def run(binary,state,seconds):
   with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
    end=time.monotonic()+seconds
    while time.monotonic()<end:
+    stage='reconnect_health'
     connected=PtyDaemonClient(state/'canvas/pty-host');assert connected.runtime_id==runtime
+    stage='concurrent_output'
     futures=[pool.submit(connected.call,'output',{'workspace_id':ws,'terminal_id':t['id'],'cursor':cursors[t['id']]}) for t in terms]
     for i,(t,future) in enumerate(zip(terms,futures)):
      v=future.result(timeout=10);text=v['text'];assert v['cursor']>=cursors[t['id']];assert all(('TAG'+str(j)+' ') not in text for j in range(3) if j!=i)
      cursors[t['id']]=v['cursor'];reads+=1;bytes_read+=len(text.encode())
     elapsed=time.monotonic()-start
     if elapsed-last_restart>max(15,seconds/3):
+     stage='broker_reopen'
      app.shutdown();app=Canvas(root,principal='soak-owner',state_dir=state/'canvas');assert app._pty_client.runtime_id==runtime
      assert {t['id']:app._sessions[t['id']].pty.pid for t in terms}==pids;restarts+=1;last_restart=elapsed
      report.update(reads=reads,broker_reopens=restarts,elapsed_seconds=round(elapsed,1));save()
+    if elapsed-last_save>10:
+     report.update(reads=reads,bytes_read=bytes_read,broker_reopens=restarts,elapsed_seconds=round(elapsed,1),stage=stage);save();last_save=elapsed
     time.sleep(.2)
   for i,t in enumerate(terms):
+   stage='verify_and_close_'+str(i)
    assert (work/('started-'+str(i))).read_text()=='once';assert (work/('input-'+str(i))).read_text().splitlines()==['input-once-'+str(i)]
    app.terminal_close(ws,t['id'])
   report.update(state='passed',reads=reads,bytes_read=bytes_read,broker_reopens=restarts,concurrent_terminals=3,same_worker_pids=True,duplicate_input_physical_count=1,elapsed_seconds=round(time.monotonic()-start,1),daemon_functional=True)
  except BaseException as exc:
-  report.update(state='failed',error=type(exc).__name__+': '+str(exc));raise
+  report.update(state='failed',stage=stage,elapsed_seconds=round(time.monotonic()-start,1),error=type(exc).__name__+': '+str(exc),traceback=traceback.format_exc());raise
  finally:
   if app:app.shutdown()
   if client:
@@ -67,8 +74,8 @@ def run(binary,state,seconds):
    except Exception:pass
   if process:
    try:process.wait(12)
-   except subprocess.TimeoutExpired:process.terminate();process.wait(10)
-  report['owned_daemon_closed']=True;save()
+   except subprocess.TimeoutExpired:report['forced_owned_daemon_termination']=True;process.terminate();process.wait(10)
+  report['owned_daemon_closed']=process is not None and process.poll() is not None;save()
  return report
 if __name__=='__main__':
  p=argparse.ArgumentParser(__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--state',type=Path,required=True);p.add_argument('--seconds',type=int,default=300);a=p.parse_args()

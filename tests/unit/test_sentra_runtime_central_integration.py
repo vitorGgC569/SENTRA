@@ -52,12 +52,13 @@ def center(tmp_path):
     created = core.durable.create_run(owner, run_id=run_id)
     if created["state"] != "RUNNING":
         core.durable.transition_run(run_id, owner, "RUNNING")
+    core.ensure_agent(run_id, owner, agent_id="agent-1", role="worker")
     created = core.governance.create_work_item(
         run_id, owner, objective="Read safe lab status",
         work_item_id="WI-LAB", assignee_agent_id="agent-1",
         required_capabilities=["lab.read"],
     )
-    core.governance.transition_work_item("WI-LAB", owner, "RUNNING")
+    core.start_work_item_execution("WI-LAB", owner, run_id=run_id, agent_id="agent-1")
     grant = core.authorization.grant(
         owner, principal_type="agent", principal_id="agent-1",
         capability="lab.read", scope_type="work_item", scope_id="WI-LAB",

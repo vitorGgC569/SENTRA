@@ -198,7 +198,7 @@ class CentralEffectContext:
 
     def _begin(self):
         lock = _ResourceLock(self.authority.durable.root / "effect-locks",
-                             self.request.machine_id)
+                             self.authority.physical_resource(self.request))
         lock.acquire(self.lock_timeout)
         try:
             self.checkpoint()
