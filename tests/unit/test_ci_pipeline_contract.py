@@ -47,6 +47,18 @@ def test_whitespace_check_has_parent_commit_in_shallow_checkout():
     assert checkout['with']['fetch-depth'] >= 2
 
 
+def test_python_lanes_isolate_runner_tools_before_installing_locked_dependencies():
+    data = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
+    for lane in ('python','canvas'):
+        steps=data['jobs'][lane]['steps']
+        isolation=next(i for i,s in enumerate(steps) if 'python -m venv' in s.get('run',''))
+        installation=next(i for i,s in enumerate(steps) if 'pip install --require-hashes' in s.get('run',''))
+        assert isolation<installation
+        assert 'GITHUB_PATH' in steps[isolation]['run']
+        assert '--system-site-packages' not in steps[isolation]['run']
+    assert 'python -m pip check' in str(data['jobs']['python']['steps'])
+
+
 def test_ci_lanes_gate_windows_canvas_and_web_models():
     data = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     assert data["permissions"] == {"contents": "read"}

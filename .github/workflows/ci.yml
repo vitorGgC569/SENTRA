@@ -68,6 +68,12 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements.lock.txt
+      - name: Isolate Python from runner tools
+        run: |
+          $sentraVenv = Join-Path $env:RUNNER_TEMP "sentra-ci-python"
+          python -m venv $sentraVenv
+          if ($LASTEXITCODE -ne 0) { throw "Isolated Python environment creation failed" }
+          (Join-Path $sentraVenv "Scripts") | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Install hash-pinned Python dependencies
         run: |
           python -m pip install --require-hashes -r requirements.lock.txt
@@ -112,6 +118,12 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements.lock.txt
+      - name: Isolate Python from runner tools
+        run: |
+          $sentraVenv = Join-Path $env:RUNNER_TEMP "sentra-ci-python"
+          python -m venv $sentraVenv
+          if ($LASTEXITCODE -ne 0) { throw "Isolated Python environment creation failed" }
+          (Join-Path $sentraVenv "Scripts") | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
       - name: Install hash-pinned Python dependencies
         run: |
           python -m pip install --require-hashes -r requirements.lock.txt
