@@ -79,6 +79,7 @@ def test_canvas_restart_reattaches_one_live_process(tmp_path,monkeypatch):
         second=Canvas(root,principal='test-owner',state_dir=state)
         resumed=second._sessions[terminal['id']].pty
         assert resumed.pid==pid and resumed.runtime_id==runtime_id
+        assert resumed.input_generation==original.input_generation and len(resumed.input_generation)==32
         assert second.store.resource('terminals',terminal['id'],ws)['status']=='running'
         for _ in range(30):
             output=second.terminal_output(ws,terminal['id'])
@@ -96,4 +97,62 @@ def test_canvas_restart_reattaches_one_live_process(tmp_path,monkeypatch):
                 if record['exit_code'] is None:
                     try:DaemonPTY(client,record['workspace_id'],record['terminal_id'],pid=record['pid'],runtime_id=record['runtime_id']).close()
                     except Exception:pass
+            client.call('drain');client.call('stop_when_idle')
+
+
+@pytest.mark.skipif(os.name!='nt',reason='Windows ConPTY and protected host receipts')
+def test_lost_daemon_write_reply_recovers_after_canvas_restart_by_exact_receipt(tmp_path,monkeypatch):
+    import hashlib
+    import json
+    from pathlib import Path
+    from sentra_canvas.service import Canvas
+    from sentra_canvas.terminal_input_receipts import acknowledge
+    monkeypatch.setenv('SENTRA_PTY_DAEMON','1')
+    project=tmp_path/'project';project.mkdir()
+    state=tmp_path/'state'
+    first=second=None;client=None
+    try:
+        first=Canvas(project,principal='test-owner',state_dir=state)
+        ws=first.create_workspace('RecoveredInput')['id']
+        record=first.create_terminal(ws,'Input','cmd')
+        terminal=record['id'];session=first._sessions[terminal]
+        target=session.input_instance_id;pid=session.pty.pid;generation=session.pty.input_generation
+        client=first._pty_client;call=client.call;writes=[]
+        data='echo once>> exact-effect.txt\r';key='exact-lost-response'
+        payload={'terminal_id':terminal,'data':data,'input_target':target}
+        fp=hashlib.sha256(json.dumps(['terminal_input',payload],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        def lost_reply(method,fields=None,key=None):
+            result=call(method,fields,key)
+            if method=='write_correlated':
+                writes.append(key)
+                raise TimeoutError('injected loss after daemon committed physical delivery')
+            return result
+        monkeypatch.setattr(client,'call',lost_reply)
+        with pytest.raises(TimeoutError):first.terminal_input(ws,terminal,data,request_key=key,input_target=target)
+        file=Path(first.store.workspace(ws)['path'])/'exact-effect.txt'
+        deadline=time.monotonic()+5
+        while not file.exists() and time.monotonic()<deadline:time.sleep(.03)
+        assert file.read_text().splitlines()==['once']
+        first.shutdown();first=None
+        second=Canvas(project,principal='test-owner',state_dir=state)
+        assert second._sessions[terminal].pty.pid==pid
+        assert second._sessions[terminal].pty.input_generation==generation
+        assert second._sessions[terminal].input_instance_id!=target
+        observed=second.terminal_input_status(ws,terminal,key,fp)
+        assert observed['resolved'] and observed['journal_state']=='observed_input'
+        assert observed['result']['physical_receipt']['generation']==generation
+        assert not observed['task_completion_verified'] and not observed['automatic_retry']
+        assert acknowledge(second,ws,terminal,key,fp)['acknowledged']
+        assert not second.terminal_output(ws,terminal)['input_pending']
+        duplicate=second.terminal_input(ws,terminal,data,request_key=key,input_target=target)
+        assert duplicate['status']=='delivered' and len(writes)==1
+        assert file.read_text().splitlines()==['once']
+        second.terminal_close(ws,terminal)
+    finally:
+        if first:first.shutdown()
+        if second:second.shutdown()
+        if client:
+            for row in client.call('inventory'):
+                if row['process_live']:
+                    DaemonPTY(client,row['workspace_id'],row['terminal_id'],pid=row['pid'],runtime_id=row['runtime_id']).close()
             client.call('drain');client.call('stop_when_idle')

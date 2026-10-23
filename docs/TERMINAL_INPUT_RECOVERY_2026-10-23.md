@@ -66,3 +66,7 @@ acceptance. They are not counted as final passes.
 Global terminal possession, exact physical-effect correlation through the daemon,
 mobile reconciliation and installed-package acceptance remain separate open
 requirements. This source milestone does not close them.
+
+Subsequent source continuation: [exact owner daemon receipts](TERMINAL_DAEMON_RECEIPTS_2026-10-23.md)
+now qualifies the owner path under deliberate reply loss and broker restart.
+Global possession, mobile and installed acceptance remain open.

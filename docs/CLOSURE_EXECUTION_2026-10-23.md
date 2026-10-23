@@ -14,11 +14,11 @@ that a subsequently implemented feature is absent.
 | Long-running PTY/checkpoints | Successful prolonged run of the exact frozen/installed daemon under concurrent output, reconnect and uncertain input | New source and frozen 1,800-second runs passed with three terminals, three broker reopens and unchanged worker PIDs. Complete installed-package and prolonged real-model/TUI acceptance still open. Earlier frozen failure remains historical. |
 | Renderer recovery and memory | Watchdog/heap enforcement, preserved resource/view identity, no input replay, actual renderer qualification | Source watchdog and allocation admission delivered and tested; actual total V8/Chromium heap, installed acceptance and physical devices still unqualified. |
 | Global input ownership and conflict recovery | Conflicting desktop/mobile origins and devices, lease loss, pending-intent recovery, no late/repeated effect | Central lease foundation has six tests, including durable uncertainty after a failed write. It is explicitly not wired to desktop/mobile/agent/daemon paths; global arbitration remains open. Multiple desktop pending selectors have their own partial acceptance below. |
-| Multiple pending inputs | Independent observation/ACK, uncertainty preserved, old projection fencing and no resend | Desktop/host implementation and focused HTTP/ConPTY/Node/React tests delivered; daemon physical-effect correlation, mobile and installed acceptance remain open. See the dedicated recovery report. |
+| Multiple pending inputs | Independent observation/ACK, uncertainty preserved, old projection fencing and no resend | Desktop/host implementation and HTTP/ConPTY/Node/React tests delivered. Exact owner daemon correlation and broker-reopen recovery now have source acceptance; mobile/global arbitration and installed acceptance remain open. See the recovery and daemon receipt reports. |
 | Journal retention | Bounded protected-content retention preserving unresolved effects and permanent deduplication | Terminal ACK/retirement, permanent tombstones and transactional owner admission budgets implemented. Generic operations retain complete content pending ACK integration; inactive stores need explicit maintenance. |
 | Unified subscriptions | Versioned sequenced events, resumption/gap behavior and shared desktop/mobile consumers | Open; bounded polling is not this acceptance. |
-| Daemon upgrade | Actual version negotiation, explicit drain and update with active process preservation | Open; handshake and existing drain commands alone do not qualify an update. |
-| MSI | Actual administrative extraction and independent install/update/uninstall of exact package and cabinets | Corrected external-media candidate passed real administrative extraction and 7,886 file checks. Release-caller integration and independent install/update/uninstall/signing remain open. Published preview is unchanged. |
+| Daemon upgrade | Actual version negotiation, explicit drain and update with active process preservation | Open; accepted HTTP handlers now drain before database closure. Handshake, additive receipt capabilities and drain commands do not qualify executable replacement. |
+| MSI | Actual administrative extraction and independent install/update/uninstall of exact package and cabinets | Corrected external-media candidate passed real administrative extraction and 7,886 file checks; release callers now preserve/bind external media. Independent install/update/uninstall/signing remain open. Published preview is unchanged. |
 | Windows stable distribution | Clean independent Windows, previous-version upgrade, rollback, uninstall inspection, component execution, trusted signing, reviewed exact hashes | Open; current unsigned Setup is experimental. Local update ZIP is not an enabled stable channel. |
 | Workspace/editor/Git | Installed pane/orphan/layout recovery, device conflicts, visual editor/long content and authorized advanced merge/rebase/new/binary destructive flows | Existing source and targeted tests are partial evidence; complete acceptance open. |
 | Guest/VM files | Real scoped remote editing, bidirectional synchronization and reviewed back-publication | Open; current snapshot import is one-way and does not make the host editor a guest filesystem. |
@@ -180,3 +180,18 @@ Current local scopes (overlap; do not add together):
 A new complete CI on the resulting revision is still required. The complete
 Windows setup, user's installed app, Android APK and iPhone distribution have
 not been replaced by these source changes.
+
+## Exact owner/daemon receipt continuation
+
+The multiple-pending/CI source milestone was committed and pushed as `ee73a52`.
+Its full remote qualification is run `40006505644`; the two unit jobs were still
+running at the last observation. This does not qualify the later daemon changes.
+
+[Exact daemon receipt report](TERMINAL_DAEMON_RECEIPTS_2026-10-23.md) records the
+new capability, physical input generations, read-only effect observation and
+protected host reconciliation. A real source daemon survived lost confirmation
+and two broker reopens with one consumption per input. The HTTP shutdown barrier
+now joins accepted handlers before closing SQLite; its old-behavior regression
+mutant fails as expected. The 93-case consolidated scope and 19-case host
+compatibility scope passed. Global possession and the remaining attachment
+requirements are still active, not inferred complete from these improvements.

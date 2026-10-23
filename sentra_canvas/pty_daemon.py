@@ -21,14 +21,23 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from .pty_history import PtyHistory, OUTPUT_CHARS
+from .pty_input_effects import REFERENCE_FIELDS, validate_reference, validate_payload
 
 VERSION = 1
 MAX_CACHE_BYTES = 16 * 1024 * 1024
 MAX_FRAME = 256 * 1024
+MAX_INPUT_EFFECTS = 250000
 
 
 class UncertainPTY(RuntimeError):
     pass
+
+
+class PtyServer(ThreadingHTTPServer):
+    # server_close joins accepted handlers before serve() closes journals and
+    # releases installation ownership. Socket reads already have a deadline.
+    daemon_threads = False
+    block_on_close = True
 
 
 class OutputCache:
@@ -85,6 +94,7 @@ class PtyHost:
         self.db = sqlite3.connect(self.state/"pty-effects.sqlite3", check_same_thread=False)
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.execute("CREATE TABLE IF NOT EXISTS effects (key TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, state TEXT NOT NULL, result TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS input_effect_refs (key TEXT PRIMARY KEY,reference TEXT NOT NULL)")
         self.db.execute("UPDATE effects SET state='uncertain' WHERE state='in_flight'")
         self.db.commit()
         try:
@@ -110,7 +120,27 @@ class PtyHost:
                     "history_protocol_version": 1, "history": self.history.status(),
                     "capabilities": {"persistent_history": self.history.error is None, "consumer_cursor": True,
                                      "ansi_tui_snapshots": bool(self.history.snapshots and self.history.snapshots.available),
-                                     "producer_queue_bounded": True, "agent_binding_proof": True}}
+                                     "producer_queue_bounded": True, "agent_binding_proof": True,
+                                     "correlated_input_receipts": 1}}
+        if method == "input_effect":
+            reference = validate_reference(fields)
+            with self.lock:
+                saved = self.db.execute("SELECT r.reference,e.state,e.result FROM input_effect_refs r "
+                    "JOIN effects e ON e.key=r.key WHERE r.key=?", (reference['effect_key'],)).fetchone()
+            if saved is None:
+                return {'input_receipt_protocol_version':1,'found':False,'resolved':False,'automatic_retry':False,'may_resend':False,'task_completion_verified':False}
+            if json.loads(saved[0]) != reference:
+                raise PermissionError('terminal input receipt belongs to another exact scope')
+            receipt = json.loads(saved[2]) if saved[2] else None
+            resolved = saved[1] == 'done' and receipt is not None
+            if resolved and (any(receipt.get(k) != v for k,v in reference.items())
+                    or receipt.get('stage') != 'delivered_to_process'
+                    or receipt.get('input_receipt_protocol_version') != 1
+                    or receipt.get('automatic_retry') is not False
+                    or receipt.get('task_completion_verified') is not False):
+                raise RuntimeError('terminal input receipt binding is invalid')
+            return {'input_receipt_protocol_version':1,'found':True,'resolved':resolved,'state':saved[1], 'receipt':receipt,
+                    'automatic_retry':False,'may_resend':False,'task_completion_verified':False}
         if method in {"drain", "cancel_drain", "stop_when_idle"}:
             with self.lock:
                 live = sum(s['pty'].poll() is None for s in self.sessions.values())
@@ -161,6 +191,7 @@ class PtyHost:
                          "pid": session["pty"].pid, "exit_code": code, "process_live": code is None,
                          "process_state": "live" if code is None else "ended",
                          "agent_token_sha256": session.get("agent_token_sha256"), "runtime_id": self.runtime_id})
+                    result[-1]['input_generation'] = session['input_generation']
                 if fields.get('include_history'):
                     result.extend({**row, "runtime_id": self.runtime_id, "process_live": False,
                                    "process_state": "history_restored", "restoration_creates_process": False}
@@ -211,13 +242,21 @@ class PtyHost:
             except BaseException:
                 self.history.invalidate_checkpoint(fields['terminal_id']);raise
             return {"resized": True}
-        if method not in {"create", "write", "close"}:
+        if method not in {"create", "write", "write_correlated", "close"}:
             raise ValueError("unsupported PTY method")
         if not isinstance(key, str) or not 8<=len(key)<=160:
             raise ValueError("durable effect identity required")
         fingerprint = hashlib.sha256(json.dumps([method, fields], sort_keys=True,
             separators=(",", ":"), allow_nan=False).encode()).hexdigest()
         with self.lock:
+            reference = None
+            if method == 'write_correlated':
+                if set(fields) != REFERENCE_FIELDS | {'data'}:
+                    raise ValueError('exact correlated input fields required')
+                reference = validate_payload({k:fields[k] for k in REFERENCE_FIELDS},
+                    base64.b64decode(fields['data'],validate=True))
+                if key != reference['effect_key']:
+                    raise ValueError('terminal input effect key differs from selector')
             row = self.db.execute("SELECT fingerprint,state,result FROM effects WHERE key=?", (key,)).fetchone()
             if row:
                 if not hmac.compare_digest(row[0], fingerprint):
@@ -228,8 +267,16 @@ class PtyHost:
                         raise UncertainPTY("historical session is not a live process; no respawn")
                     return result
                 raise UncertainPTY("PTY effect requires observation; never replay")
-            self.db.execute("INSERT INTO effects VALUES(?,?,'in_flight',NULL)", (key, fingerprint))
-            self.db.commit()
+            if reference:
+                session = self._session(fields)
+                if reference['runtime_id'] != self.runtime_id or reference['generation'] != session['input_generation']:
+                    raise PermissionError('physical terminal input generation changed')
+                if self.db.execute('SELECT COUNT(*) FROM input_effect_refs').fetchone()[0] >= MAX_INPUT_EFFECTS:
+                    raise ValueError('terminal input receipt capacity reached; no input admitted')
+            with self.db:
+                if reference:
+                    self.db.execute('INSERT INTO input_effect_refs VALUES(?,?)', (key,json.dumps(reference,sort_keys=True)))
+                self.db.execute("INSERT INTO effects VALUES(?,?,'in_flight',NULL)", (key, fingerprint))
             try:
                 if method == "create":
                     if self.draining:
@@ -251,17 +298,19 @@ class PtyHost:
                         env=fields.get("env"))
                     token = (fields.get('env') or {}).get('SENTRA_CANVAS_AGENT_TOKEN')
                     self.sessions[ident] = {"pty": pty, "workspace_id": workspace,
-                        'output_lock':output_lock,
+                        'output_lock':output_lock, 'input_generation':uuid.uuid4().hex,
                         "agent_token_sha256": hashlib.sha256(token.encode()).hexdigest() if token else None}
                     self.history.bind(ident, pty.pid)
-                    result = {"terminal_id": ident, "pid": pty.pid, "runtime_id": self.runtime_id}
-                elif method == "write":
+                    result = {"terminal_id": ident, "pid": pty.pid, "runtime_id": self.runtime_id,
+                              'input_generation':self.sessions[ident]['input_generation']}
+                elif method in {"write", "write_correlated"}:
                     s = self._session(fields)
                     data = base64.b64decode(fields["data"], validate=True)
                     if not data or len(data)>16384:
                         raise ValueError("invalid input frame")
                     s["pty"].write(data)
-                    result = {"stage": "delivered", "model_completed": False}
+                    result = ({**reference,'input_receipt_protocol_version':1,'stage':'delivered_to_process','task_completion_verified':False,
+                               'automatic_retry':False} if reference else {"stage": "delivered", "model_completed": False})
                 else:
                     s = self._session(fields)
                     exit_input = base64.b64decode(fields.get("exit_input", "ZXhpdA0="), validate=True)
@@ -316,8 +365,7 @@ def serve(state_dir):
             self.send_header("Content-Length",str(len(data)));self.end_headers();self.wfile.write(data)
             if status == 200 and body['method'] == 'stop_when_idle':
                 threading.Thread(target=server.shutdown, daemon=True).start()
-    server = ThreadingHTTPServer(("127.0.0.1",0),Handler)
-    server.daemon_threads = True
+    server = PtyServer(("127.0.0.1",0),Handler)
     original=server.get_request
     def request():
         sock,addr=original();sock.settimeout(5);return sock,addr

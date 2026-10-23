@@ -7,12 +7,13 @@ if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
 from sentra_canvas.pty_client import PtyDaemonClient,DaemonPTY
 from sentra_canvas.service import Canvas
 
-def run(binary,state,seconds,*,source_daemon=False):
+def run(binary,state,seconds,*,source_daemon=False,correlated_inputs=False):
  state=state.resolve()
  if state.exists():raise ValueError('Choose a new, empty validation directory')
  state.mkdir(parents=True);report={'state':'running','installed_binary':None if source_daemon else str(binary),'daemon_kind':'source' if source_daemon else 'frozen','seconds_requested':seconds,'synthetic_workloads':True,'user_state_used':False}
  report['broker_source_root']=str(ROOT)
- report['broker_source_inputs']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ('sentra_canvas/service.py','sentra_canvas/pty_client.py','sentra_canvas/pty_history.py','sentra_canvas/pty_daemon.py','sentra_canvas/terminal_snapshots.py')}
+ report['broker_source_inputs']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ('sentra_canvas/service.py','sentra_canvas/pty_client.py','sentra_canvas/pty_history.py','sentra_canvas/pty_daemon.py','sentra_canvas/terminal_snapshots.py','sentra_canvas/terminal_input_receipts.py','sentra_canvas/shell_requests.py','sentra_canvas/pty_input_effects.py')}
+ report['correlated_input_receipts']=correlated_inputs
  output=state/'report.json'
  def save():output.write_text(json.dumps(report,indent=2),encoding='utf-8')
  save();process=None;app=None;client=None;terms=[];start=time.monotonic();stage='startup';last_save=0
@@ -42,10 +43,31 @@ def run(binary,state,seconds,*,source_daemon=False):
    t=app._start(ws,'Soak_'+str(i),'cmd',[sys.executable,'-u','-c',code]);terms.append(t)
   pids={t['id']:app._sessions[t['id']].pty.pid for t in terms};runtime=client.runtime_id;cursors={t['id']:0 for t in terms};checkpoint_cursors={};checkpoint_sequences={};reads=0;bytes_read=0;restarts=0;last_restart=0;checkpoint_reads=0
   assert client.call('health')['capabilities']['ansi_tui_snapshots'] is True,'Packaged snapshot runtime unavailable'
+  pending=[]
   for i,t in enumerate(terms):
    pty=app._sessions[t['id']].pty;fields=pty.fields(data=base64.b64encode(('input-once-'+str(i)+'\r').encode()).decode())
-   # Deliberate duplicate request identity is handled by the daemon's existing receipt.
-   client.call('write',fields,'soak-input-'+str(i));client.call('write',fields,'soak-input-'+str(i))
+   if correlated_inputs:
+    assert pty.client.capabilities.get('correlated_input_receipts')==1
+    target=app._sessions[t['id']].input_instance_id;key='soak-owner-input-'+str(i);data='input-once-'+str(i)+'\r'
+    payload={'terminal_id':t['id'],'data':data,'input_target':target}
+    fp=hashlib.sha256(json.dumps(['terminal_input',payload],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    original_call=pty.client.call
+    def lost_response(method,fields=None,key=None):
+     result=original_call(method,fields,key)
+     if method=='write_correlated':raise TimeoutError('injected after exact daemon delivery commit')
+     return result
+    if i==0:pty.client.call=lost_response
+    try:
+     value=app.terminal_input(ws,t['id'],data,request_key=key,input_target=target)
+     assert i!=0 and value['status']=='delivered'
+    except TimeoutError:
+     if i!=0:raise
+     report['physical_reply_loss_injected']=True
+    finally:pty.client.call=original_call
+    pending.append((t['id'],key,data,target,fp))
+   else:
+    # Deliberate duplicate identity is handled by the daemon's existing receipt.
+    client.call('write',fields,'soak-input-'+str(i));client.call('write',fields,'soak-input-'+str(i))
   with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
    end=time.monotonic()+seconds
    while time.monotonic()<end:
@@ -61,6 +83,17 @@ def run(binary,state,seconds,*,source_daemon=False):
      stage='broker_reopen'
      app.shutdown();app=Canvas(root,principal='soak-owner',state_dir=state/'canvas');assert app._pty_client.runtime_id==runtime
      assert {t['id']:app._sessions[t['id']].pty.pid for t in terms}==pids;restarts+=1;last_restart=elapsed
+     if pending:
+      from sentra_canvas.terminal_input_receipts import acknowledge
+      for index,(ident,key,data,target,fp) in enumerate(pending):
+       assert app._sessions[ident].input_instance_id!=target
+       observed=app.terminal_input_status(ws,ident,key,fp)
+       assert observed['resolved'] and not observed['task_completion_verified']
+       if index==0:assert observed['journal_state']=='observed_input'
+       assert acknowledge(app,ws,ident,key,fp)['acknowledged']
+       assert not app.terminal_output(ws,ident)['input_pending']
+       assert app.terminal_input(ws,ident,data,request_key=key,input_target=target)['status']=='delivered'
+      report['receipt_observations']=len(pending);report['pending_confirmations_recovered']=True;pending=[]
      report.update(reads=reads,broker_reopens=restarts,elapsed_seconds=round(elapsed,1));save()
     if elapsed-last_save>10:
      stage='checkpoint_observation'
@@ -98,6 +131,6 @@ def run(binary,state,seconds,*,source_daemon=False):
   report['owned_daemon_closed']=process is not None and process.poll() is not None;save()
  return report
 if __name__=='__main__':
- p=argparse.ArgumentParser(__doc__);mode=p.add_mutually_exclusive_group(required=True);mode.add_argument('--binary',type=Path);mode.add_argument('--source-daemon',action='store_true');p.add_argument('--state',type=Path,required=True);p.add_argument('--seconds',type=int,default=300);a=p.parse_args()
+ p=argparse.ArgumentParser(__doc__);mode=p.add_mutually_exclusive_group(required=True);mode.add_argument('--binary',type=Path);mode.add_argument('--source-daemon',action='store_true');p.add_argument('--state',type=Path,required=True);p.add_argument('--seconds',type=int,default=300);p.add_argument('--correlated-inputs',action='store_true');a=p.parse_args()
  if os.name!='nt' or not 30<=a.seconds<=3600:p.error('Windows and a duration from 30 to 3600 seconds are required')
- run(a.binary.resolve(strict=True) if a.binary else None,a.state,a.seconds,source_daemon=a.source_daemon)
+ run(a.binary.resolve(strict=True) if a.binary else None,a.state,a.seconds,source_daemon=a.source_daemon,correlated_inputs=a.correlated_inputs)

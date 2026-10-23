@@ -258,7 +258,11 @@ def write_terminal(canvas, workspace, terminal, data, key):
     process = canvas._sessions[terminal].pty
     from .pty_client import DaemonPTY
     if isinstance(process, DaemonPTY):
-        process.write_correlated(data, proof)
+        reference = process.input_reference(proof['effect_key'], data)
+        with possession.physical(proof, data):
+            if isinstance(effect, CentralEffectContext):
+                effect.checkpoint()
+            process.write_correlated(data, reference)
     else:
         with possession.physical(proof, data):
             if isinstance(effect, CentralEffectContext):

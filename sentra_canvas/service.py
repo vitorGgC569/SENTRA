@@ -115,7 +115,7 @@ class Canvas:
                     continue
                 session=Session()
                 session.exit_input = b"/exit\r" if restored.get('shell') == "sentra-cli" else b"\x03" if restored.get('shell') == "codex" else b"exit\r"
-                session.pty=DaemonPTY(self._pty_client,row["workspace_id"],row["terminal_id"],pid=row["pid"],runtime_id=row["runtime_id"])
+                session.pty=DaemonPTY(self._pty_client,row["workspace_id"],row["terminal_id"],pid=row["pid"],runtime_id=row["runtime_id"],input_generation=row.get('input_generation'))
                 self._sessions[row["terminal_id"]]=session
         self._jobs={}
         self._task_threads={}

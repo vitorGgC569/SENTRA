@@ -72,6 +72,12 @@ def send(canvas,ws,terminal,data,key,target):
         if session is None or session.input_instance_id!=target:
             raise PermissionError('terminal input target changed; observe the session before new input')
         if session.pty is None:raise RuntimeError('terminal no longer attached')
+        reference = None
+        from .pty_client import DaemonPTY
+        if isinstance(session.pty,DaemonPTY) and session.pty.client.capabilities.get('correlated_input_receipts') == 1:
+            physical_key = 'host-input:' + hashlib.sha256(json.dumps([requests.owner,ws,terminal,key,target],separators=(',',':')).encode()).hexdigest()
+            reference = session.pty.input_reference(physical_key,data.encode('utf-8'))
+            requests.bind_terminal_input_effect(ws,key,fingerprint,reference)
         with closing(requests.control.store.connect('shell')) as db,db:
             db.execute('BEGIN IMMEDIATE')
             count=db.execute('SELECT COUNT(*) FROM canvas_terminal_input_pending WHERE owner=?',(requests.owner,)).fetchone()[0]
@@ -83,7 +89,8 @@ def send(canvas,ws,terminal,data,key,target):
                 (requests.owner,ws,key,terminal,fingerprint,target,int(time.time()*1000)))
         # Nothing after this mark claims safe replay if the transport disappears.
         requests.note_effect_possible(ws,key)
-        session.pty.write(data.encode('utf-8'))
+        if reference:session.pty.write_correlated(data.encode('utf-8'),reference)
+        else:session.pty.write(data.encode('utf-8'))
         return {'ok':True,'status':'delivered','delivery_stage':'delivered_to_process',
             'request_key':key,'terminal_id':terminal,'input_target':target,
             'bytes':len(data.encode('utf-8')),'task_completion_verified':False,'automatic_retry':False}
@@ -99,7 +106,17 @@ def inspect(canvas,ws,terminal,key,fingerprint):
         raise PermissionError('input receipt belongs to another terminal')
     if original.get('payload_retired'):
         value=requests.inspect_retired_input(ws,key,fingerprint,terminal)
-    else:value=requests.inspect(ws,'terminal_input',original['payload'],key)
+    else:
+        value=requests.inspect(ws,'terminal_input',original['payload'],key)
+        reference=original.get('terminal_effect')
+        client=getattr(canvas,'_pty_client',None)
+        if not value.get('resolved') and reference and client is not None and client.capabilities.get('correlated_input_receipts') == 1:
+            # Observation only: no connect-or-start and no write fallback. A
+            # missing/uncertain daemon receipt cannot license replay.
+            physical=client.call('input_effect',reference)
+            if physical.get('input_receipt_protocol_version') == 1 and physical.get('found') and physical.get('resolved'):
+                requests.confirm_terminal_input_observation(ws,key,fingerprint,reference,physical.get('receipt'))
+                value=requests.inspect(ws,'terminal_input',original['payload'],key)
     return {**value,'terminal_id':terminal,'input_target':original['payload']['input_target'],'task_completion_verified':False}
 
 

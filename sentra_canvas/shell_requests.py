@@ -275,6 +275,69 @@ class ShellHostRequests:
         """Durably mark that reserve_intent or another effect may have started."""
         self._mark(project_id, request_key, "after_possible_effect", operation_id)
 
+    def bind_terminal_input_effect(self, project_id, request_key, fingerprint, reference):
+        """Protect an exact daemon selector before dispatch, never a permission."""
+        from .pty_input_effects import validate_reference
+        reference = validate_reference(reference)
+        with closing(self.control.store.connect("shell")) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+            row = self._row(db, project_id, request_key)
+            if (row is None or row['fingerprint'] != fingerprint or row['state'] != 'claimed'
+                    or row['phase'] != 'before_admission'):
+                raise ShellConflict('terminal input effect must bind before physical admission')
+            original = _decode(row['protected_intent'])
+            payload = original.get('payload', {})
+            if (original.get('action') != 'terminal_input' or reference['workspace_id'] != project_id
+                    or reference['terminal_id'] != payload.get('terminal_id')
+                    or reference['payload_sha256'] != hashlib.sha256(payload['data'].encode('utf-8')).hexdigest()
+                    or original.get('terminal_effect', reference) != reference):
+                raise ShellConflict('physical input selector differs from protected intent')
+            encoded = _encode({**original,'terminal_effect':reference})
+            delta = len(encoded.encode('utf-8')) - len(row['protected_intent'].encode('utf-8'))
+            usage = db.execute('SELECT * FROM canvas_shell_request_usage WHERE owner=?',(self.owner,)).fetchone()
+            if usage['protected_bytes'] + usage['reserved_bytes'] + delta > self.retention_policy.max_protected_bytes:
+                raise HostRequestCapacityError('physical input selector exceeds protected journal budget before admission')
+            db.execute('UPDATE canvas_shell_host_requests SET protected_intent=? WHERE owner=? AND project_id=? AND request_key=?',
+                (encoded,self.owner,project_id,request_key))
+
+    def confirm_terminal_input_observation(self, project_id, request_key, fingerprint, reference, receipt):
+        """Commit exact daemon delivery evidence without invoking any callback.
+
+        The distinct state fences a late callback failure from replacing this
+        definite observation with uncertainty. The receipt proves delivery only.
+        """
+        from .pty_input_effects import validate_reference
+        reference = validate_reference(reference)
+        if (not isinstance(receipt,dict) or any(receipt.get(k) != v for k,v in reference.items())
+                or receipt.get('input_receipt_protocol_version') != 1
+                or receipt.get('stage') != 'delivered_to_process'
+                or receipt.get('automatic_retry') is not False or receipt.get('task_completion_verified') is not False):
+            raise ShellConflict('exact physical input delivery receipt required')
+        with closing(self.control.store.connect('shell')) as db, db:
+            db.execute('BEGIN IMMEDIATE')
+            row = self._row(db,project_id,request_key)
+            if row is None or row['fingerprint'] != fingerprint:
+                raise ShellConflict('physical input observation belongs to another request')
+            original = _decode(row['protected_intent'])
+            payload = original.get('payload',{})
+            if (original.get('action') != 'terminal_input' or original.get('terminal_effect') != reference
+                    or reference['workspace_id'] != project_id or reference['terminal_id'] != payload.get('terminal_id')):
+                raise ShellConflict('physical input observation differs from protected selector')
+            if row['state'] == 'observed_input':return True
+            if row['phase'] != 'after_possible_effect' or row['state'] not in {'effect_possible','uncertain'}:
+                return False
+            result = {'ok':True,'status':'delivered','delivery_stage':'delivered_to_process',
+                'request_key':request_key,'terminal_id':reference['terminal_id'],'input_target':payload['input_target'],
+                'bytes':len(payload['data'].encode('utf-8')),'task_completion_verified':False,'automatic_retry':False,
+                'physical_receipt':receipt,'observed':True}
+            encoded = _encode(result)
+            if len(encoded.encode('utf-8')) > self.retention_policy.result_reservation_bytes:
+                raise HostRequestCapacityError('physical input observation exceeds admitted reservation')
+            db.execute("UPDATE canvas_shell_host_requests SET state='observed_input',protected_result=?,reserved_bytes=?,updated_at=? "
+                'WHERE owner=? AND project_id=? AND request_key=?',
+                (encoded,_RETIREMENT_RESERVATION,time.time(),self.owner,project_id,request_key))
+            return True
+
     def _open_receipt(self, row):
         phase = row["phase"] if "phase" in row.keys() else None
         operation_id = row["operation_id"] if "operation_id" in row.keys() else None
@@ -338,7 +401,7 @@ class ShellHostRequests:
                 raise ValueError("protected request result exceeds its admitted reservation")
             with closing(self.control.store.connect("shell")) as db, db:
                 db.execute("UPDATE canvas_shell_host_requests SET state=?,protected_result=?,"
-                    "reserved_bytes=?,updated_at=? WHERE owner=? AND project_id=? AND request_key=?",
+                    "reserved_bytes=?,updated_at=? WHERE owner=? AND project_id=? AND request_key=? AND state<>'observed_input'",
                     (journal_state, encoded_result, _RETIREMENT_RESERVATION, time.time(),
                      self.owner, project_id, request_key))
             return result
@@ -352,7 +415,7 @@ class ShellHostRequests:
             with closing(self.control.store.connect("shell")) as db, db:
                 if phase in _EXPLICIT_PHASES:
                     db.execute("UPDATE canvas_shell_host_requests SET state=?,phase=?,operation_id=?,"
-                        "protected_result=?,reserved_bytes=?,updated_at=? WHERE owner=? AND project_id=? AND request_key=?",
+                        "protected_result=?,reserved_bytes=?,updated_at=? WHERE owner=? AND project_id=? AND request_key=? AND state<>'observed_input'",
                         (receipt["status"], phase, receipt["diagnosis"]["operation_id"],
                          _encode(receipt), _RETIREMENT_RESERVATION, time.time(), self.owner, project_id, request_key))
                 else:

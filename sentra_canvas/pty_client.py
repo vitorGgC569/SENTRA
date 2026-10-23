@@ -1,6 +1,7 @@
 """Host-only daemon connection. No automatic retries for physical effects."""
 from __future__ import annotations
 import base64
+import hashlib
 import json
 import os
 import subprocess
@@ -73,14 +74,15 @@ class PtyDaemonClient:
 
 class DaemonPTY:
     durable=True
-    def __init__(self,client,workspace_id,terminal_id,*,pid,runtime_id):
+    def __init__(self,client,workspace_id,terminal_id,*,pid,runtime_id,input_generation=None):
         self.client=client;self.workspace_id=workspace_id;self.terminal_id=terminal_id
         self.pid=pid;self.runtime_id=runtime_id
+        self.input_generation=input_generation
         self._closed=False
     @classmethod
     def create(cls,client,ws,ident,argv,cwd,**options):
         value=client.call('create',{'workspace_id':ws,'terminal_id':ident,'argv':argv,'cwd':str(cwd),**options},'create:'+ident)
-        return cls(client,ws,ident,pid=value['pid'],runtime_id=value['runtime_id'])
+        return cls(client,ws,ident,pid=value['pid'],runtime_id=value['runtime_id'],input_generation=value.get('input_generation'))
     def fields(self,**extra):return {'workspace_id':self.workspace_id,'terminal_id':self.terminal_id,**extra}
     def output(self,cursor=0):
         value=self.client.call('output',self.fields(cursor=cursor))
@@ -88,6 +90,18 @@ class DaemonPTY:
         return value
     def poll(self):return self.output()['exit_code']
     def write(self,data):return self.client.call('write',self.fields(data=base64.b64encode(data).decode()),'write:'+uuid.uuid4().hex)
+    def input_reference(self,key,data):
+        from .pty_input_effects import validate_payload
+        if self.client.capabilities.get('correlated_input_receipts') != 1:
+            raise TerminalError('daemon lacks exact input receipts; no fallback input sent')
+        return validate_payload({'effect_key':key,'workspace_id':self.workspace_id,'terminal_id':self.terminal_id,
+            'runtime_id':self.runtime_id,'generation':self.input_generation,'payload_sha256':hashlib.sha256(data).hexdigest()},data)
+    def write_correlated(self,data,reference):
+        from .pty_input_effects import validate_payload
+        value=validate_payload(reference,data)
+        if value != self.input_reference(value['effect_key'],data):
+            raise TerminalError('input selector refers to another terminal generation')
+        return self.client.call('write_correlated',{**value,'data':base64.b64encode(data).decode()},value['effect_key'])
     def resize(self,cols,rows):return self.client.call('resize',self.fields(cols=cols,rows=rows))
     def close(self,**options):
         result=self.client.call('close',self.fields(exit_input=base64.b64encode(options.get('exit_input',b'exit\r')).decode()),'close:'+self.terminal_id)
