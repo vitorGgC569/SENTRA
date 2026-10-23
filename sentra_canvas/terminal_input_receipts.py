@@ -75,7 +75,9 @@ def send(canvas,ws,terminal,data,key,target):
         reference = None
         from .pty_client import DaemonPTY
         if isinstance(session.pty,DaemonPTY) and session.pty.client.capabilities.get('correlated_input_receipts') == 1:
-            physical_key = 'host-input:' + hashlib.sha256(json.dumps([requests.owner,ws,terminal,key,target],separators=(',',':')).encode()).hexdigest()
+            # The broker's ephemeral input target fences dispatch, but must
+            # not create a second physical identity for the same caller key.
+            physical_key = 'host-input:' + hashlib.sha256(json.dumps([requests.owner,ws,terminal,key],separators=(',',':')).encode()).hexdigest()
             reference = session.pty.input_reference(physical_key,data.encode('utf-8'))
             requests.bind_terminal_input_effect(ws,key,fingerprint,reference)
         with closing(requests.control.store.connect('shell')) as db,db:

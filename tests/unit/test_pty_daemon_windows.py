@@ -146,6 +146,21 @@ def test_lost_daemon_write_reply_recovers_after_canvas_restart_by_exact_receipt(
         assert not second.terminal_output(ws,terminal)['input_pending']
         duplicate=second.terminal_input(ws,terminal,data,request_key=key,input_target=target)
         assert duplicate['status']=='delivered' and len(writes)==1
+        # Model a restored host snapshot missing this outer request. The
+        # daemon's permanent physical key must not change with the new broker
+        # input target. Only this disposable test journal is modified.
+        from contextlib import closing
+        from sentra_canvas.terminal_input_receipts import journal
+        requests=journal(second)
+        reference=requests.intent(ws,key,fp)['terminal_effect']
+        with closing(requests.control.store.connect('shell')) as db,db:
+            db.execute('DELETE FROM canvas_shell_host_requests WHERE owner=? AND project_id=? AND request_key=?',
+                       (requests.owner,ws,key))
+        new_target=second._sessions[terminal].input_instance_id
+        assert second.terminal_input(ws,terminal,data,request_key=key,input_target=new_target)['status']=='delivered'
+        new_fp=hashlib.sha256(json.dumps(['terminal_input',{**payload,'input_target':new_target}],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+        assert requests.intent(ws,key,new_fp)['terminal_effect']==reference
+        assert acknowledge(second,ws,terminal,key,new_fp)['acknowledged']
         assert file.read_text().splitlines()==['once']
         second.terminal_close(ws,terminal)
     finally:

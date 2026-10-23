@@ -20,6 +20,11 @@ write. Unknown effects remain unknown. A delivered receipt reports
 remain observable after a daemon restart without recreating their process.
 Old in-flight records become uncertain and cannot be replayed.
 
+The physical key derives from owner, workspace, terminal and caller key. It
+does not include the broker's temporary input target. That target still fences
+dispatch, but reopening a broker or restoring an older outer journal cannot
+give the same caller key a second identity in the surviving daemon.
+
 The owner desktop input path protects the selector in its existing host intent
 before dispatch. If confirmation is lost, inspection consults the existing
 daemon and commits only an exact definite receipt. It does not call
@@ -72,6 +77,18 @@ These scopes overlap; their case counts must not be added:
   establish the cause of the earlier hosted-runner timeouts.
 - Enforced typed-core gate remains **0 / maximum 0**. Desktop bundle validation
   verifies 124 output files; these backend changes do not rebuild the full Setup.
+- Physical-key follow-up: **3 passed**, `stable-physical43.xml`. The real Windows
+  test additionally models a restored outer journal missing its request, changes
+  the broker target and verifies the same daemon selector/receipt is reused.
+  Only the disposable test journal is modified.
+
+An isolated frozen Canvas was built from snapshot
+`9613f1bc8e1034b036b44ceb5adb936751d0b9b75090d9318131d99f2e0ed9ce`
+at base `6865fc0`, SHA-256
+`7c776df52637d2b6e32f630cf5b3ce3357aee2911f5065af9fbe4003303e1dab`.
+This preliminary component build predates the physical-key follow-up above;
+it is not a new complete Setup, installed acceptance or qualification of the
+later source. Its result remains `correlated-frozen42-result.json`.
 
 ## Still open
 

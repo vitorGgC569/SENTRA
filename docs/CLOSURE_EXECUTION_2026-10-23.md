@@ -195,3 +195,9 @@ now joins accepted handlers before closing SQLite; its old-behavior regression
 mutant fails as expected. The 93-case consolidated scope and 19-case host
 compatibility scope passed. Global possession and the remaining attachment
 requirements are still active, not inferred complete from these improvements.
+
+The daemon/host implementation was committed locally as `6865fc0`. The next
+physical-key correction excludes the temporary broker target from the durable
+daemon key; a real Windows journal-restore regression passed. Preliminary
+component build 42 succeeded but predates that follow-up. Its exact hashes and
+limits are recorded in the daemon report, not promoted to complete release QA.
