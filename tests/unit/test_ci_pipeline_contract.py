@@ -144,7 +144,24 @@ def test_type_failure_never_hides_runtime_tests_or_becomes_optional():
     assert '--junitxml=test-results.xml' in tests['run']
     assert 'throw "Required pytest suite failed"' in tests['run']
     assert any(s.get('uses', '').startswith('actions/upload-artifact@') and
-               s['with']['path'] == 'test-results.xml' for s in steps)
+               'test-results.xml' in s['with']['path'].splitlines() for s in steps)
+
+
+def test_encrypted_presentation_is_required_against_real_scoped_canvas():
+    data = yaml.safe_load((ROOT / '.github/workflows/ci.yml').read_text(encoding='utf-8'))
+    steps = data['jobs']['python']['steps']
+    step = next(s for s in steps if s.get('name') == 'Verify encrypted conversation observations')
+    assert step.get('continue-on-error') is not True
+    assert "matrix.partition == 0" in step['if']
+    assert "steps.terminal-fixtures.outcome == 'success'" in step['if']
+    assert '!cancelled()' in step['if']
+    assert 'npm --prefix integrations/orca-mobile/transport run typecheck' in step['run']
+    assert 'npm --prefix integrations/orca-mobile/transport test' in step['run']
+    assert "$env:SENTRA_MOBILE_ACCEPTANCE = '1'" in step['run']
+    assert 'tests/unit/test_mobile_presentation_stream.py' in step['run']
+    assert step['run'].count('if ($LASTEXITCODE -ne 0) { throw ') == 3
+    assert any(s.get('uses', '').startswith('actions/upload-artifact@') and
+               'mobile-presentation-results.xml' in s['with']['path'].splitlines() for s in steps)
 
 
 def test_release_publishing_uses_separate_minimal_token():

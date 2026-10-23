@@ -153,6 +153,9 @@ def gateway_call(canvas,body):
     if method=='pair':return devices.pair(body['invite_id'],body['invite'],public_key,body['name'])
     if method=='claim':return devices.claim(body['device_id'],public_key)
     if method=='rotate':return devices.rotate(body['device_id'],body['credential'],public_key,body['request_key'])
+    if method=='presentation_head':
+        selected=presentation_scope(canvas,body)
+        return canvas.shell_stream_head(**{k:selected[k] for k in ('project_id','space_id','conversation_id')})
     if method != 'request':raise ValueError('unsupported mobile method')
     scope=devices.authenticate(body['device_id'],body['credential'],public_key)
     request=body.get('request')
@@ -197,6 +200,32 @@ def gateway_call(canvas,body):
     if action=='conversation_list':
         result={**result,'value':{**result['value'],'items':[c for c in result['value'].get('items',[]) if c.get('dot_id')==scope['dot_id']]}}
     return result
+
+
+def presentation_scope(canvas, body):
+    """Reuse current message-read authority for a read-only conversation feed.
+
+    Called before headers and on every emitted frame, including heartbeats.
+    No device credential or presentation cursor grants execution authority.
+    """
+    selected=body.get('request')
+    fields={'project_id','space_id','dot_id','conversation_id'}
+    if (not isinstance(selected,dict) or set(selected)!=fields or
+            any(not isinstance(selected[k],str) or not 1<=len(selected[k])<=256 for k in fields)):
+        raise ValueError('exact mobile presentation scope required')
+    scope=registry(canvas).authenticate(body['device_id'],body['credential'],body['public_key'])
+    if 'message_list' not in scope['actions'] or any(selected[k]!=scope[k] for k in fields-{'conversation_id'}):
+        raise PermissionError('presentation outside paired scope')
+    from .workspace_contract import inventory
+    inventory(canvas,scope['project_id'],{k:scope[k] for k in ('space_id','dot_id')})
+    from contextlib import closing
+    control=canvas._shell_service()
+    with closing(control.store.connect('shell')) as db:
+        conversation=control.shell._entity(db,canvas._runtime().owner,scope['project_id'],
+            'conversation',selected['conversation_id'],space_id=scope['space_id'])
+    if conversation.get('dot_id')!=scope['dot_id']:
+        raise PermissionError('presentation conversation outside paired Dot')
+    return dict(selected)
 
 
 def scoped_approvals(canvas,scope,request):

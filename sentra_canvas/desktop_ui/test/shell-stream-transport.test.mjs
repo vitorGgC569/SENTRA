@@ -245,3 +245,41 @@ test('failed head recovery retries with bounded read backoff without waiting for
     assert.equal(reads,2);
   }finally{feed.close();await feed.task;}
 });
+
+
+test('SSE budgets count UTF-8 bytes across chunks and multiple lines', async()=>{
+ for(const text of ['data: '+ '界'.repeat(700000), 'data: '+ '界'.repeat(400000)+'\ndata: '+'界'.repeat(400000)+'\n\n']){
+  const bytes=encoder.encode(text);let cancelled=false;
+  const stream=new ReadableStream({start(c){for(let i=0;i<bytes.length;i+=8191)c.enqueue(bytes.subarray(i,i+8191));},cancel(){cancelled=true;}});
+  await assert.rejects(async()=>{for await(const ignored of sseFrames(stream))void ignored;},/budget/);
+  assert.equal(cancelled,true);
+ }
+});
+
+test('a reset accepts a lower restored sequence and fences an older in-flight head',async()=>{
+ let current={sequence:90,content:'before restore',operation_id:'op'},resolveOld,reads=0;
+ const seen=[];
+ const feed=new ProjectFeed({batchMs:1,readHead:async()=>{reads++;return reads===2?new Promise(r=>{resolveOld=r;}):current;},
+  open:(_cursor,signal)=>new Promise((_r,reject)=>signal.addEventListener('abort',()=>reject(Error('closed'))))});
+ feed.subscribe({space_id:'s',conversation_id:'c'},{onPreview:p=>seen.push(p.content)});
+ try{
+  await until(()=>seen.includes('before restore'));
+  void feed.sync([...feed.listeners][0]);await until(()=>!!resolveOld);
+  current={sequence:2,content:'restored current',operation_id:'new'};
+  feed.receive({event:'snapshot',data:{reset:true,cursor:2,epoch:'b'.repeat(32),items:[]}});
+  resolveOld({sequence:99,content:'late old database',operation_id:'op'});
+  await until(()=>seen.includes('restored current'));
+  assert.equal([...feed.listeners][0].head.sequence,2);assert.ok(!seen.includes('late old database'));
+ }finally{feed.close();await feed.task;}
+});
+
+test('async frame transports share projections and stop on revoked read authority',async()=>{
+ const seen=[],states=[];
+ const feed=new ProjectFeed({batchMs:1,readHead:async()=>({sequence:0,content:''}),open:async()=>({frames:(async function*(){
+  yield {event:'snapshot',data:{reset:true,cursor:0,epoch:'a'.repeat(32)}};
+  yield {event:'shell',id:'1',data:observation(1,'mobile preview')};
+  await wait(15);yield {event:'end',data:{status:403}};
+ })()})});
+ feed.subscribe({space_id:'s',conversation_id:'c'},{onPreview:p=>seen.push(p),onState:s=>states.push(s)});
+ try{await feed.task;assert.equal(states.at(-1),'reauth_required');assert.equal(seen.at(-1).content,'mobile preview');assert.equal(seen.at(-1).authoritative,false);}finally{feed.close();}
+});

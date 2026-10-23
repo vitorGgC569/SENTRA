@@ -33,3 +33,35 @@ def test_sync_call_from_host_loop_is_refused_without_waiting_for_itself(tmp_path
     try:
         with pytest.raises(RuntimeError,match='own event loop'):host._call(nested(),timeout=3)
     finally:host.close();control.durable.close()
+
+
+def test_closed_host_releases_its_async_loop_and_default_worker(tmp_path):
+    import asyncio
+    control=ControlPlaneService.from_store(tmp_path/'central');host=MachineHost(control,owner='owner')
+    async def identify_worker():
+        return await asyncio.to_thread(threading.current_thread)
+    worker=host._call(identify_worker())
+    try:
+        assert worker.is_alive()
+        host.close()
+        assert not host._thread.is_alive()
+        assert not worker.is_alive()
+        assert host._loop.is_closed()
+    finally:host.close();control.durable.close()
+
+
+def test_executor_cleanup_never_releases_an_owned_physical_boundary(tmp_path):
+    from types import SimpleNamespace
+    from sentra_runtime.effect_boundary import _ResourceLock
+    control=ControlPlaneService.from_store(tmp_path/'central');host=MachineHost(control,owner='owner')
+    host._factories['busy-machine']=SimpleNamespace(_declarations={})
+    boundary=_ResourceLock(control.durable.root/'effect-locks','busy-machine')
+    boundary.acquire(1)
+    try:
+        with pytest.raises(RuntimeError,match='physical workers'):
+            host.close()
+        assert host._thread.is_alive() and not host._loop.is_closed()
+        assert host.inventory('unknown')==[]
+    finally:
+        boundary.release();host.close();control.durable.close()
+    assert not host._thread.is_alive() and host._loop.is_closed()

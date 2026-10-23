@@ -10,7 +10,7 @@ export function subscribeShellStream(scope, observer) {
   let record = projects.get(scope.project_id);
   if (!record) {
     record = { users: 0, timer: null, feed: new ProjectFeed({
-      open: (after, signal) => apiStream(scope.project_id, { after, signal }),
+      open: (after, signal, epoch) => apiStream(scope.project_id, { after, signal, epoch }),
       readHead: (fields, options) => api(route('/api/shell/stream/head', fields), undefined, options),
     }) };
     record.resume = () => record.feed.resume();

@@ -13,6 +13,7 @@ import hashlib
 import json
 import threading
 import time
+import uuid
 
 from sentra_core.conversations import _decode, _encode
 from sentra_core.model_prose import prose_prefix
@@ -54,6 +55,8 @@ class ShellStreamJournal:
         self.closed = threading.Event()
         with closing(store.connect("shell")) as db, db:
             db.executescript("""
+                CREATE TABLE IF NOT EXISTS shell_stream_epochs(
+                    owner TEXT PRIMARY KEY, epoch TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS shell_stream_heads(
                     owner TEXT NOT NULL, project_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
                     space_id TEXT NOT NULL, sequence INTEGER NOT NULL, fingerprint TEXT NOT NULL,
@@ -91,6 +94,8 @@ class ShellStreamJournal:
                 CREATE INDEX IF NOT EXISTS shell_stream_content_chunk_roots
                     ON shell_stream_content_pages(owner,project_id,chunk_sha256);
             """)
+            db.execute("INSERT OR IGNORE INTO shell_stream_epochs VALUES(?,?)", (self.owner, uuid.uuid4().hex))
+            self.epoch = db.execute("SELECT epoch FROM shell_stream_epochs WHERE owner=?", (self.owner,)).fetchone()["epoch"]
 
     @contextmanager
     def _transaction(self):
@@ -339,7 +344,7 @@ class ShellStreamJournal:
                 (self.owner, _identifier(project_id), _identifier(conversation_id))).fetchone()
         if row is None:
             return None
-        return {**_decode(row["protected_snapshot"]), "sequence": row["sequence"], "persisted": True}
+        return {**_decode(row["protected_snapshot"]), "sequence": row["sequence"], "persisted": True, "epoch": self.epoch}
 
     def read(self, project_id, after=None, *, limit=128):
         project_id = _identifier(project_id)
@@ -387,11 +392,11 @@ class ShellStreamJournal:
                 # keeping this one multiplexed frame bounded even with many large histories.
                 heads = db.execute("SELECT conversation_id,space_id,sequence FROM shell_stream_heads WHERE owner=? AND project_id=? ORDER BY sequence DESC LIMIT 257",
                     (self.owner, project_id)).fetchall()
-                return {"reset": True, "cursor": last, "items": [dict(row) for row in heads[:256]],
+                return {"reset": True, "cursor": last, "epoch": self.epoch, "items": [dict(row) for row in heads[:256]],
                         "has_more": len(heads) > 256}
             rows = db.execute("SELECT seq,protected_event FROM shell_stream_events WHERE owner=? AND project_id=? AND seq>? ORDER BY seq LIMIT ?",
                 (self.owner, project_id, after, limit)).fetchall()
-        return {"reset": False, "cursor": rows[-1]["seq"] if rows else after,
+        return {"reset": False, "cursor": rows[-1]["seq"] if rows else after, "epoch": self.epoch,
                 "items": [{**_decode(row["protected_event"]), "sequence": row["seq"]} for row in rows]}
 
     def wait(self, seconds=1):

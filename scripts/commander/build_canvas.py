@@ -22,6 +22,7 @@ def desktop_source_inputs(project: Path) -> dict[str, str]:
     shared = {"../../integrations/orca-terminal/src/" + name for name in (
         "consumer-flow.mjs", "input-queue.mjs", "emulator-budget.mjs", "saved-register.mjs")}
     shared.add("../../integrations/orca-terminal/vendor/orca/src/shared/terminal-unicode-provider.ts")
+    shared.add("../../integrations/orca-mobile/transport/src/presentation-stream.js")
     names.update(name for name in shared if (project / name).exists() or (project / name).is_symlink())
     result = {}
     for name in sorted(names):

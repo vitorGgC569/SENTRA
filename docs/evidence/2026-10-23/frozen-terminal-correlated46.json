@@ -1,0 +1,40 @@
+{
+  "state": "passed",
+  "seconds_requested": 1800,
+  "daemon_kind": "frozen",
+  "synthetic_workloads": true,
+  "user_state_used": false,
+  "reads": 18597,
+  "bytes_read": 3817869,
+  "broker_reopens": 3,
+  "checkpoint_reads": 534,
+  "checkpoint_cursors": {
+    "9a2731e40a3f4e7ab91b93d36250ba74": 1092672,
+    "90f650bf0d6a4fab9f6c3e3ae30d3640": 1092734,
+    "edc2483a01eb4e2fbe0d055903fe0322": 1092455
+  },
+  "checkpoint_sequences": {
+    "9a2731e40a3f4e7ab91b93d36250ba74": 104870,
+    "90f650bf0d6a4fab9f6c3e3ae30d3640": 104833,
+    "edc2483a01eb4e2fbe0d055903fe0322": 104648
+  },
+  "checkpoint_progress_checked": true,
+  "elapsed_seconds": 1813.7,
+  "receipt_observations": 3,
+  "pending_confirmations_recovered": true,
+  "concurrent_terminals": 3,
+  "same_worker_pids": true,
+  "duplicate_input_physical_count": 1,
+  "daemon_functional": true,
+  "owned_daemon_closed": true,
+  "binary_sha256": "e419a7faa1d3eb21a7554cfafde1b7e61846b94b43e72cdc7b1518f88a77c398",
+  "source_snapshot_sha256": "2c53415cc1c152b6f4d18b08b449b6c9bdb03c0c4318bc336e578d191242bdb1",
+  "source_commit": "b38b2139ef6131c534c26d49bd849fc6368d294a",
+  "runtime_manifest_sha256": {
+    "sentra-mobile": "2f8cfc8a88e1191a53b732174b05d9cd8fe48fcb48107ebd03e974c2296f90a8",
+    "sentra-terminal": "27fac04756bb23c5f7426b030bcdacabe71adb555509830e059f02cb681d0525"
+  },
+  "installed_application_modified": false,
+  "scope": "frozen Canvas daemon and matching sealed source broker; synthetic workload; not full Setup",
+  "raw_report_sha256": "a4e8b47daa38cafd080c31b07a99ad74614bd6b1670aa9e6170ac5fb0ab1f53b"
+}

@@ -76,7 +76,18 @@ class MachineHost:
     def _serve(self):
         asyncio.set_event_loop(self._loop)
         self._ready.set()
-        self._loop.run_forever()
+        try:
+            self._loop.run_forever()
+        finally:
+            # close() first verifies that catalog readers and physical workers
+            # have stopped and awaits backend shutdown. Stopping run_forever
+            # alone leaves this loop's default executor threads and Windows
+            # proactor handles alive for the lifetime of a retained host.
+            try:
+                self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+                self._loop.run_until_complete(self._loop.shutdown_default_executor())
+            finally:
+                self._loop.close()
 
     def _call(self, coroutine, *, timeout=150):
         if threading.current_thread() is self._thread:

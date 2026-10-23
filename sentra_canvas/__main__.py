@@ -69,11 +69,13 @@ class CanvasServer(ThreadingHTTPServer):
 class CanvasHandler(BaseHTTPRequestHandler):
     disable_nagle_algorithm=True
 
-    def _shell_stream(self, project_id, after):
+    def _shell_stream(self, project_id, after, *, epoch=None, validate_scope=None, conversation_id=None, space_id=None):
         canvas=self.server.canvas
         canvas.store.workspace(project_id)
         canvas._shell_service()
         runtime=canvas._shell_runtime
+        if epoch is not None and epoch!=runtime.stream.epoch:
+            after=None
         if runtime.stream_error:
             self._send(503,{"error":"presentation stream temporarily unavailable"})
             return
@@ -97,7 +99,10 @@ class CanvasHandler(BaseHTTPRequestHandler):
             headers_sent=True
 
             def emit(event,value,cursor=None):
+                if validate_scope and event!='end':
+                    validate_scope()
                 data=(('id: '+str(cursor)+'\n') if cursor is not None else '')
+                value={**value,'protocol_version':1,'epoch':runtime.stream.epoch}
                 data+='event: '+event+'\ndata: '+json.dumps(value,ensure_ascii=False,separators=(',',':'))+'\n\n'
                 payload=data.encode('utf-8')
                 self.wfile.write(f'{len(payload):X}\r\n'.encode()+payload+b'\r\n')
@@ -107,15 +112,23 @@ class CanvasHandler(BaseHTTPRequestHandler):
             while not self.server._stream_stopping.is_set() and not runtime.stream.closed.is_set():
                 # Session rotation and project removal invalidate an already-open feed.
                 if not self._auth():
+                    emit('end',{'status':401,'read_only':True})
                     break
+                if validate_scope:
+                    validate_scope()
                 canvas.store.workspace(project_id)
                 if runtime.stream_error:
                     emit("unavailable",{"automatic_retry":False,"read_only":True})
                     break
                 if batch['reset']:
-                    emit('snapshot',batch,batch['cursor'])
+                    visible=batch
+                    if conversation_id is not None:
+                        visible={**batch,'items':[row for row in batch['items'] if row['conversation_id']==conversation_id and row['space_id']==space_id],'has_more':False}
+                    emit('snapshot',visible,batch['cursor'])
                 else:
                     for item in batch['items']:
+                        if conversation_id is not None and (item['conversation_id']!=conversation_id or item['space_id']!=space_id):
+                            continue
                         emit('shell',item,item['sequence'])
                 after=batch['cursor']
                 if time.monotonic()-last_heartbeat>=10:
@@ -126,6 +139,14 @@ class CanvasHandler(BaseHTTPRequestHandler):
                 batch=runtime.stream.read(project_id,after)
             self.wfile.write(b'0\r\n\r\n')
             self.wfile.flush()
+        except (Denied,PermissionError):
+            if not headers_sent:
+                raise
+            try:
+                emit('end',{'status':403,'read_only':True})
+            except OSError:
+                pass
+            self.close_connection=True
         except Exception:
             if not headers_sent:
                 raise
@@ -261,12 +282,15 @@ class CanvasHandler(BaseHTTPRequestHandler):
             if set(qs)!=fields or any(len(qs[key])!=1 for key in fields):raise ValueError('exact terminal receipt selector required')
             self._send(200,a.terminal_input_status(ws,qs['id'][0],qs['request_key'][0],qs['fingerprint'][0]));return
         if path.path=="/api/shell/stream":
-            if set(qs)-{"project_id","after"} or "project_id" not in qs or any(len(v)!=1 for v in qs.values()):
+            if set(qs)-{"project_id","after","epoch"} or "project_id" not in qs or any(len(v)!=1 for v in qs.values()):
                 raise ValueError("exact project stream scope required")
             cursor=(qs.get("after") or [self.headers.get("Last-Event-ID")])[0]
             if cursor is not None and (not cursor.isascii() or not cursor.isdecimal() or len(cursor)>19):
                 raise ValueError("invalid stream cursor")
-            self._shell_stream(qs["project_id"][0],int(cursor) if cursor is not None else None)
+            epoch=(qs.get('epoch') or [None])[0]
+            if epoch is not None and (len(epoch)!=32 or any(c not in '0123456789abcdef' for c in epoch)):
+                raise ValueError('invalid presentation epoch')
+            self._shell_stream(qs["project_id"][0],int(cursor) if cursor is not None else None,epoch=epoch)
             return
         if path.path=="/api/shell/stream/content":
             required={"project_id","space_id","conversation_id","reference_id"}
@@ -468,6 +492,18 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.agent_control(authorization[7:],p))
             return
         ws=p.get("ws","")
+        if route=='/api/mobile/stream':
+            from .mobile_devices import presentation_scope
+            selected=presentation_scope(a,p)
+            after=p.get('after');epoch=p.get('epoch')
+            if after is not None and (type(after) is not int or not 0<=after<=2**53-1):
+                raise ValueError('invalid mobile presentation cursor')
+            if epoch is not None and (not isinstance(epoch,str) or len(epoch)!=32 or any(c not in '0123456789abcdef' for c in epoch)):
+                raise ValueError('invalid mobile presentation epoch')
+            self._shell_stream(selected['project_id'],after,epoch=epoch,
+                validate_scope=lambda:presentation_scope(a,p),
+                conversation_id=selected['conversation_id'],space_id=selected['space_id'])
+            return
         if route in {"/api/mobile/control", "/api/mobile/rpc"}:
             from .mobile_devices import owner_control, gateway_call
             value=owner_control(a,p) if route.endswith("control") else gateway_call(a,p)

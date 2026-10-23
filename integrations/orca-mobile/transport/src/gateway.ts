@@ -9,6 +9,7 @@ import {primitives} from './primitives';
 import {ServerSession} from './server-session';
 import {isLocalIPv4,lanAddresses} from './lan-address';
 import {advertiseLan,type Advertisement} from './lan-advertisement';
+import {sseFrames} from './presentation-stream.js';
 
 const lines=createInterface({input:process.stdin,crlfDelay:Infinity})[Symbol.asyncIterator]();
 const first=await lines.next();
@@ -21,6 +22,7 @@ function brokerTarget(value:any){
  return {broker:value.broker,bearer:value.bearer,runtime_id:String(value.runtime_id||'initial')};
 }
 let target:ReturnType<typeof brokerTarget>|null=brokerTarget(config);
+const observations=new Set<AbortController>();
 if(config.bind!=='auto'&&!isLocalIPv4(config.bind)||!Number.isInteger(config.port)||config.port<1||config.port>65535)
  throw Error('Explicit private IPv4 bind or auto LAN required');
 const choices=lanAddresses(networkInterfaces(),config.bind);
@@ -47,6 +49,7 @@ void(async()=>{try{for await(const line of { [Symbol.asyncIterator]:()=>lines })
  const update=JSON.parse(line);
  if(update.type!=='broker_update')throw Error('Unsupported gateway control');
  target=update.available===false?null:brokerTarget(update);
+ for(const observer of observations)observer.abort();
  process.stdout.write(JSON.stringify({broker_updated:true,runtime_id:target?.runtime_id||null})+'\n');
  }}catch{target=null;}finally{if(config.supervised===true){target=null;
   for(const socket of server.clients)socket.terminate();server.close();http.close();
@@ -55,9 +58,16 @@ server.on('connection',(socket,request)=>{
  const remote=request.socket.remoteAddress?.replace(/^::ffff:/,'')||'';
  if(server.clients.size>16||request.headers.origin||!isLocalIPv4(remote)){socket.close(1008);return;}
  let session:ServerSession|null=null,queue=Promise.resolve(),count=0,queued=0;
+ const streams=new Map<string,AbortController>();
+ function send(value:unknown){
+  if(!session||socket.readyState!==socket.OPEN)return false;
+  if(socket.bufferedAmount>1024*1024){socket.close(1008);return false;}
+  socket.send(session.seal(JSON.stringify(value)));return true;
+ }
  const budget=setInterval(()=>count=0,1000),expiry=setTimeout(()=>socket.close(1000),30*60*1000);
  const helloTimer=setTimeout(()=>{if(!session)socket.close(1008)},5000);
- socket.on('close',()=>{clearTimeout(helloTimer);clearTimeout(expiry);clearInterval(budget)});
+ socket.on('close',()=>{clearTimeout(helloTimer);clearTimeout(expiry);clearInterval(budget);
+  for(const controller of streams.values())controller.abort();streams.clear();});
  socket.on('message',data=>{
  if(++queued>4||++count>30||socket.bufferedAmount>1024*1024){socket.close(1008);return;}
  queue=queue.then(async()=>{
@@ -70,12 +80,45 @@ server.on('connection',(socket,request)=>{
   let result;const destination=target;
   try{
    if(!destination)throw Error('Broker restarting');
+   if(body.method==='unsubscribe_presentation'){
+    const observer=streams.get(body.subscription_id);streams.delete(body.subscription_id);observer?.abort();
+    send({id:body.id,ok:true,value:{unsubscribed:true}});return;
+   }
+   if(body.method==='subscribe_presentation'){
+    const id=body.subscription_id;
+    if(typeof id!=='string'||!/^[a-zA-Z0-9_+/=-]{16,128}$/.test(id)||streams.has(id)||streams.size>=2)
+     throw Error('Presentation subscription budget exceeded');
+    const controller=new AbortController();streams.set(id,controller);observations.add(controller);
+    const handshake=setTimeout(()=>controller.abort(),10000);
+    try{
+     const response=await fetch(destination.broker+'/api/mobile/stream',{method:'POST',redirect:'error',
+      headers:{Authorization:'Bearer '+destination.bearer,'Content-Type':'application/json'},
+      body:JSON.stringify({...body,public_key:session.peer}),signal:controller.signal});
+     clearTimeout(handshake);
+     if(!response.ok||!response.body||!response.headers.get('content-type')?.startsWith('text/event-stream')){
+      await response.body?.cancel();throw Object.assign(Error('Presentation subscription refused'),{status:response.status});
+     }
+     send({id:body.id,ok:true,value:{subscription_id:id,protocol_version:1}});
+     void(async()=>{const status=503;try{
+      for await(const frame of sseFrames(response.body!)){
+       if(streams.get(id)!==controller||!send({type:'presentation',subscription_id:id,frame}))break;
+      }
+     }catch{/* Observation reconnects; no work or input is replayed. */}
+     finally{
+      if(streams.get(id)===controller){streams.delete(id);send({type:'presentation',subscription_id:id,
+       frame:{event:'end',data:{status,read_only:true}}});}
+      observations.delete(controller);controller.abort();
+     }})();
+     return;
+    }catch(error){streams.delete(id);observations.delete(controller);controller.abort();throw error;}
+    finally{clearTimeout(handshake);}
+   }
    const response=await fetch(destination.broker+'/api/mobile/rpc',{method:'POST',redirect:'error',
     headers:{Authorization:'Bearer '+destination.bearer,'Content-Type':'application/json'},
     body:JSON.stringify({...body,public_key:session.peer}),signal:AbortSignal.timeout(14000)});
    const value=await response.json() as any;
-   result=response.ok?{id:body.id,ok:true,value:value.value}:{id:body.id,ok:false,error:'Pedido recusado pelo SENTRA'};
-  }catch{result={id:body.id,ok:false,error:'Resultado não confirmado. Consulte antes de repetir.'};}
+   result=response.ok?{id:body.id,ok:true,value:value.value}:{id:body.id,ok:false,status:response.status,error:'Pedido recusado pelo SENTRA'};
+  }catch(error){result={id:body.id,ok:false,status:(error as any)?.status,error:'Resultado não confirmado. Consulte antes de repetir.'};}
   if(socket.readyState===socket.OPEN){let json=JSON.stringify(result);
    if(Buffer.byteLength(json)>4*1024*1024)json=JSON.stringify({id:body.id,ok:false,error:'Resultado excede o limite mobile; consulte no desktop.'});
    socket.send(session.seal(json));}

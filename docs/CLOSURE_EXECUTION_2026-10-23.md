@@ -10,13 +10,13 @@ that a subsequently implemented feature is absent.
 
 | Requirement | Evidence required to close it | Current disposition |
 |---|---|---|
-| CI failures and full run | Actual required checks passing on the delivered commit, with all collected cases and skips explained | Focused contract/drain corrections passed; two whole-file unit jobs and mandatory exact-coverage verification implemented. Original timeout causes remain unproven; new complete CI still required. |
-| Long-running PTY/checkpoints | Successful prolonged run of the exact frozen/installed daemon under concurrent output, reconnect and uncertain input | New source and frozen 1,800-second runs passed with three terminals, three broker reopens and unchanged worker PIDs. Complete installed-package and prolonged real-model/TUI acceptance still open. Earlier frozen failure remains historical. |
+| CI failures and full run | Actual required checks passing on the delivered commit, with all collected cases and skips explained | All required jobs passed on `ee73a52` (run 40006505644), including exact partition coverage. The later `b38b213` run failed: a documents timeout/retained-worker failure in partition 0 and two post-effect revocation boundary timeouts in partition 1. Current source is not CI-qualified. See the follow-up below. |
+| Long-running PTY/checkpoints | Successful prolonged run of the exact frozen/installed daemon under concurrent output, reconnect and uncertain input | Source and frozen 1,800-second runs passed. The exact correlated-input frozen follow-up on `b38b213` also passed: three terminals/reopens, 534 advancing checkpoint observations, one physical duplicate consumption. Complete installed-package and prolonged real-model/TUI acceptance still open. Earlier frozen failure remains historical. |
 | Renderer recovery and memory | Watchdog/heap enforcement, preserved resource/view identity, no input replay, actual renderer qualification | Source watchdog and allocation admission delivered and tested; actual total V8/Chromium heap, installed acceptance and physical devices still unqualified. |
 | Global input ownership and conflict recovery | Conflicting desktop/mobile origins and devices, lease loss, pending-intent recovery, no late/repeated effect | Central lease foundation has six tests, including durable uncertainty after a failed write. It is explicitly not wired to desktop/mobile/agent/daemon paths; global arbitration remains open. Multiple desktop pending selectors have their own partial acceptance below. |
 | Multiple pending inputs | Independent observation/ACK, uncertainty preserved, old projection fencing and no resend | Desktop/host implementation and HTTP/ConPTY/Node/React tests delivered. Exact owner daemon correlation and broker-reopen recovery now have source acceptance; mobile/global arbitration and installed acceptance remain open. See the recovery and daemon receipt reports. |
 | Journal retention | Bounded protected-content retention preserving unresolved effects and permanent deduplication | Terminal ACK/retirement, permanent tombstones and transactional owner admission budgets implemented. Generic operations retain complete content pending ACK integration; inactive stores need explicit maintenance. |
-| Unified subscriptions | Versioned sequenced events, resumption/gap behavior and shared desktop/mobile consumers | Open; bounded polling is not this acceptance. |
+| Unified subscriptions | Versioned sequenced events, resumption/gap behavior and shared desktop/mobile consumers | Shared conversation projection transport now has source implementation and encrypted-client acceptance. Workspace inventory, approvals and terminal output still use their existing bounded read paths; complete unified subscriptions remain open. |
 | Daemon upgrade | Actual version negotiation, explicit drain and update with active process preservation | Open; accepted HTTP handlers now drain before database closure. Handshake, additive receipt capabilities and drain commands do not qualify executable replacement. |
 | MSI | Actual administrative extraction and independent install/update/uninstall of exact package and cabinets | Corrected external-media candidate passed real administrative extraction and 7,886 file checks; release callers now preserve/bind external media. Independent install/update/uninstall/signing remain open. Published preview is unchanged. |
 | Windows stable distribution | Clean independent Windows, previous-version upgrade, rollback, uninstall inspection, component execution, trusted signing, reviewed exact hashes | Open; current unsigned Setup is experimental. Local update ZIP is not an enabled stable channel. |
@@ -201,3 +201,61 @@ physical-key correction excludes the temporary broker target from the durable
 daemon key; a real Windows journal-restore regression passed. Preliminary
 component build 42 succeeded but predates that follow-up. Its exact hashes and
 limits are recorded in the daemon report, not promoted to complete release QA.
+
+## Hosted CI and host lifecycle follow-up
+
+Run [40006505644](https://github.com/vitorGgC569/SENTRA/actions/runs/40006505644)
+completed successfully on `ee73a52`, including integration, failure, both unit
+partitions, Windows/Edge, pinned Web Models/Electron, exact partition coverage
+and the required aggregate. Unit partition 0 recorded 1,975 passed / 37 skipped;
+partition 1 recorded 2,300 passed / 29 skipped. The coverage verifier compared
+4,341 collected cases in 514 files with partition sizes 2,012 and 2,329 and
+proved the exact union. Seven subtests per partition are not extra collected
+cases and are not added to those totals.
+
+The 66 JUnit skip reasons were inspected, not treated as feature acceptance.
+They concern explicit real-device/provider opt-ins, absent external tools or
+source profiles, Docker/VM/remote credentials, and tests that specifically
+exercise an unavailable provider. Eight Vite-dependent unit cases were skipped
+in that Python environment; separate Canvas/Electron jobs passed their own
+scopes. These do not qualify physical phones, native remote services or every
+optional provider.
+
+The later `b38b213` run
+[40010182220](https://github.com/vitorGgC569/SENTRA/actions/runs/40010182220)
+has a failing partition 0: 1,993 passed, 37 skipped and one failed documents
+workflow. Its captured request deadline shows a physical document worker in
+central authorization at output publication. Shutdown then refused to close a
+host with an occupied physical I/O boundary. That refusal is retained. The
+trace does not prove the cause of the original request delay. Partition 1 also
+finished with two failed post-effect revocation boundary waits, 2,310 passed and
+29 skipped. Their stacks include central authorization connection/commit work.
+The exact-coverage job correctly refused failed partition manifests; it did not
+accept a partial green suite.
+
+A separate deterministic regression demonstrates that `MachineHost.close()`
+previously left its default executor thread alive and event loop open after
+stopping the host thread. The correction shuts down async generators and the
+default executor on the owning loop, then closes the loop. The test failed on
+the prior implementation and passed with the correction. Catalog-reader and
+actual resource-lock guard tests confirm that busy hosts retain their runtime
+instead of killing physical work. This fixes a demonstrated resource leak; it
+does not retrospectively establish the hosted timeout's cause. Full CI on the
+new delivered revision remains required.
+
+
+## Shared conversation observations follow-up
+
+Desktop and mobile now import the same read-only projection feed. The mobile
+path authenticates an existing conversation through its current `message_list`
+capability, filters project events at the host, and encrypts observations through
+the existing paired WebSocket. Cursor+epoch resumption, gap repair, revocation,
+bounded slow-reader queues and lower-sequence restoration have source tests.
+The final consolidated scope records 62 passed; the desktop suite records 261
+passed. These are overlapping test scopes, not an installed product claim.
+
+See [shared observation contracts and evidence](SHARED_PRESENTATION_EVENTS_2026-10-23.md).
+The CI now explicitly runs the actual encrypted Canvas path. Workspace inventory,
+approvals and terminal output still use their existing read paths; all-channel
+unified subscriptions, physical mobile acceptance and installed qualification
+remain open. The existing public packages and owner sessions were preserved.

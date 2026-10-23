@@ -90,6 +90,35 @@ This preliminary component build predates the physical-key follow-up above;
 it is not a new complete Setup, installed acceptance or qualification of the
 later source. Its result remains `correlated-frozen42-result.json`.
 
+## Exact frozen follow-up: 30 minutes passed
+
+The final frozen trial used base `b38b213`, including the stable physical input
+key correction, with matching sealed broker sources. It requested 1,800 seconds
+and completed successfully in 1,813.7 seconds. The three terminal workers kept
+their PIDs through three broker reopens. There were 18,597 output reads and 534
+checkpoint observations; checkpoint cursors and sequences were required to
+advance. Three pending confirmations were recovered after a deliberately lost
+physical daemon reply. Duplicate input was consumed exactly once. The owned
+daemon was functional and closed normally.
+
+- Frozen Canvas SHA-256:
+  `e419a7faa1d3eb21a7554cfafde1b7e61846b94b43e72cdc7b1518f88a77c398`.
+- Source snapshot SHA-256:
+  `2c53415cc1c152b6f4d18b08b449b6c9bdb03c0c4318bc336e578d191242bdb1`.
+- [Sanitized trial evidence](evidence/2026-10-23/frozen-terminal-correlated46.json)
+  includes component manifest hashes and the raw report digest.
+
+An initial attempt with this Canvas-only build stopped at startup because its
+isolated candidate lacked mandatory terminal/mobile sidecars. That failed attempt
+was retained. After staging sidecars whose product input pins matched the sealed
+source, a 30-second smoke passed before the prolonged trial began. Neither the
+EXE nor its source snapshot changed during staging or the successful trials.
+
+This is a synthetic ANSI/Unicode workload using the actual frozen daemon and
+matching source broker. It is not a new complete Setup, installed-user acceptance,
+prolonged real model/TUI qualification, or evidence that the later shared-stream
+changes are present in this EXE. The installed application was not modified.
+
 ## Still open
 
 The central terminal-possession foundation can now call correlated writes under

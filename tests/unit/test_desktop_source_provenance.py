@@ -26,6 +26,9 @@ def fixture(tmp_path):
     shared.mkdir(parents=True)
     for name in ("consumer-flow.mjs", "input-queue.mjs", "emulator-budget.mjs", "saved-register.mjs"):
         (shared / name).write_text("export default 'shared'", encoding="utf-8")
+    presentation = tmp_path / "integrations/orca-mobile/transport/src/presentation-stream.js"
+    presentation.parent.mkdir(parents=True)
+    presentation.write_text("export default 'shared presentation'",encoding="utf-8")
     ui = project.parent / "static"
     assets = ui / "desktop-assets"
     assets.mkdir(parents=True)
@@ -60,7 +63,7 @@ def test_byte_seal_refuses_source_which_git_would_normalize(tmp_path):
         assert result.returncode != 0 and "Noncanonical CRLF" in result.stderr
 
 
-@pytest.mark.parametrize("name", ["src/main.jsx", "public/bootstrap.js", "package-lock.json", "scripts/build.mjs", "scripts/build-island.mjs", "vite.island.config.js", "island.html", "../../integrations/orca-terminal/src/emulator-budget.mjs"])
+@pytest.mark.parametrize("name", ["src/main.jsx", "public/bootstrap.js", "package-lock.json", "scripts/build.mjs", "scripts/build-island.mjs", "vite.island.config.js", "island.html", "../../integrations/orca-terminal/src/emulator-budget.mjs", "../../integrations/orca-mobile/transport/src/presentation-stream.js"])
 def test_valid_output_hashes_cannot_certify_stale_sources(tmp_path, name):
     project, ui, _ = fixture(tmp_path)
     validate_desktop_bundle(ui)

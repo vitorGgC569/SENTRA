@@ -128,6 +128,16 @@ jobs:
         run: |
           python -B scripts/check_mypy_baseline.py
           if ($LASTEXITCODE -ne 0) { throw "Type-debt baseline regressed" }
+      - name: Verify encrypted conversation observations
+        if: ${{ !cancelled() && matrix.target == 'tests/unit' && matrix.partition == 0 && steps.terminal-fixtures.outcome == 'success' }}
+        run: |
+          npm --prefix integrations/orca-mobile/transport run typecheck
+          if ($LASTEXITCODE -ne 0) { throw "Shared mobile transport typecheck failed" }
+          npm --prefix integrations/orca-mobile/transport test
+          if ($LASTEXITCODE -ne 0) { throw "Shared mobile transport tests failed" }
+          $env:SENTRA_MOBILE_ACCEPTANCE = '1'
+          python -B -m pytest -q tests/unit/test_mobile_presentation_stream.py --junitxml=mobile-presentation-results.xml
+          if ($LASTEXITCODE -ne 0) { throw "Real encrypted Canvas presentation acceptance failed" }
       - name: Deterministic test suite
         # A type failure still fails this job, but must not hide runtime test
         # failures. Never run against missing/unverified dependency fixtures.
@@ -152,7 +162,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: python-results-${{ strategy.job-index }}
-          path: test-results.xml
+          path: |
+            test-results.xml
+            mobile-presentation-results.xml
           if-no-files-found: ignore
           retention-days: 7
 

@@ -68,14 +68,14 @@ export function route(path, fields) {
 
 // Streaming is observation-only. The caller cannot select arbitrary headers,
 // bearer values, origins or a mutation method.
-export async function apiStream(projectId, { after, signal } = {}) {
+export async function apiStream(projectId, { after, signal, epoch } = {}) {
   if (!bearer) throw new ApiError('Abra o desktop pelo SENTRA para autorizar esta janela.', 401);
   const headers = { Authorization: 'Bearer ' + bearer, Accept: 'text/event-stream' };
   if (after != null) {
     if (!Number.isSafeInteger(after) || after < 0) throw new ApiError('Cursor inválido.', 400);
     headers['Last-Event-ID'] = String(after);
   }
-  const response = await fetch(route('/api/shell/stream', { project_id: projectId }), {
+  const response = await fetch(route('/api/shell/stream', { project_id: projectId, ...(epoch ? {epoch} : {}) }), {
     method: 'GET', headers, cache: 'no-store', credentials: 'omit', redirect: 'error', signal,
   });
   if (!response.ok) {
