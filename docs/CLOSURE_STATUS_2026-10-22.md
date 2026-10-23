@@ -1,5 +1,10 @@
 # SENTRA closure and qualification status — 22 October 2026
 
+Continuing closure ledger: [23 October execution](CLOSURE_EXECUTION_2026-10-23.md).
+This file retains the earlier revision's evidence and limits. Follow the ledger
+for subsequent source corrections and still-running qualification; it does not
+retroactively turn a failed older package or CI run into a passing result.
+
 Latest build/test results: [Windows qualification — 23 October](WINDOWS_BUILD_QUALIFICATION_2026-10-23.md).
 The full build was produced, but prolonged terminal observation and actual MSI
 consumption failed. Those acceptance gates remain open.

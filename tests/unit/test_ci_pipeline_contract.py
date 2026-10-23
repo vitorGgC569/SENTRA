@@ -64,10 +64,19 @@ def test_ci_lanes_gate_windows_canvas_and_web_models():
     assert data["permissions"] == {"contents": "read"}
     jobs = data["jobs"]
     assert {"contract", "python", "canvas", "web-models", "ci-required"} <= set(jobs)
-    assert jobs["python"]["strategy"]["matrix"]["target"] == [
-        "tests/unit", "tests/failure", "tests/integration",
+    assert jobs["python"]["strategy"]["matrix"]["include"] == [
+        {"target": "tests/unit", "partition": 0},
+        {"target": "tests/unit", "partition": 1},
+        {"target": "tests/failure", "partition": "all"},
+        {"target": "tests/integration", "partition": "all"},
     ]
-    assert jobs["ci-required"]["needs"] == ["contract", "python", "canvas", "web-models"]
+    assert jobs["ci-required"]["needs"] == ["contract", "python", "unit-coverage", "canvas", "web-models"]
+    assert jobs['unit-coverage']['needs'] == 'python'
+    assert jobs['unit-coverage']['if'] == 'always()'
+    coverage = jobs['unit-coverage']['steps'][-1]['run']
+    assert "--expected-revision '${{ github.sha }}' --verify @manifests" in coverage
+    assert '$manifests.Count -ne 2' in coverage
+    assert jobs['ci-required']['steps'][0]['env']['UNIT_COVERAGE'] == '${{ needs.unit-coverage.result }}'
     assert jobs["canvas"]["runs-on"] == "windows-latest"
     assert jobs["web-models"]["runs-on"] == "windows-latest"
     assert "success" in jobs["ci-required"]["steps"][0]["run"]
@@ -77,11 +86,13 @@ def test_recursive_unit_lane_has_a_bounded_budget_without_expanding_other_lanes(
     data = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     lane = data["jobs"]["python"]
     assert lane["timeout-minutes"] == "${{ matrix.target == 'tests/unit' && 90 || 35 }}"
-    assert lane["strategy"]["matrix"]["target"] == [
-        "tests/unit", "tests/failure", "tests/integration",
-    ]
+    entries = lane["strategy"]["matrix"]["include"]
+    assert [row['partition'] for row in entries if row['target'] == 'tests/unit'] == [0, 1]
+    assert [row['target'] for row in entries if row['partition'] == 'all'] == ['tests/failure', 'tests/integration']
     tests = next(step for step in lane["steps"] if step.get("name") == "Deterministic test suite")
     assert "python -B -m pytest -q ${{ matrix.target }}" in tests["run"]
+    assert "partition_unit_tests.py --partition ${{ matrix.partition }}" in tests["run"]
+    assert "--revision '${{ github.sha }}'" in tests['run']
     assert "--ignore" not in tests["run"] and "-k " not in tests["run"]
 
 
@@ -103,9 +114,17 @@ def test_unit_lane_prepares_real_patched_terminal_before_runtime_tests():
     assert setup["with"]["cache-dependency-path"] == "integrations/orca-terminal/package-lock.json"
     assert setup["if"] == build["if"] == "matrix.target == 'tests/unit'"
     assert "npm ci --prefix integrations/orca-terminal" in build["run"]
+    assert "npm ci --prefix integrations/orca-mobile/transport" in build["run"]
     assert "npm --prefix integrations/orca-terminal run build" in build["run"]
     assert "validate_terminal_engine" in build["run"]
-    assert build["run"].count("if ($LASTEXITCODE -ne 0)") == 3
+    # Each required native command must fail the fixture step immediately;
+    # counting guards alone would let one command borrow another's guard.
+    commands = [line.strip() for line in build["run"].splitlines()
+                if line.strip() and not line.lstrip().startswith("#")]
+    assert len(commands) == 8
+    for command, guard in zip(commands[::2], commands[1::2]):
+        assert command.startswith(("npm ", "python "))
+        assert guard.startswith("if ($LASTEXITCODE -ne 0) { throw ")
     assert build.get("continue-on-error") is not True
     assert build["id"] == "terminal-fixtures"
     assert "steps.terminal-fixtures.outcome == 'success'" in steps[test_index]["if"]

@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "sha256": "f020bb4ad769b19fc4642b944afe65e5c1aa0f983a9188839a69c12cae7744d9",
-  "bytes": 370006,
+  "sha256": "7354d5e43945012610ca48060b1f52721ba1a5859d566995bbefd1f53f05c4ac",
+  "bytes": 372398,
   "xterm": "6.1.0-beta.304",
   "unicode": "0.10.0-beta.301",
   "network_access": false,

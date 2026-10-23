@@ -60,7 +60,7 @@ def _hold_startup_lock(state_root, ready, release, payload):
 
 @pytest.mark.parametrize("payload", [b"", b"unreadable", json.dumps({
     "pid": os.getpid(), "created_at": 1.0,
-}).encode()])
+}).encode()], ids=["empty", "unreadable", "stale-live-pid"])
 def test_live_startup_owner_cannot_be_stolen_for_lock_contents_or_age(tmp_path, monkeypatch, payload):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     ctx = multiprocessing.get_context("spawn")

@@ -1,5 +1,6 @@
 """The computer workspace retains Dot ownership and real machine authority."""
 import uuid
+import faulthandler
 import pytest
 from test_shell_dot_features import shell, dot
 from sentra_canvas.shell_dot_computer import DotComputerServices
@@ -13,8 +14,14 @@ def configure(shell):
     child = dot(call, "Child terminal", canvas_root_dot_id=root["dot_id"])
     ca = call("conversation_create", dot_id=root["dot_id"])
     cb = call("conversation_create", dot_id=other["dot_id"])
-    a = call("access_set", conversation_id=ca["conversation_id"], mode="full")
-    b = call("access_set", conversation_id=cb["conversation_id"], mode="full")
+    try:
+        a = call("access_set", conversation_id=ca["conversation_id"], mode="full")
+        b = call("access_set", conversation_id=cb["conversation_id"], mode="full")
+    except TimeoutError:
+        # Keep the real HTTP admission stack if a loaded runner stalls. The
+        # request deadline and the authorization assertions remain unchanged.
+        faulthandler.dump_traceback()
+        raise
     service = DotComputerServices(app)
     return service, {"space_id": scope["space_id"], "dot_id": root["dot_id"], "conversation_id": ca['conversation_id']}, root, other, child, a, b
 

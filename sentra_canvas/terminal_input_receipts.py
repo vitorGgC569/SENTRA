@@ -75,7 +75,9 @@ def inspect(canvas,ws,terminal,key,fingerprint):
     if original is None:return {'found':False,'resolved':False,'request_key':key,'automatic_retry':False,'may_resend':False}
     if original.get('action')!='terminal_input' or original.get('payload',{}).get('terminal_id')!=terminal:
         raise PermissionError('input receipt belongs to another terminal')
-    value=requests.inspect(ws,'terminal_input',original['payload'],key)
+    if original.get('payload_retired'):
+        value=requests.inspect_retired_input(ws,key,fingerprint,terminal)
+    else:value=requests.inspect(ws,'terminal_input',original['payload'],key)
     return {**value,'terminal_id':terminal,'input_target':original['payload']['input_target'],'task_completion_verified':False}
 
 
@@ -84,6 +86,9 @@ def acknowledge(canvas,ws,terminal,key,fingerprint):
     if not value.get('resolved'):return {**value,'acknowledged':False}
     requests=journal(canvas)
     with closing(requests.control.store.connect('shell')) as db,db:
+        db.execute('BEGIN IMMEDIATE')
+        if not requests.acknowledge_terminal_input(db,ws,key,fingerprint):
+            return {**value,'acknowledged':False}
         db.execute('DELETE FROM canvas_terminal_input_pending WHERE owner=? AND project_id=? AND terminal_id=? AND request_key=? AND fingerprint=?',
             (requests.owner,ws,terminal,key,fingerprint))
     return {'acknowledged':True,'request_key':key,'terminal_id':terminal,'input_target':value['input_target'],

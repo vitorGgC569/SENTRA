@@ -49,16 +49,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Whitespace contract failed" }
 
   python:
-    name: Python - ${{ matrix.target }}
+    name: Python - ${{ matrix.target }} ${{ matrix.partition }}
     needs: contract
     runs-on: windows-latest
-    # The recursive unit suite exceeded 35 minutes on the Windows runner
-    # (job 120109970919); retain a bounded run without omitting cases.
+    # Two isolated whole-file unit partitions retain the existing deadline.
+    # The required coverage job proves their union against full collection.
     timeout-minutes: ${{ matrix.target == 'tests/unit' && 90 || 35 }}
     strategy:
       fail-fast: false
       matrix:
-        target: ["tests/unit", "tests/failure", "tests/integration"]
+        include:
+          - target: tests/unit
+            partition: 0
+          - target: tests/unit
+            partition: 1
+          - target: tests/failure
+            partition: all
+          - target: tests/integration
+            partition: all
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -125,8 +133,20 @@ jobs:
         # failures. Never run against missing/unverified dependency fixtures.
         if: ${{ !cancelled() && steps.python-fixtures.outcome == 'success' && (matrix.target != 'tests/unit' || steps.terminal-fixtures.outcome == 'success') }}
         run: |
-          python -B -m pytest -q ${{ matrix.target }} --junitxml=test-results.xml -o faulthandler_timeout=120
+          if ('${{ matrix.target }}' -eq 'tests/unit') {
+            python -B scripts/ci/partition_unit_tests.py --partition ${{ matrix.partition }} --output unit-partition.json --revision '${{ github.sha }}'
+          } else {
+            python -B -m pytest -q ${{ matrix.target }} --junitxml=test-results.xml -o faulthandler_timeout=120
+          }
           if ($LASTEXITCODE -ne 0) { throw "Required pytest suite failed" }
+      - name: Preserve exact unit collection and execution coverage
+        if: ${{ !cancelled() && matrix.target == 'tests/unit' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: python-unit-partition-${{ matrix.partition }}
+          path: unit-partition.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Preserve deterministic test results
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -135,6 +155,33 @@ jobs:
           path: test-results.xml
           if-no-files-found: ignore
           retention-days: 7
+
+  unit-coverage:
+    name: Exact unit partition coverage
+    if: always()
+    needs: python
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - name: Setup Python 3.12
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - name: Download both independent unit manifests
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: python-unit-partition-*
+          path: unit-coverage
+      - name: Reject missing, duplicate or unexecuted unit cases
+        run: |
+          $manifests = @(Get-ChildItem -LiteralPath unit-coverage -Filter unit-partition.json -Recurse -File | Sort-Object FullName | ForEach-Object { $_.FullName })
+          if ($manifests.Count -ne 2) { throw "Both unit partition manifests are required" }
+          python -B scripts/ci/partition_unit_tests.py --expected-revision '${{ github.sha }}' --verify @manifests
+          if ($LASTEXITCODE -ne 0) { throw "Recursive unit coverage is incomplete" }
 
   canvas:
     name: Canvas Windows/Edge E2E
@@ -183,7 +230,7 @@ jobs:
   ci-required:
     name: CI required
     if: always()
-    needs: [contract, python, canvas, web-models]
+    needs: [contract, python, unit-coverage, canvas, web-models]
     runs-on: windows-latest
     timeout-minutes: 5
     steps:
@@ -191,10 +238,11 @@ jobs:
         env:
           CONTRACT: ${{ needs.contract.result }}
           PYTHON: ${{ needs.python.result }}
+          UNIT_COVERAGE: ${{ needs.unit-coverage.result }}
           CANVAS: ${{ needs.canvas.result }}
           WEB_MODELS: ${{ needs.web-models.result }}
         run: |
-          foreach ($name in @("CONTRACT", "PYTHON", "CANVAS", "WEB_MODELS")) {
+          foreach ($name in @("CONTRACT", "PYTHON", "UNIT_COVERAGE", "CANVAS", "WEB_MODELS")) {
             $status = [Environment]::GetEnvironmentVariable($name)
             if ($status -ne "success") { throw "CI gate $name was $status, expected success" }
           }

@@ -55,12 +55,52 @@ MIT notices and the target adaptation remain in `vendor/orca/provenance.json`.
 
 ## Still open
 
-The macro P0 is not complete. A renderer watchdog/recovery path, aggregate emulator
-heap budgets, bounded input queues, prolonged TUI/real-model CLI acceptance and
-installed daemon qualification remain. Unified sequenced subscriptions across
+The macro P0 is not complete. Desktop and mobile now have renderer watchdogs and
+bounded aggregate emulator allocations (see the October 23 supplement below).
+Bounded input queues were subsequently delivered separately. Prolonged TUI/real-model
+CLI acceptance and installed daemon qualification remain. Unified sequenced subscriptions across
 desktop/mobile also remain; bounded pull reads are not presented as that protocol.
 Physical Android/iPhone and interactive visual checks are still pending.
 
 No bundle, setup, tag or installed application was updated in this round. The
 existing Windows preview and earlier validation outputs retain their own source
 identities; this is a source implementation checkpoint.
+
+## October 23 supplement: renderer recovery and allocation admission
+
+Desktop inventory rows no longer allocate xterm instances. Only mounted, visible
+surfaces allocate an emulator. A shared budget admits at most eight instances and
+64 MiB of modeled buffer allocations, with 2,000 scrollback rows, both screen
+buffers, 32 bytes per cell and 1 MiB per instance. Resize and checkpoint geometry
+reserve before allocation. Pressure parks hidden least-recently-used emulators;
+visible emulators are not silently displaced. A refused view explains its state
+and is retried when an existing view is detached or a resource is removed.
+
+Parking retains session identity, ownership, input receipt selectors and blocked
+input state. Restoring requests a protected checkpoint and never starts a PTY or
+resends input. Scroll position is restored within the available checkpoint range;
+older scrollback remains explicitly limited by the host checkpoint.
+
+The allocation count is an admission model, not a measurement or hard ceiling of
+V8/Chromium process heap. Renderer fonts, DOM, GPU, extended cells and strings add
+memory outside this reservation. Those process-level limits require separate
+measurement and are not claimed as closed by the cell budget.
+
+Mobile has one emulator with a 16 MiB allocation budget and 500 scrollback rows.
+Missing render ACK, WebView load timeout and native renderer termination replace
+only the view, with at most two automatic attempts per selected session. Further
+failures request explicit observation restart. Stale view callbacks are fenced;
+process actions and uncertain input are never replayed. No WebView onData channel
+exists.
+
+Evidence for this source checkpoint:
+- Full Desktop Node suite: 253 passed (including real-xterm checkpoint tests).
+- Mobile app Node suite: 7 passed; TypeScript check passed.
+- Offline mobile document exercised in isolated Electron: 1 passed; actual Unicode,
+  colors, normal/alternate buffers, saved register, CSP and read-only input checked.
+- Cross-language Desktop source seal suite: 12 passed; imported shared emulator
+  modules now invalidate stale bundles.
+
+These are source and disposable-renderer checks, not physical Android/iPhone or
+installed runtime qualification. The Desktop assets and mobile offline document
+were regenerated; no installed application, setup, tag or account was changed.

@@ -17,6 +17,7 @@ import re
 import socket
 import ssl
 import threading
+import time
 import uuid
 
 from sentra_collab.authority import CollaborationDenied, validate_presentation
@@ -99,6 +100,8 @@ class PeerGateway:
         self._lock = threading.RLock()
         self._slots = threading.BoundedSemaphore(8)
         self._stop = threading.Event()
+        self._handlers = set()
+        self._handlers_lock = threading.Lock()
         self._sock = None
         self._thread = None
         self._server_ctx = None
@@ -126,6 +129,9 @@ class PeerGateway:
     def listen(self, host="127.0.0.1", port=0):
         if self._thread is not None:
             raise FederationDenied("peer gateway is already listening")
+        with self._handlers_lock:
+            if self._handlers:
+                raise FederationDenied("peer tasks are still draining")
         normalized = assert_private_bind(host, self.documented)
         if type(port) is not int or not 0 <= port <= 65535:
             raise BindRefused("invalid peer port")
@@ -148,6 +154,12 @@ class PeerGateway:
         return {"host": self.bound_host, "port": self.bound_port, "host_class": self._host_class}
 
     def close(self):
+        """Stop admission and drain handlers before callers close authority.
+
+        Closing only the accept thread leaves an admitted task writing its
+        final receipt against an already closed Control Plane. A failed drain
+        is explicit: callers must retain authority and retry shutdown.
+        """
         self._stop.set()
         sock = self._sock
         self._sock = None
@@ -160,6 +172,18 @@ class PeerGateway:
         self._thread = None
         if thread is not None:
             thread.join(timeout=2)
+            if thread.is_alive():
+                self._thread = thread
+                raise FederationUncertain("peer listener did not stop; retain authority and retry close")
+        deadline = time.monotonic() + 15
+        with self._handlers_lock:
+            handlers = tuple(self._handlers)
+        for handler in handlers:
+            if handler is threading.current_thread():
+                raise FederationUncertain("peer handler cannot close its own authority")
+            handler.join(max(0, deadline - time.monotonic()))
+        if any(handler.is_alive() for handler in handlers):
+            raise FederationUncertain("peer tasks still draining; retain authority and retry close")
 
     def exchange_hello(self, address, port):
         host, port = assert_destination(address, port, self.documented)
@@ -625,9 +649,10 @@ class PeerGateway:
                 pass
 
     def _accept(self):
+        listener = self._sock
         while not self._stop.is_set():
             try:
-                client, _address = self._sock.accept()
+                client, _address = listener.accept()
             except socket.timeout:
                 continue
             except OSError:
@@ -637,9 +662,27 @@ class PeerGateway:
             if not self._slots.acquire(blocking=False):
                 client.close()
                 continue
-            threading.Thread(target=self._handle, args=(client,), daemon=True).start()
+            handler = threading.Thread(target=self._handle, args=(client,),
+                                       name="sentra-peer-request", daemon=True)
+            with self._handlers_lock:
+                self._handlers.add(handler)
+            try:
+                handler.start()
+            except BaseException:
+                with self._handlers_lock:
+                    self._handlers.discard(handler)
+                client.close()
+                self._slots.release()
+                raise
 
     def _handle(self, client):
+        try:
+            self._handle_client(client)
+        finally:
+            with self._handlers_lock:
+                self._handlers.discard(threading.current_thread())
+
+    def _handle_client(self, client):
         try:
             # An unauthenticated peer must not retain a bounded listener slot
             # forever by opening TCP and never finishing TLS/HTTP framing.

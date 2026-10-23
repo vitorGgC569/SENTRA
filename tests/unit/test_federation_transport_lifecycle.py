@@ -1,5 +1,6 @@
 """Transport failures release the owned socket and admission slot without replay."""
 import ssl
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -37,9 +38,28 @@ def test_client_handshake_failure_closes_socket_without_retry(monkeypatch, failu
 def test_server_handshake_failure_is_bounded_and_releases_slot(failure):
     gateway = PeerGateway.__new__(PeerGateway)
     released = []
+    gateway._handlers = set()
+    gateway._handlers_lock = threading.Lock()
     gateway._slots = SimpleNamespace(release=lambda: released.append(True))
     def handshake(*args, **kwargs): raise failure
     gateway._server_ctx = SimpleNamespace(wrap_socket=handshake)
     client = Client()
     gateway._handle(client)
     assert client.timeout == 5 and client.closed == 1 and released == [True]
+
+
+def test_close_refuses_to_claim_shutdown_while_a_handler_is_still_running():
+    gateway = PeerGateway.__new__(PeerGateway)
+    gateway._stop = threading.Event()
+    gateway._sock = gateway._thread = None
+    gateway._handlers_lock = threading.Lock()
+    waits, alive = [], [True]
+    handler = SimpleNamespace(join=lambda timeout: waits.append(timeout),
+                              is_alive=lambda: alive[0])
+    gateway._handlers = [handler]
+    with pytest.raises(FederationUncertain, match="retain authority"):
+        gateway.close()
+    assert gateway._stop.is_set() and len(waits) == 1
+    assert 0 <= waits[0] <= 15
+    alive[0] = False
+    gateway.close()

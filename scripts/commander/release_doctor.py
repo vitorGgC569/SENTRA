@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from sentra_version import PRODUCT_VERSION
+from scripts.commander.msi_media import verify_msi_manifest
 
 
 def _digest(path: Path) -> str:
@@ -52,6 +53,16 @@ def audit_release(
         f"SENTRA-Desktop-{version}-update.zip",
         f"SENTRA-Desktop-{version}.cdx.json",
     )
+    manifest = _json(release / "release-manifest.json")
+    media_entry = manifest.get("msi_media")
+    media_files = []
+    if media_entry is not None:
+        media_files = verify_msi_manifest(release / names[1], media_entry)[1:]
+    elif expected_signer or (release / names[1]).with_suffix(".media.json").exists():
+        raise ValueError("release MSI external-media manifest is required")
+    records = [release / name for name in ("package-components.json", "package-artwork.json")
+               if (release / name).is_file()]
+    all_names = (*names, *(p.name for p in media_files), *(p.name for p in records))
     expected: dict[str, str] = {}
     checksums_path = release / "SHA256SUMS.txt"
     if not checksums_path.is_file() or checksums_path.stat().st_size > 8192:
@@ -64,10 +75,10 @@ def audit_release(
         if name in expected:
             raise ValueError("duplicate release checksum entry")
         expected[name] = digest
-    if set(expected) != set(names):
+    if set(expected) != set(all_names):
         raise ValueError("missing or unexpected release checksum assets")
     actual: dict[str, str] = {}
-    for name in names:
+    for name in all_names:
         file = release / name
         if not file.is_file() or file.is_symlink():
             raise ValueError(f"release artifact missing or not a regular file: {name}")
@@ -75,7 +86,6 @@ def audit_release(
         if actual[name] != expected[name]:
             raise ValueError(f"release SHA256 mismatch: {name}")
 
-    manifest = _json(release / "release-manifest.json")
     if manifest.get("version") != version:
         raise ValueError("release version mismatch")
     if any(manifest.get(key) != name for key, name in zip(
@@ -168,7 +178,7 @@ def audit_release(
     if not any(isinstance(item, dict) and item.get("name", "").casefold() == "pypdfium2"
                and item.get("version") == "4.30.0" for item in components):
         raise ValueError("release SBOM lacks pinned PDFium 4.30.0")
-    for name in names[:3]:
+    for name in (*names[:3], *(p.name for p in media_files), *(p.name for p in records)):
         if not any(
             isinstance(item, dict) and item.get("type") == "file" and item.get("name") == name
             and {"alg": "SHA-256", "content": actual[name]} in item.get("hashes", [])
@@ -204,6 +214,11 @@ def audit_release(
         from sentra_remote.updater import verify_authenticode
         verify_authenticode(release / names[0], signer)
         verify_authenticode(release / names[1], signer)
+        for file in media_files:
+            if file.suffix == ".cab":
+                verify_authenticode(file, signer)
+        from scripts.commander.msi_media_signing import require_inscribed_cabinets
+        require_inscribed_cabinets(release / names[1])
     elif manifest.get("signer_thumbprint"):
         # A manifest-asserted signer cannot attest an unsigned audit.
         raise ValueError("claimed release publisher requires independent signer verification")
@@ -230,7 +245,8 @@ def audit_release(
         provenance = "verified"
     return {
         "schema": 1, "result": "pass", "version": version,
-        "artifacts_verified": len(names), "update_zip_components": 3,
+        "artifacts_verified": len(all_names), "update_zip_components": 3,
+        "msi_media": "verified-external-cabs" if media_files else "legacy-unsigned-qa-only",
         "sbom": "verified", "payload_provenance": provenance,
         "shell_contract": shell_contract,
         "sidecars": sidecars_state,

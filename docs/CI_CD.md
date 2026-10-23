@@ -1,5 +1,36 @@
 # SENTRA CI/CD — contrato de entrega (08/10/2026)
 
+## Unit CI partitions — 23/10/2026
+
+The unit suite runs in two independent Windows jobs. Each job collects the
+entire recursive `tests/unit` tree, assigns complete files by SHA-256 of their
+repository-relative path, and executes its assigned cases. New files enter the
+plan automatically; no historical file allowlist controls coverage. Failure and
+integration suites remain single, mandatory jobs. Existing deadlines, locked
+Python/Node dependencies, upstream seals and zero-error mypy gates are retained.
+
+Each unit job uploads its full collection, source revision, selected cases and
+actually attempted setup reports. The required **Exact unit partition coverage**
+job rejects missing/duplicate partitions, differing collections or revisions,
+split files, omitted/duplicate tests, collect-only reports and nonzero pytest
+exits. Explicit pytest skips retain their original behavior and remain visible
+in the separate JUnit artifacts. **CI required** also requires this coverage job.
+
+Reproduce either partition locally, after preparing the documented dependencies:
+
+    python -B scripts/ci/partition_unit_tests.py --partition 0 --output unit-0.json --revision YOUR_COMMIT
+    python -B scripts/ci/partition_unit_tests.py --partition 1 --output unit-1.json --revision YOUR_COMMIT
+    python -B scripts/ci/partition_unit_tests.py --verify unit-0.json unit-1.json
+
+Use `--collect-only` with a partition command to inspect the current plan without
+running the full suite. Collection-only manifests cannot satisfy execution
+coverage. Each invocation writes `test-results.xml`; retain each partition's
+JUnit file separately when reproducing serially in one directory. Parameter IDs
+must be stable between processes; runtime PIDs or timestamps belong in parameter
+values with explicit stable IDs, never in collection identities.
+
+The results below are historical checkpoints, not current release qualification.
+
 > **Resultado atualizado em 09/10/2026:** `tests/unit` agora **passou**
 > com 1.962 passed, 37 skipped e zero falhas/erros. A última execução encerrada
 > de `tests/failure` + `tests/integration` teve 183 passed, 10 skipped;
@@ -26,8 +57,8 @@ Os gates paralelos são:
   arquivos obrigatórios rastreados, GitHub Actions fixadas por SHA,
   actionlint 1.7.12 instalado com SHA-256 e validação semântica dos workflows,
   patch upstream e empacotamento real de Canvas/CLI/Web Models.
-- **Python**: três suítes obrigatórias no Windows com Python 3.12:
-  tests/unit, tests/failure e tests/integration; checkout upstream fixado,
+- **Python**: três suítes obrigatórias em quatro jobs no Windows com Python 3.12:
+  tests/unit em duas partições, tests/failure e tests/integration; checkout upstream fixado,
   dependências instaladas por hash e controle de regressão mypy.
 - **Canvas**: sintaxe JS, física de cabos via Node, E2E com Edge real,
   Canvas WebView2 e ConPTY.

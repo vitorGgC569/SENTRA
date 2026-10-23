@@ -9,6 +9,7 @@ import pytest
 
 from scripts.commander.release_publish_gate import REQUIRED_PROOFS, check_publication
 from scripts.commander.isolated_vm_smoke import preflight
+from scripts.commander.msi_media import msi_manifest_entry
 
 
 def _fixtures(tmp_path: Path) -> tuple[Path, Path]:
@@ -18,13 +19,22 @@ def _fixtures(tmp_path: Path) -> tuple[Path, Path]:
     setup.write_bytes(b"synthetic-not-signed")
     msi = root / "SENTRA-Desktop-1.2.3-x64.msi"
     msi.write_bytes(b"synthetic-not-signed-msi")
+    cabinet = root / (msi.stem + "-0001.cab")
+    cabinet.write_bytes(b"MSCF" + b"synthetic-cab-fixture" * 4)
+    inventory = msi.with_suffix(".media.json")
+    inventory.write_text(json.dumps({"schema": 1, "msi": msi.name,
+        "sha256": hashlib.sha256(msi.read_bytes()).hexdigest(),
+        "media": [{"name": cabinet.name, "bytes": cabinet.stat().st_size,
+                   "sha256": hashlib.sha256(cabinet.read_bytes()).hexdigest(), "last_sequence": 1}]}))
     (root / "release-manifest.json").write_text(json.dumps({
         "version": "1.2.3", "setup": setup.name,
+        "msi_media": msi_manifest_entry(msi),
     }))
     evidence = tmp_path / "external-evidence.json"
     data = {"schema": 1, "version": "1.2.3",
             "setup_sha256": hashlib.sha256(setup.read_bytes()).hexdigest(),
             "msi_sha256": hashlib.sha256(msi.read_bytes()).hexdigest(),
+            "msi_media_sha256": hashlib.sha256(inventory.read_bytes()).hexdigest(),
             **{key: True for key in REQUIRED_PROOFS}}
     evidence.write_text(json.dumps(data))
     return root, evidence
@@ -67,6 +77,22 @@ def test_publication_structural_contract_only(tmp_path):
     assert result["release_gate"] == "pass"
     # Fixture proves only contract evaluation; the evidence itself is synthetic.
     assert result["independent_review"] is True
+
+
+def test_publication_denied_if_required_cab_is_missing(tmp_path):
+    root, evidence = _fixtures(tmp_path)
+    next(root.glob("*.cab")).unlink()
+    with pytest.raises(ValueError, match="cabinet missing"):
+        check_publication(root, evidence, expected_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(), version="1.2.3")
+
+
+def test_publication_denied_for_qa_bound_to_other_cab_inventory(tmp_path):
+    root, evidence = _fixtures(tmp_path)
+    data = json.loads(evidence.read_text())
+    data["msi_media_sha256"] = "0" * 64
+    evidence.write_text(json.dumps(data))
+    with pytest.raises(PermissionError, match="different MSI external cabinet"):
+        check_publication(root, evidence, expected_sha256=hashlib.sha256(evidence.read_bytes()).hexdigest(), version="1.2.3")
 
 
 def test_disposable_vm_smoke_is_disabled_by_default_and_without_signature():

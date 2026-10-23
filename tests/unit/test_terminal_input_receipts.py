@@ -126,3 +126,31 @@ def test_bad_selector_and_oversized_packet_cannot_dispatch(terminal):
         code,_=request(server,'/api/terminal/input',json_body={'ws':ws,'id':row['id'],'data':'text','request_key':None,'input_target':None})
         assert code==400 and not calls
     finally:process.write=original
+
+
+def test_acknowledged_retired_receipt_survives_reopen_without_command_text_or_duplicate_input(terminal):
+    from sentra_canvas.terminal_input_receipts import journal
+    from sentra_canvas.shell_requests import HostRequestRetentionPolicy
+    app,server,ws,row,frame,post,status=terminal
+    key=uuid.uuid4().hex;data='echo RETIRED_COMMAND_SECRET\r';calls=[]
+    process=app._sessions[row['id']].pty;original=process.write
+    process.write=lambda raw:(calls.append(raw),original(raw))[1]
+    try:
+        assert post(data,key)[0]==200
+        fp=fingerprint(row['id'],frame['input_target'],data)
+        body={'ws':ws,'id':row['id'],'request_key':key,'fingerprint':fp}
+        code,ack=request(server,'/api/terminal/input-ack',json_body=body)
+        assert code==200 and ack['acknowledged']
+        requests=journal(app);requests.retention_policy=HostRequestRetentionPolicy(retain_after_ack_seconds=0)
+        assert requests.compact_acknowledged(ws)['retired']==1
+        assert 'data' not in requests.intent(ws,key,fp)['payload']
+        app._terminal_input_requests=None  # Actual new journal object on the next HTTP request.
+        code,observed=status(key,data)
+        assert code==200 and observed['payload_retired'] and observed['resolved']
+        assert observed['terminal_id']==row['id'] and observed['input_target']==frame['input_target']
+        assert observed['result']['delivery_stage']=='delivered_to_process'
+        assert 'RETIRED_COMMAND_SECRET' not in json.dumps(observed)
+        assert post(data,key)[1]['payload_retired'] and calls==[data.encode()]
+        assert request(server,'/api/terminal/input-ack',json_body=body)[1]['acknowledged']
+        assert calls==[data.encode()]
+    finally:process.write=original

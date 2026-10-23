@@ -6,6 +6,7 @@ import {Buffer} from 'buffer';
 import {MobileClient,TerminalFeed,type TerminalOutputFrame,type TerminalDelivery} from '@sentra/mobile-transport';
 import {useProtectedDraft} from './use-protected-draft';
 import {TERMINAL_DOCUMENT} from '../terminal/document';
+import {RendererRecovery} from './renderer-recovery';
 
 type Props={draftScope:string;client:MobileClient|null;conversation:any;connected:boolean;colors:Record<string,string>;
  request:(action:string,fields?:Record<string,any>,effect?:boolean)=>Promise<any>};
@@ -15,19 +16,36 @@ export function TerminalWorkspace({draftScope,client,conversation,connected,colo
  const [inventory,setInventory]=useState<any>(null),[selected,setSelected]=useState(''),[ready,setReady]=useState(false);
  const [notice,setNotice]=useState(''),[writing,setWriting]=useState(false),[reload,setReload]=useState(0),[processLive,setProcessLive]=useState(false);
  const [foreground,setForeground]=useState(AppState.currentState==='active'),[viewStatus,setViewStatus]=useState('Aguardando sessão.');
+ const [rendererEpoch,setRendererEpoch]=useState(0),recovery=useRef(new RendererRecovery());
  const web=useRef<WebView<{}>>(null),sequence=useRef(0),writingNow=useRef(false),current=useRef({client,connected});
  const pending=useRef(new Map<number,{resolve:(value:any)=>void;reject:(error:Error)=>void;timer:ReturnType<typeof setTimeout>}>());
  current.current={client,connected};
  const terminals=inventory?.terminals||[],terminal=terminals.find((row:any)=>row.id===selected);
  const work=inventory?.work_items?.find((row:any)=>row.work_item_id===terminal?.work_item_id&&row.machine_id===terminal?.machine_id&&row.capabilities.includes('terminal:read'));
- const view=useMemo(()=>Crypto.randomUUID(),[selected,reload,client,connected,foreground,conversation?.conversation_id]);
+ const rendererScope=useMemo(()=>Crypto.randomUUID(),[selected,reload,client,conversation?.conversation_id]);
+ const view=useMemo(()=>Crypto.randomUUID(),[rendererScope,rendererEpoch,connected,foreground]);
+ recovery.current.select(rendererScope,view);
  const draft=useProtectedDraft(JSON.stringify(['terminal',draftScope,conversation?.conversation_id,selected]));
  const command=draft.value,setCommand=draft.change;
  const activeView=useRef(view);activeView.current=view;
  const html=useMemo(()=>TERMINAL_DOCUMENT.replace('__SENTRA_VIEW_ID__',view),[view]);
 
  function cancelPending(){for(const item of pending.current.values()){clearTimeout(item.timer);item.reject(Error('Visualização desconectada.'))}pending.current.clear()}
+ function recoverRenderer(identity:string){
+  if(activeView.current!==identity)return;
+  setReady(false);setProcessLive(false);
+  if(!foreground||!connected||!recovery.current.restart(identity)){
+   setNotice('A visualização continua indisponível. Retome a observação. O processo foi preservado.');return;
+  }
+  activeView.current='recovering:'+identity;cancelPending();
+  setNotice('Restaurando a visualização. O processo e os comandos não foram reiniciados.');
+  setRendererEpoch(value=>value+1);
+ }
  useEffect(()=>{setReady(false);setProcessLive(false);cancelPending();return cancelPending},[view]);
+ useEffect(()=>{
+  if(!terminal||ready||!foreground||!connected)return;
+  const timer=setTimeout(()=>recoverRenderer(view),12000);return()=>clearTimeout(timer);
+ },[terminal?.id,ready,foreground,connected,view]);
  useEffect(()=>{const sub=AppState.addEventListener('change',state=>setForeground(state==='active'));return()=>sub.remove()},[]);
  useEffect(()=>{
   let alive=true;setInventory(null);setSelected('');
@@ -42,7 +60,7 @@ export function TerminalWorkspace({draftScope,client,conversation,connected,colo
   const id=++sequence.current;
   const packet=JSON.stringify({id,view:identity,kind,terminal_id:selected,...fields}).replace(/</g,'\\u003c');
   return new Promise<any>((resolve,reject)=>{
-   const timer=setTimeout(()=>{pending.current.delete(id);reject(Error('Renderização não confirmada. Retome a observação.'))},10000);
+   const timer=setTimeout(()=>{pending.current.delete(id);reject(Error('Renderização não confirmada.'));recoverRenderer(identity)},10000);
    pending.current.set(id,{resolve,reject,timer});
    try{web.current!.injectJavaScript('window.sentraTerminalFrame('+packet+');true;');}
    catch(error){clearTimeout(timer);pending.current.delete(id);reject(error)}
@@ -79,9 +97,9 @@ export function TerminalWorkspace({draftScope,client,conversation,connected,colo
     catch(error:any){if(!alive)return;await widget('reset',{},identity);setNotice('Checkpoint não restaurado: '+error.message+' Histórico parcial.');}
     if(!alive)return;
     feed=new TerminalFeed(terminal.id,cursor=>read('terminal_output',{cursor}) as Promise<TerminalOutputFrame>,deliver,
-     error=>{if(alive){setNotice(error.message);setViewStatus('Observação interrompida. Nenhuma entrada foi repetida.')}},after);
+     error=>{if(alive&&activeView.current===identity){setNotice(error.message);setViewStatus('Observação interrompida. Nenhuma entrada foi repetida.')}},after);
     feed.start();
-   }catch(error:any){if(alive)setNotice(error.message)}
+   }catch(error:any){if(alive&&activeView.current===identity)setNotice(error.message)}
   })();
   return()=>{alive=false;feed?.stop();cancelPending()};
  },[client,connected,conversation?.conversation_id,terminal?.id,work?.work_item_id,ready,foreground,view,inventory?.terminal_observation?.protocol_version]);
@@ -119,8 +137,8 @@ export function TerminalWorkspace({draftScope,client,conversation,connected,colo
      javaScriptEnabled domStorageEnabled={false} allowFileAccess={false} javaScriptCanOpenWindowsAutomatically={false}
      setSupportMultipleWindows={false} sharedCookiesEnabled={false} thirdPartyCookiesEnabled={false} incognito cacheEnabled={false}
      mixedContentMode="never" onMessage={event=>{try{const value=JSON.parse(event.nativeEvent.data);if(value.view!==activeView.current)return;
-      if(value.type==='ready')setReady(true);else if(value.type==='ack'){const item=pending.current.get(value.id);if(item){pending.current.delete(value.id);clearTimeout(item.timer);value.error?item.reject(Error(value.error)):item.resolve(value)}}}catch{setNotice('Mensagem inválida da visualização.')}}}
-     onError={()=>{setReady(false);setNotice('O terminal não carregou neste aparelho. Retome a observação.')}}/>
+      if(value.type==='renderer-stalled')recoverRenderer(view);else if(value.type==='ready')setReady(true);else if(value.type==='ack'){const item=pending.current.get(value.id);if(item){pending.current.delete(value.id);clearTimeout(item.timer);value.error?item.reject(Error(value.error)):item.resolve(value)}}}catch{setNotice('Mensagem inválida da visualização.')}}}
+     onError={()=>recoverRenderer(view)} onRenderProcessGone={()=>recoverRenderer(view)} onContentProcessDidTerminate={()=>recoverRenderer(view)}/>
    </View>{text(viewStatus,11)}{!work&&text('Não há WorkItem de leitura autorizado para esta sessão.',12)}
    <TextInput accessibilityLabel="Entrada para a sessão autorizada" value={command} editable={draft.ready} onChangeText={setCommand} autoCapitalize="none" autoCorrect={false}
     multiline placeholder="Comando ou resposta para o processo…" placeholderTextColor={colors.muted}

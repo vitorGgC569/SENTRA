@@ -264,17 +264,37 @@ jobs:
         shell: pwsh
         run: |
           python scripts/commander/release_assets.py --dist dist --release release --tunnel-archive $env:SENTRA_TUNNEL_ARCHIVE
-      - name: Sign MSI
+      - name: Sign external cabinets, inscribe their trust and sign MSI
         shell: pwsh
         env:
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           WINDOWS_TIMESTAMP_URL: ${{ vars.WINDOWS_TIMESTAMP_URL }}
+          SENTRA_MSI_INSIGNIA: ${{ vars.SENTRA_MSI_INSIGNIA }}
         run: |
           if (-not $env:SENTRA_PFX) { exit 0 }
           $timestamp = if ($env:WINDOWS_TIMESTAMP_URL) { $env:WINDOWS_TIMESTAMP_URL } else { "http://timestamp.digicert.com" }
           $msi = Get-ChildItem release\SENTRA-Desktop-*-x64.msi | Select-Object -First 1
+          $cabinets = @(Get-ChildItem release\SENTRA-Desktop-*-x64-*.cab)
+          if ($cabinets.Count -eq 0) { throw "External MSI cabinets missing" }
+          foreach ($cabinet in $cabinets) {
+            & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $cabinet.FullName
+            if ($LASTEXITCODE -ne 0) { throw "External cabinet signing failed" }
+          }
+          $insignia = $env:SENTRA_MSI_INSIGNIA
+          if (-not $insignia) {
+            $command = Get-Command insignia.exe -ErrorAction SilentlyContinue
+            if ($command) { $insignia = $command.Source }
+            elseif ($env:WIX) { $insignia = Join-Path $env:WIX 'bin\insignia.exe' }
+          }
+          if (-not $insignia -or -not (Test-Path -LiteralPath $insignia -PathType Leaf)) {
+            throw "Approved WiX Insignia is required to bind external CAB signatures; configure SENTRA_MSI_INSIGNIA"
+          }
+          & $insignia -im $msi.FullName
+          if ($LASTEXITCODE -ne 0) { throw "External cabinet trust inscription failed" }
           & signtool sign /f $env:SENTRA_PFX /p $env:WINDOWS_CERTIFICATE_PASSWORD /fd SHA256 /tr $timestamp /td SHA256 $msi.FullName
           if ($LASTEXITCODE -ne 0) { throw "MSI signing failed" }
+          python -B scripts/commander/release_signing.py --release release --trusted-signer "$env:SENTRA_SIGNER_THUMBPRINT" --refresh-msi-media
+          if ($LASTEXITCODE -ne 0) { throw "Signed MSI media inventory refresh failed" }
 
       - name: Finalize hashes and signed update manifest
         shell: pwsh
@@ -295,7 +315,8 @@ jobs:
             (Get-ChildItem dist\*.exe),
             (Get-Item "dist\web-models\win-unpacked\Codex Web GPT.exe"),
             (Get-ChildItem release\SENTRA-Setup-*.exe),
-            (Get-ChildItem release\SENTRA-Desktop-*-x64.msi)
+            (Get-ChildItem release\SENTRA-Desktop-*-x64.msi),
+            (Get-ChildItem release\SENTRA-Desktop-*-x64-*.cab)
           )
           foreach ($file in $targets) {
             $signature = Get-AuthenticodeSignature $file.FullName
@@ -399,10 +420,14 @@ jobs:
           path: |
             release/SENTRA-Setup-*.exe
             release/SENTRA-Desktop-*-x64.msi
+            release/SENTRA-Desktop-*-x64-*.cab
+            release/SENTRA-Desktop-*-x64.media.json
             release/SENTRA-Desktop-*-update.zip
             release/SENTRA-Desktop-*.cdx.json
             release/SHA256SUMS.txt
             release/release-manifest.json
+            release/package-components.json
+            release/package-artwork.json
 
   publish-release:
     name: Publish verified immutable release
@@ -472,9 +497,12 @@ jobs:
           if ($LASTEXITCODE -eq 0) { throw "Release already exists; published versions are immutable" }
           # Exclude the independent VM QA attestation; it is internal evidence,
           # not a public release asset or a redistributable diagnostic.
-          $assets = @(Get-ChildItem release -File | Where-Object {
-            $_.Name -match "^(SENTRA-Setup-[0-9].*\\.exe|SENTRA-Desktop-[0-9].*-x64\\.msi|SENTRA-Desktop-[0-9].*-update\\.zip|SENTRA-Desktop-[0-9].*\\.cdx\\.json|SHA256SUMS\\.txt|release-manifest\\.json)$"
-          } | ForEach-Object { $_.FullName })
-          if ($assets.Count -ne 6) { throw "Release must have exactly six approved public assets" }
+          $assetNames = @('SHA256SUMS.txt', 'release-manifest.json')
+          foreach ($line in Get-Content release/SHA256SUMS.txt) {
+            if ($line -notmatch '^([0-9a-f]{64})  ([A-Za-z0-9._-]+)$') { throw "Malformed public asset inventory" }
+            $assetNames += $Matches[2]
+          }
+          if (@($assetNames | Select-Object -Unique).Count -ne $assetNames.Count) { throw "Duplicate public asset" }
+          $assets = @($assetNames | ForEach-Object { (Get-Item -LiteralPath (Join-Path release $_)).FullName })
           gh release create $env:GITHUB_REF_NAME @assets --verify-tag --repo "${{ github.repository }}" --generate-notes --title "SENTRA Desktop $($env:GITHUB_REF_NAME.TrimStart('v'))"
           if ($LASTEXITCODE -ne 0) { throw "GitHub Release publication failed" }

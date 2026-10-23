@@ -32,6 +32,9 @@ Configure these repository/environment secrets before creating a stable tag:
 Optional repository variable:
 
 - `WINDOWS_TIMESTAMP_URL` — RFC 3161 timestamp server.
+- `SENTRA_MSI_INSIGNIA` — approved WiX Insignia executable path on the signing
+  runner, when it is not on PATH or available through `WIX`. Missing tooling
+  blocks signed publication; the pipeline does not download an unpinned tool.
 
 Never commit the PFX or its password.
 ## Build order
@@ -45,13 +48,36 @@ The release workflow intentionally uses this order:
 5. sign Setup;
 6. download the pinned official OpenAI tunnel-client and verify SHA-256;
 7. generate the MSI and update ZIP;
-8. sign the MSI;
+8. sign all external CABs, inscribe their signatures into the MSI using WiX
+   Insignia, then sign the MSI and refresh its bound media inventory;
 9. regenerate the release manifest, SBOM and checksums after signing;
 10. verify Authenticode and SHA-256;
 11. run packaged smoke/installation checks;
 12. create the immutable GitHub Release for the tag.
 
 A stable tag fails if the signing certificate is missing.
+
+## MSI installation media
+
+The MSI database is accompanied by versioned `SENTRA-Desktop-*-x64-*.cab`
+files and `SENTRA-Desktop-*-x64.media.json`. Download and keep **every CAB in the
+same directory as the MSI**. The MSI alone is not a complete installer.
+
+`SHA256SUMS.txt`, CycloneDX and `release-manifest.json` cover the CABs and the
+inventory. Packaging verifies and copies the complete set before deleting
+temporary build directories. A missing or changed CAB blocks release checks.
+
+Signing changes both the CABs and the MSI. Signed builds must sign the CABs,
+inscribe their certificate/hash bindings in the MSI's Installer trust tables,
+sign the MSI, and then run `release_signing.py --refresh-msi-media` with the
+independently trusted publisher. Hash regeneration alone never proves signing.
+See [WiX signing order](https://docs.firegiant.com/wix3/overview/insignia/) and
+[Microsoft's external cabinet trust tables](https://learn.microsoft.com/en-us/windows/win32/msi/msidigitalsignature-table).
+
+Stable VM QA evidence must bind both `msi_sha256` and `msi_media_sha256` and
+confirm external CAB signatures. Unsigned local/explicit previews remain
+separate; administrative extraction does not qualify clean installation,
+upgrade, rollback, publisher trust or a stable release.
 ## Agent-assisted release flow
 
 The installed Desktop Commander or official Codex can run the existing

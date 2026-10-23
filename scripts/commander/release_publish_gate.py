@@ -28,6 +28,7 @@ REQUIRED_PROOFS = (
     "web_models_runtime_verified",
     "mcp_extension_integration_verified",
     "signed_artifacts_verified",
+    "external_cabinet_signatures_verified",
     "reviewed_by_release_owner",
 )
 
@@ -55,6 +56,10 @@ def check_publication(release: Path, evidence: Path, *,
     msi = release / f"SENTRA-Desktop-{version}-x64.msi"
     if not msi.is_file() or data.get("msi_sha256") != _sha(msi):
         raise PermissionError("VM QA tested a different MSI installer")
+    from scripts.commander.msi_media import verify_msi_manifest
+    media = verify_msi_manifest(msi, manifest.get("msi_media"))
+    if data.get("msi_media_sha256") != _sha(media[1]):
+        raise PermissionError("VM QA tested different MSI external cabinet media")
     return {"release_gate": "pass", "version": version, "vm_evidence": "bound",
             "independent_review": True}
 

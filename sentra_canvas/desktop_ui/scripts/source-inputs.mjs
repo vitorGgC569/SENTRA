@@ -1,6 +1,6 @@
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile, readdir, lstat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { resolve, relative } from 'node:path';
+import { resolve, relative, dirname } from 'node:path';
 
 export async function sourceInputs(project) {
   const names = ['package.json', 'package-lock.json', 'index.html', 'vite.config.js',
@@ -15,6 +15,18 @@ export async function sourceInputs(project) {
     }
   }
   await walk(resolve(project, 'src'));
+  // Imported source outside desktop_ui must also invalidate a packaged bundle.
+  for(const name of ['consumer-flow.mjs','input-queue.mjs','emulator-budget.mjs','saved-register.mjs']
+    .map(name=>'../../integrations/orca-terminal/src/'+name)
+    .concat('../../integrations/orca-terminal/vendor/orca/src/shared/terminal-unicode-provider.ts')){
+    try{
+      const info=await lstat(resolve(project,name));if(info.isSymbolicLink()||!info.isFile())throw Error('Linked desktop build input: '+name);
+      for(let parent=dirname(resolve(project,name)),root=resolve(project,'../..');parent!==root;parent=dirname(parent)){
+        if((await lstat(parent)).isSymbolicLink())throw Error('Linked desktop shared build input: '+name);
+      }
+      names.push(name);
+    }catch(error){if(error.code!=='ENOENT')throw error;}
+  }
   try { await walk(resolve(project, 'public')); }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   const hashes = {};

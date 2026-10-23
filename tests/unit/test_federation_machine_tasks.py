@@ -7,6 +7,7 @@ or claimed here. The typed task is supplied explicitly by the authorized caller.
 from __future__ import annotations
 
 import copy
+import faulthandler
 import json
 import time
 import threading
@@ -473,7 +474,12 @@ def test_final_tls_checkpoint_drops_result_when_authority_was_revoked(peers, mon
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(left.delegate, right.identity.node_id, SCOPE, task())
         try:
-            assert waiting.wait(10)
+            if not waiting.wait(10):
+                # Preserve the receiver's actual blocking stack in CI instead
+                # of diagnosing a missing checkpoint from a bare Event=False.
+                faulthandler.dump_traceback()
+                outcome = repr(future.exception()) if future.done() else "sender still pending"
+                pytest.fail("receiver never reached final TLS checkpoint: " + outcome)
             revoke_authority(right, control, left, authority)
         finally:
             release.set()
@@ -499,6 +505,41 @@ def test_final_tls_checkpoint_drops_result_when_authority_was_revoked(peers, mon
         with pytest.raises(FederationUncertain, match="not re-executed"):
             left.delegate(right.identity.node_id, SCOPE, task(), intent_id=receipt["intent_id"])
     assert workspace.joinpath("entrega.txt").stat().st_mtime_ns == before
+
+
+def test_close_drains_admitted_task_before_authority_can_be_closed(peers, monkeypatch):
+    left, right, _, control, host, workspace = peers
+    entered, release = threading.Event(), threading.Event()
+    original = host.dispatch
+
+    def pause_before_effect(**kwargs):
+        entered.set()
+        assert release.wait(10)
+        return original(**kwargs)
+
+    monkeypatch.setattr(host, "dispatch", pause_before_effect)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        delivery = pool.submit(left.delegate, right.identity.node_id, SCOPE, task())
+        assert entered.wait(10)
+        stopping = pool.submit(right.close)
+        try:
+            assert right._stop.wait(5)
+            # Listener shutdown alone cannot license closing the shared DB.
+            with pytest.raises(TimeoutError):
+                stopping.result(timeout=.5)
+        finally:
+            release.set()
+        stopping.result(timeout=10)
+        with pytest.raises(FederationUncertain):
+            delivery.result(timeout=10)
+    with right._handlers_lock:
+        assert not right._handlers
+    saved = next(iter(right.journal.intents().values()))
+    receipt = saved["receipt"]
+    assert receipt["remote_state"] == "UNCERTAIN"
+    assert receipt["result_ready"] is False
+    assert control.durable.operation_status(receipt["operation_id"], right.owner)["state"] == "UNCERTAIN"
+    assert not workspace.joinpath("entrega.txt").exists()
 
 
 @pytest.mark.parametrize("boundary", ["last_child", "aggregate_completed", "delivery"])

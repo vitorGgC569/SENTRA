@@ -135,6 +135,21 @@ def _sessions(canvas):
     return sessions
 
 
+def close_network_sessions(canvas):
+    """Drain accepted peer work before Canvas closes its shared authority.
+
+    Keep a failed session registered so an explicit shutdown retry can finish
+    draining it. Application shutdown does not erase the saved network setup.
+    """
+    with canvas._lock:
+        sessions = list(getattr(canvas, '_federation_gateways', {}).items())
+    for project_id, session in sessions:
+        session.gateway.close()
+        with canvas._lock:
+            current = getattr(canvas, '_federation_gateways', {})
+            if current.get(project_id) is session:current.pop(project_id)
+
+
 def _authority(canvas):
     return canvas._shell_service(), canvas._runtime().owner
 
@@ -387,6 +402,12 @@ def _bind_host(canvas, project_id):
 
 
 def _enable(canvas, project_id, params, reserved):
+    with canvas._lock:
+        if canvas._closing:raise RuntimeError('Canvas is closing; no new peer listener accepted')
+        return _enable_locked(canvas, project_id, params, reserved)
+
+
+def _enable_locked(canvas, project_id, params, reserved):
     sessions = _sessions(canvas)
     current = sessions.get(project_id)
     if current is not None and current.gateway.status().get("listening"):
@@ -414,10 +435,12 @@ def _enable(canvas, project_id, params, reserved):
 
 
 def _disable(canvas, project_id):
-    session = _sessions(canvas).pop(project_id, None)
+    session = _sessions(canvas).get(project_id)
     if session is not None:
         _remember(canvas, project_id, session, enabled=False)
         session.gateway.close()
+        with canvas._lock:
+            if _sessions(canvas).get(project_id) is session:_sessions(canvas).pop(project_id)
     elif _load_record(canvas, project_id) is not None:
         record = _load_record(canvas, project_id)
         record["enabled"] = False

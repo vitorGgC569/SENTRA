@@ -52,12 +52,14 @@ def verify_signed_release(release_dir: Path, *, trusted_signer: str,
         if not asset.is_file() or asset.is_symlink():
             raise ValueError(f"signed release asset missing: {asset.name}")
         verify_authenticode(asset, signer)
+    from scripts.commander.msi_media_signing import verify_signed_msi_media
+    media = verify_signed_msi_media(msi, signer)
     manifest_file = release / "release-manifest.json"
     manifest = json.loads(manifest_file.read_text(encoding="utf-8-sig"))
     if str(manifest.get("signer_thumbprint") or "").replace(" ", "").upper() != signer:
         raise ValueError("release manifest publisher does not match the trusted signer")
     return {"schema": SCHEMA, "result": "signed-verified", "version": version,
-            "signer_thumbprint": signer, "assets": [setup.name, msi.name],
+            "signer_thumbprint": signer, "assets": [setup.name, *(p.name for p in media)],
             "simulated": False}
 
 
@@ -82,9 +84,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dist", type=Path, default=ROOT / "dist")
     parser.add_argument("--trusted-signer", required=True)
     parser.add_argument("--seal", action="store_true")
+    parser.add_argument("--refresh-msi-media", action="store_true")
     parser.add_argument("--version", default=PRODUCT_VERSION)
     args = parser.parse_args(argv)
     try:
+        if args.refresh_msi_media:
+            from scripts.commander.msi_media_signing import refresh_signed_msi_media
+            msi = args.release / f"SENTRA-Desktop-{args.version}-x64.msi"
+            inventory = refresh_signed_msi_media(msi, args.trusted_signer)
+            print(json.dumps({"result": "signed-media-inventory-refreshed", "inventory": str(inventory)}))
+            return 0
         result = verify_signed_release(args.release, trusted_signer=args.trusted_signer,
                                        version=args.version)
         if args.seal:

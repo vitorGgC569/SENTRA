@@ -39,6 +39,10 @@ class PtyHistory:
         self.pending = OrderedDict()
         self.sizes, self.heads, self.durable, self.gaps = {}, {}, {}, {}
         self.geometries = {}
+        # Only committed, OS-protected frames for this process's live resources.
+        # Their total ciphertext is bounded by the same on-disk checkpoint quota.
+        # Observing a live screen must never join the transcript writer's queue.
+        self.live_scopes, self.live_checkpoints = {}, {}
         self.sequences={};self.mirrors=set();self.snapshot_dirty=set();self.snapshot_errors={}
         self.snapshot_invalid=set();self.snapshot_force=False;self.snapshot_at={}
         self.restore_lock=threading.RLock()
@@ -103,7 +107,8 @@ class PtyHistory:
                 self.db.execute("UPDATE sessions SET state='history_restored',tail_uncertain=1 WHERE state='live'")
                 self.db.execute('PRAGMA user_version=2')
                 self.checkpoint_known={row[0] for row in self.db.execute('SELECT terminal_id FROM checkpoints')}
-                self._trim()
+                _, removed = self._trim()
+                self.checkpoint_known.difference_update(removed)
                 self.geometries = {row['terminal_id']: {key: row[key] for key in ('cols','rows','geometry_sequence')}
                     for row in self.db.execute('SELECT terminal_id,cols,rows,geometry_sequence FROM sessions')}
         except BaseException:
@@ -122,6 +127,7 @@ class PtyHistory:
                             (terminal_id, workspace_id, runtime_id, 'reserved', time.time(),1))
         with self.condition:
             self.heads[terminal_id] = self.durable[terminal_id] = 0
+            self.live_scopes[terminal_id] = workspace_id
             self.geometries[terminal_id] = {'cols':100,'rows':28,'geometry_sequence':0}
             self.sequences[terminal_id]=0
             if self.snapshots and self.snapshots.available:
@@ -265,7 +271,7 @@ class PtyHistory:
 
     def _trim(self):
         used=self.db.execute('SELECT used FROM history_budget WHERE id=1').fetchone()[0]
-        pruned=[]
+        pruned=[];removed=[]
         # A little headroom avoids repeated single-row eviction under a flood.
         target=int(self.disk_limit*.9) if used>self.disk_limit else self.disk_limit
         while used>target:
@@ -295,8 +301,14 @@ class PtyHistory:
                 row=self.db.execute('SELECT terminal_id,bytes FROM checkpoints ORDER BY updated LIMIT 1').fetchone()
             if not row:break
             self.db.execute('DELETE FROM checkpoints WHERE terminal_id=?',(row[0],))
-            self.checkpoint_known.discard(row[0]);used-=row[1]+CHUNK_OVERHEAD
-        return pruned
+            removed.append(row[0]);used-=row[1]+CHUNK_OVERHEAD
+        return pruned,removed
+
+    def _publish_checkpoint_pruning(self, removed):
+        # Caller holds db_lock after a successful commit, then condition. Keeping
+        # publication in commit order prevents an older writer hiding a new frame.
+        self.checkpoint_known.difference_update(removed)
+        for terminal in removed:self.live_checkpoints.pop(terminal,None)
 
     def _save_checkpoint(self,ident,frame):
         raw=json.dumps(frame,ensure_ascii=False,separators=(',',':'))
@@ -305,17 +317,22 @@ class PtyHistory:
             raise RuntimeError('OS protected checkpoint required')
         if len(protected.encode('utf-8'))>self.disk_limit:
             raise RuntimeError('Checkpoint exceeds history quota; transcript retained')
-        with self.db_lock,self.db:
-            self.db.execute('''INSERT INTO checkpoints VALUES(?,?,?,?,?,?)
+        with self.db_lock:
+            with self.db:
+                self.db.execute('''INSERT INTO checkpoints VALUES(?,?,?,?,?,?)
                 ON CONFLICT(terminal_id) DO UPDATE SET sequence=excluded.sequence,cursor=excluded.cursor,
                 protected=excluded.protected,bytes=excluded.bytes,updated=excluded.updated
                 WHERE checkpoints.sequence<=excluded.sequence''',
-                (ident,frame['sequence'],frame['cursor'],protected,len(protected.encode('utf-8')),time.time()))
-            self.db.execute('DELETE FROM geometry WHERE terminal_id=? AND sequence<=?',(ident,frame['sequence']))
-            self.checkpoint_known.add(ident)
-            pruned=self._trim()
-        with self.condition:
-            for terminal,left,right in pruned:self._gap(terminal,left,right)
+                    (ident,frame['sequence'],frame['cursor'],protected,len(protected.encode('utf-8')),time.time()))
+                self.db.execute('DELETE FROM geometry WHERE terminal_id=? AND sequence<=?',(ident,frame['sequence']))
+                pruned,removed=self._trim()
+                saved=self.db.execute('SELECT sequence,protected FROM checkpoints WHERE terminal_id=?',(ident,)).fetchone()
+            with self.condition:
+                self._publish_checkpoint_pruning(removed)
+                if saved:
+                    self.checkpoint_known.add(ident)
+                    if ident in self.heads:self.live_checkpoints[ident]=(saved['sequence'],saved['protected'])
+                for terminal,left,right in pruned:self._gap(terminal,left,right)
 
     def _capture(self,ident):
         self.snapshot_at[ident]=time.monotonic()
@@ -370,27 +387,29 @@ class PtyHistory:
                             if text and (not isinstance(protected,str) or not protected.startswith(('dpapi:','keyring:'))):
                                 raise RuntimeError('OS protected history required')
                             protected_batch.append((event,protected))
-                        with self.db_lock,self.db:
-                            for (start,text,_,sequence,kind,geometry),protected in protected_batch:
-                                if text:self.db.execute('''INSERT INTO chunks(terminal_id,start,end,protected,bytes,created,sequence) VALUES(?,?,?,?,?,?,?)
-                                    ON CONFLICT(terminal_id,start) DO UPDATE SET end=excluded.end,protected=excluded.protected,
-                                    bytes=excluded.bytes,created=excluded.created,sequence=excluded.sequence''',
-                                    (ident,start,start+len(text),protected,len(protected.encode('utf-8')),time.time(),sequence))
-                                self.db.execute('UPDATE sessions SET sequence=?,head=MAX(head,?) WHERE terminal_id=?',(sequence,start+len(text),ident))
-                                if kind=='resize':
-                                    self.db.execute('INSERT INTO geometry VALUES(?,?,?,?,?)',(ident,sequence,start,geometry['cols'],geometry['rows']))
-                                    self.db.execute('UPDATE sessions SET cols=?,rows=?,geometry_sequence=? WHERE terminal_id=?',
-                                        (geometry['cols'],geometry['rows'],sequence,ident))
-                                    self.db.execute('DELETE FROM geometry WHERE terminal_id=? AND sequence NOT IN (SELECT sequence FROM geometry WHERE terminal_id=? ORDER BY sequence DESC LIMIT 128)',(ident,ident))
-                                    geometry_updates[ident]={'cols':geometry['cols'],'rows':geometry['rows'],'geometry_sequence':sequence}
-                            for terminal_id,head in heads.items():
-                                self.db.execute('UPDATE sessions SET head=MAX(head,?),updated=? WHERE terminal_id=?',(head,time.time(),terminal_id))
-                            pruned=self._trim()
-                        with self.condition:
-                            self.geometries.update(geometry_updates)
-                            for terminal,left,right in pruned:self._gap(terminal,left,right)
-                            for start,text,*_ in batch:
-                                if text:self.durable[ident]=max(self.durable.get(ident,0),start+len(text))
+                        with self.db_lock:
+                            with self.db:
+                                for (start,text,_,sequence,kind,geometry),protected in protected_batch:
+                                    if text:self.db.execute('''INSERT INTO chunks(terminal_id,start,end,protected,bytes,created,sequence) VALUES(?,?,?,?,?,?,?)
+                                        ON CONFLICT(terminal_id,start) DO UPDATE SET end=excluded.end,protected=excluded.protected,
+                                        bytes=excluded.bytes,created=excluded.created,sequence=excluded.sequence''',
+                                        (ident,start,start+len(text),protected,len(protected.encode('utf-8')),time.time(),sequence))
+                                    self.db.execute('UPDATE sessions SET sequence=?,head=MAX(head,?) WHERE terminal_id=?',(sequence,start+len(text),ident))
+                                    if kind=='resize':
+                                        self.db.execute('INSERT INTO geometry VALUES(?,?,?,?,?)',(ident,sequence,start,geometry['cols'],geometry['rows']))
+                                        self.db.execute('UPDATE sessions SET cols=?,rows=?,geometry_sequence=? WHERE terminal_id=?',
+                                            (geometry['cols'],geometry['rows'],sequence,ident))
+                                        self.db.execute('DELETE FROM geometry WHERE terminal_id=? AND sequence NOT IN (SELECT sequence FROM geometry WHERE terminal_id=? ORDER BY sequence DESC LIMIT 128)',(ident,ident))
+                                        geometry_updates[ident]={'cols':geometry['cols'],'rows':geometry['rows'],'geometry_sequence':sequence}
+                                for terminal_id,head in heads.items():
+                                    self.db.execute('UPDATE sessions SET head=MAX(head,?),updated=? WHERE terminal_id=?',(head,time.time(),terminal_id))
+                                pruned,removed=self._trim()
+                            with self.condition:
+                                self._publish_checkpoint_pruning(removed)
+                                self.geometries.update(geometry_updates)
+                                for terminal,left,right in pruned:self._gap(terminal,left,right)
+                                for start,text,*_ in batch:
+                                    if text:self.durable[ident]=max(self.durable.get(ident,0),start+len(text))
                         if ident is not None:self._snapshot_apply_batch(ident,batch)
                 except Exception as exc:
                     with self.condition:
@@ -448,7 +467,30 @@ class PtyHistory:
         with self.condition:return dict(self.geometries.get(terminal_id,{}))
 
     def checkpoint(self,workspace_id,terminal_id):
+        # Archived reconstruction can take multiple bounded mirror RPCs. Neither
+        # that global reconstruction lock nor an fsync may delay a live viewer.
+        with self.condition:
+            live=terminal_id in self.heads
+        if live:return self._live_checkpoint(workspace_id,terminal_id)
         with self.restore_lock:return self._checkpoint(workspace_id,terminal_id)
+
+    def _live_checkpoint(self,workspace_id,terminal_id):
+        from .terminal_snapshots import encode_checkpoint
+        with self.condition:
+            if self.live_scopes.get(terminal_id)!=workspace_id:
+                raise PermissionError('PTY checkpoint not in this workspace')
+            if terminal_id in self.snapshot_invalid or terminal_id in self.snapshot_errors:
+                return {'available':False,'retryable':False,'reason':'checkpoint_coverage_unavailable'}
+            saved=self.live_checkpoints.get(terminal_id)
+            geometry=dict(self.geometries.get(terminal_id,{}))
+            self.snapshot_force=True;self.condition.notify_all()
+            if saved is None or saved[0]<geometry.get('geometry_sequence',0):
+                return {'available':False,'retryable':bool(self.snapshots and self.snapshots.available),'reason':'checkpoint_pending'}
+        frame=json.loads(self.unprotect(saved[1]))
+        return {'available':True,'checkpoint':encode_checkpoint(frame),
+                'geometry_sequence':geometry.get('geometry_sequence',0),
+                'cols':frame['cols'],'rows':frame['rows'],'tail_uncertain':True,
+                'restoration_creates_process':False}
 
     def _checkpoint(self,workspace_id,terminal_id):
         from .terminal_snapshots import SnapshotUnavailable,encode_checkpoint

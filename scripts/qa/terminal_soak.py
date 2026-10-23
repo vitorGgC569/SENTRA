@@ -1,26 +1,33 @@
 """Disposable Windows installed-daemon soak; never attaches to user terminals."""
 from pathlib import Path
-import argparse,base64,concurrent.futures,json,os,subprocess,sys,time,traceback
-ROOT=Path(__file__).resolve().parents[2]
+import argparse,base64,concurrent.futures,hashlib,json,os,subprocess,sys,time,traceback
+ROOT=Path(os.environ.get('SENTRA_SOAK_SOURCE_ROOT') or Path(__file__).resolve().parents[2]).resolve()
+if not (ROOT/'sentra_canvas/pty_client.py').is_file():raise ValueError('Soak broker source tree unavailable')
 if str(ROOT) not in sys.path:sys.path.insert(0,str(ROOT))
 from sentra_canvas.pty_client import PtyDaemonClient,DaemonPTY
 from sentra_canvas.service import Canvas
 
-def run(binary,state,seconds):
+def run(binary,state,seconds,*,source_daemon=False):
  state=state.resolve()
  if state.exists():raise ValueError('Choose a new, empty validation directory')
- state.mkdir(parents=True);report={'state':'running','installed_binary':str(binary),'seconds_requested':seconds,'synthetic_workloads':True,'user_state_used':False}
+ state.mkdir(parents=True);report={'state':'running','installed_binary':None if source_daemon else str(binary),'daemon_kind':'source' if source_daemon else 'frozen','seconds_requested':seconds,'synthetic_workloads':True,'user_state_used':False}
+ report['broker_source_root']=str(ROOT)
+ report['broker_source_inputs']={name:hashlib.sha256((ROOT/name).read_bytes()).hexdigest() for name in ('sentra_canvas/service.py','sentra_canvas/pty_client.py','sentra_canvas/pty_history.py','sentra_canvas/pty_daemon.py','sentra_canvas/terminal_snapshots.py')}
  output=state/'report.json'
  def save():output.write_text(json.dumps(report,indent=2),encoding='utf-8')
  save();process=None;app=None;client=None;terms=[];start=time.monotonic();stage='startup';last_save=0
+ diagnostic_log=(state/'daemon-diagnostics.log').open('x',encoding='utf-8')
  def daemon():
   env={**os.environ,'PYINSTALLER_RESET_ENVIRONMENT':'1','SENTRA_PTY_DAEMON':'1'}
-  proc=subprocess.Popen([str(binary),'--pty-daemon',str(state/'canvas/pty-host')],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW)
+  argv=[str(binary),'--pty-daemon',str(state/'canvas/pty-host')]
+  if source_daemon:
+   argv=[sys.executable,'-c',"import faulthandler,sys;faulthandler.enable();faulthandler.dump_traceback_later(120,repeat=True);from sentra_canvas.pty_daemon import serve;serve(sys.argv[1])",str(state/'canvas/pty-host')]
+  proc=subprocess.Popen(argv,cwd=ROOT,env=env,stdin=subprocess.DEVNULL,stdout=diagnostic_log,stderr=diagnostic_log,creationflags=subprocess.CREATE_NO_WINDOW)
   deadline=time.monotonic()+30
   while time.monotonic()<deadline:
    try:return proc,PtyDaemonClient(state/'canvas/pty-host')
    except (OSError,ValueError,KeyError,RuntimeError):
-    if proc.poll() is not None:raise RuntimeError('Owned frozen daemon exited')
+    if proc.poll() is not None:raise RuntimeError('Owned daemon exited; inspect daemon-diagnostics.log')
     time.sleep(.1)
   proc.terminate();proc.wait(10);raise TimeoutError('Frozen daemon startup')
  try:
@@ -33,7 +40,7 @@ def run(binary,state,seconds):
    stage='create_terminal_'+str(i)
    code="from pathlib import Path;import time,threading,sys;Path('started-%d').open('a').write('once');threading.Thread(target=lambda:[Path('input-%d').open('a').write(x) for x in sys.stdin],daemon=True).start();end=time.monotonic()+%d;n=0\nwhile time.monotonic()<end:\n print('\\x1b[2K\\rTAG%d '+str(n)+' 🦊 界 \\x1b[32mRUN\\x1b[0m',flush=True);n+=1;time.sleep(.05)"%(i,i,duration,i)
    t=app._start(ws,'Soak_'+str(i),'cmd',[sys.executable,'-u','-c',code]);terms.append(t)
-  pids={t['id']:app._sessions[t['id']].pty.pid for t in terms};runtime=client.runtime_id;cursors={t['id']:0 for t in terms};reads=0;bytes_read=0;restarts=0;last_restart=0;checkpoint_reads=0
+  pids={t['id']:app._sessions[t['id']].pty.pid for t in terms};runtime=client.runtime_id;cursors={t['id']:0 for t in terms};checkpoint_cursors={};checkpoint_sequences={};reads=0;bytes_read=0;restarts=0;last_restart=0;checkpoint_reads=0
   assert client.call('health')['capabilities']['ansi_tui_snapshots'] is True,'Packaged snapshot runtime unavailable'
   for i,t in enumerate(terms):
    pty=app._sessions[t['id']].pty;fields=pty.fields(data=base64.b64encode(('input-once-'+str(i)+'\r').encode()).decode())
@@ -61,9 +68,13 @@ def run(binary,state,seconds):
       frame=connected.call('checkpoint',{'workspace_id':ws,'terminal_id':t['id']})
       assert frame.get('available') is True,frame
       assert frame['restoration_creates_process'] is False
+      packet=frame['checkpoint'];previous=checkpoint_cursors.get(t['id'],-1)
+      assert packet['cursor']>previous,'Checkpoint stopped advancing during continuous output'
+      assert packet['sequence']>checkpoint_sequences.get(t['id'],-1),'Checkpoint sequence stopped advancing'
+      checkpoint_cursors[t['id']]=packet['cursor'];checkpoint_sequences[t['id']]=packet['sequence']
       checkpoint_reads+=1
      assert connected.call('health')['history']['persistence_error'] is None
-     report.update(reads=reads,bytes_read=bytes_read,broker_reopens=restarts,checkpoint_reads=checkpoint_reads,elapsed_seconds=round(elapsed,1),stage=stage);save();last_save=elapsed
+     report.update(reads=reads,bytes_read=bytes_read,broker_reopens=restarts,checkpoint_reads=checkpoint_reads,checkpoint_cursors=checkpoint_cursors,checkpoint_sequences=checkpoint_sequences,checkpoint_progress_checked=True,elapsed_seconds=round(elapsed,1),stage=stage);save();last_save=elapsed
     time.sleep(.2)
   for i,t in enumerate(terms):
    stage='verify_and_close_'+str(i)
@@ -83,9 +94,10 @@ def run(binary,state,seconds):
   if process:
    try:process.wait(12)
    except subprocess.TimeoutExpired:report['forced_owned_daemon_termination']=True;process.terminate();process.wait(10)
+  diagnostic_log.close()
   report['owned_daemon_closed']=process is not None and process.poll() is not None;save()
  return report
 if __name__=='__main__':
- p=argparse.ArgumentParser(__doc__);p.add_argument('--binary',type=Path,required=True);p.add_argument('--state',type=Path,required=True);p.add_argument('--seconds',type=int,default=300);a=p.parse_args()
+ p=argparse.ArgumentParser(__doc__);mode=p.add_mutually_exclusive_group(required=True);mode.add_argument('--binary',type=Path);mode.add_argument('--source-daemon',action='store_true');p.add_argument('--state',type=Path,required=True);p.add_argument('--seconds',type=int,default=300);a=p.parse_args()
  if os.name!='nt' or not 30<=a.seconds<=3600:p.error('Windows and a duration from 30 to 3600 seconds are required')
- run(a.binary.resolve(strict=True),a.state,a.seconds)
+ run(a.binary.resolve(strict=True) if a.binary else None,a.state,a.seconds,source_daemon=a.source_daemon)

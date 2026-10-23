@@ -7,6 +7,7 @@ import {restoreCheckpoint,mayWriteTerminal,writeTerminalFrame,releaseDisposedWri
 import {Unicode11Addon} from '@xterm/addon-unicode11';
 import {activateOrcaTerminalUnicodeProvider} from '../../../integrations/orca-terminal/vendor/orca/src/shared/terminal-unicode-provider';
 import {TerminalReadBudget} from '../../../integrations/orca-terminal/src/consumer-flow.mjs';
+import {EmulatorBudget} from '../../../integrations/orca-terminal/src/emulator-budget.mjs';
 import {TerminalInputQueue} from '../../../integrations/orca-terminal/src/input-queue.mjs';
 import {TerminalInputJournal,deliveredInput} from './terminal-input-journal';
 
@@ -25,12 +26,14 @@ export class TerminalPool {
   snapshot = () => this.revision;
   constructor(report, changed) {
     this.readBudget = new TerminalReadBudget();
+    this.emulatorBudget = new EmulatorBudget();
+    this.rendererClock=0;
     this.inputQueue = new TerminalInputQueue();
     this.onInputStorage=()=>{for(const entry of this.entries.values())if(entry.inputJournal)void this.syncInput(entry)};
     window.addEventListener('storage',this.onInputStorage);
     this.onVisibility=()=>{for(const entry of this.entries.values()){
       if(!this.visible(entry))this.suspend(entry);
-      else if(!entry.polling&&!entry.timer)this.poll(entry);
+      else {this.place(entry);if(entry.term&&!entry.polling&&!entry.timer)this.poll(entry);}
     }};
     document.addEventListener('visibilitychange',this.onVisibility);
     this.report = report;
@@ -45,7 +48,7 @@ export class TerminalPool {
     entry.viewEpoch = (entry.viewEpoch || 0) + 1; entry.inputEpoch++;
     if(entry.sendingPacket)entry.inputBlocked=entry.inputBlocked||'view_changed';
     this.inputQueue.cancel(entry.key);entry.pendingResize=null;
-    entry.inputSuspended = true; entry.term.options.disableStdin = true;
+    entry.inputSuspended = true; if(entry.term)entry.term.options.disableStdin = true;
     entry.readAbort?.abort();clearTimeout(entry.timer);entry.timer = null;
   }
   setOutputEnabled(enabled) {
@@ -67,31 +70,56 @@ export class TerminalPool {
       this.reconcile(ws, resources);
     }
     for (const entry of this.entries.values()) {
-      if (entry.alive && !entry.polling && !entry.timer) this.poll(entry);
+      if(entry.alive){this.place(entry);if(entry.term&&!entry.polling&&!entry.timer)this.poll(entry);}
     }
   }
   key(ws, id) { return ws + ':' + id; }
+  reserveRenderer(entry,cols,rows) {
+    const reserve=()=>this.emulatorBudget.reserve(entry.key,cols,rows,2000);
+    if(reserve())return true;
+    const idle=[...this.entries.values()].filter(other=>other!==entry&&other.term&&!this.visible(other))
+      .sort((a,b)=>(a.rendererUsed||0)-(b.rendererUsed||0));
+    for(const other of idle){this.parkRenderer(other);if(reserve())return true;}
+    return false;
+  }
+  parkRenderer(entry) {
+    if(!entry.term)return;
+    this.suspend(entry);entry.rendererCols=entry.term.cols;entry.rendererRows=entry.term.rows;
+    entry.rendererScroll=entry.term.buffer?.active?.viewportY;entry.rendererWasAtBottom=entry.term.buffer?.active?.viewportY===entry.term.buffer?.active?.baseY;
+    entry.term.dispose();releaseDisposedWrites(entry);entry.term=null;entry.fit=null;
+    this.emulatorBudget.release(entry.key);entry.host.replaceChildren();entry.opened=false;
+    entry.snapshotRestored=false;entry.checkpointUnavailable=false;entry.cursor=0;entry.renderUncertain=true;
+  }
   createRenderer(entry) {
-    const term = new Terminal({
+    const cols=entry.rendererCols||100,rows=entry.rendererRows||28;
+    if(!this.reserveRenderer(entry,cols,rows)){
+      const first=!entry.memoryPaused;
+      entry.memoryPaused=true;entry.host.textContent='Limite de visualizações atingido. Feche um painel para abrir este terminal. O processo continua.';
+      if(first)this.changed();
+      return null;
+    }
+    entry.memoryPaused=false;entry.host.replaceChildren();entry.rendererUsed=++this.rendererClock;
+    let term;
+    try{term = new Terminal({
       fontFamily: '"Cascadia Mono", Consolas, monospace', fontSize: 13,
-      scrollback: 6000, screenReaderMode: true, allowProposedApi: true,vtExtensions:{kittyKeyboard:true},
+      cols,rows,scrollback: 2000, screenReaderMode: true, allowProposedApi: true,vtExtensions:{kittyKeyboard:true},
       disableStdin: true, cursorBlink: false,
-      theme: { background: '#1b1b1e', foreground: '#d4d4d8', cursor: '#d4d4d8', selectionBackground: '#51515b99' },
+      theme: { background: '#1b1b1e', foreground: '#d4d4d8', cursor: '#d4d4d8', selectionBackground: '#51515b99',...entry.viewTheme },
     });
     const fit = new FitAddon(); term.loadAddon(fit);
     term.loadAddon(new Unicode11Addon());activateOrcaTerminalUnicodeProvider(term);
     entry.term=term;entry.fit=fit;
     term.onData(data => this.send(entry, data));
     return term;
+    }catch(error){term?.dispose();entry.term=null;entry.fit=null;this.emulatorBudget.release(entry.key);throw error;}
   }
   recoverRenderer(entry) {
     if(!entry.alive)return;
     this.suspend(entry);
-    entry.term.dispose();releaseDisposedWrites(entry);
-    entry.host.replaceChildren();entry.opened=false;
+    this.parkRenderer(entry);
     entry.snapshotRestored=false;entry.checkpointUnavailable=false;entry.cursor=0;
     entry.transportUnavailable=true;entry.rendererRecoveries=(entry.rendererRecoveries||0)+1;
-    this.createRenderer(entry);this.place(entry);this.changed();
+    this.place(entry);this.changed();
     this.report('A visualização foi reiniciada. O processo e os comandos não foram reiniciados.','error');
   }
   ensure(ws, resource) {
@@ -99,7 +127,7 @@ export class TerminalPool {
     let entry = this.entries.get(key);
     if (entry) {
       const running = resource.status === 'running' && entry.recoverable !== false;
-      entry.term.options.disableStdin = !running || entry.transportUnavailable === true || entry.inputSuspended === true || !!entry.inputBlocked || !entry.inputProtocol;
+      if(entry.term)entry.term.options.disableStdin = !running || entry.transportUnavailable === true || entry.inputSuspended === true || !!entry.inputBlocked || !entry.inputProtocol;
       entry.resource = resource;
       if (!this.visible(entry)) this.suspend(entry);
       return entry;
@@ -111,9 +139,14 @@ export class TerminalPool {
       polling: false, status: resource.status, alive: true, retry: 0,inputEpoch:0,viewEpoch:0,inputSuspended:true,
       inViewport:typeof IntersectionObserver!=='function' };
     this.entries.set(key, entry);
-    this.createRenderer(entry);entry.onRendererStall=()=>this.recoverRenderer(entry);
+    entry.term=null;entry.onRendererStall=()=>this.recoverRenderer(entry);
+    entry.resizeRenderer=(cols,rows)=>{
+      if(!this.reserveRenderer(entry,cols,rows)){entry.memoryPaused=true;throw Error('Limite de memória das visualizações atingido. Feche outro painel.');}
+      entry.term.resize(cols,rows);entry.rendererCols=cols;entry.rendererRows=rows;entry.memoryPaused=false;
+    };
     entry.observer = new ResizeObserver(() => {
       if(!this.visible(entry)){this.suspend(entry);return;}
+      if(!entry.term){this.place(entry);return;}
       this.scheduleFit(entry);if(!entry.polling&&!entry.timer)this.poll(entry);
     });
     entry.observer.observe(host);
@@ -121,7 +154,7 @@ export class TerminalPool {
       entry.intersection=new IntersectionObserver(rows=>{
         entry.inViewport=rows.some(row=>row.target===host&&row.isIntersecting);
         if(!this.visible(entry))this.suspend(entry);
-        else{this.scheduleFit(entry);if(!entry.polling&&!entry.timer)this.poll(entry);}
+        else{this.place(entry);if(entry.term&&!entry.polling&&!entry.timer)this.poll(entry);}
       });entry.intersection.observe(host);
     }
     if (this.outputEnabled) this.poll(entry);
@@ -130,13 +163,16 @@ export class TerminalPool {
   attach(ws, resource, slot, priority = 1) {
     const entry = this.ensure(ws, resource);
     entry.slots.set(slot, priority); this.place(entry);
-    return () => { entry.slots.delete(slot); this.place(entry); };
+    return () => { entry.slots.delete(slot); this.place(entry);this.retryRenderers(); };
   }
+  retryRenderers(){for(const candidate of this.entries.values())if(candidate.memoryPaused&&this.visible(candidate))this.place(candidate);}
   place(entry) {
     const slot = [...entry.slots.entries()].filter(([el]) => el.isConnected)
       .sort((a, b) => b[1] - a[1])[0]?.[0];
     if (!slot) { this.suspend(entry);entry.host.remove(); return; }
     if (entry.host.parentElement !== slot) slot.append(entry.host);
+    if(!entry.term){if(!this.visible(entry)||!this.createRenderer(entry))return;}
+    entry.rendererUsed=++this.rendererClock;
     if (!entry.opened) { entry.term.open(entry.host); entry.opened = true; }
     this.scheduleFit(entry);
     if(this.visible(entry)&&!entry.polling&&!entry.timer)this.poll(entry);
@@ -144,14 +180,18 @@ export class TerminalPool {
   scheduleFit(entry) {
     clearTimeout(entry.resizeTimer);
     entry.resizeTimer = setTimeout(() => {
-      if (!entry.opened || !this.visible(entry)) return;
+      if (!entry.term || !entry.opened || !this.visible(entry)) return;
       if(entry.replaying||entry.status==='history_restored')return;
       const dims = entry.fit.proposeDimensions(); if (!dims) return;
       const cols = Math.max(20, Math.min(500, dims.cols));
       const rows = Math.max(5, Math.min(200, dims.rows));
       const changed = entry.term.cols !== cols || entry.term.rows !== rows;
       if (!changed && !entry.needsServerResize) return;
-      if (changed) { entry.term.resize(cols, rows); entry.needsServerResize = true; }
+      if (changed) {
+        try{entry.resizeRenderer(cols,rows);entry.memoryPaused=false;}
+        catch(error){entry.memoryPaused=true;this.report(error.message,'error');this.changed();return;}
+        entry.needsServerResize = true;
+      }
       if (!entry.term.options.disableStdin) {
         entry.pendingResize={cols,rows};this.queueResize(entry);
       }
@@ -171,7 +211,7 @@ export class TerminalPool {
     }catch(error){entry.resizeQueued=false;this.blockInput(entry,'queue_limit');}
   }
   blockInput(entry,reason){
-    entry.inputBlocked=reason;entry.inputEpoch++;entry.term.options.disableStdin=true;
+    entry.inputBlocked=reason;entry.inputEpoch++;if(entry.term)entry.term.options.disableStdin=true;
     this.inputQueue.cancel(entry.key);entry.pendingResize=null;this.changed();
   }
   async syncInput(entry,value){
@@ -184,7 +224,7 @@ export class TerminalPool {
         }
         entry.inputProtocol=value.input_protocol_version===1&&/^[0-9a-f]{64}$/.test(value.input_scope||'')&&/^[0-9a-f]{32}$/.test(value.input_target||'');
         entry.inputTarget=value.input_target;
-        if(!entry.inputProtocol){entry.term.options.disableStdin=true;entry.inputEpoch++;this.inputQueue.cancel(entry.key)}
+        if(!entry.inputProtocol){if(entry.term)entry.term.options.disableStdin=true;entry.inputEpoch++;this.inputQueue.cancel(entry.key)}
         if(/^[0-9a-f]{64}$/.test(value.input_scope||'')&&entry.inputScope!==value.input_scope){entry.inputScope=value.input_scope;entry.inputJournal=new TerminalInputJournal(value.input_scope,entry.id)}
         if(entry.inputProtocol&&!entry.inputJournal?.locks?.request)throw Error('Este ambiente não permite coordenar a entrada entre janelas.');
         if(value.input_pending?.length){
@@ -257,7 +297,7 @@ export class TerminalPool {
     if(entry.inputEpoch!==epoch||!this.visible(entry)||entry.inputPending||!entry.inputProtocol||entry.inputJournalError||entry.inputSuspended||entry.transportUnavailable||entry.status!=='running'||entry.recoverable===false)return false;
     entry.inputEpoch++;entry.inputBlocked=null;entry.term.options.disableStdin=false;this.changed();return true;
   }
-  focus(ws, id) { this.entries.get(this.key(ws, id))?.term.focus(); }
+  focus(ws, id) { this.entries.get(this.key(ws, id))?.term?.focus(); }
   command(ws, id, text) {
     const entry = this.entries.get(this.key(ws, id));
     if (entry) this.send(entry, text + '\r');
@@ -269,7 +309,7 @@ export class TerminalPool {
       persistenceGap: e.persistenceGap, tailUncertain: e.tailUncertain,checkpointUnavailable:e.checkpointUnavailable,
       scrollbackOmitted:e.scrollbackOmitted,inputBlocked:e.inputBlocked,inputPending:e.inputPending,
       inputProtocol:e.inputProtocol,inputJournalError:e.inputJournalError,inputBusy:!!e.activeRequestKey,
-      rendererRecoveries:e.rendererRecoveries||0 } : null;
+      memoryPaused:!!e.memoryPaused,emulatorBudget:this.emulatorBudget.status(),rendererRecoveries:e.rendererRecoveries||0 } : null;
   }
   reconcile(ws, resources) {
     this.activeWorkspace = ws;
@@ -286,9 +326,10 @@ export class TerminalPool {
     for (const [key, e] of this.entries) {
       if (e.ws === ws && !present.has(e.id)) { this.dispose(e); this.entries.delete(key); }
     }
+    this.retryRenderers();
   }
   async poll(entry) {
-    if (!entry.alive || entry.polling) return;
+    if (!entry.alive || !entry.term || entry.polling) return;
     const allowed = this.visible(entry) && shouldPollTerminalOutput({
       outputEnabled: this.outputEnabled, alive: entry.alive, workspace: entry.ws,
       activeWorkspace: this.activeWorkspace, hidden: document.hidden,
@@ -316,8 +357,11 @@ export class TerminalPool {
       if(value.checkpoint_supported&&!entry.checkpointUnavailable&&(!entry.snapshotRestored||value.truncated||value.geometry_sequence!==entry.geometrySequence)){
         const checkpoint=await api(route('/api/terminal/checkpoint',{ws:entry.ws,id:entry.id}),undefined,{signal:controller.signal});
         if(!current())return;
-        if(checkpoint.available){if(await restoreCheckpoint(entry,checkpoint,current))this.changed();return;}
-        if(checkpoint.retryable){entry.term.options.disableStdin=true;return;}
+        if(checkpoint.available){if(await restoreCheckpoint(entry,checkpoint,current)){
+          if(entry.rendererScroll!==undefined&&!entry.rendererWasAtBottom)entry.term.scrollToLine?.(Math.min(entry.rendererScroll,entry.term.buffer?.active?.baseY||0));
+          delete entry.rendererScroll;this.changed();
+        }return;}
+        if(checkpoint.retryable){if(entry.term)entry.term.options.disableStdin=true;return;}
         entry.checkpointUnavailable=true;
       }
       if(entry.renderUncertain){entry.term.reset();entry.renderUncertain=false;entry.checkpointUnavailable=true;}
@@ -368,8 +412,8 @@ export class TerminalPool {
   }
   dispose(entry) {
     this.suspend(entry);entry.alive = false; clearTimeout(entry.timer); clearTimeout(entry.resizeTimer);
-    entry.observer.disconnect();entry.intersection?.disconnect();entry.term.dispose(); entry.host.remove();
-    releaseDisposedWrites(entry);
+    entry.observer.disconnect();entry.intersection?.disconnect();entry.term?.dispose(); entry.host.remove();
+    releaseDisposedWrites(entry);this.emulatorBudget.release(entry.key);
   }
   destroy() { window.removeEventListener('storage',this.onInputStorage);document.removeEventListener('visibilitychange',this.onVisibility);for (const e of this.entries.values()) this.dispose(e); this.entries.clear(); }
 }

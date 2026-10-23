@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 import {TerminalReadBudget} from '../../../integrations/orca-terminal/src/consumer-flow.mjs';
+import {EmulatorBudget} from '../../../integrations/orca-terminal/src/emulator-budget.mjs';
 import {TerminalInputQueue} from '../../../integrations/orca-terminal/src/input-queue.mjs';
 import {TerminalInputJournal,deliveredInput} from '../src/terminal-input-journal.js';
 import {createHash,webcrypto} from 'node:crypto';
@@ -63,7 +64,7 @@ function harness({slots=1,ignoreAbort=false,sendInput,state={data:new Map(),rece
  const context={Terminal,FitAddon:class{proposeDimensions(){return {cols:100,rows:28}}},Unicode11Addon:class{},activateOrcaTerminalUnicodeProvider:()=>{},
   ResizeObserver:class{constructor(fn){this.callback=fn}observe(){}disconnect(){}},api,route:(path,query)=>({path,query}),
   shouldPollTerminalOutput:()=>true,terminalReconcileAction:enabled=>enabled?'apply':'hold',resetForOutput:()=>false,
-  restoreCheckpoint,mayWriteTerminal,writeTerminalFrame,releaseDisposedWrites,TerminalReadBudget,TerminalInputQueue,TerminalInputJournal:Journal,deliveredInput,
+  restoreCheckpoint,mayWriteTerminal,writeTerminalFrame,releaseDisposedWrites,TerminalReadBudget,EmulatorBudget,TerminalInputQueue,TerminalInputJournal:Journal,deliveredInput,
   window:{addEventListener:(name,fn)=>listeners.set(name,fn),removeEventListener:name=>listeners.delete(name)},crypto:webcrypto,
   AbortController,TextEncoder,document,setTimeout,clearTimeout};
  const source=fs.readFileSync(new URL('../src/terminal-pool.js',import.meta.url),'utf8').replace(/^import .*;\r?\n/gm,'').replace(/^export /gm,'');
@@ -116,7 +117,7 @@ test('unmounted views do not poll and visibility return resumes observation with
   const a=h.pool.ensure('project',{id:'unmounted',status:'running'});await tick();assert.equal(h.requests.length,0);
   const b=h.attach('b');await tick();h.document.hidden=true;h.listeners.get('visibilitychange')();await tick();
   assert.equal(b.inputSuspended,true);h.document.hidden=false;h.listeners.get('visibilitychange')();await tick();
-  assert.equal(h.requests.length,2);assert.equal(a.term.writes.length,0);assert.equal(b.term.options.disableStdin,true);
+  assert.equal(h.requests.length,2);assert.equal(a.term,null);assert.equal(b.term.options.disableStdin,true);
  }finally{h.pool.destroy();await tick()}
 });
 test('a terminal outside the paintable viewport stops reading without changing process state',async()=>{
@@ -225,5 +226,43 @@ test('read timeout releases credit, disables input and never repeats an effect',
   await wait(()=>a.transportUnavailable===true);await tick();
   assert.equal(a.term.options.disableStdin,true);assert.equal(a.cursor,0);
   assert.equal(h.requests[1].url.query.id,'b');assert.equal(h.inputs.length,0);
+ }finally{h.pool.destroy();await tick()}
+});
+
+test('catalog-only resources allocate no emulators or buffer reservations',async()=>{
+ const h=harness();
+ try{
+  for(let i=0;i<100;i++)h.pool.ensure('project',{id:'catalog'+i,status:'running'});
+  assert.equal(h.pool.entries.size,100);assert.equal(h.terms.length,0);
+  assert.equal(h.pool.emulatorBudget.status().renderers,0);assert.equal(h.requests.length,0);
+ }finally{h.pool.destroy();await tick()}
+});
+
+test('pressure parks only hidden LRU renderers and retains session/input metadata',async()=>{
+ const h=harness();
+ try{
+  h.pool.emulatorBudget=new EmulatorBudget({maxBytes:16*1024*1024,maxRenderers:2});
+  const a=h.attach('a'),b=h.attach('b');await tick();
+  const old=a.term;a.inputPending={request_key:'pending'};a.inputBlocked='confirmation_pending';
+  a.inViewport=false;h.pool.suspend(a);h.attach('c');await tick();
+  assert.equal(old.disposed,true);assert.equal(a.term,null);assert.equal(b.term.disposed,undefined);
+  assert.equal(a.inputPending.request_key,'pending');assert.equal(a.inputBlocked,'confirmation_pending');
+  assert.equal(a.status,'running');assert.equal(h.pool.emulatorBudget.status().renderers,2);
+  a.inViewport=true;h.pool.place(a);assert.equal(a.memoryPaused,true);assert.equal(a.term,null);
+  b.inViewport=false;h.pool.suspend(b);h.pool.retryRenderers();await tick();
+  assert.ok(a.term);assert.equal(b.term,null);assert.equal(a.cursor,0);assert.equal(a.snapshotRestored,false);
+  assert.equal(a.inputPending.request_key,'pending');assert.equal(a.term.options.disableStdin,true);
+  assert.equal(h.inputs.length,0);
+ }finally{h.pool.destroy();await tick();assert.equal(h.pool.emulatorBudget.status().reservedBytes,0)}
+});
+
+test('oversized aggregate resize is rejected before changing renderer geometry',async()=>{
+ const h=harness();
+ try{
+  h.pool.emulatorBudget=new EmulatorBudget({maxBytes:16*1024*1024,maxRenderers:2});
+  const a=h.attach('a'),b=h.attach('b');await tick();const previous=h.pool.emulatorBudget.status().reservedBytes;
+  assert.throws(()=>a.resizeRenderer(500,200),/Limite/);assert.equal(a.term.cols,100);
+  assert.equal(h.pool.emulatorBudget.status().reservedBytes,previous);assert.equal(b.term.disposed,undefined);
+  assert.equal(h.inputs.length,0);
  }finally{h.pool.destroy();await tick()}
 });

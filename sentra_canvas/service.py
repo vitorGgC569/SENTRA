@@ -2637,6 +2637,8 @@ class Canvas:
             for event in self._jobs.values():event.set()
             threads=list(self._task_threads.values())
         self._dispatch_thread.join(timeout=5)
+        from .shell_federation import close_network_sessions
+        close_network_sessions(self)
         if self._shell_runtime is not None:
             self._shell_runtime.close()
         if self._shell_machines is not None:

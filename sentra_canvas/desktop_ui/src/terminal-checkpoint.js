@@ -47,7 +47,8 @@ export async function restoreCheckpoint(entry,value,current=()=>entry.alive!==fa
  if(!current())return false;
  entry.replaying=true;entry.inputEpoch=(entry.inputEpoch||0)+1;entry.term.options.disableStdin=true;
  try{
-  entry.term.reset();entry.term.resize(frame.cols,frame.rows);
+  if(entry.resizeRenderer)entry.resizeRenderer(frame.cols,frame.rows);else entry.term.resize(frame.cols,frame.rows);
+  entry.term.reset();
   const write=text=>writeTerminalFrame(entry,text,current);
   await write(frame.scrollbackAnsi);await write(frame.rehydrateSequences);await write(frame.snapshotAnsi);
   if(frame.modes?.kittyKeyboardFlags)await write(`\x1b[=${frame.modes.kittyKeyboardFlags};1u`);

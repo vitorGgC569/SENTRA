@@ -1,5 +1,14 @@
 # Execução integral ORCA → SENTRA
 
+### Estado consolidado em 23/10
+
+Consulte [o ledger de fechamento atual](CLOSURE_EXECUTION_2026-10-23.md) e
+[a qualificação do build Windows](WINDOWS_BUILD_QUALIFICATION_2026-10-23.md).
+As rodadas abaixo são históricas. Os critérios macro desmarcados representam
+aceites integrais ainda abertos; não significam que toda implementação citada
+esteja ausente. Não somar ensaios sobrepostos nem transferir um resultado de
+fontes/fixtures para um instalador ou aparelho físico diferente.
+
 ### 22/10 — conexão direta LAN/VPN, Android e aceite real de agentes
 
 - [x] APK ARM64 assinado de avaliação atualizado em `mobile-preview-20261022-2`.

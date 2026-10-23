@@ -13,6 +13,7 @@ REQUIRED = (
     ".github/workflows/release-mcp-registry.yml",
     "scripts/ci/verify_release_contract.py", "scripts/ci/install_bun.ps1",
     "scripts/ci/install_actionlint.ps1",
+    "scripts/ci/partition_unit_tests.py", "tests/unit/test_ci_unit_partitions.py",
     "scripts/ci/test_web_models.ps1", "scripts/ci/test_canvas.ps1",
     "scripts/commander/build_windows.py", "scripts/commander/build_canvas.py",
     "scripts/commander/release_assets.py",

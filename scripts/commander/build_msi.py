@@ -1,13 +1,20 @@
-"""Build a per-user Windows MSI for SENTRA Desktop using stdlib msilib."""
+"""Build a per-user MSI with bounded external CABs and a bound media inventory.
+
+Distribute the MSI, every sibling CAB, and its .media.json together. The
+database alone is not a self-contained installer. This module does not sign or
+qualify a release; publication retains the separate signing and VM QA gates.
+"""
 from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import struct
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -19,6 +26,7 @@ import msilib
 from msilib import CAB, Directory, Feature, FCICreate, add_data, add_stream, add_tables, init_database, schema, sequence, text
 
 from sentra_version import PRODUCT_VERSION
+from scripts.commander.msi_media import msi_distribution_files
 
 MANUFACTURER = "SENTRA"
 UPGRADE_CODE = "{" + str(uuid.uuid5(uuid.NAMESPACE_URL, "https://sentra.local/windows-desktop")).upper() + "}"
@@ -48,12 +56,47 @@ def _cabinet_partitions(files, limit: int):
 
 
 class _PartitionedCAB(CAB):
-    """Keep CAB's global File sequencing while embedding independent media."""
+    """Keep global File sequencing for independent embedded or external media."""
 
-    def __init__(self, name: str, temporary_root: Path, *, input_limit: int | None = None):
+    def __init__(self, name: str, temporary_root: Path, *, input_limit: int | None = None,
+                 external_root: Path | None = None):
         super().__init__(name)
         self.temporary_root = Path(temporary_root)
         self.input_limit = MAX_CABINET_INPUT_BYTES if input_limit is None else input_limit
+        self.external_root = Path(external_root) if external_root is not None else None
+        self.media: list[dict] = []
+
+    def gen_id(self, file):
+        # Cabinet lookup on Windows must not collide only by letter case.
+        # msilib.CAB's default set is case-sensitive (LICENSE vs license).
+        stem = msilib.make_id(file)
+        number = 0
+        while True:
+            suffix = "" if number == 0 else f".{number}"
+            logical = stem[:72 - len(suffix)] + suffix
+            folded = logical.casefold()
+            if folded not in self.filenames:
+                self.filenames.add(folded)
+                return logical
+            number += 1
+
+    @staticmethod
+    def _sources_with_valid_cabinet_dates(files, folder: Path):
+        """Normalize only invalid DOS dates on private copies, never sources."""
+        normalized = []
+        for index, (filename, logical) in enumerate(files):
+            # CAB DOS timestamps can only represent 1980 through 2107. Some
+            # reproducible vendor license files intentionally carry epoch 0;
+            # FCI then writes date=0, which Installer rejects with error2357.
+            year = time.localtime(Path(filename).stat().st_mtime).tm_year
+            if not 1980 <= year <= 2107:
+                folder.mkdir(parents=True, exist_ok=True)
+                copied = folder / str(index)
+                shutil.copyfile(filename, copied)
+                os.utime(copied, (946684800, 946684800))  # 2000-01-01 UTC
+                filename = str(copied)
+            normalized.append((filename, logical))
+        return normalized
 
     def commit(self, db):
         partitions = _cabinet_partitions(self.files, self.input_limit)
@@ -61,11 +104,14 @@ class _PartitionedCAB(CAB):
             raise ValueError("MSI CAB file sequence is empty or inconsistent")
         self.temporary_root.mkdir(parents=True, exist_ok=True)
         last_sequence = 0
+        media = []
         with tempfile.TemporaryDirectory(prefix="cab-", dir=self.temporary_root) as temporary:
             for disk, files in enumerate(partitions, 1):
                 stream_name = f"{Path(self.name).stem}-{disk:04d}.cab"
                 cabinet = Path(temporary) / stream_name
-                FCICreate(str(cabinet), files)
+                normalized = self._sources_with_valid_cabinet_dates(
+                    files, Path(temporary) / f"normalized-{disk}")
+                FCICreate(str(cabinet), normalized)
                 with cabinet.open("rb") as stream:
                     header = stream.read(36)
                 size = cabinet.stat().st_size
@@ -74,10 +120,26 @@ class _PartitionedCAB(CAB):
                         or struct.unpack_from("<H", header, 28)[0] != len(files)):
                     raise ValueError("MSI cabinet size/header is invalid")
                 last_sequence += len(files)
-                add_data(db, "Media", [(disk, last_sequence, None,
-                                      "#" + stream_name, None, None)])
-                add_stream(db, stream_name, str(cabinet))
+                with cabinet.open("rb") as stream:
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                media.append({"name": stream_name, "bytes": size, "sha256": digest,
+                              "last_sequence": last_sequence})
+            # Finish every CAB before referencing or publishing any of them.
+            # External CABs keep the Installer database small; embedding the
+            # complete 2.9 GB payload failed Windows Installer's cache step.
+            for disk, item in enumerate(media, 1):
+                cabinet = Path(temporary) / item["name"]
+                external = self.external_root is not None
+                add_data(db, "Media", [(disk, item["last_sequence"], None,
+                                       ("" if external else "#") + item["name"], None, None)])
+                if not external:
+                    add_stream(db, item["name"], str(cabinet))
             db.Commit()
+            if self.external_root is not None:
+                self.external_root.mkdir(parents=True, exist_ok=True)
+                for item in media:
+                    os.replace(Path(temporary) / item["name"], self.external_root / item["name"])
+            self.media = media
 
 
 def _product_code(version: str) -> str:
@@ -179,6 +241,9 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
         raise FileNotFoundError("MSI staging is missing Web Models integration metadata")
 
     output.parent.mkdir(parents=True, exist_ok=True)
+    # msilib caches directory identifiers process-wide. A second build must
+    # still have the standard TARGETDIR/INSTALLDIR names, not suffixed copies.
+    msilib._directories.clear()
     db = init_database(
         str(output), schema,
         "SENTRA Desktop", _product_code(version), version, MANUFACTURER,
@@ -209,7 +274,10 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
         ),
     ])
 
-    cab = _PartitionedCAB("sentra.cab", output.parent / ".msi-cab-temp")
+    # Distribute this database together with its versioned CAB files. Media
+    # names omit '#' so Windows Installer resolves them beside the MSI.
+    cab = _PartitionedCAB(output.stem + ".cab", output.parent / ".msi-cab-temp",
+                          external_root=output.parent)
     target = Directory(db, cab, None, str(source), "TARGETDIR", "SourceDir")
     local = Directory(db, cab, target, ".", "LocalAppDataFolder", ".")
     vendor = Directory(db, cab, local, ".", "SENTRAHome", "SENTRA")
@@ -348,6 +416,16 @@ def build_msi(source: Path, output: Path, version: str) -> Path:
         else:
             os.environ["TMP"] = old_tmp
         shutil.rmtree(cab_temp, ignore_errors=True)
+    # MsiCloseHandle finalizes the storage header. Hashing while a Directory
+    # still owns the open database records a digest that changes on return.
+    del target, local, vendor, install, program_menu, sentra_menu, desktop_folder, db
+    # A bound inventory makes copying only the MSI detectable by packaging and
+    # publication consumers. Hashes are integrity evidence, not signatures.
+    with output.open("rb") as stream:
+        database_digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    manifest = {"schema": 1, "msi": output.name, "sha256": database_digest,
+                "media": cab.media}
+    output.with_suffix(".media.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return output
 
 

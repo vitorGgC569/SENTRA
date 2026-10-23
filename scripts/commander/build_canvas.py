@@ -19,11 +19,19 @@ def desktop_source_inputs(project: Path) -> dict[str, str]:
              "island.html", "vite.island.config.js"}
     for folder in ("src", "public"):
         names.update(path.relative_to(project).as_posix() for path in (project / folder).rglob("*") if path.is_file())
+    shared = {"../../integrations/orca-terminal/src/" + name for name in (
+        "consumer-flow.mjs", "input-queue.mjs", "emulator-budget.mjs", "saved-register.mjs")}
+    shared.add("../../integrations/orca-terminal/vendor/orca/src/shared/terminal-unicode-provider.ts")
+    names.update(name for name in shared if (project / name).exists() or (project / name).is_symlink())
     result = {}
     for name in sorted(names):
         path = project / name
-        if path.is_symlink() or not path.resolve().is_relative_to(project.resolve()):
+        if path.is_symlink() or (name not in shared and not path.resolve().is_relative_to(project.resolve())):
             raise ValueError("linked desktop source input")
+        if name in shared:
+            root = project.resolve().parent.parent
+            if not path.resolve().is_relative_to(root) or any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
+                raise ValueError("linked desktop shared source input")
         result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
     return result
 

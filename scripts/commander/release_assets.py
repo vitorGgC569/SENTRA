@@ -20,6 +20,7 @@ from sentra_remote.installer import INSTALL_MARKER, PRODUCTS, download_tunnel_cl
 from sentra_version import PRODUCT_VERSION
 
 from scripts.commander.build_msi import build_msi
+from scripts.commander.msi_media import msi_distribution_files, msi_manifest_entry
 from scripts.commander.build_windows import _BuildLock
 from scripts.commander.extension_identity import stamp_extension_identity
 
@@ -436,7 +437,10 @@ def create_assets(
         msi = release_dir / f"SENTRA-Desktop-{PRODUCT_VERSION}-x64.msi"
         local_msi = artifacts_temp / msi.name
         build_msi(staging, local_msi, PRODUCT_VERSION)
-        shutil.copy2(local_msi, msi)
+        # External CABs and their bound inventory are required installation
+        # media, not temporary build files. Preserve them before temp cleanup.
+        for media_file in msi_distribution_files(local_msi):
+            shutil.copy2(media_file, release_dir / media_file.name)
 
         update_zip = release_dir / f"SENTRA-Desktop-{PRODUCT_VERSION}-update.zip"
         local_update_zip = artifacts_temp / update_zip.name
@@ -459,6 +463,8 @@ def finalize_assets(release_dir: Path, *, signer_thumbprint: str,
     for asset in (setup, msi, update_zip):
         if not asset.is_file():
             raise FileNotFoundError(f"release asset missing: {asset}")
+    msi_files = msi_distribution_files(msi)
+    msi_sidecars = msi_files[1:]
     component_file = release_dir / 'package-components.json'
     if components is None and component_file.is_file():
         components = json.loads(component_file.read_text(encoding='utf-8'))
@@ -467,11 +473,11 @@ def finalize_assets(release_dir: Path, *, signer_thumbprint: str,
         artwork = json.loads(artwork_file.read_text(encoding='utf-8'))
     if not components or not artwork or not {'opendots', 'guacamole'} <= artwork.keys():
         raise ValueError('integral release component and license records required')
-    sbom = build_sbom(release_dir, [setup, msi, update_zip],
+    record_assets = [p for p in (component_file, artwork_file) if p.is_file()]
+    sbom = build_sbom(release_dir, [setup, msi, update_zip, *msi_sidecars, *record_assets],
                       runtime_components=components['runtime_components'], artwork=artwork,
                       runtime_dependencies=components['runtime_dependencies'])
-    record_assets = [p for p in (component_file, artwork_file) if p.is_file()]
-    checksums = write_checksums(release_dir, [setup, msi, update_zip, sbom, *record_assets])
+    checksums = write_checksums(release_dir, [setup, msi, update_zip, *msi_sidecars, sbom, *record_assets])
     manifest = {
         "version": PRODUCT_VERSION,
         "url": (
@@ -482,6 +488,7 @@ def finalize_assets(release_dir: Path, *, signer_thumbprint: str,
         "signer_thumbprint": signer_thumbprint.replace(" ", "").upper(),
         "setup": setup.name,
         "msi": msi.name,
+        "msi_media": msi_manifest_entry(msi),
         "sbom": sbom.name,
         "checksums": checksums.name,
         "shell_surface": {
@@ -535,6 +542,7 @@ def finalize_assets(release_dir: Path, *, signer_thumbprint: str,
     return {
         "setup": str(setup),
         "msi": str(msi),
+        "msi_media_inventory": str(msi_files[1]),
         "update_zip": str(update_zip),
         "sbom": str(sbom),
         "checksums": str(checksums),

@@ -54,6 +54,8 @@ def _msi_vm_roundtrip(msi: Path, isolated_install: Path, *,
     verify_authenticode(msi, trusted_signer)
     if os.name != "nt" or not msi.is_file():
         raise PermissionError("MSI QA requires Windows and signed release media")
+    from scripts.commander.msi_media_signing import verify_signed_msi_media
+    verify_signed_msi_media(msi, trusted_signer)
     if isolated_install.exists():
         raise PermissionError("MSI QA must start with an empty installation path")
     install_cmd = [
@@ -143,6 +145,8 @@ def run_vm_smoke(release: Path, tunnel_archive: Path, *,
             "schema": 1, "version": version, "smoke": "pass",
             "setup_sha256": hashlib.sha256(setup.read_bytes()).hexdigest(),
             "msi_sha256": hashlib.sha256(msi.read_bytes()).hexdigest(),
+            "msi_media_sha256": hashlib.sha256(msi.with_suffix(".media.json").read_bytes()).hexdigest(),
+            "external_cabinet_signatures_verified": True,
             "vm_asserted": True, "file_checks": len(required),
             "uninstall_clean": True,
             **msi_proof,

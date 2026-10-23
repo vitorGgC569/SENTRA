@@ -22,6 +22,10 @@ def fixture(tmp_path):
         (project / name).write_text("{}", encoding="utf-8")
     (project / "src/main.jsx").write_text("export default 'initial'", encoding="utf-8")
     (project / "public/bootstrap.js").write_text("bootstrap", encoding="utf-8")
+    shared = tmp_path / "integrations/orca-terminal/src"
+    shared.mkdir(parents=True)
+    for name in ("consumer-flow.mjs", "input-queue.mjs", "emulator-budget.mjs", "saved-register.mjs"):
+        (shared / name).write_text("export default 'shared'", encoding="utf-8")
     ui = project.parent / "static"
     assets = ui / "desktop-assets"
     assets.mkdir(parents=True)
@@ -45,7 +49,7 @@ def test_node_and_packager_agree_on_all_source_inputs(tmp_path):
     assert json.loads(result) == manifest["source_inputs"]
 
 
-@pytest.mark.parametrize("name", ["src/main.jsx", "public/bootstrap.js", "package-lock.json", "scripts/build.mjs", "scripts/build-island.mjs", "vite.island.config.js", "island.html"])
+@pytest.mark.parametrize("name", ["src/main.jsx", "public/bootstrap.js", "package-lock.json", "scripts/build.mjs", "scripts/build-island.mjs", "vite.island.config.js", "island.html", "../../integrations/orca-terminal/src/emulator-budget.mjs"])
 def test_valid_output_hashes_cannot_certify_stale_sources(tmp_path, name):
     project, ui, _ = fixture(tmp_path)
     validate_desktop_bundle(ui)
