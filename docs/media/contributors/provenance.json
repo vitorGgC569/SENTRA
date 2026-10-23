@@ -1,0 +1,20 @@
+{
+  "downloaded_at": "2026-10-23",
+  "purpose": "Public GitHub contributor avatars, saved locally to avoid renamed-login image links.",
+  "contributors": [
+    {
+      "login": "vitorGgC569",
+      "github_user_id": 241765860,
+      "source": "https://avatars.githubusercontent.com/u/241765860?v=4&s=160",
+      "file": "241765860.jpg",
+      "sha256": "0200b30a35cb782f340d8a202db6cc9d2bbda9eeee969cf8f5274137ee682a82"
+    },
+    {
+      "login": "Kayn3x",
+      "github_user_id": 243398323,
+      "source": "https://avatars.githubusercontent.com/u/243398323?v=4&s=160",
+      "file": "243398323.jpg",
+      "sha256": "a35b477290f0e7ba34d76cd85200ced7ec207fc03bfdd5333a83565808901d78"
+    }
+  ]
+}

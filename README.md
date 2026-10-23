@@ -8,7 +8,7 @@ SENTRA brings Dots, permanent conversations, terminals, files, browser tools, an
 
 ## Current status
 
-- **Windows installer contribution:** [PR #1 by Predo-kn](https://github.com/vitorGgC569/SENTRA/pull/1) consolidated Windows setup corrections and native Web response improvements in r18. The documented r16 clean-install and existing-user update scenarios passed; the r18 Web component delivered real listing, conversation-continuation, and bounded README-reading responses. See the [Windows and Web validation report](docs/VALIDACAO_WINDOWS_E_WEB_20261019.md).
+- **Windows installer contribution:** [PR #1 by Kayn3x (formerly Predo-kn)](https://github.com/vitorGgC569/SENTRA/pull/1) consolidated Windows setup corrections and native Web response improvements in r18. The documented r16 clean-install and existing-user update scenarios passed; the r18 Web component delivered real listing, conversation-continuation, and bounded README-reading responses. See the [Windows and Web validation report](docs/VALIDACAO_WINDOWS_E_WEB_20261019.md).
 - **Experimental development:** the checkout includes ORCA-inspired tabs and split panels inside each Dot's Canvas, durable terminal work, mobile LAN, conversation-centered permissions, and multi-Dot coordination. These features are not all qualified for the installed Windows product or physical Android/iPhone devices. See the [implementation tracker](docs/ORCA_IMPLEMENTATION_TRACKER.md) and [status report](docs/ORCA_SENTRA_STATUS_2026-10-21.md).
 - **Windows preview:** the October 23 full rebuild passed Setup payload and GUI checks. Prolonged terminal observation and actual MSI consumption failed; MSI is excluded from distribution and full qualification remains open. Read the [current build report](docs/WINDOWS_BUILD_QUALIFICATION_2026-10-23.md) and the identified [preview release notes](https://github.com/vitorGgC569/SENTRA/releases) before downloading an experimental Setup. These packages are unsigned.
 
@@ -27,19 +27,27 @@ separate milestone from producing a build.
 
 Desktop brings **Dots**, conversations, **Spaces**, and authorized computer resources into a Windows interface. It starts with a dark theme and offers a light-theme option.
 
-The following screenshots were captured on October 13, 2026. The setup screenshot is a **visual preview running from source**: it did not install files or configure accounts.
+The following application previews were captured on October 22, 2026, using isolated demonstration data. They show the Portuguese interface and experimental features; they do not demonstrate live agent execution or qualification of the published installer. [Screenshot provenance](site/assets/provenance.json).
 
-![SENTRA Setup in dark mode](docs/media/2026-10-13/sentra-setup-dark.jpg)
+### Home and your Dots
 
-The running Home screen with Dots from the development environment:
+Conversations, recent work, and project navigation:
 
-![SENTRA Home with Dots](docs/media/2026-10-13/sentra-home.jpg)
+![SENTRA Home preview with Dots and recent work](site/assets/home.png)
 
-The running Canvas with a terminal and a visual connection:
+### Dot Canvas
 
-![SENTRA Canvas with a terminal](docs/media/2026-10-13/sentra-canvas.jpg)
+Tabs and split terminal panels inside a Dot's workspace:
 
-[Watch the presentation video](docs/media/2026-10-13/sentra-apresentacao.mp4) — 48 seconds, 1920×1080, original music, no narration or watermark. Its setup footage is a preview, not a completed installation.
+![SENTRA Canvas preview with split terminals and multiple Dots](site/assets/workspace.png)
+
+### Floating activity bar
+
+Coucou's island adapted with SENTRA characters:
+
+![SENTRA floating activity bar preview](site/assets/island.png)
+
+The [historical October 13 presentation video](docs/media/2026-10-13/sentra-apresentacao.mp4) shows an earlier interface, including a setup preview rather than a completed installation.
 
 ### Choose your entry point
 
@@ -250,18 +258,18 @@ The experimental Canvas workspace, terminal, and mobile work reuses selected com
   <tr>
     <td align="center" width="240">
       <a href="https://github.com/vitorGgC569">
-        <img src="https://github.com/vitorGgC569.png?size=160" width="80" height="80" alt="Vitor Gabriel Gomes's GitHub avatar" /><br />
+        <img src="docs/media/contributors/241765860.jpg" width="80" height="80" alt="Vitor Gabriel Gomes's GitHub avatar" /><br />
         <strong>Vitor Gabriel Gomes</strong>
       </a><br />
       <sub>@vitorGgC569</sub><br /><br />
       Project creator and maintainer
     </td>
     <td align="center" width="240">
-      <a href="https://github.com/Predo-kn">
-        <img src="https://github.com/Predo-kn.png?size=160" width="80" height="80" alt="Predo-kn's GitHub avatar" /><br />
-        <strong>Predo-kn</strong>
+      <a href="https://github.com/Kayn3x">
+        <img src="docs/media/contributors/243398323.jpg" width="80" height="80" alt="Kayn3x's GitHub avatar" /><br />
+        <strong>Kayn3x</strong>
       </a><br />
-      <sub>@Predo-kn</sub><br /><br />
+      <sub>@Kayn3x · formerly Predo-kn</sub><br /><br />
       Windows installer fixes and improvements<br />
       <sub>Native Web response consolidation · <a href="https://github.com/vitorGgC569/SENTRA/pull/1">PR #1</a></sub>
     </td>

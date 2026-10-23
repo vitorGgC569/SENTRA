@@ -28,6 +28,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m unittest discover -s tests/site -v
+      - run: node --test tests/site/downloads.test.cjs
       - run: python scripts/site/build.py
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b
       - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa
