@@ -52,10 +52,10 @@ function harness({slots=1,ignoreAbort=false,sendInput,state={data:new Map(),rece
     state.receipts.set(body.request_key,value);
     return sendInput?sendInput(body,value):Promise.resolve(value);
    }
-   if(url==='/api/terminal/input-ack')return Promise.resolve({acknowledged:true,request_key:body.request_key,terminal_id:body.id,input_target:state.receipts.get(body.request_key)?.input_target});
+   if(url==='/api/terminal/input-ack')return Promise.resolve({acknowledged:true,request_key:body.request_key,terminal_id:body.id,input_target:state.receipts.get(body.request_key)?.input_target,input_pending_revision:state.ackRevision,input_pending_epoch:state.ackEpoch});
    return Promise.resolve({});
   }
-  if(url.path==='/api/terminal/input-status'){const value=state.receipts.get(url.query.request_key);return Promise.resolve({found:!!value,resolved:!!value,automatic_retry:false,request_key:url.query.request_key,input_target:value?.input_target,terminal_id:url.query.id,result:value})}
+  if(url.path==='/api/terminal/input-status'){const value=state.receipts.get(url.query.request_key);return Promise.resolve({found:!!value,resolved:!!value&&!value.effect_uncertain,automatic_retry:false,request_key:url.query.request_key,input_target:value?.input_target,terminal_id:url.query.id,result:value})}
   return new Promise((resolve,reject)=>{requests.push({url,resolve,reject});if(!ignoreAbort)options.signal?.addEventListener('abort',()=>reject(Error('aborted')),{once:true})});
  };
  const storage={getItem:key=>state.data.get(key),setItem:(key,value)=>state.data.set(key,value)};
@@ -166,6 +166,30 @@ test('a fresh renderer origin adopts the host selector and only observes the ori
   await next.pool.inspectInput('project','a');assert.equal(await next.pool.resumeInput('project','a'),true);
   assert.equal(next.inputs.filter(row=>row.url==='/api/terminal/input').length,0);
  }finally{old.pool.destroy();next?.pool.destroy();await tick()}
+});
+
+test('multiple host receipts recover separately and an uncertain entry keeps input fenced',async()=>{
+ const h=harness();
+ const known={request_key:'known-request',fingerprint:'a'.repeat(64),input_target:'d'.repeat(32),created_at:1};
+ const unknown={...known,request_key:'uncertain-request',fingerprint:'b'.repeat(64),input_target:'e'.repeat(32),created_at:2};
+ h.state.receipts.set(known.request_key,{input_target:known.input_target,status:'delivered'});
+ h.state.receipts.set(unknown.request_key,{input_target:unknown.input_target,status:'uncertain',effect_uncertain:true});
+ try{
+  h.state.ackEpoch='a'.repeat(32);
+  const a=await ready(h,'a',{input_pending:[known,unknown],input_pending_revision:2,input_pending_epoch:h.state.ackEpoch});
+  assert.equal(a.inputPendings.length,2);assert.equal(a.inputJournalError,null);
+  assert.equal(await h.pool.resumeInput('project','a'),false);
+  h.state.ackRevision=3;
+  assert.equal((await h.pool.inspectInput('project','a',known.request_key)).resolved,true);
+  assert.equal(a.inputPendings.length,1);assert.equal(a.inputPending.request_key,unknown.request_key);
+  // A response captured before ACK cannot restore the first receipt.
+  await h.pool.syncInput(a,{...h.frame(),input_pending:[known,unknown],input_pending_revision:2,input_pending_epoch:h.state.ackEpoch});
+  assert.equal(a.inputPendings.length,1);
+  assert.equal((await h.pool.inspectInput('project','a',unknown.request_key)).resolved,false);
+  assert.equal(await h.pool.resumeInput('project','a'),false);
+  assert.equal(a.term.options.disableStdin,true);
+  assert.equal(h.inputs.filter(row=>row.url==='/api/terminal/input').length,0);
+ }finally{h.pool.destroy();await tick()}
 });
 test('hiding an in-flight paste drops its remaining chunks and queued Enter',async()=>{
  let release;const h=harness({sendInput:(_body,value)=>new Promise(resolve=>release=()=>resolve(value))});

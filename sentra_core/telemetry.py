@@ -105,9 +105,21 @@ class EventJournal:
         db=sqlite3.connect(self.path,timeout=5)
         db.row_factory=sqlite3.Row
         try:
-            db.execute("PRAGMA journal_mode=WAL")
-            db.execute("PRAGMA synchronous=FULL")
             db.execute("PRAGMA busy_timeout=5000")
+            # WAL initialization may return SQLITE_BUSY immediately when two
+            # processes open a new journal. Retry this idempotent setup only;
+            # event transactions are never replayed after a possible effect.
+            deadline=time.monotonic()+5
+            while True:
+                try:
+                    if db.execute("PRAGMA journal_mode").fetchone()[0].lower()!="wal":
+                        db.execute("PRAGMA journal_mode=WAL")
+                    break
+                except sqlite3.OperationalError as exc:
+                    if (getattr(exc,"sqlite_errorcode",0)&255 not in {sqlite3.SQLITE_BUSY,sqlite3.SQLITE_LOCKED}
+                            or time.monotonic()>=deadline):raise
+                    time.sleep(.025)
+            db.execute("PRAGMA synchronous=FULL")
             with db:yield db
         finally:db.close()
 

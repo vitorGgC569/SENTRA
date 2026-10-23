@@ -31,7 +31,13 @@ export async function sourceInputs(project) {
   catch (error) { if (error.code !== 'ENOENT') throw error; }
   const hashes = {};
   for (const name of names.sort()) {
-    hashes[name] = createHash('sha256').update(await readFile(resolve(project, name))).digest('hex');
+    const bytes = await readFile(resolve(project, name));
+    // These source extensions have LF checkout attributes. Sealing CRLF here
+    // produces an artifact which fails its exact-byte proof after Git checkout.
+    if (/\.(?:js|jsx|mjs|cjs|ts|tsx|css|html|json)$/.test(name) && bytes.includes('\r\n')) {
+      throw new Error('Noncanonical CRLF desktop source; normalize to LF before building: ' + name);
+    }
+    hashes[name] = createHash('sha256').update(bytes).digest('hex');
   }
   return hashes;
 }

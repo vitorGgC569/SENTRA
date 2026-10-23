@@ -94,6 +94,46 @@ def test_error_after_possible_write_stays_uncertain_and_cannot_be_replayed_or_ac
     monkeypatch.setattr(process,'write',original)
 
 
+def test_multiple_pending_receipts_reconcile_independently_without_replaying_uncertain_input(terminal,monkeypatch):
+    app,server,ws,row,frame,post,status=terminal
+    original=app._sessions[row['id']].pty.write
+    delivered=[]
+    def write(raw):
+        delivered.append(raw)
+        original(raw)
+        if raw==b'echo uncertain-third\r':raise OSError('lost physical confirmation')
+    monkeypatch.setattr(app._sessions[row['id']].pty,'write',write)
+    keys=['pending-first','pending-second','pending-third']
+    data=['echo first\r','echo second\r','echo uncertain-third\r']
+    for key,text in zip(keys[:2],data[:2]):assert post(text,key)[0]==200
+    assert post(data[2],keys[2])[0]==500
+    observed=app.terminal_output(ws,row['id'])
+    assert observed['input_pending_protocol_version']==2
+    assert len(observed['input_pending_epoch'])==32
+    assert app.terminal_output(ws,row['id'])['input_pending_epoch']==observed['input_pending_epoch']
+    assert {item['request_key'] for item in observed['input_pending']}==set(keys)
+    assert all('data' not in item for item in observed['input_pending'])
+    before=observed['input_pending_revision']
+    for index in (1,0):
+        code,result=status(keys[index],data[index]);assert code==200 and result['resolved']
+        code,ack=request(server,'/api/terminal/input-ack',json_body={
+            'ws':ws,'id':row['id'],'request_key':keys[index],
+            'fingerprint':fingerprint(row['id'],frame['input_target'],data[index])})
+        assert code==200 and ack['acknowledged'] and ack['input_pending_revision']>before
+        assert ack['input_pending_epoch']==observed['input_pending_epoch']
+        before=ack['input_pending_revision']
+    code,uncertain=status(keys[2],data[2]);assert code==200 and not uncertain['resolved']
+    code,ack=request(server,'/api/terminal/input-ack',json_body={
+        'ws':ws,'id':row['id'],'request_key':keys[2],
+        'fingerprint':fingerprint(row['id'],frame['input_target'],data[2])})
+    assert code==200 and not ack['acknowledged']
+    remaining=app.terminal_output(ws,row['id'])
+    assert [item['request_key'] for item in remaining['input_pending']]==[keys[2]]
+    assert remaining['input_pending_revision']==before
+    assert post(data[2],keys[2])[1]['status']=='uncertain'
+    assert delivered==[text.encode() for text in data]
+
+
 def test_old_session_incarnation_is_rejected_before_effect_and_has_a_confirmed_refusal(terminal):
     app,_,_,row,frame,post,status=terminal
     session=app._sessions[row['id']];session.input_instance_id=uuid.uuid4().hex

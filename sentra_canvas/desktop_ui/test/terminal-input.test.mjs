@@ -83,6 +83,52 @@ test('malformed or competing host selectors cannot overwrite the local unresolve
  const {options}=store(),journal=new TerminalInputJournal('a'.repeat(64),'terminal',options);
  const row=await journal.begin('original-key','b'.repeat(32),'private');
  await assert.rejects(journal.adopt({...row,data:'must not persist'}),/inválido/);
- await assert.rejects(journal.adopt({...row,request_key:'competing-key'}),/diferentes/);
+ await assert.rejects(journal.adopt({...row,fingerprint:'c'.repeat(64)}),/diferentes/);
  assert.deepEqual(journal.list(),[row]);
+});
+
+test('multiple host selectors retain exact identity and resolve independently across reopen',async()=>{
+ const {options}=store(),scope='a'.repeat(64),a=new TerminalInputJournal(scope,'terminal',options);
+ const local=await a.begin('local-request','b'.repeat(32),'PRIVATE COMMAND');
+ const remote={...local,request_key:'remote-request',fingerprint:'c'.repeat(64),input_target:'d'.repeat(32)};
+ await a.adoptMany([remote],{revision:1});assert.equal(a.list().length,2);
+ const reopened=new TerminalInputJournal(scope,'terminal',options);
+ await assert.rejects(reopened.begin('must-not-send','b'.repeat(32),'another command'),/sem confirmação/);
+ await reopened.resolve(remote,{resolved:true,automatic_retry:false,request_key:remote.request_key,input_target:remote.input_target,input_pending_revision:2});
+ assert.deepEqual(a.list(),[local]);
+ await a.cancelBeforeDispatch(remote);assert.deepEqual(a.list(),[local]);
+ await a.cancelBeforeDispatch(local);assert.deepEqual(a.list(),[]);
+});
+
+test('an older host projection cannot restore acknowledged input in another window',async()=>{
+ const {options}=store(),a=new TerminalInputJournal('a'.repeat(64),'terminal',options),b=new TerminalInputJournal('a'.repeat(64),'terminal',options);
+ const row={request_key:'host-request',fingerprint:'c'.repeat(64),input_target:'b'.repeat(32),created_at:1};
+ assert.equal(await a.adoptMany([row],{revision:4}),true);
+ await a.resolve(row,{resolved:true,automatic_retry:false,request_key:row.request_key,input_target:row.input_target,input_pending_revision:5});
+ assert.equal(await b.adoptMany([row],{revision:4}),false);assert.deepEqual(b.list(),[]);
+ const next={...row,request_key:'host-request-next'};
+ assert.equal(await b.adoptMany([next],{revision:6}),true);
+ assert.equal(await a.adoptMany([],{revision:5}),false);assert.deepEqual(a.list(),[next]);
+});
+
+test('adopting conflicting or over-budget batches preserves every original selector',async()=>{
+ const {options}=store(),a=new TerminalInputJournal('a'.repeat(64),'terminal',options);
+ const row={request_key:'host-request-0',fingerprint:'c'.repeat(64),input_target:'b'.repeat(32),created_at:1};
+ const batch=offset=>Array.from({length:16},(_,i)=>({...row,request_key:'host-request-'+(i+offset)}));
+ await a.adoptMany(batch(0));await a.adoptMany(batch(16));assert.equal(a.list().length,32);
+ const before=a.list();
+ await assert.rejects(a.adoptMany([{...row,request_key:'host-request-extra'}]),/Limite/);
+ await assert.rejects(a.adoptMany([{...row,fingerprint:'d'.repeat(64)}]),/diferentes/);
+ assert.deepEqual(a.list(),before);
+});
+
+test('a new broker epoch can expose a lower restored revision without losing selectors',async()=>{
+ const {options}=store(),journal=new TerminalInputJournal('a'.repeat(64),'terminal',options);
+ const row={request_key:'old-receipt',fingerprint:'c'.repeat(64),input_target:'b'.repeat(32),created_at:1};
+ await journal.adoptMany([row],{revision:100,epoch:'a'.repeat(32)});
+ await journal.resolve(row,{resolved:true,automatic_retry:false,request_key:row.request_key,input_target:row.input_target,input_pending_revision:101,input_pending_epoch:'a'.repeat(32)});
+ assert.equal(await journal.adoptMany([row],{revision:100,epoch:'a'.repeat(32)}),false);
+ const restored={...row,request_key:'restored-receipt'};
+ assert.equal(await journal.adoptMany([restored],{revision:2,epoch:'d'.repeat(32)}),true);
+ assert.deepEqual(journal.list(),[restored]);
 });

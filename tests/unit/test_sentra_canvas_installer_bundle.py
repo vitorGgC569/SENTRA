@@ -85,6 +85,16 @@ def test_sealed_canvas_survives_a_windows_git_checkout(tmp_path):
     for name in ("desktop_ui", "static"):
         shutil.copytree(root / "sentra_canvas" / name, source / "sentra_canvas" / name,
                         ignore=shutil.ignore_patterns("node_modules", ".tmp", "__pycache__"))
+    # The source seal also covers these real imports outside desktop_ui. A
+    # fixture omitting them cannot qualify the bundle after Git conversion.
+    from scripts.commander.build_canvas import desktop_source_inputs
+    for name in desktop_source_inputs(root / "sentra_canvas/desktop_ui"):
+        original = (root / "sentra_canvas/desktop_ui" / name).resolve()
+        if original.is_relative_to(root / "sentra_canvas/desktop_ui"):
+            continue
+        destination = source / original.relative_to(root)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(original, destination)
     def git(*args):
         _checkout_fixture_git(source, *args)
     git("init", "--quiet")

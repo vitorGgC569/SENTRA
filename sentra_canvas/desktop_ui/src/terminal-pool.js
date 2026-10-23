@@ -227,16 +227,19 @@ export class TerminalPool {
         if(!entry.inputProtocol){if(entry.term)entry.term.options.disableStdin=true;entry.inputEpoch++;this.inputQueue.cancel(entry.key)}
         if(/^[0-9a-f]{64}$/.test(value.input_scope||'')&&entry.inputScope!==value.input_scope){entry.inputScope=value.input_scope;entry.inputJournal=new TerminalInputJournal(value.input_scope,entry.id)}
         if(entry.inputProtocol&&!entry.inputJournal?.locks?.request)throw Error('Este ambiente não permite coordenar a entrada entre janelas.');
-        if(value.input_pending?.length){
-          if(value.input_pending_overflow||value.input_pending.length>1)throw Error('Há várias confirmações de entrada neste host. Consulte o diagnóstico antes de continuar.');
-          await entry.inputJournal.adopt(value.input_pending[0]);
+        if(value.input_pending!==undefined){
+          const accepted=await entry.inputJournal.adoptMany(value.input_pending,{revision:value.input_pending_revision,epoch:value.input_pending_epoch});
+          if(accepted){entry.inputPendingOverflow=value.input_pending_overflow===true;if(entry.inputPendingOverflow)this.blockInput(entry,'confirmation_overflow');}
         }
       }
-      const row=entry.inputJournal?.list()[0]||null;
-      const previous=entry.inputPending?.request_key;entry.inputPending=row;
-      if(row&&row.request_key!==entry.activeRequestKey&&!entry.inputBlocked)this.blockInput(entry,'confirmation_pending');
-      if(previous!==row?.request_key)this.changed();
+      this.projectInputRows(entry);entry.inputJournalError=null;
     }catch(error){entry.inputJournalError=error.message;this.blockInput(entry,'journal_unavailable')}
+  }
+  projectInputRows(entry){
+    const rows=entry.inputJournal?.list()||[],previous=JSON.stringify(entry.inputPendings||[]);
+    entry.inputPendings=rows;entry.inputPending=rows[0]||null;
+    if(rows.some(row=>row.request_key!==entry.activeRequestKey)&&!entry.inputBlocked)this.blockInput(entry,'confirmation_pending');
+    if(previous!==JSON.stringify(rows))this.changed();
   }
   send(entry, data) {
     if (!this.visible(entry) || !entry.inputProtocol || !mayWriteTerminal(entry)) return;
@@ -252,17 +255,17 @@ export class TerminalPool {
           const part=characters.slice(offset,offset+1024).join(''),key=crypto.randomUUID();
           entry.activeRequestKey=key;
           try{
-            const row=await entry.inputJournal.begin(key,entry.inputTarget,part);entry.inputPending=row;this.changed();
+            const row=await entry.inputJournal.begin(key,entry.inputTarget,part);this.projectInputRows(entry);
             if(!this.visible(entry)||!mayWriteTerminal(entry,epoch)){
               // This branch proves the HTTP call was never made. After dispatch
               // only a host receipt can clear the selector.
-              await entry.inputJournal.cancelBeforeDispatch(row);entry.inputPending=null;this.changed();return {cancelled:true};
+              await entry.inputJournal.cancelBeforeDispatch(row);this.projectInputRows(entry);return {cancelled:true};
             }
             const value=await this.inputRequest('/api/terminal/input',{ws:entry.ws,id:entry.id,data:part,request_key:key,input_target:row.input_target});
             if(!deliveredInput(value,row,entry.id))throw Error('Entrega ao terminal não confirmada.');
-            await this.acknowledgeInput(entry,row);
-            await entry.inputJournal.resolve(row,{resolved:true,automatic_retry:false,request_key:key,input_target:row.input_target});
-            entry.inputPending=null;this.changed();
+            const ack=await this.acknowledgeInput(entry,row);
+            await entry.inputJournal.resolve(row,{resolved:true,automatic_retry:false,request_key:key,input_target:row.input_target,input_pending_revision:ack.input_pending_revision,input_pending_epoch:ack.input_pending_epoch});
+            this.projectInputRows(entry);
           }finally{entry.activeRequestKey=null}
         }
         }finally{entry.sendingPacket=false;this.changed()}
@@ -281,20 +284,27 @@ export class TerminalPool {
   async acknowledgeInput(entry,row){
     const value=await this.inputRequest('/api/terminal/input-ack',{ws:entry.ws,id:entry.id,request_key:row.request_key,fingerprint:row.fingerprint});
     if(value.acknowledged!==true||value.request_key!==row.request_key||value.terminal_id!==entry.id||value.input_target!==row.input_target)throw Error('Leitura do recibo não confirmada.');
+    return value;
   }
-  async inspectInput(ws,id){
+  async inspectInput(ws,id,requestKey){
     const entry=this.entries.get(this.key(ws,id));if(!entry?.inputJournal||entry.activeRequestKey)return;
-    await this.syncInput(entry);const row=entry.inputPending;if(!row)return;
+    await this.syncInput(entry);const journal=entry.inputJournal;
+    const row=requestKey?entry.inputPendings.find(item=>item.request_key===requestKey):entry.inputPending;
+    if(!row)return;
     const value=await api(route('/api/terminal/input-status',{ws,id,request_key:row.request_key,fingerprint:row.fingerprint}));
     if(value.terminal_id!==id&&value.found)throw Error('Recibo de outra sessão.');
-    if(value.resolved){await this.acknowledgeInput(entry,row);await entry.inputJournal.resolve(row,value);entry.inputPending=null;entry.inputBlocked='review_required';this.changed();}
+    if(value.resolved){
+      const ack=await this.acknowledgeInput(entry,row);
+      await journal.resolve(row,{...value,input_pending_revision:ack.input_pending_revision,input_pending_epoch:ack.input_pending_epoch});
+      if(entry.alive&&entry.inputJournal===journal){this.projectInputRows(entry);entry.inputBlocked=entry.inputPending?'confirmation_pending':'review_required';this.changed();}
+    }
     return value;
   }
   async resumeInput(ws,id){
     const entry=this.entries.get(this.key(ws,id));if(!entry||!this.visible(entry)||entry.activeRequestKey||this.inputQueue.status(entry.key).active)return false;
     const epoch=entry.inputEpoch;
     await this.syncInput(entry);
-    if(entry.inputEpoch!==epoch||!this.visible(entry)||entry.inputPending||!entry.inputProtocol||entry.inputJournalError||entry.inputSuspended||entry.transportUnavailable||entry.status!=='running'||entry.recoverable===false)return false;
+    if(entry.inputEpoch!==epoch||!this.visible(entry)||entry.inputPending||entry.inputPendingOverflow||!entry.inputProtocol||entry.inputJournalError||entry.inputSuspended||entry.transportUnavailable||entry.status!=='running'||entry.recoverable===false)return false;
     entry.inputEpoch++;entry.inputBlocked=null;entry.term.options.disableStdin=false;this.changed();return true;
   }
   focus(ws, id) { this.entries.get(this.key(ws, id))?.term?.focus(); }
@@ -308,6 +318,7 @@ export class TerminalPool {
       transportUnavailable: e.transportUnavailable, persistenceState: e.persistenceState,
       persistenceGap: e.persistenceGap, tailUncertain: e.tailUncertain,checkpointUnavailable:e.checkpointUnavailable,
       scrollbackOmitted:e.scrollbackOmitted,inputBlocked:e.inputBlocked,inputPending:e.inputPending,
+      inputPendings:e.inputPendings||[],inputPendingOverflow:!!e.inputPendingOverflow,inputTarget:e.inputTarget,
       inputProtocol:e.inputProtocol,inputJournalError:e.inputJournalError,inputBusy:!!e.activeRequestKey,
       memoryPaused:!!e.memoryPaused,emulatorBudget:this.emulatorBudget.status(),rendererRecoveries:e.rendererRecoveries||0 } : null;
   }

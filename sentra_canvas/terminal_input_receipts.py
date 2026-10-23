@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+import uuid
 from contextlib import closing
 from .shell_requests import ShellHostRequests
 
@@ -17,11 +18,23 @@ def journal(canvas):
         if requests is None:
             requests=ShellHostRequests(canvas._shell_service(),canvas._runtime().owner)
             with closing(requests.control.store.connect('shell')) as db,db:
+                db.execute('BEGIN IMMEDIATE')
                 db.execute('CREATE TABLE IF NOT EXISTS canvas_terminal_input_pending('
                     'owner TEXT NOT NULL,project_id TEXT NOT NULL,request_key TEXT NOT NULL,terminal_id TEXT NOT NULL,'
                     'fingerprint TEXT NOT NULL,input_target TEXT NOT NULL,created_at INTEGER NOT NULL,'
                     'PRIMARY KEY(owner,project_id,request_key))')
+                db.execute('CREATE TABLE IF NOT EXISTS canvas_terminal_input_revisions('
+                    'owner TEXT NOT NULL,project_id TEXT NOT NULL,terminal_id TEXT NOT NULL,revision INTEGER NOT NULL,'
+                    'PRIMARY KEY(owner,project_id,terminal_id))')
+                for event, prefix in (('INSERT','NEW'),('DELETE','OLD')):
+                    db.execute(f'''CREATE TRIGGER IF NOT EXISTS canvas_terminal_pending_{event}
+                        AFTER {event} ON canvas_terminal_input_pending BEGIN
+                        INSERT INTO canvas_terminal_input_revisions VALUES({prefix}.owner,{prefix}.project_id,{prefix}.terminal_id,1)
+                        ON CONFLICT(owner,project_id,terminal_id) DO UPDATE SET revision=revision+1; END''')
+                db.execute('INSERT OR IGNORE INTO canvas_terminal_input_revisions '
+                    'SELECT owner,project_id,terminal_id,1 FROM canvas_terminal_input_pending GROUP BY owner,project_id,terminal_id')
             canvas._terminal_input_requests=requests
+        if not getattr(canvas,'_terminal_input_epoch',None):canvas._terminal_input_epoch=uuid.uuid4().hex
         return requests
 
 
@@ -29,12 +42,21 @@ def input_identity(canvas,ws,terminal,session):
     scope=hashlib.sha256(json.dumps([str(canvas.state_dir.resolve()),canvas.store.principal,ws,terminal],separators=(',',':')).encode()).hexdigest()
     requests=journal(canvas)
     with closing(requests.control.store.connect('shell')) as db:
+        db.execute('BEGIN')
         rows=db.execute('SELECT request_key,fingerprint,input_target,created_at FROM canvas_terminal_input_pending '
             'WHERE owner=? AND project_id=? AND terminal_id=? ORDER BY created_at,request_key LIMIT 17',
             (requests.owner,ws,terminal)).fetchall()
+        revision=_pending_revision(db,requests.owner,ws,terminal)
     return {'input_protocol_version':1,'input_scope':scope,
         'input_target':session.input_instance_id if session is not None else None,
-        'input_pending':[dict(row) for row in rows[:16]],'input_pending_overflow':len(rows)>16}
+        'input_pending':[dict(row) for row in rows[:16]],'input_pending_overflow':len(rows)>16,
+        'input_pending_protocol_version':2,'input_pending_revision':revision,'input_pending_epoch':canvas._terminal_input_epoch}
+
+
+def _pending_revision(db,owner,ws,terminal):
+    row=db.execute('SELECT revision FROM canvas_terminal_input_revisions WHERE owner=? AND project_id=? AND terminal_id=?',
+        (owner,ws,terminal)).fetchone()
+    return row['revision'] if row else 0
 
 
 def send(canvas,ws,terminal,data,key,target):
@@ -91,5 +113,7 @@ def acknowledge(canvas,ws,terminal,key,fingerprint):
             return {**value,'acknowledged':False}
         db.execute('DELETE FROM canvas_terminal_input_pending WHERE owner=? AND project_id=? AND terminal_id=? AND request_key=? AND fingerprint=?',
             (requests.owner,ws,terminal,key,fingerprint))
+        revision=_pending_revision(db,requests.owner,ws,terminal)
     return {'acknowledged':True,'request_key':key,'terminal_id':terminal,'input_target':value['input_target'],
-        'automatic_retry':False,'task_completion_verified':False}
+        'automatic_retry':False,'task_completion_verified':False,'input_pending_revision':revision,
+        'input_pending_epoch':canvas._terminal_input_epoch}

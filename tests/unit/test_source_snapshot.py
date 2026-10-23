@@ -80,7 +80,8 @@ def test_repository_snapshot_covers_desktop_and_terminal_sealed_inputs():
     root = Path(__file__).resolve().parents[2]
     sources = build._source_fingerprint(root)
     for name, digest in desktop_source_inputs(root / "sentra_canvas/desktop_ui").items():
-        assert sources.get("sentra_canvas/desktop_ui/" + name) == digest, name
+        canonical = (root / "sentra_canvas/desktop_ui" / name).resolve().relative_to(root).as_posix()
+        assert sources.get(canonical) == digest, name
     engine = root / "integrations/orca-terminal/dist/manifest.json"
     if not engine.is_file():
         # A clean checkout builds this generated input before making a snapshot.

@@ -6,6 +6,7 @@ port, not an HTTP stub. Only read-only scoped operations can be dispatched.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import faulthandler
 import json
 from pathlib import Path
 from threading import Thread
@@ -53,6 +54,11 @@ def request(server, path, *, json_body=None, authorized=True):
             return response.status, json.loads(response.read())
     except urllib.error.HTTPError as exc:
         return exc.code, json.loads(exc.read())
+    except TimeoutError:
+        # Preserve the server-side stacks at the original ten-second deadline.
+        # No retry: a timed-out request may already have produced an effect.
+        faulthandler.dump_traceback(all_threads=True)
+        raise
 
 
 def install_grant(app, ws, *, principal="agent-1"):

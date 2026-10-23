@@ -7,12 +7,71 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from sentra_core.telemetry import EventJournal
 from sentra_core.conversations import ConversationStore
 from sentra_mcp.audit import AuditLogger
+
+
+def test_wal_startup_retries_busy_setup_without_replaying_event_body(tmp_path, monkeypatch):
+    import sentra_core.telemetry as telemetry
+    path = tmp_path / "events.sqlite3"
+    real_connect = sqlite3.connect
+    attempts = []
+    sleeps = []
+
+    class BusyOnce:
+        def __init__(self):
+            self.db = real_connect(path)
+        def __getattr__(self, name):
+            return getattr(self.db, name)
+        def __setattr__(self, name, value):
+            if name == "row_factory":self.db.row_factory = value
+            else:object.__setattr__(self, name, value)
+        def __enter__(self):return self.db.__enter__()
+        def __exit__(self, *args):return self.db.__exit__(*args)
+        def execute(self, sql):
+            if sql == "PRAGMA journal_mode=WAL":
+                attempts.append(sql)
+                if len(attempts) == 1:
+                    error = sqlite3.OperationalError("database is locked")
+                    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+                    raise error
+            return self.db.execute(sql)
+
+    hub = object.__new__(EventJournal)
+    hub.path = path
+    monkeypatch.setattr(telemetry, "sqlite3", SimpleNamespace(connect=lambda *a, **kw: BusyOnce(),
+        Row=sqlite3.Row, OperationalError=sqlite3.OperationalError, SQLITE_BUSY=sqlite3.SQLITE_BUSY,
+        SQLITE_LOCKED=sqlite3.SQLITE_LOCKED))
+    monkeypatch.setattr(telemetry, "time", SimpleNamespace(monotonic=lambda: 0, sleep=sleeps.append))
+    bodies = []
+    with pytest.raises(sqlite3.OperationalError, match="body failure"):
+        with hub.connect() as db:
+            assert db.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+            bodies.append(1)
+            raise sqlite3.OperationalError("body failure")
+    assert len(attempts) == 2 and sleeps == [.025] and bodies == [1]
+
+
+def test_wal_setup_refuses_non_busy_errors(tmp_path, monkeypatch):
+    import sentra_core.telemetry as telemetry
+    class Broken:
+        closed = False
+        def execute(self, sql):raise sqlite3.OperationalError("disk I/O error")
+        def close(self):self.closed = True
+    connection = Broken()
+    hub = object.__new__(EventJournal)
+    hub.path = tmp_path / "events.sqlite3"
+    monkeypatch.setattr(telemetry, "sqlite3", SimpleNamespace(connect=lambda *a, **kw: connection,
+        Row=sqlite3.Row, OperationalError=sqlite3.OperationalError, SQLITE_BUSY=sqlite3.SQLITE_BUSY,
+        SQLITE_LOCKED=sqlite3.SQLITE_LOCKED))
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        with hub.connect():pytest.fail("broken database must not enter event body")
+    assert connection.closed
 
 
 def test_secret_and_content_fields_never_enter_telemetry(tmp_path):

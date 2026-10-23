@@ -49,6 +49,17 @@ def test_node_and_packager_agree_on_all_source_inputs(tmp_path):
     assert json.loads(result) == manifest["source_inputs"]
 
 
+def test_byte_seal_refuses_source_which_git_would_normalize(tmp_path):
+    project, _, _ = fixture(tmp_path)
+    (project / "src/main.jsx").write_bytes(b"export default 'CRLF';\r\n")
+    with pytest.raises(ValueError, match="Noncanonical CRLF.*src/main.jsx"):
+        desktop_source_inputs(project)
+    if shutil.which("node"):
+        script = "import {sourceInputs} from './scripts/source-inputs.mjs'; await sourceInputs(process.cwd());"
+        result = subprocess.run(["node", "--input-type=module", "-e", script], cwd=project, capture_output=True, text=True)
+        assert result.returncode != 0 and "Noncanonical CRLF" in result.stderr
+
+
 @pytest.mark.parametrize("name", ["src/main.jsx", "public/bootstrap.js", "package-lock.json", "scripts/build.mjs", "scripts/build-island.mjs", "vite.island.config.js", "island.html", "../../integrations/orca-terminal/src/emulator-budget.mjs"])
 def test_valid_output_hashes_cannot_certify_stale_sources(tmp_path, name):
     project, ui, _ = fixture(tmp_path)

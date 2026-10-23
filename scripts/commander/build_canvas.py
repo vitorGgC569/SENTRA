@@ -32,7 +32,10 @@ def desktop_source_inputs(project: Path) -> dict[str, str]:
             root = project.resolve().parent.parent
             if not path.resolve().is_relative_to(root) or any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
                 raise ValueError("linked desktop shared source input")
-        result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        data = path.read_bytes()
+        if path.suffix in {".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".css", ".html", ".json"} and b"\r\n" in data:
+            raise ValueError("Noncanonical CRLF desktop source; normalize to LF before building: " + name)
+        result[name] = hashlib.sha256(data).hexdigest()
     return result
 
 

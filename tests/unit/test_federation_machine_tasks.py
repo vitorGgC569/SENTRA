@@ -421,7 +421,10 @@ def test_revocation_after_last_effect_keeps_results_private_and_never_replays(pe
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(left.delegate, right.identity.node_id, SCOPE, task())
         try:
-            assert waiting.wait(10)
+            if not waiting.wait(10):
+                faulthandler.dump_traceback(all_threads=True)
+                outcome = repr(future.exception()) if future.done() else "sender still pending"
+                pytest.fail("receiver never reached post-effect revocation boundary: " + outcome)
             revoke_authority(right, control, left, authority)
         finally:
             release.set()

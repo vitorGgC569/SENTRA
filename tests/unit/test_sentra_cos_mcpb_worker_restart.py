@@ -1,6 +1,7 @@
 """Real Docker-managed plugin stdout handshake and owner/grant-fenced restart."""
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import time
@@ -26,14 +27,40 @@ for line in sys.stdin:
 """
 
 
-def test_actual_sandbox_process_restart_with_workitem_and_operation(tmp_path):
+def _linux_docker():
+    def unavailable(reason):
+        if os.environ.get("SENTRA_REQUIRE_SANDBOX_RESTART") == "1":
+            pytest.fail(reason)
+        pytest.skip(reason)
     docker = shutil.which("docker")
     if not docker:
-        pytest.skip("Docker CLI unavailable")
-    os_type = subprocess.run([docker, "info", "--format", "{{.OSType}}"],
-                             capture_output=True, text=True, timeout=6)
+        unavailable("Docker CLI unavailable; real sandbox restart not qualified")
+    try:
+        os_type = subprocess.run([docker, "info", "--format", "{{.OSType}}"],
+                                 capture_output=True, text=True, timeout=6)
+    except subprocess.TimeoutExpired:
+        unavailable("Docker Linux availability probe timed out; real sandbox restart not qualified")
     if os_type.returncode or os_type.stdout.strip() != "linux":
-        pytest.skip("Docker Linux sandbox unavailable")
+        unavailable("Docker Linux sandbox unavailable; real sandbox restart not qualified")
+    return docker
+
+
+def test_probe_timeout_is_unavailable_not_a_passing_restart(monkeypatch):
+    monkeypatch.delenv("SENTRA_REQUIRE_SANDBOX_RESTART", raising=False)
+    monkeypatch.setattr(shutil, "which", lambda _: "docker-fixture")
+    def timeout(*args, **kwargs):
+        assert kwargs["timeout"] == 6
+        raise subprocess.TimeoutExpired(args[0], 6)
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(pytest.skip.Exception, match="not qualified"):
+        _linux_docker()
+    monkeypatch.setenv("SENTRA_REQUIRE_SANDBOX_RESTART", "1")
+    with pytest.raises(pytest.fail.Exception, match="not qualified"):
+        _linux_docker()
+
+
+def test_actual_sandbox_process_restart_with_workitem_and_operation(tmp_path):
+    _linux_docker()
     ws = tmp_path / "workspace"
     ws.mkdir()
     (ws / "worker.py").write_text(SERVER, encoding="utf-8")
