@@ -13,7 +13,7 @@ that a subsequently implemented feature is absent.
 | CI failures and full run | Actual required checks passing on the delivered commit, with all collected cases and skips explained | All required jobs passed on `ee73a52` (run 40006505644), including exact partition coverage. The later `b38b213` run failed: a documents timeout/retained-worker failure in partition 0 and two post-effect revocation boundary timeouts in partition 1. Current source is not CI-qualified. See the follow-up below. |
 | Long-running PTY/checkpoints | Successful prolonged run of the exact frozen/installed daemon under concurrent output, reconnect and uncertain input | Source and frozen 1,800-second runs passed. The exact correlated-input frozen follow-up on `b38b213` also passed: three terminals/reopens, 534 advancing checkpoint observations, one physical duplicate consumption. Complete installed-package and prolonged real-model/TUI acceptance still open. Earlier frozen failure remains historical. |
 | Renderer recovery and memory | Watchdog/heap enforcement, preserved resource/view identity, no input replay, actual renderer qualification | Source watchdog and allocation admission delivered and tested; actual total V8/Chromium heap, installed acceptance and physical devices still unqualified. |
-| Global input ownership and conflict recovery | Conflicting desktop/mobile origins and devices, lease loss, pending-intent recovery, no late/repeated effect | Central lease foundation has six tests, including durable uncertainty after a failed write. It is explicitly not wired to desktop/mobile/agent/daemon paths; global arbitration remains open. Multiple desktop pending selectors have their own partial acceptance below. |
+| Global input ownership and conflict recovery | Conflicting desktop/mobile origins and devices, lease loss, pending-intent recovery, no late/repeated effect | Central lease foundation now reconciles exact pre-bound daemon receipts after lost confirmation, with real Windows ConPTY evidence. It is still not wired across desktop/mobile/agent/daemon paths; global arbitration remains open. Multiple desktop pending selectors have their own partial acceptance below. |
 | Multiple pending inputs | Independent observation/ACK, uncertainty preserved, old projection fencing and no resend | Desktop/host implementation and HTTP/ConPTY/Node/React tests delivered. Exact owner daemon correlation and broker-reopen recovery now have source acceptance; mobile/global arbitration and installed acceptance remain open. See the recovery and daemon receipt reports. |
 | Journal retention | Bounded protected-content retention preserving unresolved effects and permanent deduplication | Terminal ACK/retirement, permanent tombstones and transactional owner admission budgets implemented. Generic operations retain complete content pending ACK integration; inactive stores need explicit maintenance. |
 | Unified subscriptions | Versioned sequenced events, resumption/gap behavior and shared desktop/mobile consumers | Shared conversation projection transport now has source implementation and encrypted-client acceptance. Workspace inventory, approvals and terminal output still use their existing bounded read paths; complete unified subscriptions remain open. |
@@ -259,3 +259,36 @@ The CI now explicitly runs the actual encrypted Canvas path. Workspace inventory
 approvals and terminal output still use their existing read paths; all-channel
 unified subscriptions, physical mobile acceptance and installed qualification
 remain open. The existing public packages and owner sessions were preserved.
+
+
+## Terminal possession recovery — product reliability follow-up
+
+The owner requested that hosted CI investigation be deprioritized. Its remaining
+failures stay recorded; work continues on execution and user-visible recovery.
+
+The terminal-possession foundation now stores an OS-protected exact daemon input
+selector before attempting a write. A lost acknowledgement can be reconciled
+against the existing authenticated daemon receipt, without calling write,
+connect-or-start, creating a terminal, extending a lease, changing its client or
+creating permissions. Proofs bind owner, resource, generation, runtime, payload
+SHA-256, client and epoch. Partial receipts, another scope, overstated completion,
+and correlation invented after a possible effect remain unresolved/refused.
+
+The Windows source acceptance starts its own real ConPTY daemon and `cmd.exe`,
+appends a marker once, loses the successful daemon response deliberately,
+reopens the central possession authority and connects a read-only observer. The
+original process/PID stays live and the marker remains single. Another origin
+cannot acquire the live lease until an explicit owner handoff advances the
+epoch. The lab process and daemon are then stopped by the test itself.
+
+`possession-final75.xml` records **60 passed** across possession recovery,
+foundation, exact daemon effects and existing owner terminal receipt scopes.
+The scenarios overlap previous receipt suites and are not added to old totals.
+Additional cases cover concurrent observers, a historical receipt after daemon
+restart without respawn, and recovery without renewing an expired lease.
+
+This closes a specific recovery gap **in the foundation**. The production input
+entry points still need coordinated integration, including stable existing owner
+receipt keys, authenticated mobile origin propagation, agent WorkItem identity,
+and explicit UI handoff/release. This is not a claim that global arbitration is
+already enabled, that phones were tested, or that the installed app changed.

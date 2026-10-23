@@ -58,6 +58,10 @@ class TerminalPossession:
                        'effect_key TEXT PRIMARY KEY,owner TEXT NOT NULL,resource TEXT NOT NULL,caller_key TEXT NOT NULL,'
                        'payload_sha256 TEXT NOT NULL,client TEXT NOT NULL,epoch INTEGER NOT NULL,state TEXT NOT NULL,'
                        'receipt TEXT,created REAL NOT NULL)')
+            # Additive table: old reservations remain observable, but a missing
+            # reference can never be reconstructed after a possible effect.
+            db.execute('CREATE TABLE IF NOT EXISTS terminal_physical_input_refs('
+                       'effect_key TEXT PRIMARY KEY,protected_reference TEXT NOT NULL)')
 
     def resource(self, workspace, terminal, generation, runtime):
         if not all(isinstance(s, str) and 0 < len(s) <= 256 for s in (workspace, terminal, runtime)) or not re.fullmatch(r'[0-9a-f]{32}', generation or ''):
@@ -176,6 +180,81 @@ class TerminalPossession:
             raise AuthorizationRequired('physical input proof differs from its central reservation')
         return row
 
+    def _reference(self, proof, reference):
+        from .pty_input_effects import validate_reference
+        value=validate_reference(reference)
+        expected={'effect_key':proof['effect_key'],'workspace_id':proof['workspace'],
+                  'terminal_id':proof['terminal'],'runtime_id':proof['runtime'],
+                  'generation':proof['generation'],'payload_sha256':proof['payload_sha256']}
+        if value!=expected:
+            raise AuthorizationRequired('daemon selector differs from reserved terminal input')
+        return value
+
+    def bind_reference(self, proof, reference):
+        """Persist a content-free exact daemon selector before crossing I/O."""
+        from sentra_core.conversations import _encode,_decode
+        value=self._reference(proof,reference)
+        with closing(self.control.store.connect('machine_input_control')) as db,db:
+            db.execute('BEGIN IMMEDIATE')
+            effect=self._effect(db,proof);self._row(db,proof)
+            row=db.execute('SELECT protected_reference FROM terminal_physical_input_refs WHERE effect_key=?',
+                           (effect['effect_key'],)).fetchone()
+            if row:
+                if _decode(row['protected_reference'])!=value:
+                    raise AuthorizationRequired('reserved daemon input selector changed')
+                return value
+            if effect['state']!='prepared':
+                raise AuthorizationRequired('daemon correlation must precede the physical input attempt')
+            db.execute('INSERT INTO terminal_physical_input_refs VALUES(?,?)',
+                       (effect['effect_key'],_encode(value)))
+        return value
+
+    def daemon_reference(self, proof):
+        from sentra_core.conversations import _decode
+        with closing(self.control.store.connect('machine_input_control')) as db:
+            effect=self._effect(db,proof);self._row(db,proof)
+            row=db.execute('SELECT protected_reference FROM terminal_physical_input_refs WHERE effect_key=?',
+                           (effect['effect_key'],)).fetchone()
+        return self._reference(proof,_decode(row['protected_reference'])) if row else None
+
+    def confirm_daemon_observation(self, proof, observed):
+        """Trusted host-only adoption of an exact, already delivered receipt.
+
+        This method never writes to a terminal, renews possession, or creates a
+        Grant. Caller obtains `observed` from the existing authenticated daemon.
+        """
+        reference=self.daemon_reference(proof)
+        if reference is None:
+            raise AuthorizationRequired('input has no pre-effect daemon correlation')
+        receipt=observed.get('receipt') if isinstance(observed,dict) else None
+        if (not isinstance(receipt,dict) or type(observed.get('input_receipt_protocol_version')) is not int
+                or observed['input_receipt_protocol_version']!=1 or observed.get('found') is not True
+                or observed.get('resolved') is not True or observed.get('state')!='done'
+                or observed.get('automatic_retry') is not False or observed.get('may_resend') is not False
+                or observed.get('task_completion_verified') is not False
+                or type(receipt.get('input_receipt_protocol_version')) is not int
+                or receipt['input_receipt_protocol_version']!=1
+                or any(receipt.get(k)!=v for k,v in reference.items())
+                or receipt.get('stage')!='delivered_to_process'
+                or receipt.get('automatic_retry') is not False
+                or receipt.get('task_completion_verified') is not False):
+            raise AuthorizationRequired('exact delivered daemon input evidence required')
+        with closing(self.control.store.connect('machine_input_control')) as db,db:
+            db.execute('BEGIN IMMEDIATE')
+            effect=self._effect(db,proof);self._row(db,proof)
+            if effect['state'] not in {'prepared','uncertain','delivered'}:
+                raise AuthorizationRequired('terminal input observation is not recoverable')
+            if effect['state']!='delivered':
+                result={'effect_key':proof['effect_key'],'resource_id':proof['resource'],
+                        'generation':proof['generation'],'runtime_id':proof['runtime'],
+                        'client_id':proof['client_id'],'epoch':proof['epoch'],
+                        'payload_sha256':proof['payload_sha256'],'stage':'delivered_to_process',
+                        'task_completion_verified':False,'automatic_retry':False,
+                        'recovered_by_observation':True}
+                db.execute("UPDATE terminal_physical_input_effects SET state='delivered',receipt=? WHERE effect_key=?",
+                           (json.dumps(result,sort_keys=True),effect['effect_key']))
+        return self.inspect(proof)
+
     @contextmanager
     def physical(self, proof, data):
         with closing(self.control.store.connect('machine_input_control')) as db, db:
@@ -259,6 +338,7 @@ def write_terminal(canvas, workspace, terminal, data, key):
     from .pty_client import DaemonPTY
     if isinstance(process, DaemonPTY):
         reference = process.input_reference(proof['effect_key'], data)
+        possession.bind_reference(proof,reference)
         with possession.physical(proof, data):
             if isinstance(effect, CentralEffectContext):
                 effect.checkpoint()
@@ -269,3 +349,19 @@ def write_terminal(canvas, workspace, terminal, data, key):
                 effect.checkpoint()
             process.write(data)
     return {'physical_input': proof, **possession.inspect(proof)}
+
+
+def observe_terminal_input(canvas, proof):
+    """Read existing receipts only; never connect-or-start or replay input."""
+    possession=authority(canvas)
+    current=possession.inspect(proof)
+    if current['resolved']:
+        return current
+    reference=possession.daemon_reference(proof)
+    client=getattr(canvas,'_pty_client',None)
+    if reference is None or client is None or client.capabilities.get('correlated_input_receipts')!=1:
+        return {**current,'observation_available':False}
+    observed=client.call('input_effect',reference)
+    if observed.get('found') is True and observed.get('resolved') is True:
+        return possession.confirm_daemon_observation(proof,observed)
+    return {**current,'observation_available':True}
