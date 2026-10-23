@@ -50,7 +50,18 @@ class PersistenceStore:
                 json.dump(payload, f, indent=2, ensure_ascii=False)
                 f.flush()
                 os.fsync(f.fileno())
-            os.replace(tmp_name, path)
+            # Publication can briefly encounter a Windows reader/scanner that
+            # denies delete sharing. Retry only the same fsynced snapshot;
+            # never repeat the validation, event or task that produced it.
+            for attempt in range(6):
+                try:
+                    os.replace(tmp_name, path)
+                    break
+                except PermissionError as exc:
+                    if (os.name != "nt" or getattr(exc, "winerror", None) not in {5, 32, 33}
+                            or attempt == 5):
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
         except Exception:
             try:
                 os.unlink(tmp_name)

@@ -19,10 +19,14 @@ All notable user-facing changes to SENTRA are recorded here.
 - HTTP SSE dechunking, truncated response detection, federation socket cleanup and A2A stream shutdown.
 - Budget rejection incorrectly retaining a quote for a later task step.
 - Installer login validation, exact loopback host checks and all findings in the enforced Python typing gate.
+- Windows snapshot publication sharing failures without replaying validations, provider calls or task effects.
+- Clean terminal packaging now seals the patched xterm dependency files before staging or starting its worker.
+- Android preview certificate verification recognizes the actual build-tools scheme labels while preserving the original signing identity.
 
 ### Qualification
 
 - Preview builds retain separate device, native package and signing acceptance gates.
+- The complete Windows setup rebuild and prolonged final suite are deferred; this source preview does not claim a newly qualified Windows installer.
 - Android/iPhone physical operation and private VPN behavior require device acceptance; no signed iOS distribution is claimed.
 - Stable Windows publication requires independent clean-install, upgrade, uninstall and signature evidence bound to the actual artifacts.
 

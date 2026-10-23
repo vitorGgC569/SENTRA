@@ -39,5 +39,14 @@ class AndroidVerificationTests(unittest.TestCase):
      report.replace('maxSdkVersion=2147483647','maxSdkVersion=2147483648')):
    with self.assertRaises(ValueError):certificate_identity(invalid)
 
+ def test_actual_build_tools_scheme_label_requires_one_preserved_signer(self):
+  digest=self.policy['certificate_sha256']
+  report=f'Number of signers: 1\nV2 Signer: certificate SHA-256 digest: {digest}\n'
+  self.assertEqual(certificate_identity(report),digest)
+  self.assertEqual(certificate_identity(report+f'V3 Signer: certificate SHA-256 digest: {digest}\n'),digest)
+  for invalid in (report.replace('signers: 1','signers: 2'),report.replace('Number of signers: 1\n',''),
+      report+report.split('\n')[1]+'\n',report+f'V3 Signer: certificate SHA-256 digest: {"a"*64}\n',report+self.sign):
+   with self.assertRaises(ValueError):certificate_identity(invalid)
+
 
 if __name__=='__main__':unittest.main()

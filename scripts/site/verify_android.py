@@ -11,9 +11,17 @@ def certificate_identity(report):
     V3.1 prints SDK ranges instead of ``Signer #1``. Android's implementation:
     https://android.googlesource.com/platform/tools/apksig/+/master/src/apksigner/java/com/android/apksigner/ApkSignerTool.java
     """
-    rows=[line for line in report.splitlines() if line.startswith('Signer ') and ' certificate SHA-256 digest:' in line]
+    rows=[line for line in report.splitlines() if re.match(r'^(?:Signer |V[123](?:\.1)? Signer:)',line) and ' certificate SHA-256 digest:' in line]
     counts=re.findall(r'^Number of signers: ([0-9]+)\s*$',report,re.MULTILINE)
     if counts and counts!=['1']:raise ValueError('Exactly one APK signer required')
+    # Current Android build-tools label the verified scheme directly. Require
+    # the reported single signer and identical certificates in every scheme.
+    if rows and all(re.fullmatch(r'V[123](?:\.1)? Signer: certificate SHA-256 digest: [a-fA-F0-9]{64}\s*',row) for row in rows):
+        labels=[row.split(' certificate ',1)[0] for row in rows]
+        identities={row.rsplit(': ',1)[1].strip().lower() for row in rows}
+        if counts!=['1'] or len(rows)>4 or len(set(labels))!=len(labels) or len(identities)!=1:
+            raise ValueError('Ambiguous APK scheme signing identity')
+        return next(iter(identities))
     if len(rows)==1:
         numbered=re.fullmatch(r'Signer #1 certificate SHA-256 digest: ([a-fA-F0-9]{64})\s*',rows[0])
         if numbered:return numbered[1].lower()

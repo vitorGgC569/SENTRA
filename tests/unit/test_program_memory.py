@@ -187,13 +187,22 @@ def test_cross_instance_writes_do_not_lose_updates(tmp_path):
     }
 
 
+@pytest.fixture(params=["program_memory", "persistence"])
+def publication_store(request, tmp_path):
+    from importlib import import_module
+    module = import_module("orchestrator." + request.param)
+    if request.param == "program_memory":
+        store = module.ProgramMemory(tmp_path / "ws")
+    else:
+        store = module.PersistenceStore("publication", base_dir=tmp_path / "runs")
+    return store, module
+
+
 @pytest.mark.parametrize("winerror", [5, 32, 33])
-def test_windows_publication_retries_only_same_fsynced_snapshot(tmp_path, monkeypatch, winerror):
+def test_windows_publication_retries_only_same_fsynced_snapshot(tmp_path, monkeypatch, winerror, publication_store):
     import os
     from types import SimpleNamespace
-    from orchestrator import program_memory as module
-
-    mem = _mem(tmp_path)
+    mem, module = publication_store
     replace = os.replace
     publications = []
     pauses = []
@@ -217,7 +226,7 @@ def test_windows_publication_retries_only_same_fsynced_snapshot(tmp_path, monkey
     assert len(set(publications)) == 1
     assert pauses == [0.01, 0.02]
     assert json.loads(mem.candidates_file.read_text()) == {"one": ["snapshot"]}
-    assert not list(mem.memory_dir.glob("*.tmp.*"))
+    assert not list(mem.candidates_file.parent.glob("*.tmp.*"))
 
 
 @pytest.mark.parametrize("platform,winerror,expected_attempts", [
@@ -225,12 +234,10 @@ def test_windows_publication_retries_only_same_fsynced_snapshot(tmp_path, monkey
     ("nt", None, 1), ("nt", 87, 1), ("posix", 5, 1),
 ])
 def test_publication_refusal_is_bounded_preserves_previous_and_cleans_temp(
-        tmp_path, monkeypatch, platform, winerror, expected_attempts):
+        tmp_path, monkeypatch, platform, winerror, expected_attempts, publication_store):
     import os
     from types import SimpleNamespace
-    from orchestrator import program_memory as module
-
-    mem = _mem(tmp_path)
+    mem, module = publication_store
     previous = b'{"previous": true}\n'
     mem.candidates_file.write_bytes(previous)
     attempts = []
@@ -255,19 +262,18 @@ def test_publication_refusal_is_bounded_preserves_previous_and_cleans_temp(
     assert len(set(attempts)) == 1
     assert len(pauses) == expected_attempts - 1
     assert mem.candidates_file.read_bytes() == previous
-    assert not list(mem.memory_dir.glob("*.tmp.*"))
+    assert not list(mem.candidates_file.parent.glob("*.tmp.*"))
 
 
-def test_windows_real_delete_sharing_refusal_reuses_snapshot(tmp_path, monkeypatch):
+def test_windows_real_delete_sharing_refusal_reuses_snapshot(tmp_path, monkeypatch, publication_store):
     import ctypes
     import os
     from ctypes import wintypes
     from types import SimpleNamespace
-    from orchestrator import program_memory as module
 
     if os.name != "nt":
         pytest.skip("Windows native delete-sharing semantics")
-    mem = _mem(tmp_path)
+    mem, module = publication_store
     mem.candidates_file.write_text('{"previous": true}\n', encoding="utf8")
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
@@ -307,7 +313,7 @@ def test_windows_real_delete_sharing_refusal_reuses_snapshot(tmp_path, monkeypat
     assert len(observed) == 1 and observed[0] in {5, 32, 33}
     assert len(snapshot_paths) == 2 and len(set(snapshot_paths)) == 1
     assert json.loads(mem.candidates_file.read_text()) == {"published": ["once"]}
-    assert not list(mem.memory_dir.glob("*.tmp.*"))
+    assert not list(mem.candidates_file.parent.glob("*.tmp.*"))
 
 
 def test_memory_writes_are_idempotent_by_content(tmp_path):

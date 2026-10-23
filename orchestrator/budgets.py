@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .process_lock import exclusive_file_lock
+from .atomic_publication import replace_prepared_snapshot
 
 
 class BudgetExceeded(RuntimeError):
@@ -369,7 +370,7 @@ class HostResourceBudget:
                 json.dump(payload, handle, indent=2, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp, self.state_path)
+            replace_prepared_snapshot(temp, self.state_path)
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)

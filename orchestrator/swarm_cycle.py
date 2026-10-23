@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from orchestrator.providers.base import AgentRequest, AgentResponse
+from orchestrator.atomic_publication import replace_prepared_snapshot
 from orchestrator.rate_governor import ProviderRateGovernor
 from orchestrator.turn_scheduler import ConversationTurnScheduler
 from orchestrator.providers.extension_provider import BrowserExtensionProvider
@@ -229,7 +230,7 @@ class PersistentSwarm:
                 json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            replace_prepared_snapshot(temporary, path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
@@ -812,7 +813,7 @@ class PersistentSwarm:
                 handle.write(str(text))
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            replace_prepared_snapshot(temporary, path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

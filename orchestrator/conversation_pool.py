@@ -26,6 +26,7 @@ from typing import Any, Dict
 from sentra_core.conversation import ConversationIdentity
 
 from .providers.base import AgentResponse
+from .atomic_publication import replace_prepared_snapshot
 from .shared_context import SharedContextBatch
 _ALIASES = {"planner": "master", "judge": "master", "repair": "executor"}
 _ROLES = {"master", "executor", "validator.logic", "validator.requirements",
@@ -271,7 +272,7 @@ class FixedConversationRouter:
                            "last_dispatch_at": self._last_dispatch, "seats": self._map}, handle, indent=2)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self._path)
+            replace_prepared_snapshot(temporary, self._path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)

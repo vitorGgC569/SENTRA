@@ -10,6 +10,7 @@ import time
 from contextlib import nullcontext
 
 from .process_lock import exclusive_file_lock
+from .atomic_publication import replace_prepared_snapshot
 from pathlib import Path
 from typing import Any, Callable
 
@@ -88,7 +89,7 @@ class ProviderRateGovernor:
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp, self.state_path)
+            replace_prepared_snapshot(temp, self.state_path)
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)
@@ -276,7 +277,7 @@ class HostResourceGovernor:
                 )
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp, self.state_path)
+            replace_prepared_snapshot(temp, self.state_path)
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)

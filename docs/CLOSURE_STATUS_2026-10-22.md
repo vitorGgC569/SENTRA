@@ -10,7 +10,7 @@ qualification are separate results. Overlapping test reruns are not added togeth
 | Area | Changes and current evidence |
 |---|---|
 | Python quality | Enforced mypy findings reduced from 297 to zero. The gate now permits zero, rejects incomplete runs and rejects a new finding. No baseline expansion or diagnostic suppression. |
-| Durable execution | Windows atomic projection writes use unique temporary files and bounded sharing retries. Protected JobStore reads decode through the protected store. Cold PTY owner startup waits for the one launched process; no fallback process or uncertain command replay. |
+| Durable execution | Windows atomic projection writes use unique temporary files and bounded sharing retries. Run/task/validation/budget snapshots and ProgramMemory publish the same already-fsynced snapshot under bounded Windows sharing retries, without repeating the operation. Protected JobStore reads decode through the protected store. Cold PTY owner startup waits for the one launched process; no fallback process or uncertain command replay. |
 | Host concurrency | Catalog reads leave the host event loop available for effects and cancellation. Reader ownership survives caller cancellation. Same-loop synchronous calls fail immediately. Actual concurrent Git/file/command jobs passed. |
 | Workspace | Resource reattachment, unavailable/orphan resource controls, explicit layout conflict choice, edge splitting, pane/tab keyboard navigation and context menus. Restoring views does not create processes. |
 | Editor and Git | Grouped scoped observation, protected draft conflict preservation, disk staleness after discard, draft/cleanup serialization and rollback-compatible scope metadata. Central, separately scoped Git review/commit/discard/fast-forward merge/nonforce publication/cleanup. New and binary files have size/hash evidence. Lost push confirmation stays uncertain. |
@@ -20,6 +20,7 @@ qualification are separate results. Overlapping test reruns are not added togeth
 | LAN discovery | Host mDNS advertisement and explicit bounded discovery of already-paired hosts. An encrypted host identity probe precedes credential use. Discovery is not execution permission. |
 | Installer | Required Platform project/expiry validation, exact parsed loopback host checks, bounded browser-host responses, installer introspection/default compatibility and typed UI-thread worker options. Installer/setup tests: 130 passed. |
 | Packaging | Snapshot includes every desktop src/public seal input, required extensionless licenses, connectors and the sealed generated terminal engine. Actual repository-seal coverage and tamper tests guard against incomplete isolated builds. Bounded CAB partitions preserve global MSI file/media sequence and legal payloads. A streaming multipart preview utility verifies original/part hashes and generates a no-overwrite PowerShell reassembly helper. |
+| Terminal dependency integrity | Engine manifest v2 seals every external xterm dependency after the pinned serializer patch. Source, staging, installed consumer and worker reject missing, altered, extra or legacy dependencies before starting the worker. The worker protocol remains version1. Real source/staged worker and refusal scope:26 Python tests and4 Node tests passed. |
 | Interoperability | A2A/SSE shutdown drains accepted clients. HTTP SSE consumes dechunked bytes and refuses truncated declared bodies. Federation closes failed handshakes and bounds accepted connections. Actual HTTP framing regressions preserve uncertain/no-replay behavior. |
 | Task accounting | Quote, step and cost reservation share a transaction. A rejected budget request no longer pins a quote for a later step. Canonical central intent hashes are used for workflow signal acknowledgement. |
 | Remote adapters | Existing protected GitHub/Drive machine registrations restore through their existing adapter. Explicit guest reconciliation records VM identity and rejects a replaced VM. No substitute host directory or fabricated remote provider result. |
@@ -68,9 +69,34 @@ proof bundles. Do not treat file presence as artifact qualification.
 
 ## Full-suite and native package qualification
 
-The fresh full unit run is in progress. Earlier runs with failures, a native
-worker crash and an intentionally stopped diagnostic round are retained as
-failed/incomplete evidence. They are not relabeled as passed.
+The first complete recursive unit diagnostic collected4116 cases across505
+files, including all29 nested files:4045 passed,61 skipped and10 failed.
+Two genuine/fixture publication issues and two imported-module/live-source
+inspection mismatches were corrected and rechecked; six terminal failures
+used an old imported manifest consumer while its on-disk worker changed.
+The subsequent matrix exposed three real validation/budget publication
+failures through the same Windows atomic writer. Those results remain failed
+evidence. A new full run after source freeze is required, rather than adding
+targeted reruns together and calling the whole suite green.
+
+The remote unit job exceeded its35-minute bound. Its unit-only budget is now
+90 minutes; the other lanes retain35 minutes. Unit CI prepares and validates
+the actual patched terminal engine. Venv process fixtures distinguish the
+Windows launcher from the interpreter and prove daemon Job membership.
+Docker grant-only fixtures have no physical CLI prerequisite; physical cases
+still require the trusted CLI and Linux image. All three physical Docker
+scenarios ran locally in the22-case passing scope, with zero skips.
+
+At the owner's request, the complete Windows rebuild and prolonged final
+qualification were deferred to conserve usage. The candidate attempt was
+stopped after the validation writer defect was discovered; it is not a
+delivered or qualified package. The source preview contains the correction.
+Stable publication gates remain unchanged.
+
+Final focused publication checks:107 passed across prepared-publication,
+ProgramMemory/Persistence and site verification; enforced mypy0/max0. The
+prepared-publication cases cover all six actual caller wrappers, native
+Windows delete-sharing refusal, permanent failures and no provider replay.
 
 The development host also exposed path-specific HTTP interception under Codex:
 an unchanged stdlib `/mcp` response acquired a chunked header without chunk
