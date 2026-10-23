@@ -1,5 +1,9 @@
 # SENTRA closure and qualification status — 22 October 2026
 
+Latest build/test results: [Windows qualification — 23 October](WINDOWS_BUILD_QUALIFICATION_2026-10-23.md).
+The full build was produced, but prolonged terminal observation and actual MSI
+consumption failed. Those acceptance gates remain open.
+
 This record supersedes the implementation status in `OPEN_ITEMS_AUDIT_2026-10-22.md`.
 That audit and the earlier delivery acceptance record remain historical evidence.
 Implementation, automated acceptance, installed delivery and physical device

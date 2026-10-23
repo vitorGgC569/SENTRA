@@ -121,7 +121,7 @@ try {
         Assert-Integer $part.size_bytes 0 $manifest.part_bytes
         if (-not $names.Add($part.name)) { throw 'Duplicate part' }
         if ($part.name -cne ($manifest.original.name + ('.part{0:D4}' -f ($i + 1)))) { throw 'Unexpected part path or order' }
-        $expectedSize = [Math]::Min($manifest.part_bytes, $manifest.original.size_bytes - $total)
+        $expectedSize = [Math]::Min([long]$manifest.part_bytes, [long]($manifest.original.size_bytes - $total))
         if ($part.size_bytes -ne $expectedSize) { throw 'Part size does not match original size' }
         $partPath = Join-Path $directory $part.name
         Assert-NoLinks $partPath

@@ -108,6 +108,9 @@ jobs:
         run: |
           npm ci --prefix integrations/orca-terminal
           if ($LASTEXITCODE -ne 0) { throw "Pinned terminal dependencies unavailable" }
+          # The installed-path terminal test also stages the real mobile gateway.
+          npm ci --prefix integrations/orca-mobile/transport
+          if ($LASTEXITCODE -ne 0) { throw "Pinned mobile transport fixture unavailable" }
           npm --prefix integrations/orca-terminal run build
           if ($LASTEXITCODE -ne 0) { throw "Patched terminal engine build failed" }
           python -B -c "from pathlib import Path; from scripts.commander.stage_terminal import validate_terminal_engine; validate_terminal_engine(Path('integrations/orca-terminal'))"

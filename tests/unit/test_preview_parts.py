@@ -68,6 +68,24 @@ def test_powershell_restores_exact_original_without_execution(tmp_path, content)
     assert not list(tmp_path.glob(".sentra-reassemble-*.tmp"))
 
 
+def test_powershell_large_manifest_uses_int64_before_checking_actual_part_size(tmp_path):
+    # Exercise the >2 GiB arithmetic without allocating gigabytes in every CI run.
+    _, result, _ = _split(tmp_path, b"abc", size=1)
+    manifest_path = _manifest(result)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["part_bytes"] = 1024 ** 3
+    manifest["original"]["size_bytes"] = 3 * 1024 ** 3
+    for part in manifest["parts"]:
+        part["size_bytes"] = 1024 ** 3
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    target = tmp_path / "Restored-preview.exe"
+    run = _join(result, target)
+    assert run.returncode != 0
+    assert "Part size mismatch" in run.stderr, run.stderr
+    assert "System.Int32" not in run.stderr
+    assert not target.exists()
+
+
 @pytest.mark.parametrize("damage", ["tampered", "missing", "duplicate", "existing", "joined_hash", "traversal", "size"])
 def test_powershell_refuses_damaged_or_unsafe_inputs_and_existing_destination(tmp_path, damage):
     _, result, _ = _split(tmp_path)

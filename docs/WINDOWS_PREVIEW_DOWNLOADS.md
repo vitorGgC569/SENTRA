@@ -11,7 +11,7 @@ direct executable. See [GitHub's release limits](https://docs.github.com/en/repo
 2. Open PowerShell in that folder and run:
 
    ```powershell
-   powershell.exe -NoProfile -File .\Reassemble-Preview.ps1
+   powershell.exe -NoProfile -File .\Reassemble-Preview.ps1 -OutputPath .\SENTRA-Setup-1.0.1.exe
    ```
 
 3. The helper verifies every part and the complete reconstructed SHA-256. It

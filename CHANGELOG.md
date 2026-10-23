@@ -26,7 +26,7 @@ All notable user-facing changes to SENTRA are recorded here.
 ### Qualification
 
 - Preview builds retain separate device, native package and signing acceptance gates.
-- The complete Windows setup rebuild and prolonged final suite are deferred; this source preview does not claim a newly qualified Windows installer.
+- The complete Windows rebuild and extended tests were subsequently run on October 23. Setup integrity/GUI checks passed; prolonged terminal observation and real MSI consumption failed. Only an experimental Setup preview is prepared. See [the qualification report](docs/WINDOWS_BUILD_QUALIFICATION_2026-10-23.md).
 - Android/iPhone physical operation and private VPN behavior require device acceptance; no signed iOS distribution is claimed.
 - Stable Windows publication requires independent clean-install, upgrade, uninstall and signature evidence bound to the actual artifacts.
 
