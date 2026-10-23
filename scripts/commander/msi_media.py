@@ -63,5 +63,3 @@ def verify_msi_manifest(msi: Path, entry: object) -> list[Path]:
     if not isinstance(entry, dict) or entry != msi_manifest_entry(msi):
         raise ValueError("release MSI external-media manifest mismatch")
     return msi_distribution_files(msi)
-
-
