@@ -4,7 +4,7 @@ import argparse,datetime,json,re,shutil,urllib.request
 ROOT=Path(__file__).resolve().parents[2]
 REPO='vitorGgC569/SENTRA'
 def validate_catalog(releases,fetch):
- for release in releases:
+ for release in sorted(releases,key=lambda r:r.get('published_at') or '',reverse=True):
   if release.get('draft') or not release.get('tag_name','').startswith('mobile-preview-'):continue
   assets={a['name']:a for a in release.get('assets',[])}
   if not {'SENTRA-Android-preview.apk','mobile-downloads.json'}<=assets.keys():continue
@@ -62,6 +62,7 @@ def validate_windows_catalog(releases,fetch):
   reviewed=json.loads((ROOT/'site/release-status.json').read_text())
   return {'release':release['html_url'],'metadata':expected+'windows-preview.json',
     'checksums':expected+'PREVIEW-SHA256SUMS.txt','version':tag,'source_commit':source,
+    **({'product_version':metadata['version']} if isinstance(metadata.get('version'),str) and re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+',metadata['version']) else {}),
     'sha256':setup['sha256'],'size':setup['size_bytes'],'parts':verified,
     'current_interface':source in reviewed.get('current_interface_installer_sources',[]),
     'stable_qualified':False}

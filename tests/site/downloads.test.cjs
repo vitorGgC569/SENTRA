@@ -48,3 +48,12 @@ test('foreign Windows metadata cannot replace the static release link',async()=>
  const get=await render({schema:1,generated_at:'2026-10-24',windows:{release:base+'tag/x',metadata:'https://example.com/proof',sha256:'a'.repeat(64),size:10}});
  assert.equal(get('windows-verification').hidden,true);assert.equal(get('windows-release').href,undefined);
 });
+
+test('current Windows setup shows its product version and unsigned qualification',async()=>{
+ const windows={release:base+'tag/installer-preview-20261024-1',metadata:base+'download/installer-preview-20261024-1/windows-preview.json',sha256:'a'.repeat(64),size:3193341241,version:'installer-preview-20261024-1',product_version:'1.0.2',parts:[{}, {}, {}],current_interface:true};
+ const get=await render({schema:1,generated_at:'2026-10-24',windows});
+ assert.equal(get('windows-status').textContent,'Current-interface preview');
+ assert.match(get('windows-description').textContent,/Unsigned preview/);
+ assert.match(get('windows-version').textContent,/Setup 1\.0\.2/);
+ assert.equal(get('windows-release').href,windows.release);
+});

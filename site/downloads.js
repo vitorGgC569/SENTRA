@@ -16,8 +16,8 @@ async function load(){const state=document.getElementById('catalog-status');try{
   const notes=document.getElementById('windows-release');notes.href=w.release;
   const proof=document.getElementById('windows-verification');proof.href=w.metadata;proof.hidden=false;
   document.getElementById('windows-status').textContent=w.current_interface===true?'Current-interface preview':'Older installer preview';
-  document.getElementById('windows-description').textContent=w.current_interface===true?'Preview installer containing the reviewed interface. Stable-release qualification remains pending.':'This published installer predates the current local interface. Read its release notes before testing.';
-  document.getElementById('windows-version').textContent=w.version+' · '+(w.size/1024/1024/1024).toFixed(2)+' GB · '+(Array.isArray(w.parts)?w.parts.length:0)+' parts';
+  document.getElementById('windows-description').textContent=w.current_interface===true?'Unsigned preview containing the current interface. Read the release notes for remaining validation limits.':'This published installer predates the current local interface. Read its release notes before testing.';
+  document.getElementById('windows-version').textContent=(w.product_version?'Setup '+w.product_version+' · ':'')+w.version+' · '+(w.size/1024/1024/1024).toFixed(2)+' GB · '+(Array.isArray(w.parts)?w.parts.length:0)+' parts';
  }
  state.textContent='Availability updated on '+new Date(data.generated_at).toLocaleDateString('en-US')+'.';
  }catch{document.getElementById('android-status').textContent='Browse releases';state.textContent='Could not load the catalog. Published downloads are available on GitHub Releases.';}}

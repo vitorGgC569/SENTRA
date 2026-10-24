@@ -8,6 +8,16 @@ class CatalogTests(unittest.TestCase):
    {'name':'mobile-downloads.json','browser_download_url':base+'download/mobile-preview-1/mobile-downloads.json'}]}
  def metadata(self,_):return {'schema':1,'tag':'mobile-preview-1','android':{'sha256':'a'*64,'size':12345}}
  def test_empty_is_unavailable(self):self.assertIsNone(validate_catalog([],self.metadata))
+ def test_newest_verified_android_wins_even_when_list_is_unsorted(self):
+  import copy
+  old=self.release();old['published_at']='2026-10-23T00:00:00Z'
+  new=copy.deepcopy(old);new['published_at']='2026-10-24T00:00:00Z';new['tag_name']='mobile-preview-2'
+  new['html_url']=new['html_url'].replace('mobile-preview-1','mobile-preview-2')
+  for asset in new['assets']:asset['browser_download_url']=asset['browser_download_url'].replace('mobile-preview-1','mobile-preview-2')
+  def metadata(url):
+   value=self.metadata(url);value['tag']='mobile-preview-2' if 'mobile-preview-2/' in url else 'mobile-preview-1';return value
+  result=validate_catalog([old,new],metadata)
+  self.assertEqual(result['version'],'mobile-preview-2')
  def test_verified_asset_only(self):self.assertEqual(validate_catalog([self.release()],self.metadata)['sha256'],'a'*64)
  def test_mismatched_digest_is_unavailable(self):
   r=self.release();r['assets'][0]['digest']='sha256:'+'b'*64;self.assertIsNone(validate_catalog([r],self.metadata))
@@ -38,6 +48,13 @@ class WindowsCatalogTests(unittest.TestCase):
  def verify(self):return validate_windows_catalog([self.release],lambda _:self.metadata)
  def test_verified_old_preview_is_not_current_or_stable(self):
   result=self.verify();self.assertEqual(result['size'],10);self.assertFalse(result['current_interface']);self.assertFalse(result['stable_qualified'])
+ def test_reviewed_source_is_current_but_never_claimed_stable(self):
+  import json
+  from scripts.site.build import ROOT
+  reviewed=json.loads((ROOT/'site/release-status.json').read_text())
+  self.metadata.update(source_commit=reviewed['current_interface_installer_sources'][0],version='1.0.2')
+  result=self.verify();self.assertTrue(result['current_interface']);self.assertFalse(result['stable_qualified'])
+  self.assertEqual(result['product_version'],'1.0.2')
  def test_wrong_digest_size_or_duplicate_parts_is_rejected(self):
   self.release['assets'][-1]['digest']='sha256:'+'d'*64;self.assertIsNone(self.verify())
   self.release['assets'][-1]['digest']='sha256:'+'a'*64;self.metadata['setup']['size_bytes']=11;self.assertIsNone(self.verify())

@@ -1,9 +1,9 @@
 {
   "schema": 1,
   "reviewed_on": "2026-10-24",
-  "application_baseline": "b520687",
+  "application_baseline": "62d61fa65fec9b79a0f531a91ccafd2fd3163615",
   "status": "development-preview",
   "stable_release_qualified": false,
-  "current_interface_installer_sources": [],
+  "current_interface_installer_sources": ["62d61fa65fec9b79a0f531a91ccafd2fd3163615"],
   "readiness": "https://github.com/vitorGgC569/SENTRA/blob/main/docs/RELEASE_READINESS_2026-10-24.md"
 }
