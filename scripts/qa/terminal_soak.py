@@ -22,7 +22,9 @@ def run(binary,state,seconds,*,source_daemon=False,correlated_inputs=False):
   env={**os.environ,'PYINSTALLER_RESET_ENVIRONMENT':'1','SENTRA_PTY_DAEMON':'1'}
   argv=[str(binary),'--pty-daemon',str(state/'canvas/pty-host')]
   if source_daemon:
-   argv=[sys.executable,'-c',"import faulthandler,sys;faulthandler.enable();faulthandler.dump_traceback_later(120,repeat=True);from sentra_canvas.pty_daemon import serve;serve(sys.argv[1])",str(state/'canvas/pty-host')]
+   # Exercise the normal entrypoint. Periodic cross-thread traceback dumping
+   # is diagnostic instrumentation, not part of the production daemon.
+   argv=[sys.executable,'-m','sentra_canvas.pty_daemon',str(state/'canvas/pty-host')]
   proc=subprocess.Popen(argv,cwd=ROOT,env=env,stdin=subprocess.DEVNULL,stdout=diagnostic_log,stderr=diagnostic_log,creationflags=subprocess.CREATE_NO_WINDOW)
   deadline=time.monotonic()+30
   while time.monotonic()<deadline:
