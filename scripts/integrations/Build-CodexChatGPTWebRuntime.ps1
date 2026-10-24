@@ -257,7 +257,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Electron renderer typecheck failed" }
         # Vite's config bundle loader asks esbuild to scan Windows profile
         # ancestors. The runner loads the same TS config without that traversal.
-        & node "node_modules/vite/bin/vite.js" build --configLoader runner
+        # Store-hosted Windows sessions may redirect LOCALAPPDATA. Rollup sees
+        # canonical HTML paths while cwd retains the alias; use one real root.
+        $CanonicalLauncher = (& node -e "process.stdout.write(require('node:fs').realpathSync(process.cwd()))").Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $CanonicalLauncher) { throw "Could not resolve launcher build root" }
+        & node "node_modules/vite/bin/vite.js" build $CanonicalLauncher --configLoader runner
         if ($LASTEXITCODE -ne 0) { throw "Electron renderer build failed" }
         $env:CODEX_WEB_GPT_BUN = $Bun
         & $Bun run build:runtime
