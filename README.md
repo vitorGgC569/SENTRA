@@ -9,8 +9,8 @@ SENTRA brings Dots, permanent conversations, terminals, files, browser tools, an
 ## Current status
 
 - **Development preview:** the local Windows app includes the conversation-first Home, central Dot selector, contextual Canvas, durable terminal receipts and LAN/mobile integration. Selected functionality is validated; the complete product is not yet qualified as a stable release.
-- **Installer is older than the current app:** the published [Windows preview from October 23](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261023-1) does not include the October 24 interface. A complete matching Setup, clean installation/update/rollback and trusted signing remain open.
-- **Known limits:** confirmed external-model acceptance, physical mobile tests and the full recovery journey remain open. The external-bar component is currently blocked by the Windows application policy on this host; the native WebView2 display is available. Read the [first-version acceptance review](docs/RELEASE_READINESS_2026-10-24.md).
+- **Current Windows installer:** the unsigned [Setup 1.0.2 preview](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261024-1) includes the October 24 interface and runtime fixes. Isolated installation, upgrade preservation, manual backup rollback and a real multi-Dot recovery journey passed. Stable qualification remains incomplete.
+- **Known limits:** updated user-app Web login/inference, physical mobile/VPN tests, clean-OS installation and installed endurance remain open. The native WebView2 display passed; Electron timed out and the external activity bar is unqualified. MSI and automatic-update packages are excluded from publication. Read the [first-version acceptance review](docs/RELEASE_READINESS_2026-10-24.md).
 
 Some linked documents and application labels remain in Portuguese. Dated reports identify the actual validation scope and remaining work.
 
@@ -23,11 +23,15 @@ metadata have been published. iPhone installation remains unavailable until an
 Apple distribution channel is configured. Physical-device qualification is a
 separate milestone from producing a build.
 
+Latest platform previews: [Windows Setup 1.0.2](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261024-1) and
+[Android v8](https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261024-8), both built from source `62d61fa`.
+The Windows Setup is unsigned; the Android APK uses the preserved preview key.
+
 ## SENTRA Desktop
 
 Desktop brings **Dots**, conversations, **Spaces**, and authorized computer resources into a Windows interface. It starts with a dark theme and offers a light-theme option.
 
-The following application previews were refreshed on October 24, 2026, using isolated demonstration data. They show the current Portuguese interface; they do not demonstrate live agent execution or qualification of the older published installer. [Screenshot provenance](site/assets/provenance.json).
+The following application previews were refreshed on October 24, 2026, using isolated demonstration data. They show the current Portuguese interface; they do not demonstrate live agent execution or full qualification of the Windows preview. [Screenshot provenance](site/assets/provenance.json).
 
 ### Start with your Dot
 

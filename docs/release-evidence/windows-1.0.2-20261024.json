@@ -5,7 +5,7 @@
   "source_commit": "62d61fa65fec9b79a0f531a91ccafd2fd3163615",
   "source_snapshot_sha256": "b66ca69df7db99ce5d26aeceb35335726c335f73bdd643dce408b9e06f3fe3cd",
   "signed": false,
-  "published": false,
+  "published": true,
   "user_installation_updated": false,
   "setup": {
     "name": "SENTRA-Setup-1.0.2.exe",
@@ -175,6 +175,20 @@
     "SHA256SUMS.txt": {
       "bytes": 1068,
       "sha256": "519ab997bba279bbc60c29be0bd321ab29ab94dba48add717874b81b2bd4c9ed"
+    }
+  },
+  "release_url": "https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261024-1",
+  "published_at": "2026-10-24T20:15:55Z",
+  "publication": {
+    "tag": "installer-preview-20261024-1",
+    "prerelease": true,
+    "parts_and_assets_verified": 11,
+    "msi_published": false,
+    "automatic_update_published": false,
+    "android": {
+      "tag": "mobile-preview-20261024-8",
+      "url": "https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261024-8",
+      "source_commit": "62d61fa65fec9b79a0f531a91ccafd2fd3163615"
     }
   }
 }

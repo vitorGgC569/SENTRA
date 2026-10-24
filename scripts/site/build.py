@@ -21,6 +21,7 @@ def validate_catalog(releases,fetch):
   url=apk['browser_download_url'];notes=release['html_url']
   if not url.startswith('https://github.com/'+REPO+'/releases/download/') or not notes.startswith('https://github.com/'+REPO+'/releases/tag/'):continue
   return {'url':url,'release':notes,'sha256':m['sha256'],'size':apk['size'],'version':release['tag_name'],
+          **({'source_commit':metadata['commit']} if isinstance(metadata.get('commit'),str) and re.fullmatch('[a-f0-9]{40}',metadata['commit']) else {}),
           **({k:m[k] for k in ('version_code','signing_certificate_sha256')} if 'version_code' in m else {})}
  return None
 

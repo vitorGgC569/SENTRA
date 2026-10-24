@@ -11,7 +11,7 @@ direct executable. See [GitHub's release limits](https://docs.github.com/en/repo
 2. Open PowerShell in that folder and run:
 
    ```powershell
-   powershell.exe -NoProfile -File .\Reassemble-Preview.ps1 -OutputPath .\SENTRA-Setup-1.0.1.exe
+   powershell.exe -NoProfile -File .\Reassemble-Preview.ps1 -OutputPath .\SENTRA-Setup-1.0.2.exe
    ```
 
 3. The helper verifies every part and the complete reconstructed SHA-256. It
@@ -28,10 +28,41 @@ The hash verifies downloaded bytes. It is separate from trusted Windows
 publisher signing and clean-install qualification. Read the release notes for
 the actual signature and acceptance status of that preview.
 
+## If PowerShell scripts are restricted
+
+Do not change the machine's execution policy for this preview. The same three
+parts can be joined with Windows' built-in binary copy command. In a new folder
+containing the 1.0.2 parts, first ensure the output does not already exist, then
+run these commands interactively:
+
+```powershell
+if (Test-Path .\SENTRA-Setup-1.0.2.exe) { throw 'Output already exists' }
+cmd.exe /d /c 'copy /b SENTRA-Setup-1.0.2.exe.part0001+SENTRA-Setup-1.0.2.exe.part0002+SENTRA-Setup-1.0.2.exe.part0003 SENTRA-Setup-1.0.2.exe'
+Get-FileHash -Algorithm SHA256 .\SENTRA-Setup-1.0.2.exe
+```
+
+The complete SHA-256 must be
+`e005f82bcef7d4ab8955d8f4061d423bb8d443f343be8742d0189f5e00b8a678`.
+Stop if the copy reports an error or the hash differs. Do not open an unverified
+or incomplete file. This alternative does not execute the downloaded helper.
+
+## Native main-window option
+
+If the Electron window cannot open, the supported native main window can be
+launched after installation in the default directory (use your chosen path for
+a custom installation):
+
+```powershell
+& "$env:LOCALAPPDATA\SENTRA\Commander\sentra-canvas.exe" --ui native
+```
+
+Native mode does not enable or qualify the external activity bar. The preview
+is unsigned and does not request disabling Windows protections.
+
 ## Preparing parts from reviewed release outputs
 
 ```powershell
-python scripts/commander/preview_parts.py split --source .\release\SENTRA-Setup-1.0.1.exe --output-dir .\new-setup-parts
+python scripts/commander/preview_parts.py split --source .\release\SENTRA-Setup-1.0.2.exe --output-dir .\new-setup-parts
 ```
 
 The default part size is 1 GiB. The output directory must not exist. The command

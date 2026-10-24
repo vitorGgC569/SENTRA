@@ -133,3 +133,19 @@ Android/iPhone, VPN, trusted signing and a clean-OS matrix remain separate work.
 The external activity bar depends on Electron. If Windows refuses that image,
 the native main window can work while the bar remains unavailable. No stable
 release claim follows from the native fallback alone.
+
+## Subsequent preview publication
+
+The same unchanged Setup was subsequently published as an unsigned
+[Windows 1.0.2 preview](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261024-1). All eleven public assets were checked against
+the reviewed publication plan, including the three installer parts. Independent
+streamed reconstruction matched the full Setup SHA-256. The PowerShell helper
+was not executed on this host because script execution is restricted; no policy
+was changed. Download instructions include a built-in binary-copy alternative.
+
+[Android preview v8](https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261024-8) was built, signature-checked and published by
+the existing GitHub workflow. Its package and dedicated signing identity are
+preserved. Both platform builds identify source `62d61fa65fec9b79a0f531a91ccafd2fd3163615`. This does not
+establish physical-device qualification or change the open acceptance above.
+The user's installation remains unchanged. MSI/CAB and automatic-update ZIP
+are not attached to the public preview.

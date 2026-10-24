@@ -28,6 +28,11 @@ class CatalogTests(unittest.TestCase):
   self.assertIsNone(validate_catalog([r],lambda _:self.fail('Foreign fetch')))
  def test_size_mismatch(self):
   r=self.release();r['assets'][0]['size']=1;self.assertIsNone(validate_catalog([r],self.metadata))
+ def test_valid_source_identity_is_preserved_for_cross_platform_catalog_checks(self):
+  metadata=self.metadata(None);metadata['commit']='a'*40
+  self.assertEqual(validate_catalog([self.release()],lambda _:metadata)['source_commit'],'a'*40)
+  metadata['commit']='not-a-commit'
+  self.assertNotIn('source_commit',validate_catalog([self.release()],lambda _:metadata))
  def test_new_mobile_metadata_requires_preserved_signer_and_version(self):
   from scripts.site.build import ROOT
   import json
