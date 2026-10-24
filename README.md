@@ -10,7 +10,9 @@ SENTRA brings Dots, permanent conversations, terminals, files, browser tools, an
 
 - **Development preview:** the local Windows app includes the conversation-first Home, central Dot selector, contextual Canvas, durable terminal receipts and LAN/mobile integration. Selected functionality is validated; the complete product is not yet qualified as a stable release.
 - **Current Windows installer:** the unsigned [Setup 1.0.2 preview](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261024-1) includes the October 24 interface and runtime fixes. Isolated installation, upgrade preservation, manual backup rollback and a real multi-Dot recovery journey passed. Stable qualification remains incomplete.
-- **Known limits:** updated user-app Web login/inference, physical mobile/VPN tests, clean-OS installation and installed endurance remain open. The native WebView2 display passed; Electron timed out and the external activity bar is unqualified. MSI and automatic-update packages are excluded from publication. Read the [first-version acceptance review](docs/RELEASE_READINESS_2026-10-24.md).
+- **Known limits:** the published 1.0.2 broker has a durable-terminal HTTP cursor bug; the correction is validated in source and a QA executable but requires a new full Setup. Updated user-app Web login/inference, physical mobile/VPN tests and clean-OS installation remain open. The native WebView2 display passed; Electron timed out and the external activity bar is unqualified. MSI and automatic-update packages are excluded from publication. Read the [first-version acceptance review](docs/RELEASE_READINESS_2026-10-24.md).
+
+[Headless acceptance follow-up](docs/HEADLESS_ACCEPTANCE_2026-10-24.md): installed-daemon endurance, MSI extraction, protocol tests and the unreleased cursor fix.
 
 Some linked documents and application labels remain in Portuguese. Dated reports identify the actual validation scope and remaining work.
 

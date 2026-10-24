@@ -103,6 +103,7 @@ def run(binary, proof_path, output):
         frame = request('/api/terminal/output?'+urllib.parse.urlencode({'ws': ws, 'id': ident}))
         row = next(r for r in client.call('inventory') if r['terminal_id'] == ident)
         original_pid, daemon_id = row['pid'], client.runtime_id
+        original_workers = {(r['terminal_id'], r['pid']) for r in client.call('inventory')}
         nonce = uuid.uuid4().hex
         gate = workspace/'continue.flag'
         started, result = workspace/'started.txt', workspace/'result.json'
@@ -143,6 +144,7 @@ def run(binary, proof_path, output):
         save()
         boot()
         assert endpoint.runtime_id != old_runtime
+        assert {(r['terminal_id'], r['pid']) for r in client.call('inventory')} == original_workers
         frame2 = request('/api/terminal/output?'+urllib.parse.urlencode({'ws': ws, 'id': ident}))
         assert frame2['input_target'] != frame['input_target'] and frame2['status'] == 'running'
         selector = {'ws': ws, 'id': ident, 'request_key': key, 'fingerprint': fingerprint}
@@ -162,6 +164,10 @@ def run(binary, proof_path, output):
                       physical_command_count=1, independently_verified_total=20100,
                       result_sha256=hashlib.sha256(result.read_bytes()).hexdigest())
         request('/api/terminal/close', {'ws': ws, 'id': ident, 'confirm': True})
+        assert started.read_text(encoding='utf-8-sig').splitlines() == [nonce]
+        assert json.loads(result.read_text(encoding='utf-8-sig')) == observed
+        report['no_extra_workers_after_restart'] = True
+        report['physical_count_verified_after_terminal_close'] = True
     except BaseException as exc:
         report.update(status='failed', error=type(exc).__name__+': '+str(exc), traceback=traceback.format_exc())
     finally:

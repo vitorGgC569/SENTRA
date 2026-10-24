@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "published_source": "62d61fa65fec9b79a0f531a91ccafd2fd3163615",
+  "published_canvas_sha256": "35cb224e558f6cbf7cf923961a0d582bc8ca35ee1a6fd2c29289466f54513564",
+  "interactive_ui_used": false,
+  "models_called": false,
+  "user_installation_modified": false,
+  "stable_release_qualified": false,
+  "installed_daemon_endurance": {
+    "state": "passed",
+    "elapsed_seconds": 1813.4,
+    "concurrent_terminals": 3,
+    "broker_reopens": 3,
+    "checkpoint_reads": 531,
+    "same_worker_pids": true,
+    "duplicate_input_physical_count": 1,
+    "owned_daemon_closed": true
+  },
+  "msi_administrative_image": {
+    "status": "passed",
+    "msi_sha256": "776b4c89979b71af270bf0ec5276721c14516835e4b10e927b9b9f590bd590c2",
+    "native_path_used": true,
+    "exit_code": 0,
+    "media_files_verified": 6,
+    "executables_verified": 14,
+    "matching_distribution_files": 7808,
+    "runtime_sidecars_verified": true,
+    "extension_identity_verified": true,
+    "registered_installation_tested": false,
+    "clean_windows_vm_tested": false
+  },
+  "msi_image_frozen_http": {
+    "sha256": "35cb224e558f6cbf7cf923961a0d582bc8ca35ee1a6fd2c29289466f54513564",
+    "source_snapshot_sha256": "b66ca69df7db99ce5d26aeceb35335726c335f73bdd643dce408b9e06f3fe3cd",
+    "unauthenticated_api_rejected": true,
+    "frozen_broker_restart": true,
+    "workspace_persisted": true,
+    "sse_before_and_after_restart": true,
+    "verified_http_assets": 122
+  },
+  "mobile": {
+    "tests": 27,
+    "failures": 0,
+    "skipped": 0,
+    "network": "loopback",
+    "fixture": "source production broker; installed launcher/Node/gateway in selected cases; automated encrypted clients",
+    "physical_phone_tested": false,
+    "physical_pointer_or_keyboard_control_tested": false
+  },
+  "terminal_cursor_fix": {
+    "released_binary_reproduced_http_500": true,
+    "source_regression_failed_before_fix": true,
+    "related_tests_passed": 20,
+    "source_commit": "15f2c2e566bd2cd113e6d1bf1015e959c736531f",
+    "candidate_sha256": "dce0e6c2eb563792475dfa424d9aff6eedf027321f8ba96d768b50df71213392",
+    "candidate_snapshot_sha256": "a5f85909e84d8c297f5d7c6edaced5ebe18d58e6db31cef0843878bc6f00ec4c",
+    "candidate_is_setup_or_installed_update": false,
+    "candidate_crash_recovery": {
+      "status": "passed",
+      "input_submissions": 1,
+      "automatic_replay": false,
+      "broker_killed_during_work": true,
+      "daemon_survived": true,
+      "same_worker_pid": true,
+      "receipt_reconciled_without_resend": true,
+      "receipt_did_not_claim_task_completion": true,
+      "worker_completed_after_broker_reopen": true,
+      "physical_command_count": 1,
+      "independently_verified_total": 20100,
+      "no_extra_workers_after_restart": true,
+      "physical_count_verified_after_terminal_close": true,
+      "owned_brokers_closed": true,
+      "owned_daemon_closed": true
+    },
+    "harness_sha256": "6439af14d02587d79f9fa199cdafa74367cfb8a6b8ffcc76170e307a3f1a7e3a",
+    "full_setup_with_fix_published": false
+  }
+}
