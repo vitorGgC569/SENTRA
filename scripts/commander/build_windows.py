@@ -90,7 +90,7 @@ def _source_fingerprint(root: Path | None = None) -> dict[str, str]:
     extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".cs", ".h", ".go", ".mod", ".sum", ".sh", ".wasm", ".rs", ".toml", ".lock", ".mjs", ".xpi"}
     files = {root / name for name in (
         "main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt", "LICENSE",
-        "README.md", "SECURITY.md", "CHANGELOG.md",
+        "README.md", "SECURITY.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md",
         # These extensionless notices are mandatory inputs of mobile staging
         # and the terminal engine seal, including in isolated source snapshots.
         "vendor/orca/LICENSE", "integrations/orca-terminal/vendor/orca/LICENSE",
@@ -274,6 +274,7 @@ def _common(name: str, entry: Path, dist: Path, work: Path, spec: Path) -> list[
 
 
 PYINSTALLER_TIMEOUT_S = 600
+SETUP_TIMEOUT_S = 1800  # Integral offline payloads exceed the small-EXE budget.
 UPDATE_HELPER_TIMEOUT_S = 600
 WEB_MODELS_TIMEOUT_S = 600
 
@@ -821,6 +822,7 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     stage_wasmtime_notices(runtime_legal)
     packaged_docs = extension_parent / "docs"
     shutil.copytree(ROOT / "docs", packaged_docs)
+    shutil.copy2(ROOT / "THIRD_PARTY_NOTICES.md", packaged_docs / "THIRD_PARTY_NOTICES.md")
     shutil.copytree(ROOT / "sentra_remote/provider_notices", packaged_docs / "provider_notices", dirs_exist_ok=True)
     shutil.copytree(runtime_legal, packaged_docs / "wasmtime", dirs_exist_ok=True)
     # Electron is a second *display*, not a parallel executor or MCP server.
@@ -882,6 +884,7 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
         dist, work, spec,
         windowed=True,
         extra=installer_extra,
+        timeout_s=SETUP_TIMEOUT_S,
     )
     _verify_frozen_gui(dist / "SENTRA-Setup.exe")
 
