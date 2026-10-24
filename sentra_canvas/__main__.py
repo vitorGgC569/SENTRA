@@ -433,8 +433,12 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(200,a.store.events(ws,limit=250,
                        search=(qs.get("q") or [""])[0]));return
         if path.path=="/api/terminal/output":
+            cursors=qs.get('cursor',['0'])
+            if (len(cursors)!=1 or not cursors[0].isascii() or not cursors[0].isdecimal()
+                    or len(cursors[0])>13 or int(cursors[0])>10**12):
+                raise ValueError('bounded integer terminal cursor required')
             self._send(200,a.terminal_output(ws,(qs.get("id") or [""])[0],
-                              (qs.get("cursor") or ["0"])[0]));return
+                              int(cursors[0])));return
         if path.path=='/api/terminal/checkpoint':
             self._send(200,a.terminal_checkpoint(ws,(qs.get('id') or [''])[0]));return
         if path.path=="/api/team":

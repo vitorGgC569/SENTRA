@@ -46,3 +46,34 @@ def test_authenticated_canvas_history_pages_without_skips_or_starting_a_process(
         assert not app._sessions  # Metadata/history retrieval never creates a PTY.
         code,_=request(server,f'/api/terminal/output?ws={ws}&id={terminal}&cursor=0',authorized=False)
         assert code==401
+
+
+def test_owner_http_output_uses_integer_cursors_for_real_durable_terminal(tmp_path,monkeypatch):
+    import os
+    from urllib.parse import quote
+    if os.name!='nt':pytest.skip('actual Windows ConPTY daemon')
+    from test_sentra_runtime_canvas_center_http import running_canvas,request
+    from sentra_canvas.pty_client import DaemonPTY
+    monkeypatch.setenv('SENTRA_PTY_DAEMON','1')
+    with running_canvas(tmp_path) as (app,server):
+        client=None;terminal=None
+        try:
+            ws=app.create_workspace('HttpDaemonCursor')['id']
+            terminal=app.create_terminal(ws,'CursorFixture','cmd')['id']
+            client=app._pty_client
+            assert isinstance(app._sessions[terminal].pty,DaemonPTY)
+            pid=app._sessions[terminal].pty.pid
+            base=f'/api/terminal/output?ws={ws}&id={terminal}'
+            for suffix in ('','&cursor=0','&cursor=1'):
+                code,frame=request(server,base+suffix)
+                assert code==200,frame
+                assert frame['process_live'] and type(frame['cursor']) is int
+                assert app._sessions[terminal].pty.pid==pid
+            for cursor in ('-1','1.5','true','1000000000001','9'*100,'١'):
+                assert request(server,base+'&cursor='+quote(cursor))[0]==400
+            assert request(server,base+'&cursor=0&cursor=1')[0]==400
+            assert request(server,base,authorized=False)[0]==401
+        finally:
+            if terminal is not None:app.terminal_close(ws,terminal)
+            if client is not None:
+                client.call('drain');client.call('stop_when_idle')

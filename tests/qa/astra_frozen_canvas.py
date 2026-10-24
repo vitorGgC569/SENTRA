@@ -19,10 +19,13 @@ from sentra_canvas.broker import read_endpoint
 from scripts.commander.build_windows import _terminate_process_tree
 
 
-def verify(executable: Path, output: Path):
+def verify(executable: Path, output: Path, proof_path: Path | None = None):
     executable = executable.resolve(strict=True)
     output.mkdir(parents=True, exist_ok=True)
-    proof = json.loads((executable.parent / "build-provenance-canvas.json").read_text())
+    # Setup/MSI installations intentionally do not add QA provenance files to
+    # the program tree. Accept the independently retained build proof instead.
+    proof_path = proof_path or executable.parent / "build-provenance-canvas.json"
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
     digest = hashlib.sha256(executable.read_bytes()).hexdigest()
     assert proof["executables"][executable.name]["sha256"] == digest
     base = Path(tempfile.mkdtemp(prefix="frozen-canvas-", dir=output))
@@ -121,6 +124,7 @@ def verify(executable: Path, output: Path):
     finally:
         stop(process, endpoint)
     report = {"executable": str(executable), "sha256": digest,
+              "proof_sha256": hashlib.sha256(proof_path.read_bytes()).hexdigest(),
               "source_snapshot_sha256": proof.get("source_snapshot_sha256"),
               "isolated_state": str(state), "unauthenticated_api_rejected": True,
               "frozen_broker_restart": True, "workspace_persisted": True,
@@ -135,5 +139,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", type=Path)
     parser.add_argument("--output", type=Path, default=ROOT / ".tmp/astra-frozen-qa")
+    parser.add_argument("--proof", type=Path,
+                        help="External build provenance bound to this executable's SHA-256")
     args = parser.parse_args()
-    verify(args.executable, args.output)
+    verify(args.executable, args.output, args.proof)
