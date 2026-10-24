@@ -6,45 +6,45 @@
  * Original SENTRA characters, navigation and execution contracts are retained.
  */
 :root {
-  --sc-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --sc-font: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   --sc-mono: "SFMono-Regular", "Cascadia Code", Consolas, monospace;
-  --sc-bg: #f5f5f7;
-  --sc-sidebar: #ededf0;
+  --sc-bg: #f7f8fa;
+  --sc-sidebar: #eef0f3;
   --sc-panel: #ffffff;
-  --sc-field: #ececef;
-  --sc-ink: #202126;
-  --sc-body: #41434b;
-  --sc-muted: #686c76;
-  --sc-line: rgb(20 21 24 / 9%);
-  --sc-hover: rgb(20 21 24 / 5%);
-  --sc-selected: rgb(20 21 24 / 8%);
-  --sc-accent: #fb923c;
-  --sc-accent-ink: #170c04;
-  --sc-accent-text: #a4470b;
-  --sc-green: #18805d;
-  --sc-red: #bd2535;
-  --sc-glass: rgb(255 255 255 / 88%);
-  --sc-shadow: 0 2px 5px rgb(0 0 0 / 3%), 0 12px 32px rgb(20 21 24 / 7%);
-  --sc-modal-shadow: 0 24px 90px rgb(0 0 0 / 24%), 0 0 0 1px rgb(255 255 255 / 50%) inset;
+  --sc-field: #f0f2f5;
+  --sc-ink: #20262e;
+  --sc-body: #424c59;
+  --sc-muted: #616b79;
+  --sc-line: #dce1e8;
+  --sc-hover: #e7ebf0;
+  --sc-selected: #dde3eb;
+  --sc-accent: #39aef5;
+  --sc-accent-ink: #071b2b;
+  --sc-accent-text: #0866aa;
+  --sc-green: #19734c;
+  --sc-red: #b43142;
+  --sc-glass: #fff;
+  --sc-shadow: 0 4px 16px rgb(30 40 55 / 5%);
+  --sc-modal-shadow: 0 24px 70px rgb(15 23 35 / 24%);
 }
 :root[data-sentra-theme="dark"] {
   color-scheme: dark;
-  --sc-bg: #0e0f11;
-  --sc-sidebar: #000000;
-  --sc-panel: #18191c;
-  --sc-field: #1f2024;
-  --sc-ink: #f5f6f8;
-  --sc-body: #e1e3e6;
-  --sc-muted: #9a9fa8;
-  --sc-line: rgb(255 255 255 / 7%);
-  --sc-hover: rgb(255 255 255 / 5%);
-  --sc-selected: rgb(255 255 255 / 9%);
-  --sc-accent-text: #fdab63;
-  --sc-green: #34d399;
-  --sc-red: #ff8d97;
-  --sc-glass: rgb(24 25 28 / 90%);
-  --sc-shadow: 0 1px 0 rgb(255 255 255 / 3%) inset, 0 8px 28px rgb(0 0 0 / 20%);
-  --sc-modal-shadow: 0 28px 100px rgb(0 0 0 / 58%), 0 1px 0 rgb(255 255 255 / 9%) inset;
+  --sc-bg: #101010;
+  --sc-sidebar: #090909;
+  --sc-panel: #1b1b1b;
+  --sc-field: #242424;
+  --sc-ink: #f5f5f5;
+  --sc-body: #dedede;
+  --sc-muted: #b0b0b0;
+  --sc-line: #3b3b3b;
+  --sc-hover: #2a2a2a;
+  --sc-selected: #303030;
+  --sc-accent-text: #78cbff;
+  --sc-green: #7bd4aa;
+  --sc-red: #ff9ca9;
+  --sc-glass: #1b1b1b;
+  --sc-shadow: 0 4px 18px rgb(0 0 0 / 9%);
+  --sc-modal-shadow: 0 24px 80px rgb(0 0 0 / 44%);
 }
 :root[data-sentra-theme="light"] { color-scheme: light; }
 
@@ -69,7 +69,7 @@
   --polish-accent: var(--sc-accent-text);
   --polish-ring: color-mix(in srgb, var(--sc-accent) 36%, transparent);
   --polish-shadow: var(--sc-shadow);
-  font: 400 13px/1.5 var(--sc-font);
+  font: 400 14px/1.5 var(--sc-font);
   -webkit-font-smoothing: antialiased;
   background: var(--sc-bg);
   color: var(--sc-ink);
@@ -86,148 +86,156 @@
 .dialog-content :is(button, input, textarea, select, summary):focus-visible {
   outline: 2px solid var(--sc-accent-text); outline-offset: 3px;
 }
-.opendots-shell ::selection, .dialog-content ::selection { background: rgb(251 146 60 / 28%); }
+.opendots-shell ::selection, .dialog-content ::selection { background: color-mix(in srgb, var(--sc-accent) 28%, transparent); }
 
-/* Sidebar: quieter groups, comfortable hit areas and a single selected surface. */
-.opendots-shell .shell-rail {
-  width: 228px; flex-basis: 228px; padding: 25px 12px 14px;
-  background: var(--sc-sidebar); border-right-color: var(--sc-line);
-}
-.opendots-shell .shell-wordmark { padding: 0 12px 24px; font-size: 19px; letter-spacing: -.7px; font-weight: 750; }
-.opendots-shell .shell-project-label { gap: 7px; padding-inline: 8px; }
-.opendots-shell .shell-project-label { color: var(--sc-muted); font-size: 11px; font-weight: 500; }
-.opendots-shell .shell-project-label select {
-  min-height: 38px; padding: 8px 11px; border-radius: 10px;
-  background: var(--sc-field); border-color: var(--sc-line); color: var(--sc-ink);
-}
-.opendots-shell .shell-primary-nav { margin-top: 18px; gap: 3px; }
-.opendots-shell .shell-primary-nav button { min-height: 37px; padding: 8px 12px; font-size: 13px; font-weight: 500; color: var(--sc-body); }
+/* Stable navigation: project and utilities remain visible around one scroll area. */
+.opendots-shell .shell-rail { width: 248px; flex-basis: 248px; padding: 20px 12px 12px; gap: 8px; overflow: hidden; background: var(--sc-sidebar); border-right-color: var(--sc-line); }
+.opendots-shell .shell-wordmark { padding: 0 12px 14px; font-size: 19px; letter-spacing: -.6px; font-weight: 750; }
+.opendots-shell .shell-project-label { gap: 7px; padding-inline: 8px; color: var(--sc-muted); font-size: 12px; font-weight: 500; flex-shrink: 0; }
+.opendots-shell .shell-project-label select { min-height: 40px; padding: 8px 11px; border-radius: 8px; background: var(--sc-field); border-color: var(--sc-line); color: var(--sc-ink); }
+.opendots-shell .shell-rail-content { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; scrollbar-width: thin; scrollbar-gutter: stable; }
+.opendots-shell .shell-primary-nav { margin-top: 8px; gap: 3px; }
+.opendots-shell .shell-primary-nav button { min-height: 38px; padding: 8px 12px; font-size: 13px; font-weight: 500; color: var(--sc-body); border: 1px solid transparent; }
 .opendots-shell .shell-primary-nav button svg { width: 17px; stroke-width: 1.7; }
-.opendots-shell .shell-primary-nav button[aria-current="page"] {
-  background: var(--sc-selected); color: var(--sc-ink); font-weight: 650;
-  box-shadow: none; border-color: transparent;
-}
+:root[data-sentra-theme] .opendots-shell .shell-primary-nav button[aria-current="page"] { background: var(--sc-selected); color: var(--sc-ink); font-weight: 650; box-shadow: none; border-color: transparent; }
 .opendots-shell .shell-primary-nav button[aria-current="page"] svg { color: var(--sc-accent-text); }
-.opendots-shell .shell-rail-label { padding: 23px 12px 8px; font-size: 10px; letter-spacing: .09em; font-weight: 650; }
-.opendots-shell .shell-dot-nav-row { border-radius: 10px; padding-inline: 4px; }
-.opendots-shell .shell-dot-nav-row.selected,
-.opendots-shell .shell-dot-nav-row[aria-current="page"],
-.opendots-shell .shell-dot-nav-row:has([aria-current="page"]) { background: var(--sc-selected); }
-.opendots-shell .shell-dot-nav-open { min-height: 43px; font-size: 12px; }
-.opendots-shell .shell-rail-footer { border-top-color: var(--sc-line); padding-top: 12px; }
-.opendots-shell .shell-rail-footer button { min-height: 34px; color: var(--sc-muted); font-size: 11.5px; }
-.opendots-shell .shell-topbar {
-  height: 60px; flex-basis: 60px; padding-inline: 24px;
-  background: color-mix(in srgb, var(--sc-bg) 88%, transparent);
-  border-bottom: 1px solid var(--sc-line); backdrop-filter: blur(22px);
-}
-.opendots-shell .shell-breadcrumb { font-size: 12px; gap: 11px; }
+.opendots-shell .shell-rail-label { padding: 18px 12px 7px; font-size: 12px; letter-spacing: 0; text-transform: none; font-weight: 600; }
+.opendots-shell :is(.shell-space-nav, .shell-dots-nav) { max-height: none; overflow: visible; flex: none; }
+.opendots-shell .shell-dot-nav-row { border-radius: 8px; padding-inline: 4px; }
+.opendots-shell .shell-dot-nav-row:is(.selected, [aria-current="page"]), .opendots-shell .shell-dot-nav-row:has([aria-current="page"]) { background: var(--sc-selected); }
+.opendots-shell .shell-dot-nav-open { min-height: 40px; font-size: 13px; }
+.opendots-shell .shell-mascot.nav { width: 27px; height: 30px; }
+.opendots-shell .shell-rail-footer { flex-shrink: 0; margin-top: 0; border-top-color: var(--sc-line); padding-top: 8px; }
+.opendots-shell .shell-rail-footer button { min-height: 34px; color: var(--sc-muted); font-size: 12px; }
+.opendots-shell .shell-topbar { height: 60px; flex-basis: 60px; padding-inline: 24px; background: var(--sc-bg); border-bottom: 1px solid var(--sc-line); backdrop-filter: none; }
+.opendots-shell .shell-breadcrumb { font-size: 13px; gap: 10px; }
 .opendots-shell .shell-breadcrumb > span { color: var(--sc-muted); }
 .opendots-shell .shell-topbar-actions { gap: 6px; }
-.opendots-shell .shell-topbar .shell-icon { border-radius: 10px; color: var(--sc-muted); }
-.opendots-shell .shell-run-label .shell-status { background: var(--sc-field); border-color: var(--sc-line); border-radius: 7px; padding: 4px 8px; font-size: 10px; }
+.opendots-shell .shell-native-slot { display: flex; align-items: center; flex-shrink: 0; }
+.opendots-shell .shell-run-label { display: inline-flex; align-items: center; gap: 7px; }
+.opendots-shell .shell-run-caption { color: var(--sc-muted); font-size: 12px; }
+.opendots-shell .shell-topbar .shell-icon { width: 34px; height: 34px; border-radius: 8px; color: var(--sc-muted); }
+.opendots-shell .shell-run-label .shell-status { background: var(--sc-field); border-color: var(--sc-line); border-radius: 6px; padding: 4px 8px; font-size: 12px; }
 
-/* Coucou's coloured hero band establishes a clear beginning to the page. */
-.opendots-shell .shell-content { padding: 28px clamp(22px, 3vw, 44px) 48px; }
-.opendots-shell .shell-content > * { max-width: 1120px; margin-inline: auto; }
-.opendots-shell .shell-home-hero {
-  position: relative; isolation: isolate; min-height: 190px; margin-bottom: 22px;
-  padding: 28px 32px; border: 1px solid rgb(251 146 60 / 20%); border-radius: 20px;
-  background: radial-gradient(ellipse at 88% 120%, rgb(251 146 60 / 25%), transparent 60%),
-    linear-gradient(115deg, var(--sc-panel), color-mix(in srgb, var(--sc-panel) 89%, #fb923c));
-  overflow: hidden; box-shadow: var(--sc-shadow);
-}
-.opendots-shell .shell-home-hero::before {
-  content: ""; position: absolute; z-index: -1; pointer-events: none;
-  width: 240px; height: 240px; right: 32px; bottom: -150px; border-radius: 50%;
-  border: 1px solid rgb(251 146 60 / 16%); box-shadow: 0 0 0 44px rgb(251 146 60 / 3%), 0 0 0 88px rgb(251 146 60 / 2%);
-}
-.opendots-shell .shell-home-hero > div { position: relative; z-index: 1; max-width: calc(100% - 170px); }
-.opendots-shell .shell-eyebrow { color: var(--sc-muted); font-size: 10px; font-weight: 650; letter-spacing: .1em; }
-.opendots-shell .shell-home-hero .shell-eyebrow { color: var(--sc-accent-text); }
-.opendots-shell .shell-home-hero h1 { font-size: clamp(25px, 2.8vw, 34px); font-weight: 720; letter-spacing: -.035em; line-height: 1.15; margin: 12px 0; }
-.opendots-shell .shell-home-hero p { color: var(--sc-body); font-size: 13.5px; line-height: 1.65; max-width: 430px; }
-.opendots-shell .shell-home-hero-actions { display: flex; gap: 9px; margin-top: 20px; flex-wrap: wrap; }
-.opendots-shell .shell-home-hero-actions button { display: inline-flex; align-items: center; gap: 7px; padding: 9px 13px; font-size: 12px; min-height: 35px; }
-.opendots-shell .shell-home-hero-actions button:not(.shell-primary) { background: var(--sc-hover); border-color: var(--sc-line); color: var(--sc-body); }
-.opendots-shell .shell-home-resume-primary .shell-primary { background: var(--sc-selected); color: var(--sc-ink); box-shadow: none; }
-.opendots-shell .shell-home-hero .shell-mascot.hero { width: 158px; height: 158px; flex: 0 0 158px; filter: drop-shadow(0 14px 20px rgb(0 0 0 / 15%)); transform: none; }
-.opendots-shell .shell-home-resume {
-  border-radius: 15px; background: var(--sc-panel); border-color: var(--sc-line); box-shadow: var(--sc-shadow); margin-bottom: 16px;
-}
-.opendots-shell .shell-home-resume-primary { padding: 20px 23px; gap: 18px; }
-.opendots-shell .shell-home-resume h2 { font-size: 17px; font-weight: 650; letter-spacing: -.025em; margin: 6px 0 4px; }
-.opendots-shell .shell-home-start {
-  min-height: 74px; padding: 15px 22px; margin-bottom: 28px; border-radius: 14px;
-  background: var(--sc-panel); border-color: var(--sc-line); box-shadow: none;
-}
-.opendots-shell .shell-home-start > svg { color: var(--sc-accent-text); width: 20px; }
-.opendots-shell .shell-home-start h2 { font-size: 13px; font-weight: 600; }
-.opendots-shell .shell-home-start p { font-size: 12px; color: var(--sc-muted); }
-.opendots-shell .shell-home-start .shell-primary { background: var(--sc-selected); color: var(--sc-ink); box-shadow: none; }
-.opendots-shell .shell-section-heading { margin-block: 27px 14px; }
-.opendots-shell .shell-section-heading h2 { font-size: 14px; font-weight: 650; letter-spacing: -.015em; }
-.opendots-shell .shell-section-heading > button { color: var(--sc-muted); font-size: 11.5px; }
-.opendots-shell .shell-dot-grid { grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
-.opendots-shell .shell-dot-card {
-  padding: 20px; border-radius: 16px; border: 1px solid var(--sc-line);
-  background: linear-gradient(150deg, color-mix(in srgb, var(--sc-panel) 96%, white), var(--sc-panel));
-  box-shadow: var(--sc-shadow); grid-template-columns: 58px minmax(0, 1fr); gap: 8px 14px;
-}
-.opendots-shell .shell-dot-card:is(:hover, :focus-within) { border-color: rgb(251 146 60 / 34%); transform: translateY(-2px); }
-.opendots-shell .shell-dot-card > .shell-mascot.card { width: 58px; height: 64px; }
-.opendots-shell .shell-dot-card h3 { font-size: 14px; font-weight: 650; letter-spacing: -.015em; }
-.opendots-shell .shell-dot-card > .shell-status { color: var(--sc-muted); font-size: 10.5px; }
-.opendots-shell .shell-dot-card footer { margin-top: 8px; padding-top: 14px; border-color: var(--sc-line); }
-.opendots-shell .shell-dot-card footer button { min-height: 32px; border-radius: 8px; background: var(--sc-hover); font-size: 11.5px; border-color: transparent; }
-.opendots-shell .shell-dot-card footer button:first-child { color: var(--sc-accent-text); background: rgb(251 146 60 / 10%); }
-.opendots-shell :is(.shell-conversation-row, .shell-space-card, .shell-team, .shell-space-shortcuts) {
-  border-color: var(--sc-line); border-radius: 14px; background: var(--sc-panel); box-shadow: none;
-}
-.opendots-shell .shell-conversation-row { padding: 16px 20px; }
-.opendots-shell .shell-conversation-row:hover { background: var(--sc-field); }
-.opendots-shell .shell-page-heading:not(.shell-home-hero) h1 { font-size: 30px; letter-spacing: -.035em; font-weight: 700; }
+/* The first screen has one task: begin a conversation with a Dot. */
+.opendots-shell .shell-content { padding: 32px 40px 48px; }
+.opendots-shell .shell-content > * { max-width: 1160px; margin-inline: auto; }
+.opendots-shell .shell-page-heading h1 { font-size: 28px; letter-spacing: -.025em; font-weight: 700; line-height: 1.25; margin: 0 0 8px; }
+.opendots-shell .shell-page-heading p { color: var(--sc-muted); font-size: 14px; line-height: 1.6; margin: 0; }
+.opendots-shell[data-surface=home] .shell-content { display: flex; padding: 24px 40px 32px; }
+.opendots-shell .shell-start { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; align-content: center; align-content: safe center; gap: 28px; flex: 1; padding-block: 32px; width: 100%; max-width: 760px; min-width: 0; min-height: 0; margin: 0 auto; }
+.opendots-shell .shell-start-greeting { align-self: center; display: flex; flex-direction: column; align-items: center; gap: 20px; padding-bottom: 0; text-align: center; }
+.opendots-shell .shell-start-greeting > .shell-mascot { width: 80px; height: 88px; margin: 0; flex-shrink: 0; }
+.opendots-shell .shell-start h1 { font-size: 28px; line-height: 1.3; font-weight: 500; letter-spacing: -.025em; margin: 0; text-wrap: balance; }
+.opendots-shell .shell-start-compose { min-width: 0; border: 1px solid var(--sc-line); border-radius: 16px; background: var(--sc-panel); padding: 16px 16px 12px; margin: 0; }
+.opendots-shell .shell-start-compose:focus-within { border-color: var(--sc-muted); outline: 2px solid var(--sc-muted); outline-offset: 2px; }
+.opendots-shell .shell-start-compose textarea { display: block; width: 100%; min-height: 76px; max-height: 220px; padding: 3px 2px 12px; border: 0; border-radius: 0; resize: none; background: transparent; font-size: 16px; line-height: 1.65; outline: none; box-shadow: none; }
+:root[data-sentra-theme] .opendots-shell .shell-start-compose textarea:focus-visible { outline: none; }
+.opendots-shell .shell-start-action-area { min-width: 0; }
+.opendots-shell .shell-start-writing { display: flex; align-items: flex-start; gap: 10px; }
+.opendots-shell .shell-start-writing textarea { flex: 1; min-width: 0; }
+.opendots-shell .shell-start-add { display: grid; place-items: center; flex-shrink: 0; width: 34px; height: 34px; padding: 0; border-radius: 50%; border: 1px solid var(--sc-line); background: var(--sc-field); color: var(--sc-body); }
+.opendots-shell .shell-start-add:hover:not(:disabled) { background: var(--sc-hover); color: var(--sc-ink); }
+.opendots-shell .shell-start-file-input { display: none; }
+.opendots-shell .shell-start-attachment { display: flex; align-items: center; gap: 8px; width: fit-content; max-width: 100%; padding: 5px 6px 5px 10px; margin-bottom: 12px; border: 1px solid var(--sc-line); border-radius: 8px; background: var(--sc-field); font-size: 13px; }
+.opendots-shell .shell-start-attachment > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.opendots-shell .shell-start-attachment button { flex-shrink: 0; width: 28px; height: 28px; padding: 0; border: 0; background: transparent; }
+.opendots-shell .shell-start-attachment > svg { flex-shrink: 0; color: var(--sc-accent-text); }
+.opendots-shell .shell-start-file-error { color: var(--sc-red); }
+.opendots-shell .shell-start-shortcuts { display: flex; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.opendots-shell .shell-start-shortcuts button { min-height: 36px; padding: 7px 13px; border-radius: 20px; border: 1px solid var(--sc-line); background: var(--sc-panel); color: var(--sc-body); font-size: 12px; font-weight: 400; }
+.opendots-shell .shell-start-shortcuts button:hover:not(:disabled) { background: var(--sc-hover); border-color: var(--sc-accent-text); color: var(--sc-ink); }
+.opendots-shell .shell-start-controls { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.opendots-shell .shell-start-dot { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 48%; padding: 0 4px 0 0; }
+.opendots-shell .shell-start-dot .shell-mascot { width: 26px; height: 30px; flex-shrink: 0; }
+.opendots-shell .shell-start-dot select { appearance: none; min-height: 38px; width: auto; min-width: 0; max-width: 100%; padding: 4px 0; border: 0; background: transparent; font-size: 13px; cursor: pointer; text-overflow: ellipsis; }
+.opendots-shell .shell-start-dot > svg { flex-shrink: 0; color: var(--sc-muted); }
+.opendots-shell .shell-start-model { margin-left: auto; min-width: 0; max-width: 42%; font-size: 12px; color: var(--sc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opendots-shell .shell-start-send { flex-shrink: 0; width: 38px; height: 38px; padding: 0; border-radius: 50%; border: 0; background: var(--sc-accent); color: var(--sc-accent-ink); }
+.opendots-shell .shell-start-send:hover:not(:disabled) { background: color-mix(in srgb, var(--sc-accent) 82%, white); color: var(--sc-accent-ink); }
+.opendots-shell .shell-start-send:disabled { opacity: .48; }
+.opendots-shell .shell-start-note { margin: 12px 2px 0; color: var(--sc-muted); font-size: 13px; }
+.opendots-shell .shell-start-empty { align-self: end; text-align: center; padding: 24px; color: var(--sc-muted); }
+.opendots-shell .shell-start-empty p { margin: 0 0 16px; }
+.opendots-shell .shell-recent-chats { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; }
+.opendots-shell .shell-recent-chats button { display: flex; justify-content: flex-start; gap: 9px; width: 100%; min-width: 0; padding: 8px 12px; min-height: 36px; background: transparent; border-color: transparent; color: var(--sc-muted); font-size: 13px; }
+.opendots-shell .shell-recent-chats button svg { flex-shrink: 0; }
+.opendots-shell .shell-recent-chats button span { min-width: 0; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.opendots-shell .shell-rail-tools summary { display: flex; align-items: center; gap: 9px; padding: 10px; color: var(--sc-muted); font-size: 12px; cursor: pointer; list-style: none; border-radius: 8px; }
+.opendots-shell .shell-rail-tools summary::-webkit-details-marker { display: none; }
+.opendots-shell .shell-rail-tools summary:hover { background: var(--sc-hover); }
+.opendots-shell .shell-rail-tools[open] summary { margin-bottom: 6px; }
+.opendots-shell .shell-rail-tools button { width: 100%; }
+@keyframes shell-start-spin { to { transform: rotate(360deg); } }
+.opendots-shell .shell-start-spinner { animation: shell-start-spin 1s linear infinite; }
+.opendots-shell .shell-section-heading { margin-block: 28px 14px; }
+.opendots-shell .shell-section-heading h2 { font-size: 16px; font-weight: 650; letter-spacing: -.015em; margin: 0; }
+.opendots-shell .shell-section-heading p { font-size: 13px; color: var(--sc-muted); margin: 4px 0 0; }
+.opendots-shell .shell-section-heading > button { color: var(--sc-muted); font-size: 13px; }
+.opendots-shell .shell-dot-grid { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.opendots-shell .shell-dot-card { padding: 18px; border-radius: 12px; border: 1px solid var(--sc-line); background: var(--sc-panel); box-shadow: none; grid-template-columns: 42px minmax(0, 1fr); gap: 8px 12px; }
+.opendots-shell .shell-dot-card:is(:hover, :focus-within) { border-color: var(--sc-muted); transform: none; box-shadow: none; }
+.opendots-shell .shell-dot-card > .shell-mascot.card { width: 42px; height: 48px; margin: 0; filter: none; }
+.opendots-shell .shell-dot-card h3 { font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+.opendots-shell .shell-dot-card :is(p, small) { font-size: 13px; }
+.opendots-shell .shell-dot-card > .shell-status { color: var(--sc-muted); font-size: 12px; }
+.opendots-shell .shell-dot-card footer { margin-top: 6px; padding-top: 12px; border-color: var(--sc-line); }
+.opendots-shell .shell-dot-card footer button { min-height: 34px; border-radius: 8px; background: var(--sc-hover); font-size: 12px; border-color: transparent; }
+.opendots-shell .shell-dot-card footer button:first-child { color: var(--sc-accent-text); background: color-mix(in srgb, var(--sc-accent) 10%, transparent); }
+.opendots-shell :is(.shell-conversation-list, .shell-space-card, .shell-team, .shell-space-shortcuts) { border: 1px solid var(--sc-line); border-radius: 12px; background: var(--sc-panel); box-shadow: none; }
+.opendots-shell .shell-conversation-list { gap: 0; overflow: hidden; }
+.opendots-shell .shell-conversation-row { padding: 14px 18px; min-height: 66px; border: 0; border-bottom: 1px solid var(--sc-line); border-radius: 0; background: transparent; box-shadow: none; }
+.opendots-shell .shell-conversation-row:last-child { border-bottom: 0; }
+.opendots-shell .shell-conversation-row:hover { background: var(--sc-hover); }
+.opendots-shell .shell-conversation-row strong { font-size: 14px; }
+.opendots-shell .shell-conversation-row :is(small, time) { font-size: 12px; }
 
-/* Buttons and fields have one language across orchestration and configuration. */
-.opendots-shell .shell-primary,
-.opendots-shell .sentra-workspace .sw-new-session,
-.dialog-content :is(.primary, .shell-primary),
-.shell-hub-primary, .dialog-content .shell-hub-primary,
-.shell-decisions-button.is-primary {
-  background: var(--sc-accent); color: var(--sc-accent-ink); border: 1px solid rgb(255 255 255 / 9%);
-  border-radius: 10px; font-weight: 650; box-shadow: 0 1px 0 rgb(255 255 255 / 18%) inset, 0 2px 5px rgb(0 0 0 / 10%);
+/* A single primary action treatment also applies inside workspace headers. */
+:root[data-sentra-theme] :is(.opendots-shell, .dialog-content) :is(.shell-primary, .shell-send),
+:root[data-sentra-theme] .opendots-shell .sentra-workspace .sw-header .sw-new-session,
+:root[data-sentra-theme] .dialog-content :is(.primary, .sw-primary, .shell-hub-primary),
+:root[data-sentra-theme] .shell-decisions-button.is-primary {
+  background: var(--sc-accent); color: var(--sc-accent-ink); border: 1px solid transparent; border-radius: 8px; font-weight: 650; box-shadow: none;
 }
-.opendots-shell .shell-primary:hover:not(:disabled),
-.dialog-content .primary:hover:not(:disabled), .shell-hub-primary:hover:not(:disabled),
-.shell-decisions-button.is-primary:hover:not(:disabled) { background: #fdab63; color: #170c04; }
+:root[data-sentra-theme] :is(.opendots-shell, .dialog-content) :is(.shell-primary, .shell-send, .primary, .sw-primary, .shell-hub-primary):hover:not(:disabled),
+:root[data-sentra-theme] .opendots-shell .sentra-workspace .sw-header .sw-new-session:hover:not(:disabled) { background: color-mix(in srgb, var(--sc-accent) 82%, white); color: var(--sc-accent-ink); }
 .opendots-shell :is(input, textarea, select) { color: var(--sc-ink); caret-color: var(--sc-accent-text); }
-.opendots-shell .shell-search { background: var(--sc-field); border-color: var(--sc-line); border-radius: 11px; }
-.opendots-shell .shell-search:focus-within { box-shadow: 0 0 0 3px rgb(251 146 60 / 12%); border-color: var(--sc-accent-text); }
+.opendots-shell :is(input, textarea)::placeholder, .dialog-content :is(input, textarea)::placeholder { color: var(--sc-muted); opacity: 1; }
+.opendots-shell .shell-search { background: var(--sc-field); border-color: var(--sc-line); border-radius: 8px; }
+.opendots-shell .shell-search:focus-within { box-shadow: none; border-color: var(--sc-accent-text); }
+.opendots-shell .shell-skip-link { color: var(--sc-ink); background: var(--sc-panel); border-color: var(--sc-accent-text); }
+.opendots-shell .shell-eyebrow { font-size: 12px; text-transform: none; letter-spacing: 0; color: var(--sc-muted); }
 
-/* Conversation: calm transcript, a crisp composer and one primary send action. */
-.opendots-shell .shell-chat-heading { background: var(--sc-bg); padding-block: 16px; border-color: var(--sc-line); }
-.opendots-shell .shell-chat-presence { --chat-presence-accent: var(--sc-accent-text); }
+/* Conversation uses readable text, restrained chrome and a clear writing surface. */
+.opendots-shell .shell-chat-heading { background: var(--sc-bg); padding: 16px 28px; border-color: var(--sc-line); }
+.opendots-shell .shell-chat-heading .shell-persona .shell-mascot { width: 36px; height: 40px; }
+.opendots-shell .shell-chat-heading h2 { font-size: 16px; letter-spacing: -.015em; }
+.opendots-shell .shell-chat-presence { --chat-presence-accent: var(--sc-accent-text); font-size: 12px; }
+.opendots-shell .shell-chat-presence :is(strong, span, small) { font-size: 12px; }
+.opendots-shell .shell-chat-filter { margin: 10px 28px; opacity: 1; font-size: 13px; }
+.opendots-shell .shell-chat-stream-status { font-size: 13px; color: var(--sc-muted); }
 .opendots-shell .shell-transcript { scrollbar-gutter: stable; }
-.opendots-shell .shell-message-content { font-size: 15px; line-height: 1.75; letter-spacing: -.005em; }
-.opendots-shell .shell-message.from-user {
-  background: var(--sc-panel); border: 1px solid var(--sc-line); border-radius: 17px; box-shadow: var(--sc-shadow);
-}
-.opendots-shell .shell-composer {
-  background: var(--sc-panel); border: 1px solid color-mix(in srgb, var(--sc-ink) 13%, transparent);
-  border-radius: 19px; box-shadow: var(--sc-shadow); padding: 16px 18px 12px;
-}
-.opendots-shell .shell-composer:focus-within { border-color: rgb(251 146 60 / 48%); box-shadow: 0 0 0 3px rgb(251 146 60 / 7%), var(--sc-shadow); }
-.opendots-shell .shell-composer textarea { font-size: 14px; line-height: 1.65; background: transparent; }
-.opendots-shell .shell-send { width: 34px; height: 34px; min-height: 34px; border-radius: 50%; background: var(--sc-accent); color: var(--sc-accent-ink); border: 0; }
-.opendots-shell .shell-send:disabled { background: var(--sc-selected); color: var(--sc-muted); opacity: .7; }
-.opendots-shell .shell-composer-hint { font-size: 10px; color: var(--sc-muted); }
-.opendots-shell .shell-chat-ticker, .opendots-shell .shell-permission-cards article { background: var(--sc-panel); border-color: var(--sc-line); border-radius: 13px; }
-.opendots-shell .shell-permission-cards article { box-shadow: var(--sc-shadow); }
-.opendots-shell .shell-context { background: var(--sc-sidebar); border-color: var(--sc-line); }
-.opendots-shell .shell-context h2 { font-size: 15px; letter-spacing: -.02em; }
+.opendots-shell .shell-chat-intro { margin: 16px auto; max-width: 400px; }
+.opendots-shell .shell-chat-intro .shell-mascot { width: 64px; height: 70px; margin-bottom: 16px; }
+.opendots-shell .shell-chat-intro h3 { font-size: 24px; letter-spacing: -.025em; }
+.opendots-shell .shell-chat-intro p { font-size: 14px; line-height: 1.7; }
+.opendots-shell .shell-message-content { font-size: 15px; line-height: 1.75; letter-spacing: 0; }
+.opendots-shell .shell-message.from-user { background: var(--sc-panel); border: 1px solid var(--sc-line); border-radius: 12px; box-shadow: none; }
+.opendots-shell .shell-composer { background: var(--sc-panel); border: 1px solid var(--sc-line); border-radius: 12px; box-shadow: none; padding: 16px 18px 12px; }
+.opendots-shell .shell-composer:focus-within { border-color: var(--sc-accent-text); box-shadow: none; }
+.opendots-shell .shell-composer textarea { font-size: 15px; line-height: 1.65; min-height: 70px; background: transparent; }
+.opendots-shell .shell-send { width: 38px; height: 38px; min-height: 38px; border-radius: 8px; }
+:root[data-sentra-theme] .opendots-shell .shell-send:disabled { background: var(--sc-selected); color: var(--sc-muted); opacity: .7; }
+.opendots-shell .shell-composer-hint { font-size: 13px; color: var(--sc-muted); }
+.opendots-shell :is(.shell-chat-ticker, .shell-permission-cards article) { background: var(--sc-panel); border-color: var(--sc-line); border-radius: 12px; box-shadow: none; }
+.opendots-shell .shell-permission-cards article { padding: 18px 20px; font-size: 13px; }
+.opendots-shell .shell-markdown a { color: var(--sc-accent-text); }
+.opendots-shell .shell-markdown blockquote { border-left: 1px solid var(--sc-line); color: var(--sc-muted); }
+.opendots-shell .shell-context { background: var(--sc-panel); border-color: var(--sc-line); }
+.opendots-shell .shell-context h2 { font-size: 16px; letter-spacing: -.02em; }
 .opendots-shell .dot-computer-panel { background: var(--sc-bg); border-color: var(--sc-line); }
-.opendots-shell .dot-computer-tabs { padding: 4px; background: var(--sc-field); border-radius: 11px; }
-.opendots-shell .dot-computer-tabs button { background: transparent; border-color: transparent; border-radius: 8px; }
+.opendots-shell .dot-computer-tabs { padding: 4px; background: var(--sc-field); border-radius: 8px; }
+.opendots-shell .dot-computer-tabs button { background: transparent; border-color: transparent; border-radius: 6px; }
 .opendots-shell .dot-computer-tabs button[aria-selected="true"] { background: var(--sc-selected); color: var(--sc-ink); }
 .opendots-shell .shell-documents-host {
   --text: var(--sc-ink); --panel: var(--sc-bg); background: var(--sc-bg);
@@ -241,7 +249,7 @@
 .opendots-shell .document-panel :is(button, input, select) { border-color: var(--sc-line); background: var(--sc-field); }
 .opendots-shell .document-format-bar { border-color: var(--sc-line); }
 .opendots-shell .document-format-bar button { border-color: transparent; background: transparent; }
-.opendots-shell .document-rich .tiptap { font-size: 15px; line-height: 1.8; }
+.opendots-shell .document-rich .tiptap { font-size: 16px; line-height: 1.8; }
 
 /* The internal ORCA workspace uses the shell palette without recolouring ANSI. */
 .opendots-shell .sentra-workspace,
@@ -262,9 +270,13 @@
 .opendots-shell .sentra-workspace .sw-tabs [data-active="true"]::after { background: var(--sc-accent); height: 2px; }
 .opendots-shell .sentra-workspace .sw-divider { background: var(--sc-sidebar); border: 1px solid var(--sc-line); }
 .opendots-shell .sentra-workspace .sw-divider:is(:hover, :focus-visible) { background: var(--sc-accent); }
-.opendots-shell .sentra-workspace .sw-welcome h2 { font-size: 27px; letter-spacing: -.035em; font-weight: 700; }
+.opendots-shell .sentra-workspace .sw-welcome h2 { font-size: 24px; letter-spacing: -.025em; font-weight: 700; }
 .opendots-shell .sentra-workspace .sw-welcome > p { color: var(--sc-muted); font-size: 13px; }
-.opendots-shell .sentra-workspace .sw-welcome-actions button { border-radius: 11px; background: var(--sc-panel); box-shadow: var(--sc-shadow); }
+.opendots-shell .sentra-workspace .sw-welcome-actions button { min-height: 38px; border-radius: 8px; background: var(--sc-panel); box-shadow: none; font-size: 13px; }
+.opendots-shell .sentra-workspace .sw-welcome-label { text-transform: none; letter-spacing: 0; font-size: 12px; }
+.opendots-shell .sentra-workspace .sw-welcome-compact { padding: 28px; }
+.opendots-shell .sentra-workspace .sw-welcome-compact h2 { font-size: 20px; }
+.opendots-shell .sentra-workspace .sw-welcome-compact .sw-welcome-mascot { width: 48px; height: 54px; }
 .opendots-shell .sentra-workspace button { color: var(--sw-text); }
 .opendots-shell .sentra-workspace :is(select, textarea, input:not([type=checkbox]):not([type=radio])) {
   color: var(--sw-text); background: var(--sw-panel); border-color: var(--sw-line);
@@ -272,7 +284,7 @@
 .opendots-shell .sentra-workspace button.sw-primary,
 .dialog-content button.sw-primary { background: var(--sc-accent); color: var(--sc-accent-ink); border-color: transparent; }
 .opendots-shell .sentra-workspace button.danger { color: var(--sc-red); }
-.opendots-shell .sentra-workspace .sw-statusbar { background: var(--sc-sidebar); border-color: var(--sc-line); font-size: 10px; }
+.opendots-shell .sentra-workspace .sw-statusbar { background: var(--sc-sidebar); border-color: var(--sc-line); font-size: 12px; }
 .opendots-shell .shell-studio { background-color: var(--sc-bg); }
 .opendots-shell .shell-studio .shell-agent-terminal { background: var(--sc-panel); border-color: var(--sc-line); border-radius: 12px; box-shadow: var(--sc-shadow); }
 .opendots-shell .shell-studio .shell-agent-terminal > header { background: var(--sc-field); border-color: var(--sc-line); }
@@ -292,23 +304,24 @@
   background: var(--sc-field); border-color: var(--sc-line); color: var(--sc-ink);
 }
 
-/* Portals, settings, hub and the island belong to the same window material. */
-.dialog-overlay { background: rgb(0 0 0 / 42%); backdrop-filter: blur(8px); }
+/* Solid, legible dialogs share the shell typography and control sizes. */
+.dialog-overlay { background: rgb(8 12 18 / 60%); backdrop-filter: none; }
 .dialog-content, :root[data-sentra-theme] .dialog-content {
   background: var(--sc-glass); color: var(--sc-ink); border: 1px solid var(--sc-line);
-  border-radius: 19px; box-shadow: var(--sc-modal-shadow); backdrop-filter: blur(32px) saturate(130%);
+  border-radius: 14px; box-shadow: var(--sc-modal-shadow); backdrop-filter: none; color-scheme: inherit;
 }
+:root[data-sentra-theme] :is(.opendots-shell, .dialog-content) :is(button, input, textarea, select, summary, a):focus-visible { outline: 2px solid var(--sc-accent-text); outline-offset: 3px; }
 .dialog-content .dialog-heading { border-color: var(--sc-line); padding-bottom: 17px; }
-.dialog-content .dialog-heading h2 { font-size: 18px; letter-spacing: -.025em; font-weight: 650; }
-.dialog-content .dialog-heading p { color: var(--sc-muted); font-size: 12px; }
-.dialog-content :is(input, select, textarea) { background: var(--sc-field); border: 1px solid var(--sc-line); border-radius: 9px; padding: 9px 11px; color: var(--sc-ink); }
-.dialog-content button { border-radius: 9px; border-color: var(--sc-line); background: var(--sc-selected); color: var(--sc-ink); }
+.dialog-content .dialog-heading h2 { font-size: 20px; letter-spacing: -.025em; font-weight: 650; }
+.dialog-content .dialog-heading p { color: var(--sc-muted); font-size: 13px; line-height: 1.6; }
+.dialog-content :is(input, select, textarea) { background: var(--sc-field); border: 1px solid var(--sc-line); border-radius: 8px; padding: 10px 12px; color: var(--sc-ink); font-size: 14px; }
+.dialog-content button { min-height: 36px; border-radius: 8px; border-color: var(--sc-line); background: var(--sc-selected); color: var(--sc-ink); }
 .dialog-content .danger { color: var(--sc-red); background: color-mix(in srgb, var(--sc-red) 12%, transparent); }
 .context-menu, :root[data-sentra-theme] .context-menu {
   background: var(--sc-glass); color: var(--sc-ink); border: 1px solid var(--sc-line);
-  border-radius: 13px; padding: 6px; backdrop-filter: blur(28px); box-shadow: var(--sc-modal-shadow);
+  border-radius: 10px; padding: 6px; backdrop-filter: none; box-shadow: var(--sc-modal-shadow);
 }
-.context-menu .menu-item { border-radius: 7px; padding: 8px 11px; font-size: 12px; }
+.context-menu .menu-item { min-height: 36px; border-radius: 6px; padding: 8px 11px; font-size: 13px; }
 .context-menu .menu-item[data-highlighted] { background: var(--sc-selected); color: var(--sc-ink); }
 .context-menu .menu-item.danger { color: var(--sc-red); }
 .dialog-content.shell-hub-dialog,
@@ -317,8 +330,8 @@
   --hub-text: var(--sc-ink); --hub-ink: var(--sc-ink); --hub-muted: var(--sc-muted);
   --hub-line: var(--sc-line); --hub-line-strong: color-mix(in srgb, var(--sc-ink) 16%, transparent);
   --hub-accent: var(--sc-accent-text); --hub-accent-2: var(--sc-accent-text);
-  --hub-accent-ink: var(--sc-accent-ink); --hub-accent-soft: rgb(251 146 60 / 12%);
-  --hub-accent-shadow: rgb(251 146 60 / 10%); --hub-focus: var(--sc-accent-text);
+  --hub-accent-ink: var(--sc-accent-ink); --hub-accent-soft: color-mix(in srgb, var(--sc-accent) 12%, transparent);
+  --hub-accent-shadow: color-mix(in srgb, var(--sc-accent) 10%, transparent); --hub-focus: var(--sc-accent-text);
   --hub-hover: var(--sc-hover); --hub-shine: transparent; --hub-shadow: rgb(0 0 0 / 15%);
   --hub-glass-1: var(--sc-panel); --hub-glass-2: var(--sc-field); --hub-header: var(--sc-panel);
   --hub-nav: var(--sc-sidebar); --hub-nav-active: var(--sc-selected); --hub-track: var(--sc-field);
@@ -329,14 +342,6 @@
 .shell-hub-card { box-shadow: none; }
 .shell-hub-heading { padding-bottom: 20px; }
 .shell-hub-heading h3 { letter-spacing: -.035em; }
-.shell-island, :root[data-sentra-theme] .shell-island {
-  --island-bg: var(--sc-glass); --island-ink: var(--sc-ink); --island-muted: var(--sc-muted);
-  --island-line: var(--sc-line); --island-soft: var(--sc-hover); --island-hover: var(--sc-selected);
-  --island-wait: var(--sc-accent-text); --island-work: var(--sc-accent-text);
-  --island-shadow: var(--sc-modal-shadow);
-}
-.shell-island-pill { border-radius: 13px; box-shadow: var(--sc-shadow); }
-.shell-island-panel { border-radius: 21px; backdrop-filter: blur(28px) saturate(130%); }
 .shell-decisions, :root[data-sentra-theme] .shell-decisions {
   --decisions-accent: var(--sc-accent-text); --decisions-bg: var(--sc-glass);
   --decisions-panel: var(--sc-panel); --decisions-ink: var(--sc-ink); --decisions-muted: var(--sc-muted);
@@ -346,85 +351,126 @@
 }
 .shell-decisions-panel, .shell-decisions-card { background: var(--sc-glass); border-color: var(--sc-line); box-shadow: var(--sc-shadow); }
 
-@media (max-width: 900px) {
-  .opendots-shell .shell-rail { width: 202px; flex-basis: 202px; }
-  .opendots-shell .shell-topbar { padding-inline: 16px; }
-  .opendots-shell .shell-content { padding: 22px 22px 40px; }
-  .opendots-shell .shell-home-hero { min-height: 176px; padding: 24px; }
-  .opendots-shell .shell-home-hero .shell-mascot.hero { width: 128px; height: 128px; flex-basis: 128px; }
-  .opendots-shell .shell-home-hero > div { max-width: calc(100% - 136px); }
+/* Compact editors make the form, selected identity and actions easy to scan. */
+.dialog-content.shell-dot-editor { width: min(560px, calc(100vw - 32px)); padding: 24px; }
+.shell-dot-editor .shell-dot-identity-row { display: flex; align-items: center; gap: 14px; }
+.shell-dot-editor .shell-dot-identity-row .shell-mascot { width: 40px; height: 44px; flex-shrink: 0; margin: 0; }
+.shell-dot-editor .shell-dot-identity-row .dialog-field { flex: 1; min-width: 0; }
+.shell-dot-editor .shell-form { padding-top: 0; }
+.shell-dot-editor .shell-form section { min-height: 0; }
+.shell-dot-editor .shell-form :is(label, small) { font-size: 13px; }
+.shell-dot-editor .dialog-field > span { font-size: 13px; }
+.shell-dot-editor .shell-dot-editor-tabs { padding: 4px; border-radius: 8px; background: var(--sc-field); margin-bottom: 18px; }
+.shell-dot-editor .shell-dot-editor-tabs button { min-height: 36px; font-size: 13px; background: transparent; border-color: transparent; }
+.shell-dot-editor .shell-dot-editor-tabs button[aria-selected=true] { background: var(--sc-panel); color: var(--sc-ink); box-shadow: none; }
+.shell-dot-editor .shell-mascot-picker { max-height: none; overflow: visible; }
+.shell-dot-editor .shell-mascot-picker > div { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 6px; max-height: 146px; overflow-y: auto; padding: 3px; }
+.shell-dot-editor .shell-mascot-picker button { min-height: 54px; padding: 5px; border-radius: 8px; }
+.shell-dot-editor .shell-mascot-picker :is(.shell-mascot, img) { width: 36px; height: 40px; }
+.shell-dot-editor .shell-mascot-picker button:hover { transform: none; }
+.shell-dot-editor .shell-mascot-picker button[aria-pressed=true] { border-color: var(--sc-accent-text); box-shadow: none; background: var(--sc-selected); }
+.shell-dot-editor .shell-mascot-picker .shell-mascot-option-label { font-size: 11px; }
+.shell-dot-editor .dialog-field textarea { min-height: 140px; max-height: 200px; }
+.shell-dot-editor .shell-form > footer { position: static; margin: 8px 0 0; padding: 16px 0 0; border-top: 1px solid var(--sc-line); background: var(--sc-panel); }
+.shell-dot-editor .shell-form > footer button { font-size: 13px; border-radius: 8px; }
+.shell-dot-editor .shell-mascot-check { color: var(--sc-accent-text); }
+.dialog-content.sw-session-dialog { --sw-text: var(--sc-ink); --sw-muted: var(--sc-muted); --sw-panel: var(--sc-panel); --sw-line: var(--sc-line); }
+.sw-session-dialog-refined .sw-session-choices strong { font-size: 14px; }
+.sw-session-dialog-refined .sw-session-choices small { font-size: 12px; line-height: 1.6; }
+.sw-session-dialog-refined :is(.sw-session-existing h3, .sw-session-existing button, .sw-session-access) { font-size: 13px; }
+.opendots-shell .shell-rail-footer-label { padding: 3px 12px 5px; font-size: 12px; color: var(--sc-muted); }
+.opendots-shell .shell-rail-footer button { border-color: transparent; background: transparent; justify-content: flex-start; }
+.opendots-shell .sentra-workspace .sw-welcome-heading { display: flex; align-items: center; gap: 16px; max-width: 480px; text-align: left; }
+.opendots-shell .sentra-workspace .sw-welcome-heading .shell-mascot { width: 64px; height: 70px; flex-shrink: 0; margin: 0; }
+.opendots-shell .sentra-workspace .sw-welcome-compact .shell-mascot { width: 44px; height: 48px; }
+.opendots-shell .sentra-workspace .sw-welcome-copy p { font-size: 14px; line-height: 1.6; color: var(--sc-muted); }
+.opendots-shell .sentra-workspace .sw-welcome-recent-title { font-size: 13px; font-weight: 600; margin: 0 0 8px; color: var(--sc-muted); }
+.opendots-shell .shell-chat-connection { display: flex; align-items: center; gap: 7px; }
+.opendots-shell .shell-chat-connection-indicator { width: 6px; height: 6px; flex-shrink: 0; border-radius: 50%; background: var(--sc-muted); }
+.opendots-shell .shell-chat-connection[data-state=connected] .shell-chat-connection-indicator { background: var(--sc-green); }
+.tooltip { font-family: var(--sc-font); font-size: 12px; }
+
+@media (max-width: 1100px) {
+  .opendots-shell .shell-rail { width: 224px; flex-basis: 224px; }
+  .opendots-shell .shell-content { padding: 28px; }
+  .opendots-shell .shell-home-heading { align-items: flex-start; flex-direction: column; gap: 16px; }
+  .opendots-shell .shell-run-label { display: none; }
 }
-@media (max-width: 600px) {
-  .opendots-shell .shell-content { padding: 16px 16px 32px; }
-  .opendots-shell .shell-home-hero { min-height: 172px; padding: 22px 20px; }
-  .opendots-shell .shell-home-hero > div { max-width: calc(100% - 74px); }
-  .opendots-shell .shell-home-hero .shell-mascot.hero { position: absolute; right: 4px; bottom: 10px; width: 88px; height: 100px; }
-  .opendots-shell .shell-home-hero h1 { font-size: 25px; }
-  .opendots-shell .shell-home-hero p { font-size: 12px; }
-  .opendots-shell .shell-home-start { flex-wrap: wrap; padding: 16px; gap: 10px; }
+@media (max-width: 850px) {
+  .opendots-shell .shell-topbar { padding-inline: 16px; }
+  .opendots-shell .shell-content { padding: 24px; }
+  .opendots-shell .shell-dot-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+}
+@media (max-width: 700px) {
+  .opendots-shell .shell-rail { top: 56px; width: min(280px, 85vw); box-shadow: 16px 0 50px rgb(0 0 0 / 32%); }
+  .opendots-shell .shell-topbar { height: 56px; flex-basis: 56px; padding-inline: 10px; gap: 6px; }
+  .opendots-shell .shell-topbar-actions { gap: 3px; }
+  .opendots-shell .shell-topbar .shell-icon { width: 36px; height: 36px; }
+  .opendots-shell .shell-content { padding: 24px 18px 32px; }
+  .opendots-shell .shell-page-heading h1, .opendots-shell .shell-page-heading:not(.shell-home-hero) h1 { font-size: 25px; }
+  .opendots-shell .shell-home-heading { flex-direction: column; align-items: flex-start; gap: 16px; }
+  .opendots-shell .shell-page-actions button { min-height: 42px; }
+  .opendots-shell .shell-home-start { flex-wrap: wrap; padding: 18px; gap: 10px; }
   .opendots-shell .shell-home-start > div { flex: 1; min-width: 160px; }
   .opendots-shell .shell-home-start > button { margin-left: 30px; }
   .opendots-shell .shell-dot-grid { grid-template-columns: minmax(0, 1fr); }
-  .opendots-shell .shell-home-resume-primary { padding: 18px; }
-  .opendots-shell .shell-topbar .shell-run-label { display: none; }
+  .opendots-shell .shell-home-resume-primary { display: grid; grid-template-columns: 24px minmax(0, 1fr); padding: 18px; }
+  .opendots-shell .shell-home-resume-primary > button { min-height: 42px; grid-column: 2; justify-self: start; }
+  .opendots-shell .shell-conversation-row { padding: 14px; }
+  .opendots-shell .shell-chat-heading { padding: 14px 18px; flex-wrap: wrap; gap: 12px; }
+  .opendots-shell .shell-chat-presence { flex-wrap: wrap; }
+  .opendots-shell .shell-chat-presence :is(span, small) { white-space: normal; max-width: 100%; }
+  .opendots-shell .shell-chat-filter { margin-inline: 18px; }
+  .opendots-shell .shell-composer { padding: 14px; }
+  .dialog-content.shell-dot-editor { padding: 20px; }
+  .shell-dot-editor .shell-mascot-picker > div { grid-template-columns: repeat(5, minmax(0, 1fr)); max-height: 138px; }
 }
 @media (max-width: 700px) {
-  .opendots-shell .shell-rail { width: min(260px, 85vw); box-shadow: 16px 0 50px rgb(0 0 0 / 32%); }
+  .opendots-shell[data-surface=home] .shell-content { padding: 24px 16px 16px; }
+  .opendots-shell .shell-start { grid-template-rows: auto auto; gap: 24px; padding-block: 24px; }
+  .opendots-shell .shell-start h1 { font-size: 25px; }
+  .opendots-shell .shell-start-greeting { padding-bottom: 0; }
+  .opendots-shell .shell-start-compose { padding: 12px; margin-bottom: 0; }
+  .opendots-shell .shell-start-controls { gap: 8px; }
+  .opendots-shell .shell-start-add { width: 44px; height: 44px; }
+  .opendots-shell .shell-start-attachment button { width: 44px; height: 44px; }
+  .opendots-shell .shell-start-shortcuts button { min-height: 44px; padding: 8px 12px; }
+  .opendots-shell .shell-start-send { width: 44px; height: 44px; }
+  .opendots-shell .shell-start-dot { max-width: 60%; }
+  .opendots-shell .shell-start-dot select { min-height: 44px; }
+  .opendots-shell .shell-start-model { max-width: 28%; font-size: 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .opendots-shell *, .dialog-content *, .context-menu *, .shell-island * {
-    animation: none !important; transition: none !important; scroll-behavior: auto !important;
-  }
-  .opendots-shell .shell-dot-card:is(:hover, :focus-within) { transform: none; }
-}
-@media (prefers-reduced-transparency: reduce) {
-  .dialog-content, .context-menu, .shell-island-panel, .shell-decisions-card { backdrop-filter: none; background: var(--sc-panel); }
+  .opendots-shell *, .dialog-content *, .context-menu *, .shell-decisions * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 }
 @media (forced-colors: active) {
-  .opendots-shell .shell-home-hero, .opendots-shell .shell-dot-card,
-  .dialog-content, .context-menu { border: 1px solid CanvasText; box-shadow: none; }
-  .opendots-shell .shell-primary, .opendots-shell .shell-send { background: Highlight; color: HighlightText; }
+  .opendots-shell .shell-dot-card, .opendots-shell .shell-home-resume, .dialog-content, .context-menu { border: 1px solid CanvasText; box-shadow: none; }
+  :root[data-sentra-theme] .opendots-shell :is(.shell-primary, .shell-send) { background: Highlight; color: HighlightText; }
 }
-
-:root[data-sentra-theme] .opendots-shell .shell-primary,
-:root[data-sentra-theme] .opendots-shell .shell-send,
-:root[data-sentra-theme] .dialog-content .shell-primary {
-  background: var(--sc-accent); color: var(--sc-accent-ink); border-color: rgb(255 255 255 / 9%);
-}
-:root[data-sentra-theme] .opendots-shell .shell-primary:hover:not(:disabled),
-:root[data-sentra-theme] .opendots-shell .shell-send:hover:not(:disabled) { background: #fdab63; }
-:root[data-sentra-theme] .opendots-shell .shell-home-start .shell-primary {
-  background: var(--sc-selected); color: var(--sc-ink); border-color: transparent;
-}
-:root[data-sentra-theme] .opendots-shell .shell-home-resume-primary .shell-primary { background: var(--sc-selected); color: var(--sc-ink); border-color: var(--sc-line); }
-:root[data-sentra-theme] .opendots-shell .shell-send:disabled { background: var(--sc-selected); color: var(--sc-muted); }
-:root[data-sentra-theme] .opendots-shell .shell-primary-nav button[aria-current="page"] { color: var(--sc-ink); }
-:root[data-sentra-theme] .opendots-shell .shell-home-hero .shell-eyebrow { color: var(--sc-accent-text); }
-:root[data-sentra-theme] .opendots-shell :is(button, input, select, textarea, a):focus-visible { outline-color: var(--sc-accent-text); }
 
 /* Secondary screens share the same hierarchy, material and reading widths. */
 .opendots-shell .shell-network { max-width: 1040px; margin: 0 auto; }
 .opendots-shell .shell-network > header { margin-bottom: 28px; }
-.opendots-shell .shell-network > header h1 { font-size: clamp(27px, 3vw, 36px); letter-spacing: -.04em; margin: 9px 0; font-weight: 680; }
+.opendots-shell .shell-network > header h1 { font-size: 28px; letter-spacing: -.04em; margin: 9px 0; font-weight: 680; }
 .opendots-shell .shell-network > header p { color: var(--sc-muted); max-width: 640px; line-height: 1.7; }
 .opendots-shell .shell-network-overview { display: flex; align-items: center; gap: 18px; padding: 24px; border: 1px solid var(--sc-line); border-radius: 18px; background: var(--sc-panel); box-shadow: var(--sc-shadow); }
 .opendots-shell .shell-network-overview h2 { font-size: 16px; letter-spacing: -.02em; margin: 0 0 6px; }
 .opendots-shell .shell-network-overview p { color: var(--sc-muted); font-size: 12px; margin: 0; }
-.opendots-shell .shell-network-symbol { display: grid; place-items: center; flex: 0 0 48px; height: 48px; border-radius: 14px; background: rgb(251 146 60 / 10%); color: var(--sc-accent-text); }
-.opendots-shell .shell-network-state { display: inline-flex; align-items: center; gap: 7px; color: var(--sc-muted); margin-left: auto; font-size: 11px; white-space: nowrap; }
+.opendots-shell .shell-network-symbol { display: grid; place-items: center; flex: 0 0 48px; height: 48px; border-radius: 14px; background: color-mix(in srgb, var(--sc-accent) 10%, transparent); color: var(--sc-accent-text); }
+.opendots-shell .shell-network-state { display: inline-flex; align-items: center; gap: 7px; color: var(--sc-muted); margin-left: auto; font-size: 12px; white-space: nowrap; }
 .opendots-shell .shell-network-state i { width: 6px; height: 6px; border-radius: 50%; background: var(--sc-muted); }
 .opendots-shell .shell-network-state i[data-connected="true"] { background: var(--sc-green); }
 .opendots-shell .shell-network-actions { padding: 18px 0; display: flex; gap: 10px; align-items: end; flex-wrap: wrap; }
-.opendots-shell .shell-network label { display: grid; gap: 7px; font-size: 11px; color: var(--sc-muted); }
+.opendots-shell .shell-network label { display: grid; gap: 7px; font-size: 13px; color: var(--sc-muted); }
 .opendots-shell .shell-network :is(input, select) { border: 1px solid var(--sc-line); background: var(--sc-field); border-radius: 9px; padding: 10px 12px; min-width: 0; }
 .opendots-shell .shell-network button { min-height: 36px; padding: 8px 13px; background: var(--sc-field); border: 1px solid var(--sc-line); }
 .opendots-shell .shell-network :is(.shell-network-connect, .shell-network-advanced) { border: 1px solid var(--sc-line); border-radius: 14px; background: var(--sc-panel); margin: 16px 0; }
-.opendots-shell .shell-network summary { display: flex; align-items: center; gap: 9px; padding: 17px 20px; color: var(--sc-body); cursor: pointer; font-size: 12px; }
+.opendots-shell .shell-network summary { display: flex; align-items: center; gap: 9px; padding: 17px 20px; color: var(--sc-body); cursor: pointer; font-size: 13px; }
 .opendots-shell .shell-network details form { display: flex; gap: 14px; flex-wrap: wrap; align-items: end; padding: 0 20px 20px; }
 .opendots-shell .shell-network form label { flex: 1 1 180px; }
 .opendots-shell .shell-network-dots { list-style: none; padding: 0; display: grid; gap: 10px; }
 .opendots-shell .shell-network-dots li { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; padding: 18px 20px; background: var(--sc-panel); border: 1px solid var(--sc-line); border-radius: 13px; }
-.opendots-shell .shell-network-dots li span { font-size: 11px; color: var(--sc-muted); }
+.opendots-shell .shell-network-dots li span { font-size: 13px; color: var(--sc-muted); }
 .opendots-shell .shell-network-dots li button { margin-left: auto; }
 .opendots-shell .document-workarea { background: var(--sc-bg); }
 .opendots-shell .document-rich { max-width: 850px; margin-inline: auto; }

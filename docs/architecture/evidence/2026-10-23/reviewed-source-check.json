@@ -1,0 +1,50 @@
+[
+  {
+    "path": "sentra_canvas/desktop_ui/src/main.jsx",
+    "inventory_sha256": "bb684f47c1c9b28a4245eb8e79a5380656056876431623b3b1233ab8c948acc7",
+    "current_sha256": "bb684f47c1c9b28a4245eb8e79a5380656056876431623b3b1233ab8c948acc7",
+    "matches_inventory": true
+  },
+  {
+    "path": "sentra_canvas/desktop_ui/src/shell-app.jsx",
+    "inventory_sha256": "f47f2c10128840be2de3cc555b171707be9cc46852ec7384f0b16e34192027a8",
+    "current_sha256": "f47f2c10128840be2de3cc555b171707be9cc46852ec7384f0b16e34192027a8",
+    "matches_inventory": true
+  },
+  {
+    "path": "sentra_canvas/desktop_ui/src/shell-bridge.js",
+    "inventory_sha256": "6084cebc2744ed204e24e9f0b6c1ab78c29dac13f5fc37dd9d72e4b3fbd41f3b",
+    "current_sha256": "6084cebc2744ed204e24e9f0b6c1ab78c29dac13f5fc37dd9d72e4b3fbd41f3b",
+    "matches_inventory": true
+  },
+  {
+    "path": "sentra_canvas/desktop_ui/src/shell-conversation.jsx",
+    "inventory_sha256": "65799fb28e06e87b572eaec21177e1c72dbb395bf5e5c22240fb50ca0b22b94d",
+    "current_sha256": "65799fb28e06e87b572eaec21177e1c72dbb395bf5e5c22240fb50ca0b22b94d",
+    "matches_inventory": true
+  },
+  {
+    "path": "sentra_canvas/dot_tool_runner.py",
+    "inventory_sha256": "9753bf2cf6059ce7b1d9ccde57fffd74538e5410f4a9d6b47cf201a6cd9eda4b",
+    "current_sha256": "9753bf2cf6059ce7b1d9ccde57fffd74538e5410f4a9d6b47cf201a6cd9eda4b",
+    "matches_inventory": true
+  },
+  {
+    "path": "sentra_canvas/service.py",
+    "inventory_sha256": "28079c3b7b2f7eb50660e49692cf053cde66e02ebb529ac13c8a18c036a46158",
+    "current_sha256": "28079c3b7b2f7eb50660e49692cf053cde66e02ebb529ac13c8a18c036a46158",
+    "matches_inventory": true
+  },
+  {
+    "path": "sentra_mcp/services/control_plane.py",
+    "inventory_sha256": "8c1598480c5d20839ab1abf7aa7fb4d0ece00538f13a0f19fffe61df3697ee4a",
+    "current_sha256": "8c1598480c5d20839ab1abf7aa7fb4d0ece00538f13a0f19fffe61df3697ee4a",
+    "matches_inventory": true
+  },
+  {
+    "path": "sentra_runtime/dot_tool_dispatch.py",
+    "inventory_sha256": "a1075dd59e3c67081e57e9e6d34a91103bcc6f8a008ecf236b31abc5830d1045",
+    "current_sha256": "a1075dd59e3c67081e57e9e6d34a91103bcc6f8a008ecf236b31abc5830d1045",
+    "matches_inventory": true
+  }
+]

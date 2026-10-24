@@ -413,6 +413,13 @@ class Canvas:
         return observed if observed.get('content') or (native['status'] == 'idle' and observed['status'] != 'idle') else native
 
     def shell_bridge(self, payload, *, input_client_id=''):
+        if input_client_id:
+            from .terminal_possession import client_scope
+            with client_scope(input_client_id):
+                return self._shell_bridge(payload,input_client_id=input_client_id)
+        return self._shell_bridge(payload,input_client_id=input_client_id)
+
+    def _shell_bridge(self, payload, *, input_client_id=''):
         """Authenticated owner entry point; renderer inputs never select authority."""
         if not isinstance(payload, dict):
             raise ValueError("shell envelope must be an object")
@@ -423,7 +430,8 @@ class Canvas:
         if payload.get("ws") is not None and payload["ws"] != project_id:
             raise ValueError("conflicting project identifiers")
         forbidden = {"owner", "principal", "principal_id", "principal_type", "grant",
-            "grant_id", "permissions", "permission", "workspace_root", "root", "run_id", "operation_id"}
+            "grant_id", "permissions", "permission", "workspace_root", "root", "run_id", "operation_id",
+            "input_client_id","physical_input"}
         if forbidden.intersection(payload):
             raise Denied("shell authority is derived from the authenticated server")
         self.store.workspace(project_id)
@@ -1711,7 +1719,8 @@ class Canvas:
         self.graph.handoff_state(ws,result["id"],"sending")
         try:
             # A write is evidence of transport only, NOT that a model processed it.
-            session.pty.write((message+"\r").encode("utf-8"))
+            from .terminal_possession import write_terminal
+            write_terminal(self,ws,terminal['id'],(message+'\r').encode('utf-8'),'handoff:'+result['id'])
         except BaseException:
             self.graph.handoff_state(ws,result["id"],"uncertain")
             raise
@@ -2384,8 +2393,12 @@ class Canvas:
         session=self._sessions.get(terminal)
         if session is None or session.pty is None:
             raise TerminalError("terminal is no longer attached")
-        session.pty.write(data.encode("utf-8"))
-        return {"ok":True}
+        from .terminal_possession import write_terminal
+        from sentra_runtime.effect_boundary import current_effect_context,CentralEffectContext
+        effect=current_effect_context.get()
+        key=('operation:'+effect.receipt.operation_id if isinstance(effect,CentralEffectContext)
+             else 'legacy:'+uuid.uuid4().hex)
+        return {'ok':True,**write_terminal(self,ws,terminal,data.encode('utf-8'),key)}
 
     def terminal_input_status(self,ws,terminal,request_key,fingerprint):
         from .terminal_input_receipts import inspect

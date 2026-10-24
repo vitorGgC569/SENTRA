@@ -131,7 +131,8 @@ def test_concurrent_observers_adopt_one_receipt_without_changing_possession(reco
     with ThreadPoolExecutor(max_workers=4) as pool:
         results=list(pool.map(lambda _:r.authority.confirm_daemon_observation(r.proof,copy.deepcopy(observed)),range(8)))
     assert all(value['resolved'] for value in results)
-    assert r.authority.status(r.resource)==before
+    after=r.authority.status(r.resource)
+    assert after=={**before,'pending_confirmation':False}
     assert r.host.sessions['terminal']['pty'].writes==[r.data]
 
 
@@ -154,7 +155,8 @@ def test_observation_does_not_renew_an_expired_lease(recovery):
     assert before['live'] is False
     observed=r.client.call('input_effect',r.reference)
     assert r.authority.confirm_daemon_observation(r.proof,observed)['resolved']
-    assert r.authority.status(r.resource)==before
+    after=r.authority.status(r.resource)
+    assert after=={**before,'pending_confirmation':False}
 
 
 @pytest.mark.skipif(os.name!='nt',reason='real Windows ConPTY, isolated owned daemon')

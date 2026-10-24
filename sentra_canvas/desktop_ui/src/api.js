@@ -10,6 +10,16 @@ if (fragment.has('token')) {
 }
 const bearer = sessionStorage.getItem('sentra_native_token');
 export const hasCredential = Boolean(bearer);
+// Viewer identity arbitrates a terminal; it grants no permission. Session
+// storage separates windows and preserves identity through a page reload.
+let terminalViewer;
+try {
+  terminalViewer=sessionStorage.getItem('sentra_terminal_viewer_v1');
+  if(!/^[a-f0-9]{32}$/.test(terminalViewer||'')){
+    terminalViewer=crypto.randomUUID().replaceAll('-','');
+    sessionStorage.setItem('sentra_terminal_viewer_v1',terminalViewer);
+  }
+} catch { terminalViewer=null; }
 const requestReauthorization = createNativeAuthRecovery({
   onFailure: () => window.dispatchEvent(new Event('sentra:auth-recovery-failed')),
 });
@@ -21,6 +31,7 @@ export async function api(path, data, options = {}) {
   if (!path.startsWith('/api/')) throw new ApiError('Rota de controle inválida.');
   if (!bearer) throw new ApiError('Abra o desktop pelo SENTRA para autorizar esta janela.', 401);
   const headers = { Authorization: 'Bearer ' + bearer };
+  if(terminalViewer)headers['X-Sentra-Input-Client']=terminalViewer;
   if (data !== undefined) headers['Content-Type'] = 'application/json';
   let response;
   try {
@@ -71,6 +82,7 @@ export function route(path, fields) {
 export async function apiStream(projectId, { after, signal, epoch } = {}) {
   if (!bearer) throw new ApiError('Abra o desktop pelo SENTRA para autorizar esta janela.', 401);
   const headers = { Authorization: 'Bearer ' + bearer, Accept: 'text/event-stream' };
+  if(terminalViewer)headers['X-Sentra-Input-Client']=terminalViewer;
   if (after != null) {
     if (!Number.isSafeInteger(after) || after < 0) throw new ApiError('Cursor inválido.', 400);
     headers['Last-Event-ID'] = String(after);

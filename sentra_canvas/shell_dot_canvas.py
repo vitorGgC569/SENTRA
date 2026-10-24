@@ -589,7 +589,8 @@ def dispatch_dot_canvas(canvas, project_id, action, params, request_key):
                 tool=tool,terminal_id=terminal["id"],handoff_id=record["id"])
             canvas.graph.handoff_state(project_id, record["id"], "sending")
             try:
-                session.pty.write((message + "\r").encode("utf-8"))
+                from .terminal_possession import write_terminal
+                write_terminal(canvas,project_id,terminal['id'],(message+'\r').encode('utf-8'),'handoff:'+record['id'])
                 canvas.graph.handoff_state(project_id, record["id"], "sent")
                 delivery_sent(control, owner, ids)
             except BaseException:

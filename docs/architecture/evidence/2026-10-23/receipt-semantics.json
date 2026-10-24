@@ -1,0 +1,9 @@
+{
+  "experiment": "Pure-function counterexample with synthetic data; no application runtime import, subprocess, model, credentials or execution permission used.",
+  "source": "sentra_canvas/dot_tool_runner.py",
+  "source_sha256": "9753bf2cf6059ce7b1d9ccde57fffd74538e5410f4a9d6b47cf201a6cd9eda4b",
+  "verified": true,
+  "effective_model": "sentra/chatgpt-web/gpt-6",
+  "transformed_nonce_found": true,
+  "interpretation": "Receipt confirms a zero exit code and a matching deterministic nonce transformation. This function alone does not attest a provider/model identity or live inference. Not evidence of a production bypass."
+}

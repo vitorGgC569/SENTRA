@@ -1,0 +1,32 @@
+[
+  {
+    "name": "ui-ux-pro-max",
+    "repository": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+    "source_path": ".claude/skills/ui-ux-pro-max",
+    "installed_path": "C:\\Users\\vitor\\.codex\\skills\\ui-ux-pro-max",
+    "skill_sha256": "ea087c341bfb5b23195c7302027268ede86da802554c18a5c4896a6017b439f9",
+    "support_files": 76,
+    "installed_for": "Codex",
+    "date": "2026-10-23"
+  },
+  {
+    "name": "impeccable",
+    "repository": "https://github.com/pbakaus/impeccable",
+    "source_path": ".agents/skills/impeccable",
+    "installed_path": "C:\\Users\\vitor\\.codex\\skills\\impeccable",
+    "skill_sha256": "7ceec4e863e52befc85e592ccf67caa84c12998a98099844b660c2c7bcbbb41d",
+    "support_files": 62,
+    "installed_for": "Codex",
+    "date": "2026-10-23"
+  },
+  {
+    "name": "frontend-design",
+    "repository": "https://github.com/anthropics/skills",
+    "source_path": "skills/frontend-design",
+    "installed_path": "C:\\Users\\vitor\\.codex\\skills\\frontend-design",
+    "skill_sha256": "d91970639e9f5c37682ac7ab60094d35f1c7c1f38d731bd56396563aee10c1d3",
+    "support_files": 2,
+    "installed_for": "Codex",
+    "date": "2026-10-23"
+  }
+]

@@ -1,4 +1,4 @@
-import React, { forwardRef } from 'react';
+import React, { forwardRef, useRef } from 'react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Menu from '@radix-ui/react-dropdown-menu';
@@ -12,15 +12,34 @@ export const IconButton = forwardRef(function IconButton({ label, children, clas
     {label}<Tooltip.Arrow />
   </Tooltip.Content></Tooltip.Portal></Tooltip.Root>;
 });
-export function Modal({ open, onOpenChange, title, description, children, className = '', busy = false, ...props }) {
+export function Modal({ open, onOpenChange, title, description, children, className = '', busy = false, onCloseAutoFocus, ...props }) {
+  const focusReturn = useRef({ open: false, target: null });
+  // Capture before the portal's inputs autofocus, including conditionally mounted dialogs.
+  if (open && !focusReturn.current.open && typeof document !== 'undefined') {
+    const active = document.activeElement;
+    const menu = active?.closest('[role="menu"]');
+    const menuTrigger = menu?.id && Array.from(document.querySelectorAll('[aria-controls]'))
+      .find(element => element.getAttribute('aria-controls') === menu.id);
+    focusReturn.current.target = menuTrigger || active;
+  }
+  focusReturn.current.open = open;
   return <Dialog.Root open={open} onOpenChange={value => { if (!busy) onOpenChange(value); }}>
     <Dialog.Portal><Dialog.Overlay className="dialog-overlay" />
-      <Dialog.Content className={'dialog-content ' + className}
+      <Dialog.Content className={'dialog-content dialog-content-refined ' + className}
         onEscapeKeyDown={e => { if (busy) e.preventDefault(); }}
-        onInteractOutside={e => { if (busy) e.preventDefault(); }} {...props}>
-        <header className="dialog-heading"><div><Dialog.Title>{title}</Dialog.Title>
+        onInteractOutside={e => { if (busy) e.preventDefault(); }} {...props}
+        onCloseAutoFocus={event => {
+          onCloseAutoFocus?.(event);
+          const target = focusReturn.current.target;
+          if (!event.defaultPrevented && target?.isConnected && target !== document.body
+              && !target.matches(':disabled') && !target.closest('[hidden], [inert]')) {
+            event.preventDefault();
+            target.focus({ preventScroll: true });
+          }
+        }}>
+        <header className="dialog-heading dialog-heading-compact"><div className="dialog-heading-copy"><Dialog.Title>{title}</Dialog.Title>
           <Dialog.Description>{description}</Dialog.Description></div>
-          <Dialog.Close asChild><button type="button" className="icon-button" aria-label="Fechar" disabled={busy}><X size={16} /></button></Dialog.Close>
+          <Dialog.Close asChild><button type="button" className="icon-button dialog-close" aria-label="Fechar" disabled={busy}><X size={16} /></button></Dialog.Close>
         </header>{children}
       </Dialog.Content>
     </Dialog.Portal>
@@ -37,5 +56,5 @@ export function ActionMenu({ label = 'Ações', items, trigger, open, onOpenChan
   </Menu.Content></Menu.Portal></Menu.Root>;
 }
 export function Field({ label, hint, children }) {
-  return <label className="dialog-field"><span>{label}</span>{children}{hint && <small>{hint}</small>}</label>;
+  return <label className="dialog-field"><span className="dialog-field-label">{label}</span>{children}{hint && <small>{hint}</small>}</label>;
 }

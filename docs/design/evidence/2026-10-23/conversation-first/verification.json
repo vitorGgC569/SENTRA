@@ -1,0 +1,39 @@
+{
+  "ui_tests": {
+    "passed": 263,
+    "failed": 0
+  },
+  "protected_python_files": 1413,
+  "backend_changed": [],
+  "production_bundle": {
+    "entry": "/desktop.html",
+    "files": 124
+  },
+  "browser_preview": {
+    "title": "Quero revisar o login do projeto com cuidado",
+    "dot": "Teste",
+    "user_messages": 1,
+    "messages_total": 2,
+    "draft_survives_reload": true,
+    "shift_enter_newline": true,
+    "viewports": [
+      [
+        1440,
+        900
+      ],
+      [
+        1280,
+        720
+      ],
+      [
+        390,
+        844
+      ]
+    ],
+    "themes": [
+      "dark",
+      "light"
+    ],
+    "actual_model_executed": false
+  }
+}

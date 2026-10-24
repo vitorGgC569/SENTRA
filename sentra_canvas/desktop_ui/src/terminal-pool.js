@@ -217,6 +217,11 @@ export class TerminalPool {
   async syncInput(entry,value){
     try{
       if(value){
+        if(value.input_control){
+          const previous=JSON.stringify(entry.inputControl);entry.inputControl=value.input_control;
+          if(value.input_control.can_write===false&&!entry.inputBlocked)this.blockInput(entry,'control_elsewhere');
+          if(previous!==JSON.stringify(entry.inputControl))this.changed();
+        }
         if(entry.inputScope&&value.input_scope&&entry.inputScope!==value.input_scope){this.blockInput(entry,'scope_changed');return;}
         if(entry.inputTarget&&entry.inputTarget!==value.input_target){
           if(this.inputQueue.status(entry.key).sessionCount)this.blockInput(entry,'target_changed');
@@ -304,8 +309,19 @@ export class TerminalPool {
     const entry=this.entries.get(this.key(ws,id));if(!entry||!this.visible(entry)||entry.activeRequestKey||this.inputQueue.status(entry.key).active)return false;
     const epoch=entry.inputEpoch;
     await this.syncInput(entry);
-    if(entry.inputEpoch!==epoch||!this.visible(entry)||entry.inputPending||entry.inputPendingOverflow||!entry.inputProtocol||entry.inputJournalError||entry.inputSuspended||entry.transportUnavailable||entry.status!=='running'||entry.recoverable===false)return false;
+    if(entry.inputEpoch!==epoch||!this.visible(entry)||entry.inputPending||entry.inputPendingOverflow||!entry.inputProtocol||entry.inputControl?.can_write===false||entry.inputJournalError||entry.inputSuspended||entry.transportUnavailable||entry.status!=='running'||entry.recoverable===false)return false;
     entry.inputEpoch++;entry.inputBlocked=null;entry.term.options.disableStdin=false;this.changed();return true;
+  }
+  async controlInput(ws,id,action){
+    const entry=this.entries.get(this.key(ws,id));
+    if(!entry||!this.visible(entry)||!entry.inputControl?.available)return false;
+    const expected=entry.inputControl.epoch;
+    this.blockInput(entry,'control_transition');
+    const value=await this.inputRequest('/api/terminal/input-control',{ws,id,action,expected_epoch:expected});
+    if(!entry.alive)return false;
+    entry.inputControl=value;this.changed();
+    if(action!=='release'&&value.can_write)return this.resumeInput(ws,id);
+    return value.can_write;
   }
   focus(ws, id) { this.entries.get(this.key(ws, id))?.term?.focus(); }
   command(ws, id, text) {
@@ -320,6 +336,7 @@ export class TerminalPool {
       scrollbackOmitted:e.scrollbackOmitted,inputBlocked:e.inputBlocked,inputPending:e.inputPending,
       inputPendings:e.inputPendings||[],inputPendingOverflow:!!e.inputPendingOverflow,inputTarget:e.inputTarget,
       inputProtocol:e.inputProtocol,inputJournalError:e.inputJournalError,inputBusy:!!e.activeRequestKey,
+      inputControl:e.inputControl,
       memoryPaused:!!e.memoryPaused,emulatorBudget:this.emulatorBudget.status(),rendererRecoveries:e.rendererRecoveries||0 } : null;
   }
   reconcile(ws, resources) {
@@ -394,7 +411,7 @@ export class TerminalPool {
       entry.persistenceGap = !!(value.persistence_gap||value.truncated);
       entry.tailUncertain = value.tail_uncertain === true;
       entry.inputSuspended = false;
-      entry.term.options.disableStdin = value.status !== 'running' || value.recoverable === false || !!entry.inputBlocked || !entry.inputProtocol;
+      entry.term.options.disableStdin = value.status !== 'running' || value.recoverable === false || !!entry.inputBlocked || !entry.inputProtocol || entry.inputControl?.can_write===false;
       if (entry.needsServerResize && !entry.term.options.disableStdin) this.scheduleFit(entry);
       if (value.persisted === false && (!value.persistence_state || value.persistence_state === 'failed') && !entry.warned) {
         entry.warned = true; this.report('O histórico da sessão não está sendo salvo.', 'error');

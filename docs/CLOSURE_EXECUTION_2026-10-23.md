@@ -292,3 +292,27 @@ entry points still need coordinated integration, including stable existing owner
 receipt keys, authenticated mobile origin propagation, agent WorkItem identity,
 and explicit UI handoff/release. This is not a claim that global arbitration is
 already enabled, that phones were tested, or that the installed app changed.
+
+### 2026-10-24 — visual integration and local Windows delivery
+
+The approved conversation-first Home and refined shell now ship in the production
+desktop bundle and a rebuilt Canvas executable. The installed Windows app was
+updated with a backup and opened against its existing state. Asset and executable
+hashes match the separately tested candidate. See
+`docs/design/VISUAL_INTEGRATION_2026-10-24.md` and its structured evidence.
+
+The previously unwired terminal possession path is now used by owner input,
+central agent effects and Canvas handoffs. Desktop requests carry a per-window
+viewer identity; authenticated mobile origin is propagated at the shell boundary.
+Existing owner receipt keys remain stable. Output exposes lease state and the
+desktop offers explicit release/takeover/observation. These changes passed the
+selected real HTTP/ConPTY tests and a frozen two-viewer acceptance. They do not
+claim daemon-wide enforcement or a completed physical mobile control workflow.
+
+This delivery records **265 UI tests and 62 selected Python tests passing**.
+The interactive real backend accepted one Home conversation/message and retained
+the draft through a Canvas round trip. Chunked attachment storage and cross-chat
+scope were checked against the production HTTP service. The external model was
+unavailable and its uncertain state remained visible without retry or fallback.
+Model inference, physical devices, the complete product journey and a new signed
+Setup/release remain open. CI investigation remains deferred per user priority.

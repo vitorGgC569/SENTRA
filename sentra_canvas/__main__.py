@@ -220,7 +220,14 @@ class CanvasHandler(BaseHTTPRequestHandler):
         try:
             if not self._allowed():
                 self._send(403,{"error":"invalid local origin"});return
-            fn()
+            if self._auth():
+                from .terminal_possession import client_scope
+                ident=self.headers.get('X-Sentra-Input-Client')
+                if ident is not None and (len(ident)!=32 or any(c not in '0123456789abcdef' for c in ident)):
+                    raise ValueError('invalid terminal viewer identity')
+                with client_scope('desktop:'+ident if ident else 'owner:host'):
+                    fn()
+            else:fn()
         except (ShellConflict,SnapshotConflict):
             self._send(409,{"error":"resource revision changed; reload before saving"})
         except (ValueError,TypeError) as exc:
@@ -681,6 +688,13 @@ class CanvasHandler(BaseHTTPRequestHandler):
             if set(p)-{'ws','id','data','request_key','input_target'} or ('request_key' in p)!=('input_target' in p):raise ValueError('exact terminal input fields required')
             if 'request_key' in p and (not isinstance(p['request_key'],str) or not 8<=len(p['request_key'])<=200):raise ValueError('durable input request key required')
             result=a.terminal_input(ws,p["id"],p["data"],request_key=p.get('request_key'),input_target=p.get('input_target'))
+        elif route=='/api/terminal/input-control':
+            if set(p)!={'ws','id','action','expected_epoch'} or p['action'] not in {'acquire','release','takeover','observe'}:
+                raise ValueError('exact terminal ownership change required')
+            if type(p['expected_epoch']) is not int or p['expected_epoch']<0:
+                raise ValueError('observed terminal ownership epoch required')
+            from .terminal_possession import input_control
+            result=input_control(a,ws,p['id'],p['action'],p['expected_epoch'])
         elif route=='/api/terminal/input-ack':
             if set(p)!={'ws','id','request_key','fingerprint'}:raise ValueError('exact terminal receipt selector required')
             from .terminal_input_receipts import acknowledge

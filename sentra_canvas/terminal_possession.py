@@ -4,8 +4,8 @@ This uses the selected ControlStore. A client identity is an arbitration
 identity, never a permission. Agent/mobile writes still require their live
 terminal WorkItem and Grant. A claim or transport timeout never licenses replay.
 
-Integration is incomplete: this module is not yet called by the desktop,
-mobile, agent or daemon input paths. It is not evidence of global arbitration.
+The broker binds authenticated input origins; leases never replace WorkItems,
+Grants, exact receipts or the daemon's generation check.
 """
 from __future__ import annotations
 
@@ -37,6 +37,13 @@ def client_scope(client_id):
         yield
     finally:
         _client.reset(token)
+
+
+def current_client():
+    from sentra_runtime.effect_boundary import current_effect_context, CentralEffectContext
+    effect=current_effect_context.get()
+    return _client.get() or ('agent:'+effect.request.principal_id
+        if isinstance(effect,CentralEffectContext) else 'owner:host')
 
 
 class TerminalPossession:
@@ -96,11 +103,13 @@ class TerminalPossession:
     def status(self, resource):
         with closing(self.control.store.connect('machine_input_control')) as db:
             row = self._row(db, resource)
+            pending=db.execute("SELECT 1 FROM terminal_physical_input_effects WHERE resource=? AND state IN ('prepared','uncertain') LIMIT 1",
+                               (resource['resource'],)).fetchone() is not None
         return {'input_protocol_version': PROTOCOL, 'resource_id': resource['resource'],
                 'generation': resource['generation'], 'runtime_id': resource['runtime'],
                 'epoch': row['epoch'] if row else 0, 'client_id': row['client'] if row else '',
                 'live': bool(row and row['client'] and row['expires'] > self.clock()),
-                'expires_at': row['expires'] if row else 0, 'grant_created': False}
+                'expires_at': row['expires'] if row else 0, 'pending_confirmation':pending,'grant_created': False}
 
     def acquire(self, resource, client, *, principal='', work_item='', expected_epoch=None, takeover=False, ttl=30):
         if not isinstance(client, str) or not 1 <= len(client) <= 160 or type(ttl) is not int or not 1 <= ttl <= 60:
@@ -167,6 +176,38 @@ class TerminalPossession:
         return {'input_protocol_version': PROTOCOL, **resource, 'owner': self.owner, 'client_id': client,
                 'epoch': lease['epoch'], 'effect_key': 'terminal-input:' + effect, 'payload_sha256': payload}
 
+    def existing(self,resource,key,data):
+        """Host-only recovery of a prior selector, never permission to retry it."""
+        if not isinstance(key,str) or not 1<=len(key)<=200 or not isinstance(data,bytes):
+            raise ValueError('exact existing terminal input identity required')
+        effect=digest([self.owner,resource['resource'],key])
+        with closing(self.control.store.connect('machine_input_control')) as db:
+            self._row(db,resource)
+            row=db.execute('SELECT * FROM terminal_physical_input_effects WHERE effect_key=?',(effect,)).fetchone()
+        if row is None:return None
+        if row['owner']!=self.owner or row['resource']!=resource['resource'] or row['payload_sha256']!=hashlib.sha256(data).hexdigest():
+            raise AuthorizationRequired('terminal input key belongs to another physical intent')
+        return {'input_protocol_version':PROTOCOL,**resource,'owner':self.owner,'client_id':row['client'],
+                'epoch':row['epoch'],'effect_key':'terminal-input:'+effect,'payload_sha256':row['payload_sha256']}
+
+    def pending(self,resource):
+        with closing(self.control.store.connect('machine_input_control')) as db:
+            self._row(db,resource)
+            rows=db.execute("SELECT * FROM terminal_physical_input_effects WHERE owner=? AND resource=? AND state IN ('prepared','uncertain') LIMIT 16",
+                            (self.owner,resource['resource'])).fetchall()
+        return [{'input_protocol_version':PROTOCOL,**resource,'owner':self.owner,'client_id':row['client'],
+                 'epoch':row['epoch'],'effect_key':'terminal-input:'+row['effect_key'],'payload_sha256':row['payload_sha256']}
+                for row in rows]
+
+    def abandon_prepared(self,proof):
+        """Retire an unattempted selector; a possible effect cannot be undone."""
+        with closing(self.control.store.connect('machine_input_control')) as db,db:
+            db.execute('BEGIN IMMEDIATE')
+            effect=self._effect(db,proof)
+            if effect['state']!='prepared':
+                raise AuthorizationRequired('physical input may already have started')
+            db.execute("UPDATE terminal_physical_input_effects SET state='not_started' WHERE effect_key=?",(effect['effect_key'],))
+
     def _effect(self, db, proof):
         if proof.get('input_protocol_version') != PROTOCOL or proof.get('owner') != self.owner:
             raise AuthorizationRequired('versioned terminal input proof required')
@@ -183,7 +224,15 @@ class TerminalPossession:
     def _reference(self, proof, reference):
         from .pty_input_effects import validate_reference
         value=validate_reference(reference)
-        expected={'effect_key':proof['effect_key'],'workspace_id':proof['workspace'],
+        with closing(self.control.store.connect('machine_input_control')) as db:
+            effect=self._effect(db,proof)
+        # Existing owner receipt keys must survive broker changes and journal
+        # restore. Accept only this exact deterministic legacy identity, never
+        # an arbitrary key supplied by a renderer or another reservation.
+        legacy='host-input:'+hashlib.sha256(json.dumps([self.owner,proof['workspace'],proof['terminal'],effect['caller_key']],separators=(',',':')).encode()).hexdigest()
+        if value['effect_key'] not in {proof['effect_key'],legacy}:
+            raise AuthorizationRequired('daemon selector differs from reserved terminal input')
+        expected={'effect_key':value['effect_key'],'workspace_id':proof['workspace'],
                   'terminal_id':proof['terminal'],'runtime_id':proof['runtime'],
                   'generation':proof['generation'],'payload_sha256':proof['payload_sha256']}
         if value!=expected:
@@ -323,7 +372,33 @@ def terminal_resource(canvas, workspace, terminal):
     return authority(canvas).resource(workspace, terminal, generation, runtime)
 
 
-def write_terminal(canvas, workspace, terminal, data, key):
+def input_control(canvas,workspace,terminal,action='status',expected_epoch=None):
+    from .terminal import TerminalError
+    client=current_client()
+    try:
+        resource=terminal_resource(canvas,workspace,terminal)
+    except (AuthorizationRequired,TerminalError):
+        if action!='status':raise
+        return {'available':False,'can_write':False,'reason':'terminal_input_control_unavailable'}
+    possession=authority(canvas)
+    if action=='acquire':
+        possession.acquire(resource,client,expected_epoch=expected_epoch)
+    elif action=='takeover':
+        # This owner-only entry point is never selected from a machine prompt.
+        from sentra_runtime.effect_boundary import current_effect_context,CentralEffectContext
+        if isinstance(current_effect_context.get(),CentralEffectContext):
+            raise AuthorizationRequired('agent cannot force terminal ownership')
+        possession.acquire(resource,client,expected_epoch=expected_epoch,takeover=True)
+    elif action=='release':possession.release(resource,client,expected_epoch)
+    elif action=='observe':
+        for proof in possession.pending(resource):observe_terminal_input(canvas,proof)
+    elif action!='status':raise ValueError('unsupported terminal input control action')
+    value=possession.status(resource)
+    return {**value,'available':True,'viewer_client_id':client,
+            'can_write':not value['live'] or value['client_id']==client}
+
+
+def write_terminal(canvas, workspace, terminal, data, key, *, reference=None, before_write=None):
     from sentra_runtime.effect_boundary import current_effect_context, CentralEffectContext
     resource = terminal_resource(canvas, workspace, terminal)
     possession = authority(canvas)
@@ -332,22 +407,35 @@ def write_terminal(canvas, workspace, terminal, data, key):
     if isinstance(effect, CentralEffectContext):
         effect.checkpoint()
         principal, work_item = effect.request.principal_id, effect.request.work_item_id
-    client = _client.get() or ('agent:' + principal if principal else 'owner:host')
+    client = current_client()
+    prior=possession.existing(resource,key,data)
+    if prior is not None:
+        observed=observe_terminal_input(canvas,prior)
+        if observed['state']!='delivered':
+            raise AuthorizationRequired('terminal input already reserved; observe without replay')
+        if before_write:before_write(prior,possession.daemon_reference(prior))
+        return {'physical_input':prior,**observed}
     proof = possession.prepare(resource, client, key, data, principal=principal, work_item=work_item)
     process = canvas._sessions[terminal].pty
     from .pty_client import DaemonPTY
-    if isinstance(process, DaemonPTY):
-        reference = process.input_reference(proof['effect_key'], data)
-        possession.bind_reference(proof,reference)
+    try:
+        if isinstance(process,DaemonPTY):
+            reference=reference or process.input_reference(proof['effect_key'],data)
+            if process.input_reference(reference['effect_key'],data)!=reference:
+                raise AuthorizationRequired('terminal generation changed before dispatch')
+            possession.bind_reference(proof,reference)
+        if before_write:before_write(proof,reference)
         with possession.physical(proof, data):
             if isinstance(effect, CentralEffectContext):
                 effect.checkpoint()
-            process.write_correlated(data, reference)
-    else:
-        with possession.physical(proof, data):
-            if isinstance(effect, CentralEffectContext):
-                effect.checkpoint()
-            process.write(data)
+            if isinstance(process,DaemonPTY):process.write_correlated(data,reference)
+            else:process.write(data)
+    except BaseException:
+        # Admission failures before the possible-effect mark must not leave a
+        # prepared selector blocking every later key. Never undo uncertainty.
+        try:possession.abandon_prepared(proof)
+        except Exception:pass
+        raise
     return {'physical_input': proof, **possession.inspect(proof)}
 
 

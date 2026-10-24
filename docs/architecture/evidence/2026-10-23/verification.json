@@ -1,0 +1,22 @@
+{
+  "date": "2026-10-23",
+  "mode": "read-only architecture assessment",
+  "source_contract": {
+    "command": "python -B scripts/ci/verify_release_contract.py --require-tracked",
+    "result": "passed",
+    "output": "SENTRA_CICD_CONTRACT_OK"
+  },
+  "desktop_bundle": {
+    "command": "validate_desktop_bundle(Path(\"sentra_canvas/static\"))",
+    "result": "rejected_current_source_mismatch",
+    "output": "React Canvas bundle differs from current desktop sources; run npm run build",
+    "interpretation": "Working-tree source and existing sealed bundle differ. Concurrent source edits were already present. No rebuild or package change performed."
+  },
+  "runtime_modules_imported_for_inventory": false,
+  "tests_executed": "No application test suite; static inventory/AST, source contract and read-only bundle validation only.",
+  "limitations": [
+    "No full runtime, installation, concurrency, profiling or deployment qualification performed.",
+    "Analysis reads tracked files as currently present on disk; concurrent work may change bytes."
+  ],
+  "receipt_experiment": "Pure functions extracted by AST evaluated with synthetic nonce output; no subprocess/model invoked."
+}

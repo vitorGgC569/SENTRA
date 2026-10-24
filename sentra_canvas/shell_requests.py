@@ -275,10 +275,12 @@ class ShellHostRequests:
         """Durably mark that reserve_intent or another effect may have started."""
         self._mark(project_id, request_key, "after_possible_effect", operation_id)
 
-    def bind_terminal_input_effect(self, project_id, request_key, fingerprint, reference):
+    def bind_terminal_input_effect(self, project_id, request_key, fingerprint, reference, physical_input=None):
         """Protect an exact daemon selector before dispatch, never a permission."""
         from .pty_input_effects import validate_reference
-        reference = validate_reference(reference)
+        reference = validate_reference(reference) if reference is not None else None
+        if reference is None and physical_input is None:
+            raise ValueError('physical terminal input correlation required')
         with closing(self.control.store.connect("shell")) as db, db:
             db.execute("BEGIN IMMEDIATE")
             row = self._row(db, project_id, request_key)
@@ -287,12 +289,19 @@ class ShellHostRequests:
                 raise ShellConflict('terminal input effect must bind before physical admission')
             original = _decode(row['protected_intent'])
             payload = original.get('payload', {})
-            if (original.get('action') != 'terminal_input' or reference['workspace_id'] != project_id
+            if (original.get('action') != 'terminal_input' or reference is not None and (reference['workspace_id'] != project_id
                     or reference['terminal_id'] != payload.get('terminal_id')
                     or reference['payload_sha256'] != hashlib.sha256(payload['data'].encode('utf-8')).hexdigest()
-                    or original.get('terminal_effect', reference) != reference):
+                    or original.get('terminal_effect', reference) != reference)):
                 raise ShellConflict('physical input selector differs from protected intent')
-            encoded = _encode({**original,'terminal_effect':reference})
+            if physical_input is not None and (not isinstance(physical_input,dict)
+                    or physical_input.get('owner')!=self.owner or physical_input.get('workspace')!=project_id
+                    or physical_input.get('terminal')!=payload.get('terminal_id')
+                    or physical_input.get('payload_sha256')!=hashlib.sha256(payload['data'].encode('utf-8')).hexdigest()
+                    or original.get('physical_input',physical_input)!=physical_input):
+                raise ShellConflict('physical possession differs from protected intent')
+            encoded = _encode({**original,**({'terminal_effect':reference} if reference else {}),
+                               **({'physical_input':physical_input} if physical_input else {})})
             delta = len(encoded.encode('utf-8')) - len(row['protected_intent'].encode('utf-8'))
             usage = db.execute('SELECT * FROM canvas_shell_request_usage WHERE owner=?',(self.owner,)).fetchone()
             if usage['protected_bytes'] + usage['reserved_bytes'] + delta > self.retention_policy.max_protected_bytes:

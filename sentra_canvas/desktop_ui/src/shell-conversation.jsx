@@ -15,6 +15,7 @@ import {ConversationPermissionCards} from './shell-permission-cards';
 import {ConversationTools} from './shell-conversation-tools';
 import { ShellGoalDialog } from './shell-goals';
 import { shellCommand } from './shell-commands';
+import { matchesConversationStart } from './shell-conversation-start.js';
 import { mergeMessages } from './shell-chat-state';
 import { conversationCache } from './shell-conversation-cache';
 import { readRecentMessagePage, recentPageDisposition } from './shell-message-pages';
@@ -40,11 +41,12 @@ function downloadMarkdown(conversation, messages) {
   anchor.download = (conversation.title || 'conversa').replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').slice(0, 100) + '.md';
   anchor.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-export function ShellConversation({ conversation, dot, bridge, onCoordinate, onModel, onCanvas, onTools, onChanged, voice, onResource }) {
+export function ShellConversation({ conversation, dot, bridge, onCoordinate, onModel, onCanvas, onTools, onChanged, voice, onResource, initialMessage, onInitialMessageHandled }) {
   const scope = { project_id: conversation.project_id, space_id: conversation.space_id, conversation_id: conversation.conversation_id };
   const draftKey = 'sentra_shell_draft:' + scope.project_id + ':' + scope.conversation_id;
   const initial = useRef(readDraft(draftKey));
   const lastAutomaticInspection = useRef(null);
+  const startedMessage = useRef(null);
   const [content, setContent] = useState(initial.current.content), [pending, setPending] = useState(initial.current.pending);
   useEffect(()=>{const staged=event=>{if(event.detail?.project_id===scope.project_id&&event.detail?.conversation_id===scope.conversation_id&&!pending)setContent(old=>old.trim()?old:readDraft(draftKey).content||'')};window.addEventListener('sentra:draft-staged',staged);return()=>window.removeEventListener('sentra:draft-staged',staged)},[draftKey,pending]);
   const [messages, setMessages] = useState([]), [page, setPage] = useState(null), [busy, setBusy] = useState(false);
@@ -430,6 +432,21 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
       }
     } finally { submitLock.current = false; if (alive.current) setBusy(false); }
   }
+  // A Home submit is handed off only after conversation creation and history are confirmed.
+  // This calls the normal send path, which journals its exact request before transport.
+  useEffect(() => {
+    if (!matchesConversationStart(initialMessage, scope) || startedMessage.current === initialMessage.id
+        || loading || !historyVerified || loadError || !readAccess.current || busy || attachmentBusy || pendingAttachment) return;
+    startedMessage.current = initialMessage.id;
+    onInitialMessageHandled?.(initialMessage.id);
+    if (pending || messages.length) return; // Existing work is never automatically replayed.
+    if (initialMessage.files?.length) {
+      // The existing uploader stages the file; the user confirms upload and send there.
+      window.dispatchEvent(new CustomEvent('sentra:attach-file', { detail: { files: initialMessage.files } }));
+      return;
+    }
+    void send(false, initialMessage.content);
+  }, [initialMessage, loading, historyVerified, loadError, busy, pending, messages.length, attachmentBusy, pendingAttachment]);
   async function attach(request = pendingAttachment) {
     if (!request) return;
     setBusy(true);
@@ -573,11 +590,21 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
     [dot, presentedMessages, livePreview, connectionState, busy]);
   const tickerItems = useMemo(() => deriveChatTicker({ messages: presentedMessages, livePreview, limit: 4 }),
     [presentedMessages, livePreview]);
+  const heading = conversation.title || dot?.name || 'Conversa';
+  const displayConnectionState = !readAccess.current && connectionState !== 'reauth_required' ? 'access_unavailable' : connectionState;
+  const connectionLabel = {
+    connecting: 'Conectando à conversa…',
+    connected: 'Conectado',
+    reconnecting: 'Reconectando. O texto recebido está preservado.',
+    unavailable: 'Conexão contínua indisponível. Atualizando em modo de compatibilidade.',
+    reauth_required: 'Sessão expirada. Reabra a janela para continuar.',
+    access_unavailable: 'Acesso à conversa indisponível. Consulte novamente.',
+  }[displayConnectionState] || 'Estado da conexão indisponível.';
   return <section className="shell-chat" aria-label={'Conversa com ' + (dot?.name || 'Dot')}>
-    <header className="shell-chat-heading"><div className="shell-persona"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="small" decorative />
-      <div><h2>{conversation.title || dot?.name || 'Conversa'}</h2><p title={dot?.model}>{dot?.name}</p></div></div>
-      {/* Coucou visual layer: presença compacta sem remover o h2 nem as ações. */}
-      <ChatPresence dot={dot} model={presence} showIdentity={false} />
+    <header className="shell-chat-heading shell-chat-heading-refined"><div className="shell-persona"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="nav" decorative />
+      <div className="shell-persona-copy"><h2>{heading}</h2>{dot?.name && heading !== dot.name && <p title={dot?.model}>{dot.name}</p>}</div></div>
+      {/* Task evidence stays visible; connection details have one dedicated status row. */}
+      {!['idle', 'listening'].includes(presence.state) && <div className="shell-chat-task-state"><ChatPresence dot={dot} model={presence} showIdentity={false} /></div>}
       <div className="shell-chat-actions"><ConversationTools scope={scope} dot={dot} bridge={bridge} onResource={onResource}/><button onClick={onCanvas}><Layers size={15} />Canvas</button><ActionMenu label="Opções da conversa" items={[
         { label: 'Modelo e raciocínio', icon: <SlidersHorizontal size={15} />, action: () => onModel('') },
         { label: 'Definir objetivo', icon: <Flag size={15} />, action: () => setGoalDialog({ argument: '' }) },
@@ -589,10 +616,8 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
     </header>
     {/* Coucou visual layer: ticker derivado das mensagens já carregadas, sem polling próprio. */}
     <ChatTicker items={tickerItems} muted={connectionState !== 'connected'} />
-    <div className="shell-chat-stream-status" role="status" data-state={!readAccess.current && connectionState !== 'reauth_required' ? 'access_unavailable' : connectionState}>
-      {!readAccess.current && connectionState !== 'reauth_required' ? 'Acesso à conversa indisponível · consulte novamente' :
-        { connecting: 'Conectando', connected: 'Conexão contínua', reconnecting: 'Reconectando · texto preservado',
-          unavailable: 'Modo de compatibilidade', reauth_required: 'Sessão expirada · reabra a janela' }[connectionState]}
+    <div className="shell-chat-stream-status shell-chat-connection" role="status" data-state={displayConnectionState}>
+      <span className="shell-chat-connection-indicator" aria-hidden="true" /><span>{connectionLabel}</span>
     </div>
     <div className="shell-visually-hidden" role="status" aria-live="polite" aria-atomic="true">
       {latest?.role === 'assistant' && !latest.optimistic && <span key={latest.message_id}>Resposta de {dot?.name || 'Dot'} disponível no histórico da conversa.</span>}
@@ -604,7 +629,7 @@ export function ShellConversation({ conversation, dot, bridge, onCoordinate, onM
       {page?.previous_offset != null && <button disabled={busy} onClick={loadMore}>Carregar mais mensagens</button>}
       {!historyVerified && cachedPreview?.items.length > 0 && <p className="shell-cache-note" role="status">Visualização anterior · atualizando histórico</p>}
       {loading && !cachedPreview?.items.length && <p className="shell-empty">Consultando mensagens…</p>}
-      {!loading && historyVerified && !error && !loadError && !presentedMessages.length && !livePreview?.content && <div className="shell-chat-intro"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="intro" decorative /><h3>Uma conversa que continua.</h3><p>Descreva seu objetivo para {dot?.name || 'este Dot'}.</p></div>}
+      {!loading && historyVerified && !error && !loadError && !presentedMessages.length && !livePreview?.content && <div className="shell-chat-intro shell-chat-intro-compact"><DotMascot mascot={dot?.mascot} identity={dot?.agent_id || dot?.dot_id} name={dot?.name} status={dot?.status} execution={dot?.execution} size="small" decorative /><h3>Como posso ajudar?</h3><p>Conte a {dot?.name || 'este Dot'} o que você quer fazer, revisar ou entender neste projeto.</p></div>}
       {!loading && filter && !filteredMessages.length && <p className="shell-empty" role="status">Nenhuma mensagem carregada contém “{filter}”.</p>}
       <ShellMessageWindow items={filteredMessages} scrollRef={list} follow={follow && !filter} enabled={!renderAll && !filter}>{message =>
         message.cached_visual ? <article className="shell-message shell-cached-message" key={message.message_id} data-authoritative="false">

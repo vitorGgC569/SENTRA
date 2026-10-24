@@ -128,6 +128,11 @@
 .sentra-workspace .sw-file-conflict summary{font-weight:600;cursor:pointer}
 .sentra-workspace .sw-file-conflict pre{padding:8px;max-height:180px;overflow:auto;background:var(--sw-bg);font-size:12px;white-space:pre-wrap;overflow-wrap:anywhere}
 .sentra-workspace .sw-file-conflict label{display:flex;align-items:center;gap:8px;margin:8px 0;font-size:12px}
+.terminal-control-status{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;padding:7px 10px;border-top:1px solid var(--sw-line,var(--shell-line,#34363a));background:var(--sw-panel,var(--shell-panel,#24262b));color:var(--sw-muted,var(--shell-muted,#b0b0b0));font-size:12px;line-height:1.5;flex-shrink:0}
+.terminal-control-status button{font:inherit;color:var(--sw-text,var(--shell-ink,#e4e5e7));background:transparent;border:1px solid var(--sw-line,var(--shell-line,#555));border-radius:6px;padding:5px 9px;cursor:pointer}
+.terminal-control-status button:hover{background:var(--sw-selected,var(--shell-hover,#34363a))}
+.terminal-control-status button:focus-visible{outline:2px solid var(--sw-accent,#39aef5);outline-offset:2px}
+.terminal-control-status button:disabled{opacity:.5;cursor:wait}
 .terminal-input-notice{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 10px;border-top:1px solid var(--sw-line,var(--shell-line,#34363a));background:var(--sw-panel,var(--shell-panel,#24262b));color:var(--sw-text,var(--shell-ink,#e4e5e7));font-size:11px;line-height:1.5;flex-shrink:0}
 .terminal-input-notice button{white-space:nowrap;font-size:11px;color:inherit;background:transparent;border:1px solid var(--sw-line,var(--shell-line,#555));border-radius:6px;padding:5px 9px;cursor:pointer}
 .terminal-input-notice button:hover{background:var(--sw-selected,var(--shell-hover,#34363a))}

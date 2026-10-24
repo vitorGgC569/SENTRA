@@ -47,7 +47,8 @@ def input_identity(canvas,ws,terminal,session):
             'WHERE owner=? AND project_id=? AND terminal_id=? ORDER BY created_at,request_key LIMIT 17',
             (requests.owner,ws,terminal)).fetchall()
         revision=_pending_revision(db,requests.owner,ws,terminal)
-    return {'input_protocol_version':1,'input_scope':scope,
+    from .terminal_possession import input_control
+    return {'input_protocol_version':1,'input_scope':scope,'input_control':input_control(canvas,ws,terminal),
         'input_target':session.input_instance_id if session is not None else None,
         'input_pending':[dict(row) for row in rows[:16]],'input_pending_overflow':len(rows)>16,
         'input_pending_protocol_version':2,'input_pending_revision':revision,'input_pending_epoch':canvas._terminal_input_epoch}
@@ -79,20 +80,23 @@ def send(canvas,ws,terminal,data,key,target):
             # not create a second physical identity for the same caller key.
             physical_key = 'host-input:' + hashlib.sha256(json.dumps([requests.owner,ws,terminal,key],separators=(',',':')).encode()).hexdigest()
             reference = session.pty.input_reference(physical_key,data.encode('utf-8'))
-            requests.bind_terminal_input_effect(ws,key,fingerprint,reference)
-        with closing(requests.control.store.connect('shell')) as db,db:
-            db.execute('BEGIN IMMEDIATE')
-            count=db.execute('SELECT COUNT(*) FROM canvas_terminal_input_pending WHERE owner=?',(requests.owner,)).fetchone()[0]
-            if count>=1024:raise ValueError('pending terminal receipt budget reached')
-            per_terminal=db.execute('SELECT COUNT(*) FROM canvas_terminal_input_pending WHERE owner=? AND project_id=? AND terminal_id=?',
-                (requests.owner,ws,terminal)).fetchone()[0]
-            if per_terminal>=16:raise ValueError('pending terminal receipt session budget reached')
-            db.execute('INSERT OR IGNORE INTO canvas_terminal_input_pending VALUES(?,?,?,?,?,?,?)',
-                (requests.owner,ws,key,terminal,fingerprint,target,int(time.time()*1000)))
-        # Nothing after this mark claims safe replay if the transport disappears.
-        requests.note_effect_possible(ws,key)
-        if reference:session.pty.write_correlated(data.encode('utf-8'),reference)
-        else:session.pty.write(data.encode('utf-8'))
+        def before_write(proof,actual_reference):
+            if canvas._sessions.get(terminal) is not session:
+                raise PermissionError('terminal incarnation changed before input')
+            requests.bind_terminal_input_effect(ws,key,fingerprint,actual_reference,proof)
+            with closing(requests.control.store.connect('shell')) as db,db:
+                db.execute('BEGIN IMMEDIATE')
+                count=db.execute('SELECT COUNT(*) FROM canvas_terminal_input_pending WHERE owner=?',(requests.owner,)).fetchone()[0]
+                if count>=1024:raise ValueError('pending terminal receipt budget reached')
+                per_terminal=db.execute('SELECT COUNT(*) FROM canvas_terminal_input_pending WHERE owner=? AND project_id=? AND terminal_id=?',
+                    (requests.owner,ws,terminal)).fetchone()[0]
+                if per_terminal>=16:raise ValueError('pending terminal receipt session budget reached')
+                db.execute('INSERT OR IGNORE INTO canvas_terminal_input_pending VALUES(?,?,?,?,?,?,?)',
+                    (requests.owner,ws,key,terminal,fingerprint,target,int(time.time()*1000)))
+            # Nothing after this mark claims safe replay if transport disappears.
+            requests.note_effect_possible(ws,key)
+        from .terminal_possession import write_terminal
+        write_terminal(canvas,ws,terminal,data.encode('utf-8'),key,reference=reference,before_write=before_write)
         return {'ok':True,'status':'delivered','delivery_stage':'delivered_to_process',
             'request_key':key,'terminal_id':terminal,'input_target':target,
             'bytes':len(data.encode('utf-8')),'task_completion_verified':False,'automatic_retry':False}
@@ -110,6 +114,10 @@ def inspect(canvas,ws,terminal,key,fingerprint):
         value=requests.inspect_retired_input(ws,key,fingerprint,terminal)
     else:
         value=requests.inspect(ws,'terminal_input',original['payload'],key)
+        proof=original.get('physical_input')
+        if proof:
+            from .terminal_possession import observe_terminal_input
+            observe_terminal_input(canvas,proof)
         reference=original.get('terminal_effect')
         client=getattr(canvas,'_pty_client',None)
         if not value.get('resolved') and reference and client is not None and client.capabilities.get('correlated_input_receipts') == 1:

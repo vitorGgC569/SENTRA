@@ -1,0 +1,60 @@
+{
+  "date": "2026-10-24",
+  "kind": "local-visual-integration",
+  "ui_node_tests": {
+    "passed": 265,
+    "failed": 0
+  },
+  "python_tests": [
+    {
+      "cases": 59,
+      "failures": 0,
+      "errors": 0
+    },
+    {
+      "cases": 3,
+      "failures": 0,
+      "errors": 0
+    }
+  ],
+  "frozen": {
+    "frozen_broker_authenticated": true,
+    "production_assets_verified": true,
+    "real_conpty_input_delivered": true,
+    "second_viewer_denied": true,
+    "model_inference_verified": false,
+    "binary_sha256": "247e68aeec4304d7bd08a07b55f1a41e4293eff9d9cae4ffffe1c7dd121888ed",
+    "source_snapshot_sha256": "828e7f3af731e161cc2010447235f6c6fe4669d6fe17e269bfd54ac39e66e5ba",
+    "production_manifest_sha256": "e8150be1016fd8fcca0bea0b8c4a54b1c14150738cbb0257aa36d4c1bde817ba",
+    "owned_broker_closed": true
+  },
+  "installed": {
+    "updated_files": 208,
+    "canvas_sha256": "247e68aeec4304d7bd08a07b55f1a41e4293eff9d9cae4ffffe1c7dd121888ed",
+    "backup_created": true,
+    "new_setup_published": false,
+    "broker_authenticated": true,
+    "served_manifest_matches_tested_build": true,
+    "installed_binary_matches_tested_build": true
+  },
+  "interactive": {
+    "real_http_backend": true,
+    "synthetic_preview_api": false,
+    "home_to_chat_once": true,
+    "canvas_roundtrip_retained_draft": true,
+    "light_dark": true,
+    "desktop_window": [
+      1440,
+      900
+    ],
+    "narrow_window": [
+      390,
+      844
+    ],
+    "narrow_new_canvas_cancelled": true,
+    "first_external_model_turn": "uncertain; selected provider unavailable; no retry or fallback",
+    "model_inference_verified": false,
+    "physical_mobile_tested": false
+  },
+  "impeccable_detector_findings": 0
+}

@@ -1,0 +1,41 @@
+{
+  "ui_tests": {
+    "passed": 265,
+    "failed": 0
+  },
+  "protected_python_files": 1413,
+  "backend_changed": [],
+  "production_bundle": {
+    "entry": "/desktop.html",
+    "files": 124
+  },
+  "preview": {
+    "viewports": [
+      [
+        1440,
+        900
+      ],
+      [
+        1280,
+        720
+      ],
+      [
+        390,
+        844
+      ]
+    ],
+    "themes": [
+      "dark",
+      "light"
+    ],
+    "send_button_contrast": 7.1183,
+    "attachment_selection": true,
+    "upload_confirmation": true,
+    "user_messages_after_explicit_send": 1,
+    "reselection_required_after_reload": true,
+    "canvas_dialog_opened": true,
+    "code_draft_action": true,
+    "network_navigation": true,
+    "actual_model_executed": false
+  }
+}
