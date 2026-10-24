@@ -97,6 +97,7 @@ def run(binary,state,seconds,*,source_daemon=False,correlated_inputs=False):
      report.update(reads=reads,broker_reopens=restarts,elapsed_seconds=round(elapsed,1));save()
     if elapsed-last_save>10:
      stage='checkpoint_observation'
+     report['history_diagnostics']=connected.call('health')['history'];save()
      for t in terms:
       frame=connected.call('checkpoint',{'workspace_id':ws,'terminal_id':t['id']})
       assert frame.get('available') is True,frame

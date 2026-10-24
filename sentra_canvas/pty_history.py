@@ -187,11 +187,29 @@ class PtyHistory:
                 self.error = self.error or 'history_not_available'
                 return
             original_end = start + len(text)
-            self.sequences[terminal_id]+=1
-            sequence=self.sequences[terminal_id]
             self.heads[terminal_id] = max(self.heads[terminal_id], original_end)
             self.dirty_heads[terminal_id] = self.heads[terminal_id]
             inflight = self.inflight_bytes if self.inflight_terminal == terminal_id else 0
+            queued = self.pending.get(terminal_id)
+            if queued:
+                previous = queued[-1]
+                # ConPTY may split one small line into dozens of fragments.
+                # Merge only adjacent, not-yet-consumed output: a resize remains
+                # an ordering barrier and an in-flight event is never changed.
+                # Sequences identify committed history events, not read calls.
+                if (previous[4] == 'output' and previous[0] + len(previous[1]) == start
+                        and previous[3] == self.sequences[terminal_id]
+                        and len(previous[1]) + len(text) <= OUTPUT_CHARS
+                        and self.sizes[terminal_id] + inflight + len(raw) <= self.session_limit
+                        and self.queued_bytes + self.inflight_bytes + len(raw) <= self.queue_limit):
+                    queued[-1] = (previous[0], previous[1] + text, previous[2] + len(raw),
+                                  previous[3], 'output', None)
+                    self.sizes[terminal_id] += len(raw)
+                    self.queued_bytes += len(raw)
+                    self.condition.notify_all()
+                    return
+            self.sequences[terminal_id]+=1
+            sequence=self.sequences[terminal_id]
             allowance = max(0, self.session_limit - inflight - CHUNK_OVERHEAD)
             if len(raw) > allowance:
                 tail = raw[-allowance:].decode('utf-8', 'ignore') if allowance else ''

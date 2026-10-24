@@ -62,8 +62,12 @@ def test_fragmented_output_batches_preserve_order_geometry_and_each_terminal(tmp
         assert host.dropped_chars==0 and not host.snapshot_errors and not host.snapshot_invalid
         for ident,text in texts.items():
             frame=decode(host.checkpoint('w',ident))
-            assert frame['sequence']==701 and frame['cursor']==len(text)
+            # Read fragments can coalesce before commit. The checkpoint must
+            # cover every ordered history event and every original character.
+            assert 3<=frame['sequence']<=701
+            assert frame['sequence']==host.sequences[ident] and frame['cursor']==len(text)
             assert frame['cols']==70 and frame['rows']==12
+            assert frame['pendingEscapeTailAnsi']=='\x1b[3'
             assert ident in frame['snapshotAnsi']
             assert all(other not in frame['snapshotAnsi'] for other in texts if other!=ident)
     finally:assert host.close()

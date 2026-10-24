@@ -74,7 +74,8 @@ def test_tiny_frames_account_for_rows_and_budget_updates_roll_back(tmp_path):
         host.register('w','t','r')
         for i in range(600):
             host.append('t',i,'x')
-            if i%40==39:assert host.flush()
+            # Force distinct committed rows: pending fragments may coalesce.
+            assert host.flush()
         assert host.flush()
         with host.db_lock:
             actual=host.db.execute('SELECT COALESCE(SUM(bytes+256),0) FROM chunks').fetchone()[0]
@@ -93,6 +94,34 @@ def test_tiny_frames_account_for_rows_and_budget_updates_roll_back(tmp_path):
     try:
         assert host.db.execute('SELECT used FROM history_budget').fetchone()[0]<=host.disk_limit
     finally:host.close()
+
+
+def test_fragmented_output_survives_a_stalled_writer_without_false_queue_overflow(tmp_path):
+    entered=threading.Event();release=threading.Event()
+    def slow(value):
+        entered.set();assert release.wait(5);return protected(value)
+    host=PtyHistory(tmp_path,protect=slow,unprotect=unprotected,snapshots_enabled=False,
+                    queue_limit=16384,session_queue_limit=8192)
+    try:
+        host.register('w','t','r')
+        host.append('t',0,'first');assert entered.wait(2)
+        for index in range(2000):host.append('t',5+index,'x')
+        status=host.status('t',0,2005)
+        assert status['dropped_chars']==0
+        assert status['buffered_bytes']<=8192
+        with host.condition:
+            events=list(host.pending['t'])
+            assert len(events)==1 and events[0][3]==2
+        # A geometry change must remain between the surrounding output events.
+        host.resize('t',120,30);host.append('t',2005,'after')
+        with host.condition:
+            events=list(host.pending['t'])
+            assert [event[4] for event in events]==['output','resize','output']
+            assert [event[3] for event in events]==[2,3,4]
+        release.set();assert host.flush()
+        assert host.read('w','t')['text']=='first'+'x'*2000+'after'
+        assert host.status('t',0,2010)['persisted']
+    finally:release.set();host.close()
 
 
 def test_resize_flood_respects_per_session_budget_including_inflight_output(tmp_path):
