@@ -45,7 +45,39 @@ def probe_installed_display(install_dir: Path, *, timeout_s: float = 25) -> dict
         validate_electron_payload(root)
     except (OSError, ValueError):
         return {"ok": False, "reason": "display_payload_invalid"}
-    return _run_display_probe(root, timeout_s=timeout_s)
+    electron=_run_display_probe(root, timeout_s=timeout_s)
+    if electron.get('ok') is True:return {**electron,'backend':'electron'}
+    native=_run_native_display_probe(Path(install_dir),timeout_s=timeout_s)
+    return {**native,'electron':electron,'external_bar_available':False}
+
+
+def _run_native_display_probe(install_dir: Path, *, timeout_s: float) -> dict:
+    from sentra_canvas.owned_process import TaskProcess
+    directory=Path(tempfile.mkdtemp(prefix='sentra-native-probe-'))
+    report=directory/'result.json';nonce=secrets.token_hex(16);task=None
+    try:
+        executable=Path(install_dir).resolve()/'sentra-canvas.exe'
+        if not executable.is_file():return {'ok':False,'reason':'native_display_unavailable','backend':'native'}
+        task=TaskProcess([str(executable),'--native-display-check',str(report),nonce],
+            cwd=install_dir,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+            env={**os.environ,'PYINSTALLER_RESET_ENVIRONMENT':'1'},creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
+        task.communicate(timeout=max(10,min(45,float(timeout_s))))
+        value=json.loads(report.read_text()) if report.is_file() and report.stat().st_size<2048 else {}
+        fields=('renderer_loaded','node_absent','network_blocked','window_destroyed','frozen')
+        verified=(task.returncode==0 and value.get('schema')==1 and value.get('nonce')==nonce
+                  and value.get('backend')=='native' and all(value.get(key) is True for key in fields))
+        return {'ok':verified,'reason':'native_display_verified' if verified else 'native_display_unconfirmed',
+                'backend':'native',**({key:True for key in fields} if verified else {})}
+    except Exception:
+        return {'ok':False,'reason':'native_display_unavailable','backend':'native'}
+    finally:
+        if task is not None:
+            task.terminate_tree()
+            try:task.communicate(timeout=3)
+            except (OSError,subprocess.TimeoutExpired):pass
+        # Only files created under our freshly allocated directory are removed.
+        report.unlink(missing_ok=True)
+        if not directory.is_symlink() and not directory.is_junction():directory.rmdir()
 
 
 def _run_display_probe(root: Path, *, timeout_s: float) -> dict:

@@ -19,6 +19,9 @@ def root_dir() -> Path:
 
 def main(argv=None):
     arguments=list(sys.argv[1:] if argv is None else argv)
+    if len(arguments)==3 and arguments[0]=='--native-display-check':
+        from .native_probe import check
+        return check(Path(arguments[1]),arguments[2])
     if '--windows-interactive-launch' in arguments:
         # This entry is launched once by the interactive Windows task service,
         # which owns its lifetime instead of the developer application's job.

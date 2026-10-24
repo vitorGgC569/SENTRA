@@ -780,14 +780,22 @@ def main(argv=None):
             from sentra_cli.__main__ import main as cli_main
             return cli_main(["--workspace",str(args.root.resolve())])
         endpoint=connect_or_start(args.root,args.state_dir,port=args.port)
-        if args.ui == "auto":
+        automatic_display=args.ui == "auto"
+        if automatic_display:
             from .electron_host import electron_binary
             # Setup ships its renderer. Fresh Windows does not need a separate
             # Python, Node or WebView2 installation just to open the product.
             args.ui = "electron" if getattr(sys, "frozen", False) and electron_binary() else "native"
         if args.ui == "electron":
             from .electron_host import launch_electron
-            return launch_electron(endpoint,wait=True)
+            try:
+                return launch_electron(endpoint,wait=True)
+            except OSError as exc:
+                if not automatic_display:raise
+                if not isinstance(exc,FileNotFoundError) and getattr(exc,'winerror',None) not in {2,3,5,193,216,4551}:raise
+                # Use the supported native backend when Windows refuses to
+                # start Electron. Never alter the policy or retry that binary.
+                args.ui="native"
         from .native_app import launch_native, resolve_surface
         surface_file = {"shell-home": "shell-home.html", "desktop": "desktop.html",
                         "native": "native.html"}[args.surface]
