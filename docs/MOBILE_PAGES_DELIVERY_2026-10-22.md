@@ -50,7 +50,7 @@ cloud account or public relay is required. E2EE identity pinning, expiring QR,
 owner confirmation, scoped device permissions and revocation still apply.
 A passing local protocol test is not evidence of routing on a physical VPN.
 
-The full ORCA migration remains open: interactive browser/computer surfaces,
+The full workspace migration remains open: interactive browser/computer surfaces,
 orphan recovery/layout synchronization qualification,
 SSH/connectors, physical devices and final signed distribution.
 

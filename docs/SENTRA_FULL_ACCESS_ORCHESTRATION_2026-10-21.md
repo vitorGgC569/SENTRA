@@ -1,6 +1,6 @@
 # Estados formais e orquestração com Acesso completo
 
-21/10/2026 · build `sentra-orca-experimental-cffb8f3284b3` · entrega experimental.
+21/10/2026 · build [component source inventory](../THIRD_PARTY_NOTICES.md) · entrega experimental.
 
 ## Experiência consolidada
 
@@ -129,7 +129,7 @@ conversas e recibos, sem intervenção técnica ou concessão manual de permiss�
   saídas tiveram seus hashes conferidos.
 
 Janela atual para avaliação: **SENTRA · Orquestração**.
-Estado próprio `.tmp/orca-full-evaluation`, gateway LAN na porta 5202. O seletor
+Estado próprio [component source inventory](../THIRD_PARTY_NOTICES.md), gateway LAN na porta 5202. O seletor
 Acesso completo está no compositor. Para usar a automação, selecione esse modo
 uma vez nessa nova avaliação e descreva a tarefa.
 
@@ -137,4 +137,4 @@ A instalação e as janelas anteriores continuam com seus estados. Android/iPhon
 físicos, instaladores assinados, relay, ACP integral e demais itens da migração
 continuam com seus critérios de aceite anteriores.
 
-[Registro verificável do build e dos ensaios](../vendor/orca/full-access-orchestration-validation.json).
+[component source inventory](../THIRD_PARTY_NOTICES.md).

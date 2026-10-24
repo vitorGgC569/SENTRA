@@ -1,4 +1,4 @@
-# Auditoria das pendências — SENTRA, ORCA e Coucou
+# Auditoria das pendências — SENTRA
 
 Data: 22/10/2026. Base: `bfa09a5a43a47132fa4474fb52a0ac5536d6bd0b`.
 Última observação dos ensaios: aproximadamente 17h32, horário de Brasília.
@@ -42,7 +42,7 @@ fecham esses critérios.
 - **ACP/OpenCode 1.19.3:** geração real, aprovação única de caminho, cancelamento
   confirmado pelo provedor, carga da mesma sessão e perda de transporte sem
   replay. Não equivale à homologação de todos os provedores ACP.
-- **Coucou:** ilha com módulos originais fixados, Dots SENTRA, projeção real,
+- **camada visual:** ilha com módulos originais fixados, Dots SENTRA, projeção real,
   bandeja, ocultar/reabrir e atalhos. Há ensaio nativo com dois monitores e
   comprovação da entrega instalada; fidelidade visual integral continua sendo
   um critério distinto.
@@ -124,7 +124,7 @@ fecham esses critérios.
   pixel a pixel nem revisão completa das demais telas.
 - A origem e MIT estão registradas. A composição final de dependências/assets
   de cada pacote continua sendo um gate de distribuição.
-- Hooks/adaptadores CLI e biometria reaproveitáveis do Coucou são backlog
+- Hooks/adaptadores CLI e biometria reaproveitáveis da camada visual são backlog
   separado; não foram entregues apenas por integrar o visual da ilha.
 
 ## 4. Publicação: três estados diferentes

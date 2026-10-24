@@ -75,7 +75,7 @@ passes SQLite integrity checking. This is a local patch, not a full Setup/tag.
 - The existing browser machine now supplies an optional bounded JPEG of its
   actual Playwright viewport. Image hash, observation identity, page identity
   and policy checks are verified. Desktop semantic actions use the same central
-  operation journal. This is not full ORCA Design Mode or unrestricted remote input.
+  operation journal. This is not full Design Mode or unrestricted remote input.
 - A clean workspace adopts a newer host layout revision. Unsaved local changes
   retain their conflict instead of being overwritten. Mobile can reopen an
   existing recent resource; it never recreates the resource from a saved layout.

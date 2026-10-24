@@ -3,7 +3,7 @@
 ## Delivered source scope
 
 Desktop and mobile now import the same `ProjectFeed` and projection reducer from
-`integrations/orca-mobile/transport/src/presentation-stream.js`. The desktop
+[component source inventory](../THIRD_PARTY_NOTICES.md). The desktop
 module is a re-export, not a second implementation. Both observe the existing
 protected `ShellStreamJournal`; no replacement authority, conversation or model
 transport is introduced.

@@ -27,8 +27,8 @@ Impeccable foram aplicadas em etapas, preservando a identidade do produto.
 - Ilha flutuante interna removida conforme o pedido do usuário. A integração
   da barra externa permanece; atividade e decisões seguem acessíveis no app.
 
-O adapter visual existente `src/shell-coucou-macos.css` foi consolidado; não foi
-adicionado um quarto stylesheet de overrides. A atribuição e licença Coucou
+O adapter visual existente [component source inventory](../../THIRD_PARTY_NOTICES.md) foi consolidado; não foi
+adicionado um quarto stylesheet de overrides. A atribuição e licença dos componentes
 permanecem. Fontes do backend não foram alteradas por esta implementação.
 
 ## Validação realizada

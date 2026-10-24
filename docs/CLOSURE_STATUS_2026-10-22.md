@@ -140,15 +140,7 @@ or ordinary text discard.
 
 ## Reproduction entry points
 
-```powershell
-python scripts/check_mypy_baseline.py
-python -B -m pytest tests/failure tests/integration -q
-node --test sentra_canvas/desktop_ui/test/*.test.mjs
-npm --prefix integrations/orca-mobile/transport run typecheck
-npm --prefix integrations/orca-mobile/transport test
-npm --prefix integrations/orca-mobile/app run typecheck
-npm --prefix integrations/orca-mobile/app test
-```
+[component source inventory](../THIRD_PARTY_NOTICES.md)
 
 Use the normal Windows interactive launch path for process-lifetime and real
 HTTP qualification on a development host with the interception described above.

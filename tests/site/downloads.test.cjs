@@ -34,3 +34,17 @@ test('offline catalog provides an English fallback without a download',async()=>
  const get=await render(null,true);assert.equal(get('android-status').textContent,'Browse releases');
  assert.match(get('catalog-status').textContent,/^Could not load the catalog/);assert.equal(get('android-download').hidden,true);
 });
+
+test('older Windows installer remains clearly marked as preview',async()=>{
+ const windows={release:base+'tag/installer-preview-1',metadata:base+'download/installer-preview-1/windows-preview.json',sha256:'a'.repeat(64),size:3176796914,version:'installer-preview-1',parts:[{}, {}, {}],current_interface:false};
+ const get=await render({schema:1,generated_at:'2026-10-24',windows});
+ assert.equal(get('windows-status').textContent,'Older installer preview');
+ assert.equal(get('windows-release').href,windows.release);assert.equal(get('windows-verification').hidden,false);
+ assert.match(get('windows-description').textContent,/predates the current local interface/);
+ assert.match(get('windows-version').textContent,/3 parts/);
+});
+
+test('foreign Windows metadata cannot replace the static release link',async()=>{
+ const get=await render({schema:1,generated_at:'2026-10-24',windows:{release:base+'tag/x',metadata:'https://example.com/proof',sha256:'a'.repeat(64),size:10}});
+ assert.equal(get('windows-verification').hidden,true);assert.equal(get('windows-release').href,undefined);
+});

@@ -54,4 +54,4 @@ python tests/qa/windows_preview_smoke.py --dist .tmp/windows-preview-20261022/di
 
 This is not clean-machine installation, real account login, upgrade/rollback,
 mobile-device, Authenticode or stable-release qualification. Those acceptance
-criteria remain open in the ORCA implementation tracker.
+criteria remain open in the SENTRA implementation tracker.

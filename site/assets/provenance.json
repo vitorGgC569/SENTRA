@@ -1,16 +1,31 @@
 {
   "schema": 1,
-  "captured_at": "2026-10-22T17:43:07.284878+00:00",
+  "captured_at": "2026-10-24T17:19:08.198436+00:00",
   "fixture": true,
   "production_account": false,
+  "application_baseline": "b520687",
   "sources": {
-    "home.png": "sentra_canvas/desktop_ui/qa/orca-workspace.html?view=home",
-    "workspace.png": "sentra_canvas/desktop_ui/qa/orca-workspace.html?view=canvas",
-    "island.png": "sentra_electron/test/presence-native-runner.cjs"
+    "home.png": "SENTRA desktop isolated demonstration: home",
+    "workspace.png": "SENTRA desktop isolated demonstration: workspace",
+    "selector.png": "SENTRA desktop isolated demonstration: selector"
   },
   "sha256": {
-    "home.png": "571957a75440753e4d2e64b9bd2a3b136ab55f8bdd49b5179c094b03fe231bbd",
-    "workspace.png": "9f862b3777bf3157060fb8279bfff7b6c5c0470ed0ad956216dc0efb871f6778",
-    "island.png": "6a650cab90fe565ca55397e538dd8414f6934f3bc49c55eb9dc96838e7758f19"
+    "home.png": "9c96d919c6d5df011d9171f21255cb0c0edf97ba9ffdeb1a784fdd23299a9a02",
+    "workspace.png": "4b791c8500c3b7bb34634f3b2247053b289f3b114e2c1e8ea2bf14851d537fb8",
+    "selector.png": "1c783eae618b5c9b4ac2dd8f67320d2d1152280182ed2d2ead10dfcd84eb6009"
+  },
+  "dimensions": {
+    "home.png": [
+      1280,
+      720
+    ],
+    "workspace.png": [
+      1280,
+      720
+    ],
+    "selector.png": [
+      1280,
+      720
+    ]
   }
 }

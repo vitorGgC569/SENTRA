@@ -151,7 +151,7 @@
     "chunk-u8YMmbU0.js": "84ae4ba6bf879a4608696af785e17cedd8b581bdbea0c90f856585d451b34190",
     "chunk-xvONpD0Z.js": "bd8b29f1100faa6548bf4e1fd9270feccb476af74862a06cb0ed267c067683b9",
     "desktop.css": "9637aacf37b0d3900c9b4e4b7102d440980ea998e9fab8e9a3eb726944d198b4",
-    "desktop.js": "a82126a2bcdf99484d4cafe4914afe3226240afcf269c8144b249daaab3ae3b8",
+    "desktop.js": "dff3b917ff6e3337a94057ec5f4b872951f7111aa19cf47a9c1627b11e3e3e7a",
     "index.html": "1c959e724a618c3eacb8d6e4537d29ff0d96ca8d561917ab99ded01106e410d3"
   },
   "source_inputs": {
@@ -350,7 +350,7 @@
     "src/workspace/BrowserDesignCanvas.jsx": "862b48ccbad9bbfbed09028a65d46ba8b346f377ee8b21c2bdf22a161bf07b6a",
     "src/workspace/BrowserPane.jsx": "4651ac13d3a1e76eee0b3740909c89135dfbdd33b17434e26d9d2b5e70fce2bb",
     "src/workspace/ConversationResource.jsx": "5831cd91aa0033d950d58cf90925030404bc6931e17267e68ce097561910440e",
-    "src/workspace/DotWorkspace.jsx": "2b22477fbdf9161380fe78f28b4f1a06a6c836adb4f9a7c892aa88fccd65d751",
+    "src/workspace/DotWorkspace.jsx": "837793be77729c37fe591734bfe7c0c61da8ef6efe84dcd5043488e50eb024b0",
     "src/workspace/GitWorkflow.jsx": "4264c8c34b8c0bca82bf7143c0f52fb78f84b68f3f48435b33275847faff958f",
     "src/workspace/MobileDevices.jsx": "1f9262897a6047dc2bf2174b97ced7beae715a6beb39d0642061c4f4ea7aa4d7",
     "src/workspace/NewSession.jsx": "cae7e2d2f25e84657b8a0c14b437769f82d02faaae1680495baa107ea08c63b3",

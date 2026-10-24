@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "purpose": "Retained engineering provenance; product-facing notes use SENTRA terminology. License files remain in their original locations.",
+  "base_commit": "b520687",
+  "records": [
+    {
+      "original": "docs/COUCOU_INTEGRATION_REVIEW_2026-10-22.md",
+      "archived": "vendor/component-records/COUCOU_INTEGRATION_REVIEW_2026-10-22.md",
+      "sha256": "48c49c2c6781154934bfcd9e30c0455a53f100fd6148d8b74ecfe9a57fc1b6b3"
+    },
+    {
+      "original": "docs/COUCOU_MACOS_VISUAL_2026-10-22.md",
+      "archived": "vendor/component-records/COUCOU_MACOS_VISUAL_2026-10-22.md",
+      "sha256": "e46682051deb1c118bae50b886a54ab221dc4595cee330e973b2b3449fbdc61f"
+    },
+    {
+      "original": "docs/COUCOU_ORCA_COMPATIBILITY_AUDIT_2026-10-22.md",
+      "archived": "vendor/component-records/COUCOU_ORCA_COMPATIBILITY_AUDIT_2026-10-22.md",
+      "sha256": "cb4e802202961a80eb1018919d7d68f7d8b89192d04e1582bec90eae64e1e3b0"
+    },
+    {
+      "original": "docs/COUCOU_ORIGINAL_ISLAND_2026-10-22.md",
+      "archived": "vendor/component-records/COUCOU_ORIGINAL_ISLAND_2026-10-22.md",
+      "sha256": "b9356fc012d4d0aefcfe3325de3f1a175447985ebb1e10911044d55a09f41681"
+    },
+    {
+      "original": "docs/COUCOU_VISUAL_ABSORPTION_2026-10-22.md",
+      "archived": "vendor/component-records/COUCOU_VISUAL_ABSORPTION_2026-10-22.md",
+      "sha256": "d0b7b9e1292468807639b0ed5342d027351338dbae2e912f4bbe736337cd49b5"
+    },
+    {
+      "original": "docs/ORCA_CONTINUITY_COLLABORATION_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_CONTINUITY_COLLABORATION_2026-10-21.md",
+      "sha256": "65fc8faa4d37957055b7230655f1f66c24cf66ad01855783b4f3cc80a262a0fc"
+    },
+    {
+      "original": "docs/ORCA_FILE_EDITOR_2026-10-22.md",
+      "archived": "vendor/component-records/ORCA_FILE_EDITOR_2026-10-22.md",
+      "sha256": "4c766f44a9e058bd754b191b26c526358445a2f58add61584ab6e1012ad9b6ec"
+    },
+    {
+      "original": "docs/ORCA_IMPLEMENTATION_TRACKER.md",
+      "archived": "vendor/component-records/ORCA_IMPLEMENTATION_TRACKER.md",
+      "sha256": "22369dee8e4e0115d99c0fc298f100ab9803133b426c35d6afb4c70107eefc3e"
+    },
+    {
+      "original": "docs/ORCA_MOBILE_TERMINAL_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_MOBILE_TERMINAL_2026-10-21.md",
+      "sha256": "35471757aa7a4c7f912ed4d57a67806e9f2836be4d3ea76ca2f2e4c9adc9a2f4"
+    },
+    {
+      "original": "docs/ORCA_PTY_CLI_RECOVERY_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_PTY_CLI_RECOVERY_2026-10-21.md",
+      "sha256": "8c6f55f9943d2cf4e15a9cbf7c925aea6b9b5d2c9f43cf3c92a519b995354015"
+    },
+    {
+      "original": "docs/ORCA_SENTRA_IMPLEMENTATION_20261020.md",
+      "archived": "vendor/component-records/ORCA_SENTRA_IMPLEMENTATION_20261020.md",
+      "sha256": "90e11d22f34cc667d430a3211d367af54e8a036c13ff9bd3c69e69b62eee5135"
+    },
+    {
+      "original": "docs/ORCA_SENTRA_REAUDIT_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_SENTRA_REAUDIT_2026-10-21.md",
+      "sha256": "a44fe6a94ea4bf53337f25c2e755a0830e942fb2e2f084770e9c871defaa9f55"
+    },
+    {
+      "original": "docs/ORCA_SENTRA_STATUS_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_SENTRA_STATUS_2026-10-21.md",
+      "sha256": "5a8322f9cbe9138631f0e18adaea46a32b7d31c1c09d1c4ffa6adf709aa9dfe5"
+    },
+    {
+      "original": "docs/ORCA_SIMPLE_MODE_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_SIMPLE_MODE_2026-10-21.md",
+      "sha256": "8196116b4ab99f06977122b2f9f24c65babd365d15da41fd6d2871c39c52dbe8"
+    },
+    {
+      "original": "docs/ORCA_TERMINAL_CHECKPOINTS_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_TERMINAL_CHECKPOINTS_2026-10-21.md",
+      "sha256": "50405f47abc3266f60da40952e055e88040cc926093899c68476538919a6c70d"
+    },
+    {
+      "original": "docs/ORCA_TERMINAL_CONSUMERS_2026-10-22.md",
+      "archived": "vendor/component-records/ORCA_TERMINAL_CONSUMERS_2026-10-22.md",
+      "sha256": "e15b67ed3c976cef52f83994c817c5a9324c3d5daa45961124260c79d9947a29"
+    },
+    {
+      "original": "docs/ORCA_TERMINAL_INPUT_2026-10-22.md",
+      "archived": "vendor/component-records/ORCA_TERMINAL_INPUT_2026-10-22.md",
+      "sha256": "4c1ff4063d8cc692982786b40ed05a61346d1829ea3a1dcd0eebd1d7288d918f"
+    },
+    {
+      "original": "docs/ORCA_WORKSPACE_EVALUATION_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_WORKSPACE_EVALUATION_2026-10-21.md",
+      "sha256": "0df40450f7f2aa0cae3395593bda6ff62473ff2a5c0617902e920298d9ba153d"
+    },
+    {
+      "original": "docs/ORCA_WORKTREE_EXECUTION_2026-10-21.md",
+      "archived": "vendor/component-records/ORCA_WORKTREE_EXECUTION_2026-10-21.md",
+      "sha256": "0083b0e479a08ed44aa6559060849551acb349bc0ff3756cdda19e3027eb1851"
+    },
+    {
+      "original": "docs/CLOSURE_EXECUTION_2026-10-23.md",
+      "archived": "vendor/component-records/reference--CLOSURE_EXECUTION_2026-10-23.md",
+      "sha256": "ca92a3145b7707e28a85cd129d7f5ac6c03d92991664f798cfbf5c319c48ada5"
+    },
+    {
+      "original": "docs/CLOSURE_STATUS_2026-10-22.md",
+      "archived": "vendor/component-records/reference--CLOSURE_STATUS_2026-10-22.md",
+      "sha256": "ef65816be07aec1c3fc822d4427280002a69c49c7c4e29959b8bd658d6c031d2"
+    },
+    {
+      "original": "docs/DELIVERY_ACCEPTANCE_2026-10-22.md",
+      "archived": "vendor/component-records/reference--DELIVERY_ACCEPTANCE_2026-10-22.md",
+      "sha256": "22ffa80696cdc299cd05717d46b9728b4b0835554766f02bb8b97a428afcc1c1"
+    },
+    {
+      "original": "docs/MOBILE_PAGES_DELIVERY_2026-10-22.md",
+      "archived": "vendor/component-records/reference--MOBILE_PAGES_DELIVERY_2026-10-22.md",
+      "sha256": "66c820dc57b98520e5f1fb8380ec92a3bf95c79f3db77be8d617f61a420e5f94"
+    },
+    {
+      "original": "docs/NATIVE_PRESENCE_DELIVERY_2026-10-22.md",
+      "archived": "vendor/component-records/reference--NATIVE_PRESENCE_DELIVERY_2026-10-22.md",
+      "sha256": "d90665d28c0c7db34d23887984a96d41aa4ff9bf1e480775414ae672982c97ca"
+    },
+    {
+      "original": "docs/OPEN_ITEMS_AUDIT_2026-10-22.md",
+      "archived": "vendor/component-records/reference--OPEN_ITEMS_AUDIT_2026-10-22.md",
+      "sha256": "4b2628cb79f233445523046d70b63f87953c4646d6d4c13333a5aa6d3ec4cf2d"
+    },
+    {
+      "original": "docs/SENTRA_FULL_ACCESS_ORCHESTRATION_2026-10-21.md",
+      "archived": "vendor/component-records/reference--SENTRA_FULL_ACCESS_ORCHESTRATION_2026-10-21.md",
+      "sha256": "9b063bf6c640ca8ef4c37e6a4829c9e87916c68a158978a24b89e5d0f7a06c64"
+    },
+    {
+      "original": "docs/SHARED_PRESENTATION_EVENTS_2026-10-23.md",
+      "archived": "vendor/component-records/reference--SHARED_PRESENTATION_EVENTS_2026-10-23.md",
+      "sha256": "e3c71e12c6cd166c8a462cf7aa01c2a46b6ef7937a28b85133514604fbc837dc"
+    },
+    {
+      "original": "docs/WINDOWS_PREVIEW_2026-10-22.md",
+      "archived": "vendor/component-records/reference--WINDOWS_PREVIEW_2026-10-22.md",
+      "sha256": "91bae90aaa06577d54785b14cc87d9db2208976052dda90878cb7d5abc13fe5f"
+    },
+    {
+      "original": "docs/architecture/STRUCTURAL_AUDIT_2026-10-23.md",
+      "archived": "vendor/component-records/reference--architecture--STRUCTURAL_AUDIT_2026-10-23.md",
+      "sha256": "559fcaf3e2f935cebec0eef0596fe7d8bba7f7f7ccd8469bd734bb3c1a0d52f1"
+    },
+    {
+      "original": "docs/design/interface-audit-2026-10-23.md",
+      "archived": "vendor/component-records/reference--design--interface-audit-2026-10-23.md",
+      "sha256": "029823f49b7666f5413e5ec159abe6218709b2a40b77103c1bf961b51800ac76"
+    },
+    {
+      "original": "docs/design/VISUAL_REFINEMENT_2026-10-23.md",
+      "archived": "vendor/component-records/reference--design--VISUAL_REFINEMENT_2026-10-23.md",
+      "sha256": "5d75f9249797cc185fc6ff07091b8665532404aa3a156cded5ac8059392b79b7"
+    },
+    {
+      "original": "docs/design/evidence/2026-10-23/assessment-b.md",
+      "archived": "vendor/component-records/reference--design--evidence--2026-10-23--assessment-b.md",
+      "sha256": "3845b1ec7a2ec8e4a1ebf94794675727a9d63ff62eaaf80b4ee4aa29096e8a10"
+    }
+  ]
+}

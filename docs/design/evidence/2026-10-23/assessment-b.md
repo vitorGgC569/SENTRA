@@ -35,7 +35,7 @@ Total: 4 achados técnicos, P0=0, P1=2, P2=2, P3=0. As observações de targets 
 ### P1 — contraste do botão Nova sessão no cabeçalho do Canvas
 
 - Markup: `sentra_canvas/desktop_ui/src/workspace/DotWorkspace.jsx:183`.
-- Cascata: `sentra_canvas/desktop_ui/src/workspace/workspace.css:26` aplica `color:var(--sw-text)` ao botão do cabeçalho com seletor mais específico; `sentra_canvas/desktop_ui/src/shell-coucou-macos.css:193`/197 fornece fundo laranja e tenta aplicar texto escuro, mas perde na propriedade color.
+- Cascata: `sentra_canvas/desktop_ui/src/workspace/workspace.css:26` aplica `color:var(--sw-text)` ao botão do cabeçalho com seletor mais específico; [component source inventory](../../../../THIRD_PARTY_NOTICES.md)/197 fornece fundo laranja e tenta aplicar texto escuro, mas perde na propriedade color.
 - Em Canvas, `.sw-new-session` apresentou texto de 12px `rgb(245,246,248)` sobre `rgb(251,146,60)`; medição repetida em estado Canvas confirmou as mesmas cores.
 - Razão: 2,0930:1, abaixo de 4,5:1 (WCAG 1.4.3 AA).
 - Dimensão medida: aproximadamente 119,22×34 CSS px. Controle habilitado.
@@ -72,18 +72,18 @@ São alvos compactos em relação à referência ergonômica de 44×44. Não for
 
 ## Suspeitas descartadas / proteções verificadas
 
-- Cores antigas do workspace (#737373 etc.) não provam tema quebrado. A camada Coucou sobrescreve tokens em `shell-coucou-macos.css:247`; o Canvas medido usava `--sw-accent:#fdab63`, fundo #0e0f11 e texto #f5f6f8. Não há finding genérico de ausência de tokens.
+- Cores antigas do workspace (#737373 etc.) não provam tema quebrado. A camada visual sobrescreve tokens em [component source inventory](../../../../THIRD_PARTY_NOTICES.md); o Canvas medido usava `--sw-accent:#fdab63`, fundo #0e0f11 e texto #f5f6f8. Não há finding genérico de ausência de tokens.
 - Inputs de ShellEntityDialog e ShellCoordinateDialog usam Field, que renderiza label envolvente em `primitives.jsx`. AX do diálogo mostrou Nome e Papel nomeados. Não há finding de campos sem labels.
 - Botões de ícone observados têm nomes acessíveis. Menus usam Radix; tabs possuem role, seleção e associação com tabpanels. Não há finding genérico de ARIA ausente.
 - Foco visível foi medido diretamente no skip link. Há regras finais de focus-visible no shell; declarações antigas de outline não foram usadas para inventar falha.
-- OrcaSplit, dependência do alvo, tem role separator, tabIndex, valor/orientação, setas de teclado, pointer capture, limpeza em pointercancel/lostpointercapture e touch-action:none. Não procede classificá-lo como implementação mouse-only. Gesto touch não foi sintetizado.
+- o componente de divisão, dependência do alvo, tem role separator, tabIndex, valor/orientação, setas de teclado, pointer capture, limpeza em pointercancel/lostpointercapture e touch-action:none. Não procede classificá-lo como implementação mouse-only. Gesto touch não foi sintetizado.
 - Conversa usa textarea nomeada Mensagem, busca nomeada, log nomeado e status separado para resposta disponível. O log com aria-live=off é intencionalmente acompanhado de um status polite; não foi tratado isoladamente como falha.
 - Há ShellMessageWindow para histórico e RetainedTab/portals para retenção de painéis. Sem profiler, não se atribuiu custo de render, layout thrashing ou bundle excessivo.
 - Há regras de reduced motion e `useReducedMotion` na conversa. A presença de cancelamento global de animação, sem evidência de perda de estado, não foi contada como falha funcional.
 
 ## Limitações e notas de execução
 
-- Browser preview: `http://127.0.0.1:5200/desktop-assets/qa/orca-workspace.html?view=home`, página QA que importa o shell real e usa fixtures. Não é verificação da janela desktop nativa nem da execução real de agentes.
+- Browser preview: [component source inventory](../../../../THIRD_PARTY_NOTICES.md), página QA que importa o shell real e usa fixtures. Não é verificação da janela desktop nativa nem da execução real de agentes.
 - Aba nova própria em browser 2/iab, mantida em background (`visible:false`). Nenhuma aba de A/pai foi usada. Estados examinados: Home, Novo Dot, Canvas de Dot existente e conversa existente. Nenhuma criação/envio foi submetida.
 - Overlay indisponível: evaluate documentado como somente leitura. Não houve tentativa de injetar detector, alterar título ou DOM por evaluate. Não há findings de console do overlay. Fallback: AX, screenshot nativo, leituras DOM, estilos computados e caixas renderizadas, mais fonte/cascata.
 - Nenhum live-server ou serviço extra iniciado; limpeza de live-server não aplicável.

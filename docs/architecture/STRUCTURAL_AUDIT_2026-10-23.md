@@ -154,8 +154,8 @@ não deve criar terminais nem transportar segredos ou permissões implícitas.
 
 ### Referências externas e protótipos
 
-ORCA, Coucou, componentes adaptados e protótipos têm papéis diferentes. Já há
-pins, hashes, licenças e inventários, como scripts/commander/orca_inventory.py:11.
+Dependências externas, componentes adaptados e protótipos têm papéis diferentes. Já há
+pins, hashes, licenças e inventários, como [component source inventory](../../THIRD_PARTY_NOTICES.md).
 Essas origens devem ser rastreáveis sem se tornarem três sistemas visuais ativos.
 
 Identificar explicitamente o que é produção, compatibilidade, experimento e
@@ -330,7 +330,7 @@ recuperação. A UI não decide se deve repetir uma operação pelo texto do err
 ### A10 — P2: estilos e bridges imperativos têm contratos implícitos
 
 **Fato:** main.jsx:30 carrega três camadas de CSS com redefinições dos mesmos
-tokens. shell-coucou-macos.css também traduz tokens de outras features. O
+tokens. adaptador visual também traduz tokens de outras features. O
 catálogo shell-design-tokens.js lista nomes, mas não centraliza os valores.
 
 InspectorPortal e openInspector dependem de IDs globais e alteração imperativa
@@ -381,7 +381,7 @@ Isso é uma proteção existente, não uma duplicação a remover sem substitui�
 build_windows.py:823 copia todo docs/ para o payload. Só os documentos rastreados
 somam 294 arquivos e cerca de 21,94 MiB, incluindo relatórios e dados internos de
 auditoria. O README do frontend ainda abre descrevendo a direção Maestri,
-enquanto a entrada atual usa shell e estilos Coucou.
+enquanto a entrada atual usa shell e estilos da camada visual.
 
 **Separação proposta:** comandos por perfil desktop/backend/mobile/integrations;
 mapa arquitetural atual separado do histórico; catálogo explícito de docs que

@@ -1,6 +1,6 @@
 # Native Dot activity bar — local Windows delivery
 
-The subsequent [original Coucou island delivery](COUCOU_ORIGINAL_ISLAND_2026-10-22.md)
+The subsequent [component source inventory](../THIRD_PARTY_NOTICES.md)
 supersedes the floating-bar visual description and Canvas binary hash below.
 
 ## Installed result
@@ -65,7 +65,7 @@ Logs are under `.tmp/native-presence-*.log` and
 
 ## Visual refinement
 
-The shared Coucou-inspired palette now applies to Home, Dot and conversation
+The shared shared SENTRA palette now applies to Home, Dot and conversation
 lists, conversation composer, workspace, dialogs, configuration inspectors,
 documents and the network screen. Network connection and advanced coordination
 forms are progressively disclosed. Documents use a constrained reading surface.

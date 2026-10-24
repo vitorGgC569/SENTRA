@@ -27,7 +27,7 @@ that a subsequently implemented feature is absent.
 | Android/VPN | Actual phone installation/pairing/Windows approval/chat/terminal/background/reconnect/revoke/release, plus real private VPN route/address change | Open; automated encrypted clients are not physical phones. |
 | iPhone | Valid signing/provisioning/build/distribution channel, then physical device acceptance | Open external prerequisite: no owner Apple Developer account or signing channel supplied. Source/export is not an installable app. |
 | SSH/GitHub/Linear | Real configured identities/accounts/services; guided setup, authorized remote files and issues/PR operations | Partial adapters exist; native Linear and complete guided provider workflows remain open. |
-| Additional Coucou integrations | Actual CLI observation adapters, reversible hooks and biometric approvals | Separate unimplemented backlog included in the attachment; existing visual adaptation does not prove these features. |
+| Additional presentation integrations | Actual CLI observation adapters, reversible hooks and biometric approvals | Separate unimplemented backlog included in the attachment; existing visual adaptation does not prove these features. |
 | Documentation/release closure | Reconciled current checklist, exact artifact provenance and recovery/update/limitations documentation | This ledger starts reconciliation; final release evidence is still required. |
 
 Public relay and relay-dependent push remain outside the owner's selected

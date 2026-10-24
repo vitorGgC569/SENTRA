@@ -21,8 +21,8 @@ superfície como uma mesa de trabalho de uma equipe de agentes.
 ## Escopo e evidências
 
 - Alvo estável: `sentra_canvas/desktop_ui/src/shell-app.jsx` e seus componentes.
-- Prévia isolada existente: `qa/orca-workspace.html`, servida pela configuração
-  `vite.orca-preview.config.js`. Ela importa os componentes e CSS atuais, mas
+- Prévia isolada existente: [component source inventory](../../THIRD_PARTY_NOTICES.md), servida pela configuração
+  [component source inventory](../../THIRD_PARTY_NOTICES.md). Ela importa os componentes e CSS atuais, mas
   substitui a API por fixtures. Nenhum agente real foi iniciado nesta revisão.
 - Inspeção com navegador e Playwright: Home, conversa, Canvas e diálogo Novo
   Dot; tema escuro e Home no tema claro; viewports de 1280×720, 1440×900 e
@@ -122,7 +122,7 @@ podem aparecer em linhas compactas ou cartões apenas quando houver informação
 comparável que justifique a área. Reservar a recepção completa ao primeiro uso.
 
 **Fontes:** `shell-app.jsx:948`, `:949`, `:951`, `:953`;
-`shell-coucou-macos.css:133`, `:148`, `:172`; `shell-home-resume.jsx:21`.
+[component source inventory](../../THIRD_PARTY_NOTICES.md), `:148`, `:172`; `shell-home-resume.jsx:21`.
 Referências: `$impeccable layout` e `$impeccable onboard`.
 
 ### 3. [P1] Melhorar legibilidade, estados e acesso por teclado
@@ -135,7 +135,7 @@ Eles podem ser tecnicamente compatíveis, mas falta explicar o escopo de cada um
 
 | Severidade | Achado | Evidência e correção proposta |
 | --- | --- | --- |
-| P1 | Contraste do CTA “Nova sessão” | Texto `#f5f6f8` sobre `#fb923c`: **2,09:1**, abaixo de 4,5:1 para texto pequeno. `workspace/workspace.css:26` vence na propriedade de cor; corrigir para o token de texto sobre o acento em `shell-coucou-macos.css:193`. |
+| P1 | Contraste do CTA “Nova sessão” | Texto `#f5f6f8` sobre `#fb923c`: **2,09:1**, abaixo de 4,5:1 para texto pequeno. `workspace/workspace.css:26` vence na propriedade de cor; corrigir para o token de texto sobre o acento em [component source inventory](../../THIRD_PARTY_NOTICES.md). |
 | P1 | Contraste do skip link | Texto `#5269bb` sobre `#18191c`: **3,43:1**, abaixo de 4,5:1. `desktop.css:506`; usar cor de texto apropriada ao tema. O foco visível existe. |
 | P2 | Escape perde o retorno de foco | Em Novo Dot, o input Nome recebe foco; Escape fecha o diálogo, mas `document.activeElement` passa a BODY. `primitives.jsx:15`; vincular o acionador ou restaurar seu foco explicitamente. |
 | P2 | Falta landmark principal em chat e Canvas | Nenhum `main`/`role=main` com caixa renderizada nessas vistas; Home possui main. `shell-app.jsx:931` e `:946`; usar um landmark principal comum, sem duplicação. O skip link existe, portanto não se conclui automaticamente falha de WCAG 2.4.1. |
@@ -148,7 +148,7 @@ Alvos de 21–34 px merecem revisão ergonômica. Não foram contados como infra
 AA apenas por serem menores que 44 px: o critério de 24 px possui exceções de
 espaçamento e equivalência que precisam ser avaliadas.
 
-**Outras fontes:** `shell-coucou-macos.css:111`, `:180`, `:223`;
+**Outras fontes:** [component source inventory](../../THIRD_PARTY_NOTICES.md), `:180`, `:223`;
 `shell-chat-visuals.css:137`; `shell-conversation.jsx:580`, `:592`;
 `shell-island.jsx:28`, `:76`. Referências: `$impeccable harden`,
 `$impeccable typeset` e `$impeccable clarify`.
@@ -173,7 +173,7 @@ Referências: `$impeccable distill` e `$impeccable layout`.
 ### 5. [P2] Consolidar o sistema visual e a cascata
 
 **Problema:** `main.jsx:30` carrega `desktop.css`, `shell-polish.css` e
-`shell-coucou-macos.css` em sequência. Esses três arquivos somam aproximadamente
+[component source inventory](../../THIRD_PARTY_NOTICES.md) em sequência. Esses três arquivos somam aproximadamente
 160 KiB de fonte e contêm 613 ocorrências de cores hexadecimais, além de regras
 repetidas de hero, cartões e paleta. Contagem de fonte não é medida de custo
 de renderização e não significa que todas as declarações estejam ativas.
@@ -188,7 +188,7 @@ overrides redundantes à medida que cada componente for revisado. Fazer a
 migração por componente, com capturas comparáveis em dois temas.
 
 **Fontes:** `main.jsx:30`, `shell-design-tokens.js:1`, `desktop.css:331`,
-`shell-polish.css:49`, `:65`, `shell-coucou-macos.css:8`, `:50`, `:193`.
+`shell-polish.css:49`, `:65`, [component source inventory](../../THIRD_PARTY_NOTICES.md), `:50`, `:193`.
 Referências: `$impeccable extract`, `$impeccable document` e `$impeccable polish`.
 
 ## O que preservar

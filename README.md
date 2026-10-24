@@ -8,9 +8,9 @@ SENTRA brings Dots, permanent conversations, terminals, files, browser tools, an
 
 ## Current status
 
-- **Windows installer contribution:** [PR #1 by Kayn3x (formerly Predo-kn)](https://github.com/vitorGgC569/SENTRA/pull/1) consolidated Windows setup corrections and native Web response improvements in r18. The documented r16 clean-install and existing-user update scenarios passed; the r18 Web component delivered real listing, conversation-continuation, and bounded README-reading responses. See the [Windows and Web validation report](docs/VALIDACAO_WINDOWS_E_WEB_20261019.md).
-- **Experimental development:** the checkout includes ORCA-inspired tabs and split panels inside each Dot's Canvas, durable terminal work, mobile LAN, conversation-centered permissions, and multi-Dot coordination. These features are not all qualified for the installed Windows product or physical Android/iPhone devices. See the [implementation tracker](docs/ORCA_IMPLEMENTATION_TRACKER.md) and [status report](docs/ORCA_SENTRA_STATUS_2026-10-21.md).
-- **Windows preview:** the October 23 full rebuild passed Setup payload and GUI checks. That published candidate failed prolonged terminal observation and MSI consumption, so MSI remains excluded from its downloads. Later source fixes passed a 30-minute frozen daemon trial and real MSI administrative extraction; clean installation, update, rollback, trusted signing, and complete package qualification remain open. See the [current acceptance ledger](docs/CLOSURE_EXECUTION_2026-10-23.md). Read the [current build report](docs/WINDOWS_BUILD_QUALIFICATION_2026-10-23.md) and the identified [preview release notes](https://github.com/vitorGgC569/SENTRA/releases) before downloading an experimental Setup. These packages are unsigned.
+- **Development preview:** the local Windows app includes the conversation-first Home, central Dot selector, contextual Canvas, durable terminal receipts and LAN/mobile integration. Selected functionality is validated; the complete product is not yet qualified as a stable release.
+- **Installer is older than the current app:** the published [Windows preview from October 23](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261023-1) does not include the October 24 interface. A complete matching Setup, clean installation/update/rollback and trusted signing remain open.
+- **Known limits:** confirmed external-model acceptance, physical mobile tests and the full recovery journey remain open. The external-bar component is currently blocked by the Windows application policy on this host; the native WebView2 display is available. Read the [first-version acceptance review](docs/RELEASE_READINESS_2026-10-24.md).
 
 Some linked documents and application labels remain in Portuguese. Dated reports identify the actual validation scope and remaining work.
 
@@ -27,13 +27,13 @@ separate milestone from producing a build.
 
 Desktop brings **Dots**, conversations, **Spaces**, and authorized computer resources into a Windows interface. It starts with a dark theme and offers a light-theme option.
 
-The following application previews were captured on October 22, 2026, using isolated demonstration data. They show the Portuguese interface and experimental features; they do not demonstrate live agent execution or qualification of the published installer. [Screenshot provenance](site/assets/provenance.json).
+The following application previews were refreshed on October 24, 2026, using isolated demonstration data. They show the current Portuguese interface; they do not demonstrate live agent execution or qualification of the older published installer. [Screenshot provenance](site/assets/provenance.json).
 
-### Home and your Dots
+### Start with your Dot
 
-Conversations, recent work, and project navigation:
+A focused conversation entry, project navigation and a central assistant selector:
 
-![SENTRA Home preview with Dots and recent work](site/assets/home.png)
+![SENTRA Home with the central Dot and conversation entry](site/assets/home.png)
 
 ### Dot Canvas
 
@@ -41,11 +41,11 @@ Tabs and split terminal panels inside a Dot's workspace:
 
 ![SENTRA Canvas preview with split terminals and multiple Dots](site/assets/workspace.png)
 
-### Floating activity bar
+### Choose your assistant
 
-Coucou's island adapted with SENTRA characters:
+Click the central Dot to select another assistant or create a new one. Your draft stays in place:
 
-![SENTRA floating activity bar preview](site/assets/island.png)
+![SENTRA visual assistant selector](site/assets/selector.png)
 
 The [historical October 13 presentation video](docs/media/2026-10-13/sentra-apresentacao.mp4) shows an earlier interface, including a setup preview rather than a completed installation.
 
@@ -248,9 +248,9 @@ Historical installer checkpoints: [October 13 report](docs/INSTALADOR_AUTOMATICO
 
 [Start here](docs/START_HERE.md) · [quick start](docs/QUICKSTART.md) · [using SENTRA](docs/USING_SENTRA.md) · [CLI](docs/SENTRA_CLI.md) · [Web Models](docs/WEB_MODELS.md) · [architecture](docs/ARCHITECTURE.md) · [security](SECURITY.md) · [releases](docs/RELEASE.md) · [operator runbook](skills/oma_operator/SKILL.md) · [known pitfalls](docs/traps.md) · [OMA specification](docs/OMA_Orquestrador_Multiagente.md).
 
-## Upstream acknowledgments
+## Third-party licenses
 
-The experimental Canvas workspace, terminal, and mobile work reuses selected components and patterns from [ORCA](https://github.com/stablyai/orca). Its MIT license, pinned source references, and dependency inventory are preserved under [`vendor/orca/`](vendor/orca/) and the integration directories. SENTRA's central authority and Web model transport retain their existing contracts.
+Required dependency licenses, copyright notices and engineering provenance are preserved in the [third-party notices](THIRD_PARTY_NOTICES.md) and distributed component inventories.
 
 ## Contributors
 

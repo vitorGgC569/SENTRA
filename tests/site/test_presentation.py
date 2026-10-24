@@ -20,6 +20,15 @@ class Page(HTMLParser):
 
 
 class PresentationTests(unittest.TestCase):
+    def test_product_notes_use_sentra_names_and_preserve_source_records(self):
+        paths = [ROOT / 'README.md', ROOT / 'site/index.html', * (ROOT / 'docs').rglob('*.md')]
+        for path in paths:
+            self.assertNotRegex(path.read_text(encoding='utf-8'), r'(?i)(?<![a-z])(orca|coucou)(?![a-z])', str(path))
+        index = json.loads((ROOT / 'vendor/component-records/index.json').read_text())
+        for record in index['records']:
+            self.assertEqual(hashlib.sha256((ROOT / record['archived']).read_bytes()).hexdigest(), record['sha256'])
+        self.assertTrue((ROOT / 'THIRD_PARTY_NOTICES.md').is_file())
+
     def test_page_is_english_and_local_links_resolve(self):
         source = (ROOT / 'site/index.html').read_text(encoding='utf-8')
         page = Page(source)

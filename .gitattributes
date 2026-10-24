@@ -49,3 +49,6 @@
 /sentra_canvas/static/vendor/*-LICENSE -text
 # Preserve the exact upstream patch bytes, including meaningful patch whitespace.
 integrations/orca-terminal/vendor/orca/config/patches/*.patch -text -whitespace
+
+# Historical component records are indexed by their original byte-level hashes.
+/vendor/component-records/*.md -text -whitespace
