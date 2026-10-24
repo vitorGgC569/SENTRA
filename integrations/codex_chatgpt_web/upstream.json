@@ -26,6 +26,7 @@
     "launcher/tests/packaging-contract.test.cjs",
     "launcher/tests/runtime-install-orphan.test.cjs",
     "launcher/tests/saved-conversations.test.cjs",
+    "launcher/tests/sentra-account-control.test.cjs",
     "src/adapters/chatgpt-web/browser-helper-main.ts",
     "src/adapters/chatgpt-web/browser-worker.ts",
     "src/adapters/chatgpt-web/environment.ts",

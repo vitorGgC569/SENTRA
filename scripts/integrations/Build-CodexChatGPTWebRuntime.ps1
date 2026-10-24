@@ -247,6 +247,8 @@ try {
     }
     & node --test "launcher/tests/saved-conversations.test.cjs"
     if ($LASTEXITCODE -ne 0) { throw "Saved ChatGPT conversation persistence tests failed" }
+    & node --test "launcher/tests/sentra-account-control.test.cjs"
+    if ($LASTEXITCODE -ne 0) { throw "SENTRA authenticated account controls failed" }
     & $Bun run scripts/build-runtime-bundle.ts $Runtime
     if ($LASTEXITCODE -ne 0) { throw "Runtime build failed" }
     Push-Location (Join-Path $Source "launcher")

@@ -642,7 +642,7 @@ index 320ec5af058a0244eed710605fc375ec22190765..711ff518deac2d0792efe7a147a25b17
  
  module.exports = {
 diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
-index 2c9c5651fbe3e84e326f0cf6e24c27f68e3f6e4d..6b58dc6bc468e45c277b5165e07ee7f48a431415 100644
+index 2c9c565..0a702a7 100644
 --- a/launcher/electron/control-server.cjs
 +++ b/launcher/electron/control-server.cjs
 @@ -38,12 +38,13 @@ function writeJson(response, status, body) {
@@ -660,7 +660,7 @@ index 2c9c5651fbe3e84e326f0cf6e24c27f68e3f6e4d..6b58dc6bc468e45c277b5165e07ee7f4
      this.token = randomBytes(32).toString("base64url");
      this.port = 0;
      this.server = createServer((request, response) => {
-@@ -100,8 +101,14 @@ class BrowserControlServer {
+@@ -100,8 +101,15 @@ class BrowserControlServer {
        || request.url === "/v1/turn/usage"
        || request.url === "/v1/turn/end";
      const isTurnRelease = request.url === "/v1/turn/release";
@@ -669,22 +669,23 @@ index 2c9c5651fbe3e84e326f0cf6e24c27f68e3f6e4d..6b58dc6bc468e45c277b5165e07ee7f4
 +    const isSentraIdentitySnapshot = request.url === "/v1/sentra/identity-snapshot";
 +    const isSentraApprovalSnapshot = request.url === "/v1/sentra/approval-snapshot";
 +    const isSentraAccountCatalog = request.url === "/v1/sentra/account-catalog";
++    const isSentraAccount = request.url === "/v1/sentra/account";
      const isSessionInspect = request.url === "/v1/session/inspect";
      const isProxyResolution = request.url === "/v1/network/resolve-proxy";
 +    const isSentraRuntimeControl = Boolean(this.controlRuntime) && request.url === "/v1/sentra/runtime-control";
      const manualAction = new Map([
        ["/v1/manual/start", "start"],
        ["/v1/manual/wait-sent", "wait-sent"],
-@@ -110,7 +117,7 @@ class BrowserControlServer {
+@@ -110,7 +118,7 @@ class BrowserControlServer {
        ["/v1/manual/end", "end"],
        ["/v1/manual/cancel", "cancel"],
      ]).get(request.url);
 -    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
-+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isSentraIdentitySnapshot && !isSentraApprovalSnapshot && !isSentraAccountCatalog && !isSentraMessageSnapshot && !isSentraMessageChallenge && !isProxyResolution && !isSentraRuntimeControl && !manualAction)) {
++    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isSentraIdentitySnapshot && !isSentraApprovalSnapshot && !isSentraAccountCatalog && !isSentraAccount && !isSentraMessageSnapshot && !isSentraMessageChallenge && !isProxyResolution && !isSentraRuntimeControl && !manualAction)) {
        writeJson(response, 404, { error: "not_found" });
        return;
      }
-@@ -119,6 +126,35 @@ class BrowserControlServer {
+@@ -119,6 +127,35 @@ class BrowserControlServer {
          request,
          manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : MAX_BODY_BYTES,
        );
@@ -720,10 +721,31 @@ index 2c9c5651fbe3e84e326f0cf6e24c27f68e3f6e4d..6b58dc6bc468e45c277b5165e07ee7f4
        if (isProxyResolution) {
          const url = new URL(body?.url);
          if (url.origin !== "https://chatgpt.com" || url.username || url.password
-@@ -135,6 +171,26 @@ class BrowserControlServer {
+@@ -135,6 +172,47 @@ class BrowserControlServer {
        const preferences = this.getPreferences();
        const host = this.getBrowserHost();
        if (!host) throw new Error("browser host is not ready");
++      if (isSentraAccount) {
++        if (!body || Object.keys(body).length !== 1 || !["status", "login"].includes(body.action)) {
++          writeJson(response, 400, { error: "invalid_account_action" });
++          return;
++        }
++        // Account controls never create turns, switch profiles or return cookies.
++        if (body.action === "login") {
++          await host.reveal(false);
++          host.window.show();
++          host.window.focus();
++        }
++        const state = host.snapshot();
++        writeJson(response, 200, {
++          authenticated: state.authenticated === true,
++          status: typeof state.status === "string" ? state.status.slice(0, 40) : "unknown",
++          login_open: state.visible === true && host.window?.isVisible?.() === true,
++          saved_chats: host.getUseSavedChats?.() === true,
++          proves_model_delivery: false,
++        });
++        return;
++      }
 +      if (isSentraApprovalSnapshot || isSentraAccountCatalog) {
 +        const result = isSentraApprovalSnapshot ? await host.sentraApprovalSnapshot(body) : await host.sentraAccountCatalog(body);
 +        writeJson(response, 200, result);
@@ -7401,3 +7423,50 @@ diff --git a/tests/prompt-contract.test.ts b/tests/prompt-contract.test.ts
  });
  
  test("Full-mode Pro prompts pass one stable turn token directly to native actions", () => {
+
+diff --git a/launcher/tests/sentra-account-control.test.cjs b/launcher/tests/sentra-account-control.test.cjs
+new file mode 100644
+index 0000000..071b303
+--- /dev/null
++++ b/launcher/tests/sentra-account-control.test.cjs
+@@ -0,0 +1,40 @@
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { BrowserControlServer } = require('../electron/control-server.cjs');
++
++test('account controls require authentication and status never opens or submits a turn', async () => {
++  let opens = 0, reveals = 0, focuses = 0;
++  const host = {
++    snapshot: () => ({ authenticated: true, status: 'ready', visible: opens > 0, cookies: 'must-not-leak' }),
++    getUseSavedChats: () => true,
++    reveal: async inspect => { assert.equal(inspect, false); reveals++; },
++    window: { show: () => opens++, focus: () => focuses++, isVisible: () => opens > 0 },
++    beginTurn: () => assert.fail('account action cannot submit a turn'),
++  };
++  const server = await new BrowserControlServer({logger:{info(){},error(){}},getPreferences:()=>({}),getBrowserHost:()=>host}).start();
++  const {endpoint,token} = server.descriptor();
++  const send = (body, auth=token) => fetch(endpoint+'/v1/sentra/account', {
++    method:'POST',headers:{authorization:'Bearer '+auth,'content-type':'application/json'},body:JSON.stringify(body),
++  });
++  try {
++    assert.equal((await send({action:'login'},'wrong')).status,401);
++    assert.equal(opens,0);
++    const status = await (await send({action:'status'})).json();
++    assert.deepEqual(status,{authenticated:true,status:'ready',login_open:false,saved_chats:true,proves_model_delivery:false});
++    assert.equal(opens,0);assert.equal(reveals,0);
++    assert.equal((await send({action:'execute'})).status,400);
++    assert.equal((await send({action:'login',url:'https://example.com'})).status,400);
++    const login = await (await send({action:'login'})).json();
++    assert.equal(login.login_open,true);assert.equal(opens,1);assert.equal(reveals,1);assert.equal(focuses,1);
++  } finally { await server.close(); }
++});
++
++test('cached account observation does not promote missing authentication to success', async () => {
++  const server = await new BrowserControlServer({logger:{info(){},error(){}},getPreferences:()=>({}),getBrowserHost:()=>({snapshot:()=>({status:'starting'})})}).start();
++  const {endpoint,token} = server.descriptor();
++  try {
++    const response = await fetch(endpoint+'/v1/sentra/account',{method:'POST',headers:{authorization:'Bearer '+token},body:JSON.stringify({action:'status'})});
++    assert.equal(response.status,200);
++    const status = await response.json();assert.equal(status.authenticated,false);assert.equal(status.saved_chats,false);assert.equal(status.proves_model_delivery,false);
++  } finally { await server.close(); }
++});
