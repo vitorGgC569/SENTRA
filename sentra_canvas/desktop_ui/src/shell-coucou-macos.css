@@ -125,7 +125,26 @@
 .opendots-shell[data-surface=home] .shell-content { display: flex; padding: 24px 40px 32px; }
 .opendots-shell .shell-start { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; align-content: center; align-content: safe center; gap: 28px; flex: 1; padding-block: 32px; width: 100%; max-width: 760px; min-width: 0; min-height: 0; margin: 0 auto; }
 .opendots-shell .shell-start-greeting { align-self: center; display: flex; flex-direction: column; align-items: center; gap: 20px; padding-bottom: 0; text-align: center; }
-.opendots-shell .shell-start-greeting > .shell-mascot { width: 80px; height: 88px; margin: 0; flex-shrink: 0; }
+.opendots-shell .shell-start-identity { display: inline-flex; flex-direction: column; align-items: center; gap: 8px; max-width: 280px; min-width: 108px; padding: 8px 14px; border: 0; border-radius: 14px; background: transparent; color: var(--sc-body); }
+.opendots-shell .shell-start-identity:hover:not(:disabled), .opendots-shell .shell-start-identity[data-state=open] { background: var(--sc-hover); color: var(--sc-ink); }
+.opendots-shell .shell-start-identity > .shell-mascot { width: 80px; height: 88px; margin: 0; flex-shrink: 0; }
+.opendots-shell .shell-start-identity-caption { display: flex; align-items: center; justify-content: center; gap: 6px; max-width: 100%; font-size: 13px; font-weight: 500; }
+.opendots-shell .shell-start-identity-caption > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opendots-shell .shell-start-identity-caption > svg { flex-shrink: 0; color: var(--sc-muted); }
+.shell-start-picker { z-index: 150; width: min(328px, calc(100vw - 32px)); max-height: min(420px, var(--radix-dropdown-menu-content-available-height)); padding: 6px; overflow-y: auto; border-radius: 14px; background: var(--sc-panel); color: var(--sc-ink); box-shadow: var(--sc-modal-shadow); font-family: var(--sc-font); }
+.shell-start-picker-heading { padding: 8px 10px; font-size: 12px; font-weight: 500; color: var(--sc-muted); }
+.shell-start-picker-item, .shell-start-picker-create { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 10px; border-radius: 9px; outline: 2px solid transparent; outline-offset: -2px; cursor: pointer; user-select: none; }
+.shell-start-picker-item[data-highlighted], .shell-start-picker-create[data-highlighted] { background: var(--sc-hover); }
+.shell-start-picker-item:focus-visible, .shell-start-picker-create:focus-visible { outline-color: var(--sc-accent); }
+.shell-start-picker-item > .shell-mascot { width: 36px; height: 40px; flex-shrink: 0; }
+.shell-start-picker-copy { display: flex; flex: 1; flex-direction: column; gap: 3px; min-width: 0; }
+.shell-start-picker-copy > span { overflow-wrap: anywhere; font-size: 14px; font-weight: 500; line-height: 1.4; }
+.shell-start-picker-copy > small { color: var(--sc-muted); font-size: 12px; line-height: 1.4; }
+.shell-start-picker-check { flex-shrink: 0; color: var(--sc-accent-text); }
+.shell-start-picker-divider { height: 1px; margin: 5px 10px; background: var(--sc-line); }
+.shell-start-picker-create { min-height: 44px; color: var(--sc-accent-text); font-size: 14px; }
+.shell-start-picker-create[data-disabled] { opacity: .5; cursor: default; }
+@media (forced-colors: active) { .shell-start-picker { border: 1px solid CanvasText; } }
 .opendots-shell .shell-start h1 { font-size: 28px; line-height: 1.3; font-weight: 500; letter-spacing: -.025em; margin: 0; text-wrap: balance; }
 .opendots-shell .shell-start-compose { min-width: 0; border: 1px solid var(--sc-line); border-radius: 16px; background: var(--sc-panel); padding: 16px 16px 12px; margin: 0; }
 .opendots-shell .shell-start-compose:focus-within { border-color: var(--sc-muted); outline: 2px solid var(--sc-muted); outline-offset: 2px; }
@@ -146,11 +165,8 @@
 .opendots-shell .shell-start-shortcuts button { min-height: 36px; padding: 7px 13px; border-radius: 20px; border: 1px solid var(--sc-line); background: var(--sc-panel); color: var(--sc-body); font-size: 12px; font-weight: 400; }
 .opendots-shell .shell-start-shortcuts button:hover:not(:disabled) { background: var(--sc-hover); border-color: var(--sc-accent-text); color: var(--sc-ink); }
 .opendots-shell .shell-start-controls { display: flex; align-items: center; gap: 12px; min-width: 0; }
-.opendots-shell .shell-start-dot { display: inline-flex; align-items: center; gap: 7px; min-width: 0; max-width: 48%; padding: 0 4px 0 0; }
-.opendots-shell .shell-start-dot .shell-mascot { width: 26px; height: 30px; flex-shrink: 0; }
-.opendots-shell .shell-start-dot select { appearance: none; min-height: 38px; width: auto; min-width: 0; max-width: 100%; padding: 4px 0; border: 0; background: transparent; font-size: 13px; cursor: pointer; text-overflow: ellipsis; }
-.opendots-shell .shell-start-dot > svg { flex-shrink: 0; color: var(--sc-muted); }
-.opendots-shell .shell-start-model { margin-left: auto; min-width: 0; max-width: 42%; font-size: 12px; color: var(--sc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opendots-shell .shell-start-model { min-width: 0; max-width: calc(100% - 52px); font-size: 12px; color: var(--sc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.opendots-shell .shell-start-controls .shell-start-send { margin-inline-start: auto; }
 .opendots-shell .shell-start-send { flex-shrink: 0; width: 38px; height: 38px; padding: 0; border-radius: 50%; border: 0; background: var(--sc-accent); color: var(--sc-accent-ink); }
 .opendots-shell .shell-start-send:hover:not(:disabled) { background: color-mix(in srgb, var(--sc-accent) 82%, white); color: var(--sc-accent-ink); }
 .opendots-shell .shell-start-send:disabled { opacity: .48; }
@@ -436,9 +452,7 @@
   .opendots-shell .shell-start-attachment button { width: 44px; height: 44px; }
   .opendots-shell .shell-start-shortcuts button { min-height: 44px; padding: 8px 12px; }
   .opendots-shell .shell-start-send { width: 44px; height: 44px; }
-  .opendots-shell .shell-start-dot { max-width: 60%; }
-  .opendots-shell .shell-start-dot select { min-height: 44px; }
-  .opendots-shell .shell-start-model { max-width: 28%; font-size: 12px; }
+  .opendots-shell .shell-start-model { max-width: calc(100% - 56px); font-size: 12px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .opendots-shell *, .dialog-content *, .context-menu *, .shell-decisions * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
