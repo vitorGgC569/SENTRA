@@ -1,6 +1,6 @@
 # SENTRA — first-version acceptance review
 
-Reviewed on **24 October 2026**, after application baseline `b520687`.
+Reviewed on **24 October 2026**, including the sealed application build `62d61fa`.
 
 **The current product is a development preview. A stable first release is not
 yet qualified.** The installed local interface is newer than the published
@@ -10,13 +10,13 @@ every integration or installation scenario works.
 | Area | Evidence | Open acceptance |
 |---|---|---|
 | Desktop presentation | 265 UI tests; real HTTP integration; current Home, selector, conversation and Canvas checked locally | Full accessibility/device matrix and all long-content/tool states |
-| Local Windows delivery | Current Canvas executable and served asset hashes verified; backed-up local update applied | Complete matching Setup; clean install, upgrade, rollback and trusted signing |
-| Terminal recovery | Selected real ConPTY/receipt tests; separately identified 30-minute frozen trial | Installed daemon endurance, upgrades and the full user recovery journey |
-| Model execution | Catalog and durable admission/uncertain states available | A confirmed real-provider result in the current acceptance run; listed Grok access remains unverified |
-| Floating activity bar | Earlier implementation and observations recorded | Windows Application Control currently blocks Electron with error 4551 on this host |
+| Local Windows delivery | Current Canvas executable and served asset hashes verified; backed-up local update applied | Unsigned 1.0.2 Setup generated; isolated install, upgrade and manual rollback passed. User update, clean-OS matrix and trusted signing remain open |
+| Terminal recovery | Selected real ConPTY/receipt tests; separately identified 30-minute frozen trial | Installed crash recovery passed; 30-minute installed endurance interrupted for owner PC use; not qualified |
+| Model execution | Catalog and durable admission/uncertain states available | Real Codex multi-Dot results passed in the Setup-installed fixture; updated user-app Web login/inference and Grok remain unverified |
+| Floating activity bar | Earlier implementation and observations recorded | Earlier Electron image blocked by Windows; new probe timed out. Native display passed; external bar unqualified |
 | Android | Signed preview APK is published | Physical device, VPN, suspension/reconnection/revocation acceptance |
 | iPhone | Shared application source and LAN design | Apple signing/distribution account and an installable build; physical acceptance |
-| Coordinated agents | Existing central permissions, WorkItems, coordination and worktree implementations | Complete installed multi-Dot task, interruption, reopen and verified completion journey |
+| Coordinated agents | Existing central permissions, WorkItems, coordination and worktree implementations | Installed two-worker task, checkpoint pause/reopen and verified result passed; unknown-effect crash remains a separate case |
 
 ## Installer comparison
 
@@ -33,9 +33,20 @@ selector**. Its own metadata records incomplete clean-install/update/rollback,
 signing, prolonged terminal and physical mobile qualification. Later source
 fixes do not retroactively qualify that binary.
 
-The current local Canvas is a separate development delivery:
+The current user-installed Canvas is a separate development delivery:
 `c5f90fb29faf795ef0ef9204ec76db80e7adeb2f1f08313ce2d8a10f53e17a8e`.
 It is not a complete new Setup or an automatic update.
+
+## New local candidate
+
+A full unsigned **1.0.2 Setup** was built from `62d61fa`, including the current
+interface and backend fixes. Isolated installation, upgrade preservation,
+manual backup rollback and a real two-worker Dot recovery journey passed.
+MSI extraction failed (1619); installed endurance was interrupted when the owner
+needed the PC. The user installation is unchanged. No new Windows tag/release
+was published.
+
+[Qualification and artifact hashes](WINDOWS_BUILD_QUALIFICATION_2026-10-24.md).
 
 ## Available downloads
 

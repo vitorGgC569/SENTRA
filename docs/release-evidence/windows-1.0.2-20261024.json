@@ -1,0 +1,180 @@
+{
+  "schema": 1,
+  "product_version": "1.0.2",
+  "qualification": "preview_with_open_acceptance",
+  "source_commit": "62d61fa65fec9b79a0f531a91ccafd2fd3163615",
+  "source_snapshot_sha256": "b66ca69df7db99ce5d26aeceb35335726c335f73bdd643dce408b9e06f3fe3cd",
+  "signed": false,
+  "published": false,
+  "user_installation_updated": false,
+  "setup": {
+    "name": "SENTRA-Setup-1.0.2.exe",
+    "bytes": 3193341241,
+    "sha256": "e005f82bcef7d4ab8955d8f4061d423bb8d443f343be8742d0189f5e00b8a678"
+  },
+  "executables": {
+    "sentra-launcher.exe": {
+      "sha256": "e217ba595efcfc2174e3cb76d05276f583cad16936a1ce6b8be7bb9359d94c55",
+      "bytes": 151552
+    },
+    "sentra-agent.exe": {
+      "sha256": "6e93b04cc2f58b94edf8bac6ba02f4f5eb9839a85ab739e3871fc1b015f8b511",
+      "bytes": 157172633
+    },
+    "sentra-mcp.exe": {
+      "sha256": "241a04fae0d48eec172fed47e26c2b5dd49f6f96a0c496b5c8a635cd03070725",
+      "bytes": 157160744
+    },
+    "sentra-browser-relay.exe": {
+      "sha256": "f63e6cd4f85cc7ced421adf5b03bc173f67e6d8767f9b6444c86093a22efc921",
+      "bytes": 111049289
+    },
+    "sentra-desktop.exe": {
+      "sha256": "cb7d4abe0378b2f9cce04decc4b7bed37f380882b0acd92c74bc572ad2df8593",
+      "bytes": 161545524
+    },
+    "sentra-human.exe": {
+      "sha256": "c5fb8a9aba9cfc79b4f50ca684700315f74c1688aa9ac61a236dd8a7e336b3d2",
+      "bytes": 114507770
+    },
+    "sentra-human-worker.exe": {
+      "sha256": "e59bcab448e69acec52273ccae84fc2d7d699ef94344b7b305bac4a333de82aa",
+      "bytes": 157183375
+    },
+    "sentra-diagnostics.exe": {
+      "sha256": "98f6eff18fd87375475eff84061104d8a6a0ba4c87578aacc5eb4dafa163e417",
+      "bytes": 110969429
+    },
+    "sentra-admin.exe": {
+      "sha256": "42994636937256804d4ef5b74d08a335111be83c38b74623b02b54b7f57d7cc5",
+      "bytes": 110960698
+    },
+    "sentra-update-helper.exe": {
+      "sha256": "bf897bc9e75030179eab8f3fa1d91c06c79b835acbeac345846489bf9aa20d07",
+      "bytes": 122827425
+    },
+    "sentra-oma.exe": {
+      "sha256": "f459a75c0126fbc964fe021a664727cb20e63641c8eb9f3ca0536bb2d5ed2c21",
+      "bytes": 157227588
+    },
+    "sentra-cli.exe": {
+      "sha256": "4725255eeeb723ff2e4df6a8053a8abba12ae4890c025261d58d81e88088ebc7",
+      "bytes": 122987526
+    },
+    "sentra-canvas.exe": {
+      "sha256": "35cb224e558f6cbf7cf923961a0d582bc8ca35ee1a6fd2c29289466f54513564",
+      "bytes": 132560182
+    },
+    "sentra.exe": {
+      "sha256": "f0ed28bfe1b79447071ce3b8c09a1ae6024682c6335b5f21e14e9770a223fa0a",
+      "bytes": 157255671
+    }
+  },
+  "checks": {
+    "setup_payload": {
+      "exit_code": 0,
+      "passed": true
+    },
+    "setup_tk": {
+      "exit_code": 0,
+      "passed": true
+    },
+    "installation_in_empty_directory": true,
+    "upgrade_preservation": true,
+    "manual_backup_rollback": true,
+    "same_dot_and_conversation_read_by_new_and_restored_versions": true,
+    "automatic_signed_updater_qualified": false,
+    "installed_forced_daemon_crash_recovery": true,
+    "installed_two_worker_dot_recovery": true,
+    "real_model": "sentra/codex/current",
+    "verified_sales_result": {
+      "rows": 60,
+      "total": 594
+    },
+    "web_provider_login_and_inference": false,
+    "frozen_native_display": true,
+    "electron_display": false,
+    "external_bar": false,
+    "update_zip_crc": {
+      "passed": true,
+      "entries": 3
+    },
+    "msi_administrative_extraction": {
+      "passed": false,
+      "exit_code": 1619,
+      "media_files": 6
+    },
+    "clean_windows_vm": false
+  },
+  "endurance": {
+    "source_daemon": {
+      "status": "passed",
+      "elapsed_seconds": 1809.4,
+      "concurrent_terminals": 3,
+      "broker_reopens": 3
+    },
+    "setup_installed_daemon": {
+      "status": "interrupted_by_operator",
+      "reason": "Owner requested the PC for studying; owned synthetic workloads were closed. Not a completed endurance pass.",
+      "requested_seconds": 1800,
+      "elapsed_seconds": 563.1,
+      "raw_harness_result": "failed",
+      "raw_harness_error": "AssertionError: Workload exited before acceptance completed",
+      "owned_daemon_closed": true
+    }
+  },
+  "distribution_assets": {
+    "package-artwork.json": {
+      "bytes": 764,
+      "sha256": "1e3d6f11c4a3f427653baf05abffe75678b8181f5e5ff33b129389145c1dd1c5"
+    },
+    "package-components.json": {
+      "bytes": 285278,
+      "sha256": "f4f3463833bc46754f7aa1ca8fda646bb1dc1157ea23ed0abef1a5d84bfa4e66"
+    },
+    "release-manifest.json": {
+      "bytes": 286723,
+      "sha256": "00a6a9c0267c0ede8962c2c7d96b14574cec60e4887b363bc271d9093ba256e8"
+    },
+    "SENTRA-Desktop-1.0.2-update.zip": {
+      "bytes": 3338442622,
+      "sha256": "2626a9f9583fc31518cab3108f78e55a38be0a294a45a8408a947645586c2fef"
+    },
+    "SENTRA-Desktop-1.0.2-x64-0001.cab": {
+      "bytes": 1055944003,
+      "sha256": "57ea4ea231dce56afe9cd0ca3478326ac103eff29a96858265b807a75ea9383a"
+    },
+    "SENTRA-Desktop-1.0.2-x64-0002.cab": {
+      "bytes": 751012584,
+      "sha256": "004df0674dab4b19ffe457470e43d7eb3da32bb353983b5295b6d56d6f53fbba"
+    },
+    "SENTRA-Desktop-1.0.2-x64-0003.cab": {
+      "bytes": 829850656,
+      "sha256": "a694fcca51ad770e2b4ce6ad655500b595da64cea4ca2667b25e36250ef5fc7e"
+    },
+    "SENTRA-Desktop-1.0.2-x64-0004.cab": {
+      "bytes": 247847865,
+      "sha256": "1ef7ba02e69b034327aa3c6d980a7ab666fd3d3056e2a4e81d924aa5bdd6677d"
+    },
+    "SENTRA-Desktop-1.0.2-x64.media.json": {
+      "bytes": 993,
+      "sha256": "5e635c3e8e7b0e89aab94cee8e77f57457a0c62de9916a8ce26a6cfb91466e70"
+    },
+    "SENTRA-Desktop-1.0.2-x64.msi": {
+      "bytes": 749568,
+      "sha256": "776b4c89979b71af270bf0ec5276721c14516835e4b10e927b9b9f590bd590c2"
+    },
+    "SENTRA-Desktop-1.0.2.cdx.json": {
+      "bytes": 741958,
+      "sha256": "f5c3d9dc654fdffd7bfe2968df2cb159efefbd943be231ed9bffed1e2b8c3016"
+    },
+    "SENTRA-Setup-1.0.2.exe": {
+      "bytes": 3193341241,
+      "sha256": "e005f82bcef7d4ab8955d8f4061d423bb8d443f343be8742d0189f5e00b8a678"
+    },
+    "SHA256SUMS.txt": {
+      "bytes": 1068,
+      "sha256": "519ab997bba279bbc60c29be0bd321ab29ab94dba48add717874b81b2bd4c9ed"
+    }
+  }
+}
