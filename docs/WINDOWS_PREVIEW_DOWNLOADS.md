@@ -11,7 +11,7 @@ direct executable. See [GitHub's release limits](https://docs.github.com/en/repo
 2. Open PowerShell in that folder and run:
 
    ```powershell
-   powershell.exe -NoProfile -File .\Reassemble-Preview.ps1 -OutputPath .\SENTRA-Setup-1.0.3.exe
+   powershell.exe -NoProfile -File .\Reassemble-Preview.ps1 -OutputPath .\SENTRA-Setup-1.0.4.exe
    ```
 
 3. The helper verifies every part and the complete reconstructed SHA-256. It
@@ -32,17 +32,17 @@ the actual signature and acceptance status of that preview.
 
 Do not change the machine's execution policy for this preview. The same three
 parts can be joined with Windows' built-in binary copy command. In a new folder
-containing the 1.0.3 parts, first ensure the output does not already exist, then
+containing the 1.0.4 parts, first ensure the output does not already exist, then
 run these commands interactively:
 
 ```powershell
-if (Test-Path .\SENTRA-Setup-1.0.3.exe) { throw 'Output already exists' }
-cmd.exe /d /c 'copy /b SENTRA-Setup-1.0.3.exe.part0001+SENTRA-Setup-1.0.3.exe.part0002+SENTRA-Setup-1.0.3.exe.part0003 SENTRA-Setup-1.0.3.exe'
-Get-FileHash -Algorithm SHA256 .\SENTRA-Setup-1.0.3.exe
+if (Test-Path .\SENTRA-Setup-1.0.4.exe) { throw 'Output already exists' }
+cmd.exe /d /c 'copy /b SENTRA-Setup-1.0.4.exe.part0001+SENTRA-Setup-1.0.4.exe.part0002+SENTRA-Setup-1.0.4.exe.part0003 SENTRA-Setup-1.0.4.exe'
+Get-FileHash -Algorithm SHA256 .\SENTRA-Setup-1.0.4.exe
 ```
 
 The complete SHA-256 must be
-`60acb92b83a2910bdf356c2d2f30fd4e9c541df40132824740cb6daaaab3905b`.
+`81e9b48304e2480cd3112927c4b85af34eec8532d9d7af460d78056028a126cc`.
 Stop if the copy reports an error or the hash differs. Do not open an unverified
 or incomplete file. This alternative does not execute the downloaded helper.
 
@@ -62,7 +62,7 @@ is unsigned and does not request disabling Windows protections.
 ## Preparing parts from reviewed release outputs
 
 ```powershell
-python scripts/commander/preview_parts.py split --source .\release\SENTRA-Setup-1.0.3.exe --output-dir .\new-setup-parts
+python scripts/commander/preview_parts.py split --source .\release\SENTRA-Setup-1.0.4.exe --output-dir .\new-setup-parts
 ```
 
 The default part size is 1 GiB. The output directory must not exist. The command

@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "reviewed_on": "2026-10-25",
+  "source_commit": "6c98ae16cd0800f805fe66d0ab370c069cfb2e42",
+  "setup_sha256": "81e9b48304e2480cd3112927c4b85af34eec8532d9d7af460d78056028a126cc",
+  "qualification": {
+    "isolated_local_install": true,
+    "same_version_repair_preserves_data": true,
+    "native_provider_configuration_preserved": true,
+    "unowned_destination_rejected_with_nonzero_exit": true,
+    "existing_plugin_reuse_with_fresh_mcp_proof": true,
+    "embedded_fixed_probe_protocol": true,
+    "installed_frozen_canvas_real_model_response": true,
+    "physical_model_messages": 1,
+    "fully_automatic_frozen_setup_account_ui": false,
+    "clean_windows_vm": false,
+    "cross_version_upgrade_and_rollback": false,
+    "windows_reboot": false,
+    "physical_mobile": false
+  },
+  "installed_user_product_modified": false,
+  "test_results": {
+    "onboarding_installer": {
+      "passed": 109,
+      "warnings": 1
+    },
+    "site_python": {
+      "passed": 23
+    },
+    "site_node": {
+      "passed": 8
+    }
+  },
+  "model": {
+    "model": "sentra/chatgpt-web/auto",
+    "binary_sha256": "e6feb4c27159db6bb32997392da4640fff6d3534b546d514920894315bc31129",
+    "receipt_confirmed": true,
+    "physical_user_messages": 1,
+    "automatic_replay": false
+  },
+  "environment": {
+    "clean_vm_creation": "blocked_by_automatic_approval_review",
+    "host_security_configuration_changed": false
+  },
+  "physical_device_tests": "deferred_by_owner",
+  "ios_installable": false,
+  "publication": {
+    "windows_release": "https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261025-2",
+    "android_release": "https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261025-11",
+    "windows_assets_verified": 9,
+    "android_apk_verified": true,
+    "prerelease": true
+  },
+  "android_phone_apk": {
+    "schema": 1,
+    "apk_sha256": "e7c9e5902141431db4214c60d9cf4841490f461c9912e1740c6da5c5ea4c7842",
+    "certificate_sha256": "305c42f463397dedd995b4897e022119d059b5766603a57d97ad559c86eb7823",
+    "package": "app.sentra.mobile.preview",
+    "version_code": 11,
+    "workflow_run_id": 40208015155,
+    "source_commit": "7fbabed2db5d200242148537d248341d4f6aee8b",
+    "architectures": [
+      "arm64-v8a"
+    ],
+    "published": true,
+    "release_url": "https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261025-11",
+    "mobile_source_tree": "14723b1fc6dc4a10a89a8b7a256af40863afdba6"
+  },
+  "diagnostics": {
+    "source_gateway_idle_keepalive_resets_observed": true,
+    "original_model_response_and_receipt_confirmed": true,
+    "owned_frozen_broker_closed": true
+  }
+}

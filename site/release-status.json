@@ -1,9 +1,11 @@
 {
   "schema": 1,
   "reviewed_on": "2026-10-25",
-  "application_baseline": "ffe72334a0d68b602771d9a675394e1ccf7751f9",
+  "application_baseline": "6c98ae16cd0800f805fe66d0ab370c069cfb2e42",
   "status": "development-preview",
   "stable_release_qualified": false,
-  "current_interface_installer_sources": ["d6726e3df1bcb89d6a31116da5c71eb5d3a976cc"],
-  "readiness": "https://github.com/vitorGgC569/SENTRA/blob/main/docs/LIVE_ACCOUNT_AND_EMULATOR_2026-10-25.md"
+  "current_interface_installer_sources": [
+    "6c98ae16cd0800f805fe66d0ab370c069cfb2e42"
+  ],
+  "readiness": "https://github.com/vitorGgC569/SENTRA/blob/main/docs/RELEASE_1_0_4_ACCEPTANCE_2026-10-25.md"
 }

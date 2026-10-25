@@ -1,5 +1,12 @@
 # Account and Android qualification — 25 October 2026
 
+## Historical record
+
+This records the earlier Setup 1.0.3 and emulator qualification. Its public-download
+and embedded-probe limitations are superseded where explicitly stated in the
+[1.0.4 acceptance record](RELEASE_1_0_4_ACCEPTANCE_2026-10-25.md).
+
+
 This supplements [the onedir acceptance record](WINDOWS_ONEDIR_ACCEPTANCE_2026-10-25.md).
 It distinguishes published bytes, source fixes and owner-attended checks.
 

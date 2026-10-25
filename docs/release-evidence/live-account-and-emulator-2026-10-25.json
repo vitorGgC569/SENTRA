@@ -64,5 +64,7 @@
   "rollback_tested": false,
   "windows_reboot_tested": false,
   "physical_mobile_tested": false,
-  "coordinator_file_sha256": "bbd30955b5e84c35a9a24976f909baaa5a415648c6dfe2d0c4c8f26a13d07025"
+  "coordinator_file_sha256": "bbd30955b5e84c35a9a24976f909baaa5a415648c6dfe2d0c4c8f26a13d07025",
+  "historical_record": true,
+  "superseded_by": "windows-1.0.4-2026-10-25.json"
 }

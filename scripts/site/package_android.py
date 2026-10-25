@@ -10,13 +10,13 @@ def package(apk,out,run,commit,verified=None):
  if verified is not None:
   if verified.get('apk_sha256')!=sha or verified.get('version_code')!=int(run) or verified.get('package')!='app.sentra.mobile.preview':raise ValueError('Verified Android provenance does not match this APK')
   metadata['android'].update(version_code=verified['version_code'],signing_certificate_sha256=verified['certificate_sha256'])
- (out/'mobile-downloads.json').write_text(json.dumps(metadata,indent=2)+'\n')
- (out/'SHA256SUMS.txt').write_text(sha+'  '+target.name+'\n')
+ (out/'mobile-downloads.json').write_text(json.dumps(metadata,indent=2)+'\n',encoding='utf-8')
+ (out/'SHA256SUMS.txt').write_text(sha+'  '+target.name+'\n',encoding='ascii')
  (out/'RELEASE-NOTES.md').write_text('# SENTRA Android preview\n\nStandalone ARM64 APK for LAN evaluation. No Metro server is required.\n\n'
   'Package: `app.sentra.mobile.preview`. Signed with the dedicated SENTRA preview key.\n\n'
   'Install the APK, connect to the same network as the Windows host, scan the temporary QR in Canvas → Devices and approve on the host.\n\n'
   '**Physical Android/iPhone qualification is pending.** This release does not include an iOS installation package or claim remote relay support.\n\n'
-  'Source: `'+commit+'`. Verify the APK against SHA256SUMS.txt.\n')
+  'Source: `'+commit+'`. Verify the APK against SHA256SUMS.txt.\n',encoding='utf-8')
  return metadata
 if __name__=='__main__':
  verified=json.loads((ROOT/os.environ['VERIFIED_ANDROID_REPORT']).read_text()) if os.environ.get('VERIFIED_ANDROID_REPORT') else None
