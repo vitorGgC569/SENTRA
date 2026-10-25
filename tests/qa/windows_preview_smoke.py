@@ -87,7 +87,7 @@ def main():
     except Exception as error:report.update(status='failed',error_type=type(error).__name__,error=str(error)[:700])
     finally:
         if endpoint:
-            try:endpoint.request('/api/runtime/shutdown',{})
+            try:endpoint.request('/api/runtime/shutdown',{'confirm':True})
             except (OSError,ValueError):pass
         if process:
             try:process.wait(timeout=20)
