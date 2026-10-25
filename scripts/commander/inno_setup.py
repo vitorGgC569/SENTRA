@@ -27,8 +27,8 @@ def build_inno(bundle: Path, output: Path, version: str, *, compiler: Path | Non
     import re
     if not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("Inno product version must be numeric semver")
-    probe = subprocess.run([str(compiler), "/?"], capture_output=True, text=True, check=False)
-    if "7.1.0" not in probe.stdout + probe.stderr:
+    probe = subprocess.run([str(compiler), "--version"], capture_output=True, text=True, check=False)
+    if probe.returncode != 0 or probe.stdout.strip() != INNO_VERSION:
         raise RuntimeError("Inno Setup compiler version mismatch: expected 7.1.0")
     script = Path(__file__).with_name("sentra_setup.iss")
     output.mkdir(parents=True, exist_ok=True)

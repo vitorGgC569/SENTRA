@@ -69,6 +69,31 @@ def test_native_setup_update_arguments_preserve_spaces_and_handoff(tmp_path, mon
     assert installer_engine.install_command(Path("old.exe"), ["--silent"]) == ["old.exe", "--silent"]
 
 
+def test_inno_compiler_version_uses_version_command_not_help_banner(tmp_path, monkeypatch):
+    from scripts.commander import inno_setup
+    calls = []
+    def compile_fixture(command, **kwargs):
+        calls.append(command)
+        if command[-1] == "--version":
+            return Mock(returncode=0, stdout="7.1.0\n", stderr="")
+        (tmp_path / "output/SENTRA-Setup.exe").write_bytes(b"compile fixture; never executable")
+        return Mock(returncode=0)
+    monkeypatch.setattr(inno_setup.subprocess, "run", compile_fixture)
+    result = inno_setup.build_inno(tmp_path / "bundle", tmp_path / "output", "1.0.3", compiler=Path("ISCC.exe"))
+    assert result.is_file() and calls[0] == ["ISCC.exe", "--version"]
+    assert json.loads((tmp_path / "output/setup-engine.json").read_text())["engine_version"] == "7.1.0"
+
+
+@pytest.mark.parametrize("version,code", [("7.1.1\n", 0), ("Inno Setup 7\n", 0), ("7.1.0\n", 1)])
+def test_inno_rejects_wrong_or_unavailable_compiler_before_compilation(tmp_path, monkeypatch, version, code):
+    from scripts.commander import inno_setup
+    run = Mock(return_value=Mock(returncode=code, stdout=version, stderr=""))
+    monkeypatch.setattr(inno_setup.subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="compiler version mismatch"):
+        inno_setup.build_inno(tmp_path / "bundle", tmp_path / "output", "1.0.3", compiler=Path("ISCC.exe"))
+    assert run.call_count == 1 and not (tmp_path / "output").exists()
+
+
 def test_update_archive_contains_helper_support_files(tmp_path):
     from scripts.commander.release_assets import build_update_zip
     stage = tmp_path / "stage"; stage.mkdir()

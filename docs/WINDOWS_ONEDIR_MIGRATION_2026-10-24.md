@@ -87,9 +87,16 @@ existing journal proves the baseline and there are no conflicting edits.
   it still refuses conflicting edits or an unproven baseline. Local-only
   installation attempts this recovery even when Web onboarding is postponed
   and records whether review is needed.
-- The Inno compiler was absent. Automatic installation was rejected by the
-  environment with `blocked by policy`; the new full Setup is therefore not yet
-  generated or qualified by this evidence.
+- The Inno compiler was initially absent and automatic installation was rejected
+  with `blocked by policy`. After renewed owner authorization, the official
+  7.1.0 installer was downloaded, its pinned hash and valid Pyrsys signature
+  verified, and the compiler installed. A tiny offline fixture compiled the
+  actual Setup script without executing it. Version detection uses `--version`;
+  Inno 7's help banner does not contain its full version. The payload candidate
+  preceding that build-tool correction was superseded to keep source seals
+  exact. Native update dispatch also trims the padding in Inno's OriginalFilename
+  version-resource slot. Reproduce with `tests/qa/inno_compile_smoke.py`; it never
+  executes its fixture EXE. This is not full Setup installation qualification.
 - Real provider login/consent, final Setup clean installation, update, rollback
   and restart acceptance remain required before publishing this candidate.
 

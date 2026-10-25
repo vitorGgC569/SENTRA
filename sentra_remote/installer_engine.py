@@ -30,7 +30,8 @@ def original_filename(path: Path) -> str:
     for language, codepage in translations:
         key = f"\\StringFileInfo\\{language:04x}{codepage:04x}\\OriginalFilename"
         if version.VerQueryValueW(data, key, ctypes.byref(pointer), ctypes.byref(length)) and 0 < length.value < 512:
-            return ctypes.wstring_at(pointer, length.value).rstrip("\0")
+            # Inno's version-resource slot is padded with spaces, not only NULs.
+            return ctypes.wstring_at(pointer, length.value).rstrip("\0 ")
     return ""
 
 
