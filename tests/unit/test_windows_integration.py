@@ -112,6 +112,50 @@ def test_packaged_dependency_probe_uses_only_its_disposable_folders(tmp_path,mon
     assert json.loads(report.read_text())==value
 
 
+def test_corrupt_legacy_link_and_unowned_desktop_exe_do_not_block_install(tmp_path):
+    install=tmp_path/"app";install.mkdir();desktop=tmp_path/"desktop";desktop.mkdir()
+    for name in ("sentra-human.exe","sentra-canvas.exe","sentra-launcher.exe"):
+        (install/name).write_bytes(b"fixture; never execute")
+    (desktop/"SENTRA.lnk").write_bytes(b"broken legacy shortcut")
+    (desktop/"SENTRA.exe").write_bytes(b"previous unowned launcher")
+    options=dict(programs_dir=tmp_path/"programs",desktop_dir=desktop,desktop_executable=True)
+    result=shortcuts(install,**options)
+    assert (desktop/"SENTRA.lnk").read_bytes()==b"broken legacy shortcut"
+    assert (desktop/"SENTRA.exe").read_bytes()==b"previous unowned launcher"
+    assert (desktop/"SENTRA (2).exe").read_bytes()==b"fixture; never execute"
+    assert "unreadable_legacy_shortcut_preserved" in result["warnings"]
+    assert shortcuts(install,**options)["paths"]==result["paths"]
+    shortcuts(install,remove=True,**options)
+    assert not (desktop/"SENTRA (2).exe").exists()
+    assert (desktop/"SENTRA.exe").read_bytes()==b"previous unowned launcher"
+
+
+def test_corrupt_launcher_receipt_is_preserved_and_repair_is_idempotent(tmp_path):
+    from sentra_remote.windows_integration import install_desktop_executable
+    app=tmp_path/"app";app.mkdir();desktop=tmp_path/"desktop";desktop.mkdir()
+    (app/"sentra-launcher.exe").write_bytes(b"new")
+    (app/"desktop-launcher.json").write_bytes(b"{broken")
+    (desktop/"SENTRA.exe").write_bytes(b"old")
+    target=install_desktop_executable(app,desktop)
+    assert target.name=="SENTRA (2).exe"
+    assert next(app.glob("desktop-launcher.previous-*.json")).read_bytes()==b"{broken"
+    assert install_desktop_executable(app,desktop)==target
+
+
+def test_unknown_desktop_file_appearing_during_publish_is_not_overwritten(tmp_path,monkeypatch):
+    from sentra_remote import windows_integration as integration
+    app=tmp_path/"app";app.mkdir();desktop=tmp_path/"desktop";desktop.mkdir()
+    (app/"sentra-launcher.exe").write_bytes(b"new")
+    copy=integration.shutil.copy2
+    def race(source,target):
+        result=copy(source,target)
+        (desktop/"SENTRA.exe").write_bytes(b"concurrent unrelated file")
+        return result
+    monkeypatch.setattr(integration.shutil,"copy2",race)
+    with pytest.raises(FileExistsError):integration.install_desktop_executable(app,desktop)
+    assert (desktop/"SENTRA.exe").read_bytes()==b"concurrent unrelated file"
+
+
 def test_desktop_native_shortcut_probe_does_not_start_the_application(tmp_path,monkeypatch):
     from sentra_remote import desktop
     def no_application(*args,**kwargs):

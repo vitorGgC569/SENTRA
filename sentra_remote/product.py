@@ -310,12 +310,16 @@ class ProductSettings:
         return model
 
     @classmethod
-    def load(cls, path: Path) -> "ProductSettings":
+    def load(cls, path: Path, *, migrate_legacy_web: bool = False) -> "ProductSettings":
         if not path.is_file():
             return cls()
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
         if not isinstance(data, dict):
             raise ValueError("desktop settings must be a JSON object")
+        # Only explicit installer migration accepts this historical web-only
+        # setting. Normal model selection continues requiring a Web namespace.
+        if migrate_legacy_web and data.get("web_model_name") == "gpt-6":
+            data["web_model_name"] = "sentra/chatgpt-web/gpt-6"
         known = {item.name for item in cls.__dataclass_fields__.values()}
         settings = cls(**{key: value for key, value in data.items() if key in known})
         settings.access_scope = cls._normalize_access_scope(settings.access_scope)

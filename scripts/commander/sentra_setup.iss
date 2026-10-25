@@ -51,6 +51,26 @@ Filename: "{app}\sentra-launcher.exe"; Description: "Open SENTRA"; Flags: postin
 var
   WorkerSucceeded: Boolean;
   WorkerFailureCode: Integer;
+  RecoveryPage: TInputOptionWizardPage;
+  WorkerFailureText: String;
+  WorkerNoticeText: String;
+
+procedure InitializeWizard;
+begin
+  if ActiveLanguage = 'brazilianportuguese' then begin
+    RecoveryPage := CreateInputOptionPage(wpSelectDir, 'Instalação e recuperação',
+      'Escolha como instalar o SENTRA',
+      'A instalação normal preserva os componentes existentes. Na instalação limpa, os componentes antigos são guardados em backup antes da substituição. Projetos, conversas e contas são preservados. Configurações inválidas podem ser recuperadas no modo Seguro. Feche o SENTRA antes de substituir uma instalação em uso.', False, False);
+    RecoveryPage.Add('Instalação limpa: substituir componentes anteriores, guardando uma cópia');
+    RecoveryPage.Add('Recuperar configurações locais danificadas no modo Seguro');
+  end else begin
+    RecoveryPage := CreateInputOptionPage(wpSelectDir, 'Installation and recovery',
+      'Choose how to install SENTRA',
+      'Normal installation preserves existing components. Clean installation backs up old components before replacing them. Projects, conversations and accounts are preserved. Invalid settings can be recovered in Safe mode. Close SENTRA before replacing an active installation.', False, False);
+    RecoveryPage.Add('Clean installation: replace previous components, retaining a backup');
+    RecoveryPage.Add('Recover damaged local settings in Safe mode');
+  end;
+end;
 
 function ParamExists(Name: String): Boolean;
 var I: Integer;
@@ -80,13 +100,15 @@ end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
+  if (CurPageID = wpFinished) and WorkerSucceeded and (WorkerNoticeText <> '') then
+    WizardForm.FinishedLabel.Caption := WizardForm.FinishedLabel.Caption + #13#10 + #13#10 + WorkerNoticeText;
   if (CurPageID = wpFinished) and not WorkerSucceeded then begin
     if ActiveLanguage = 'brazilianportuguese' then begin
       WizardForm.FinishedHeadingLabel.Caption := 'O SENTRA precisa de atenção';
-      WizardForm.FinishedLabel.Caption := 'A configuração não foi concluída. Abra novamente o Setup para reparar. Consulte installer-last-run.json na pasta de dados do SENTRA.';
+      WizardForm.FinishedLabel.Caption := WorkerFailureText;
     end else begin
       WizardForm.FinishedHeadingLabel.Caption := 'SENTRA needs attention';
-      WizardForm.FinishedLabel.Caption := 'Configuration did not finish. Open Setup again to repair. Review installer-last-run.json in the SENTRA state folder.';
+      WizardForm.FinishedLabel.Caption := WorkerFailureText;
     end;
     WizardForm.RunList.Visible := False;
   end;
@@ -100,12 +122,23 @@ begin
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
-var Code: Integer; Arguments, Worker: String;
+var Code, I: Integer; Arguments, Worker, FailureFile: String; Lines: TArrayOfString;
 begin
   if CurStep <> ssPostInstall then Exit;
   WorkerFailureCode := 2;
   Worker := ExpandConstant('{tmp}\sentra-bootstrap\sentra-installer.exe');
   Arguments := '--silent --local-only --no-launch --no-git --install-dir ' + Quoted(ExpandConstant('{app}'));
+  FailureFile := ExpandConstant('{tmp}\sentra-setup-failure.txt');
+  Arguments := Arguments + ' --setup-message-file ' + Quoted(FailureFile);
+  if ActiveLanguage = 'brazilianportuguese' then begin
+    Arguments := Arguments + ' --setup-language pt-BR';
+    WorkerFailureText := 'A configuração não foi concluída. Consulte installer-last-run.json na pasta de dados do SENTRA.';
+  end else begin
+    Arguments := Arguments + ' --setup-language en';
+    WorkerFailureText := 'Configuration did not finish. Review installer-last-run.json in the SENTRA state folder.';
+  end;
+  if RecoveryPage.Values[0] or ParamExists('SENTRA-CLEAN-INSTALL') then Arguments := Arguments + ' --clean-install';
+  if RecoveryPage.Values[1] or ParamExists('SENTRA-RECOVER-SETTINGS') then Arguments := Arguments + ' --repair-damaged-settings';
   AddParameter(Arguments, 'SENTRA-STATE-DIR', '--state-dir');
   AddParameter(Arguments, 'SENTRA-HANDOFF', '--offline-handoff');
   AddParameter(Arguments, 'SENTRA-MCP-PORT', '--mcp-port');
@@ -113,13 +146,25 @@ begin
   AddParameter(Arguments, 'SENTRA-TUNNEL-ARCHIVE', '--tunnel-archive');
   if ParamExists('SENTRA-NO-REGISTRATION') then Arguments := Arguments + ' --no-system-registration';
   if ParamExists('SENTRA-STOP-AFTER-DOCTOR') then Arguments := Arguments + ' --stop-after-doctor';
-  WizardForm.StatusLabel.Caption := 'Configuring SENTRA. Existing accounts and project data are preserved.';
+  if ActiveLanguage = 'brazilianportuguese' then
+    WizardForm.StatusLabel.Caption := 'Configurando o SENTRA. Contas e dados dos projetos são preservados.'
+  else
+    WizardForm.StatusLabel.Caption := 'Configuring SENTRA. Existing accounts and project data are preserved.';
   if not Exec(Worker, Arguments, ExpandConstant('{tmp}\sentra-bootstrap'), SW_HIDE, ewWaitUntilTerminated, Code) then
     RaiseException('SENTRA installation worker could not start.');
   if Code <> 0 then begin
     WorkerFailureCode := Code;
-    RaiseException('SENTRA configuration needs attention (code ' + IntToStr(Code) + '). Open setup again to repair; review installer-last-run.json in the SENTRA state folder.');
+    if LoadStringsFromFile(FailureFile, Lines) and (GetArrayLength(Lines) > 0) then begin
+      WorkerFailureText := '';
+      for I := 0 to GetArrayLength(Lines) - 1 do
+        if Length(WorkerFailureText) < 4096 then WorkerFailureText := WorkerFailureText + Lines[I] + #13#10;
+    end;
+    if not WizardSilent then SuppressibleMsgBox(WorkerFailureText, mbError, MB_OK, IDOK);
+    Exit;
   end;
   WorkerSucceeded := True;
   WorkerFailureCode := 0;
+  if LoadStringsFromFile(FailureFile, Lines) then
+    for I := 0 to GetArrayLength(Lines) - 1 do
+      if Length(WorkerNoticeText) < 4096 then WorkerNoticeText := WorkerNoticeText + Lines[I] + #13#10;
 end;

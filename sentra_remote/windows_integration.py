@@ -20,7 +20,7 @@ def _shortcut_items(install_dir: Path, programs: Path, desktop: Path, desktop_ex
     return items
 
 
-def _native_shortcuts(install_dir, remove, programs_dir, desktop_dir, desktop_executable):
+def _native_shortcuts(install_dir, remove, programs_dir, desktop_dir, desktop_executable, migration_only=False):
     # Every call owns its STA. A caller's GUI/COM apartment is left unchanged.
     import pythoncom
     # GetPath returns native file timestamps. pywin32 loads this helper by
@@ -41,16 +41,30 @@ def _native_shortcuts(install_dir, remove, programs_dir, desktop_dir, desktop_ex
             # Read the stored target; never resolve/search for it or launch it.
             return shortcut.GetPath(shell.SLGP_RAWPATH)[0]
 
-        if desktop_executable and not remove:
+        warnings = []
+        if migration_only:
             legacy = desktop / "SENTRA.lnk"
-            if legacy.is_file() and os.path.normcase(target_of(legacy)) == os.path.normcase(str(install_dir / "sentra-canvas.exe")):
-                legacy.unlink()
+            if legacy.is_file():
+                try:
+                    owned = os.path.normcase(target_of(legacy)) == os.path.normcase(str(install_dir / "sentra-canvas.exe"))
+                except (pythoncom.com_error, OSError):
+                    owned = False
+                    warnings.append("unreadable_legacy_shortcut_preserved")
+                if owned:
+                    legacy.unlink()
+            return {"warnings": warnings}
         changed = []
         for path, target in _shortcut_items(install_dir, programs, desktop, desktop_executable):
             if remove:
-                if path.is_file() and os.path.normcase(target_of(path)) == os.path.normcase(str(target)):
-                    path.unlink()
-                    changed.append(str(path))
+                if path.is_file():
+                    try:
+                        owned = os.path.normcase(target_of(path)) == os.path.normcase(str(target))
+                    except (pythoncom.com_error, OSError):
+                        owned = False
+                        warnings.append("unreadable_shortcut_preserved")
+                    if owned:
+                        path.unlink()
+                        changed.append(str(path))
             else:
                 if not target.is_file():
                     raise FileNotFoundError("Shortcut target is missing: " + target.name)
@@ -62,7 +76,7 @@ def _native_shortcuts(install_dir, remove, programs_dir, desktop_dir, desktop_ex
                 shortcut.SetDescription("SENTRA")
                 shortcut.QueryInterface(pythoncom.IID_IPersistFile).Save(str(path), 1)
                 changed.append(str(path))
-        return {"paths": changed, "action": "unregister" if remove else "register", "desktop_dir": str(desktop)}
+        return {"paths": changed, "action": "unregister" if remove else "register", "desktop_dir": str(desktop), "warnings": warnings}
 
     pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
     try:
@@ -87,6 +101,14 @@ def shortcuts(install_dir: Path, *, remove=False, programs_dir: Path | None = No
         entry = install_desktop_executable(install_dir, Path(value["desktop_dir"]), remove=remove)
         if entry:
             value["paths"].append(str(entry))
+            if not remove:
+                # Migrate only after the replacement is safely published.
+                with ThreadPoolExecutor(max_workers=1, thread_name_prefix="SENTRA-shortcuts") as worker:
+                    migrated = worker.submit(_native_shortcuts, install_dir, False, programs_dir,
+                                             Path(value["desktop_dir"]), True, True).result()
+                value["warnings"].extend(migrated["warnings"])
+                if entry.name != "SENTRA.exe":
+                    value["warnings"].append("existing_desktop_executable_preserved")
     return value
 
 
@@ -95,6 +117,7 @@ def check_shortcuts_runtime(report: Path | None = None) -> dict:
     result = {"schema": 1, "ok": False, "frozen": bool(getattr(sys, "frozen", False)),
               "backend": "IShellLink/IPersistFile", "created": False,
               "idempotent": False, "removed": False, "starts_product_services": False,
+              "residue_recovery": False,
               "accesses_browser_or_account": False, "changes_user_shortcut_folders": False}
     try:
         with tempfile.TemporaryDirectory(prefix="sentra-native-shortcuts-check-") as temporary:
@@ -102,7 +125,7 @@ def check_shortcuts_runtime(report: Path | None = None) -> dict:
             assert root.parent == Path(tempfile.gettempdir()).resolve() and not root.is_symlink() and not root.is_junction()
             install = root / "installed"
             install.mkdir()
-            for name in ("sentra-human.exe", "sentra-canvas.exe"):
+            for name in ("sentra-human.exe", "sentra-canvas.exe", "sentra-launcher.exe"):
                 (install / name).write_bytes(b"owned shortcut fixture; never executed")
             options = {"programs_dir": root / "programs", "desktop_dir": root / "desktop"}
             initial = shortcuts(install, **options)
@@ -110,7 +133,17 @@ def check_shortcuts_runtime(report: Path | None = None) -> dict:
             result["idempotent"] = shortcuts(install, **options)["paths"] == initial["paths"]
             removed = shortcuts(install, remove=True, **options)
             result["removed"] = removed["paths"] == initial["paths"] and not any(Path(p).exists() for p in initial["paths"])
-        result["ok"] = all(result[k] for k in ("created", "idempotent", "removed"))
+            desktop = options["desktop_dir"]
+            (desktop / "SENTRA.lnk").write_bytes(b"corrupt legacy fixture")
+            (desktop / "SENTRA.exe").write_bytes(b"unowned old fixture")
+            recovered = shortcuts(install, desktop_executable=True, **options)
+            stable = shortcuts(install, desktop_executable=True, **options)
+            shortcuts(install, remove=True, desktop_executable=True, **options)
+            result["residue_recovery"] = (recovered["paths"] == stable["paths"]
+                and (desktop / "SENTRA.lnk").read_bytes() == b"corrupt legacy fixture"
+                and (desktop / "SENTRA.exe").read_bytes() == b"unowned old fixture"
+                and not (desktop / "SENTRA (2).exe").exists())
+        result["ok"] = all(result[k] for k in ("created", "idempotent", "removed", "residue_recovery"))
     except Exception as exc:
         result["error_type"] = type(exc).__name__
     if report is not None:
@@ -122,12 +155,29 @@ def install_desktop_executable(install_dir: Path, desktop_dir: Path, *, remove=F
     """Publish/remove only our registered launcher; never replace an unrelated EXE."""
     from .installer_preflight import file_hash
     install_dir, desktop_dir = Path(install_dir).resolve(), Path(desktop_dir).resolve()
-    target = desktop_dir / "SENTRA.exe"
     receipt = install_dir / "desktop-launcher.json"
-    previous = json.loads(receipt.read_text(encoding="utf-8")) if receipt.is_file() else {}
-    old_digest = file_hash(target) if target.is_file() and not target.is_symlink() else None
-    owned = (previous.get("target") == str(target) and old_digest is not None
-             and old_digest in (previous.get("sha256"), previous.get("previous_sha256")))
+    try:
+        previous = json.loads(receipt.read_text(encoding="utf-8-sig")) if receipt.is_file() else {}
+    except (ValueError, OSError):
+        previous = {}
+    if not isinstance(previous, dict):
+        previous = {}
+    import re
+
+    def owned_target(path):
+        if path.is_symlink() or path.is_junction() or not path.is_file():
+            return False
+        return previous.get("target") == str(path) and file_hash(path) in (
+            previous.get("sha256"), previous.get("previous_sha256"))
+
+    # The receipt cannot select a path outside the actual desktop or an
+    # arbitrary filename. Unknown files remain untouched, including symlinks.
+    target = desktop_dir / "SENTRA.exe"
+    recorded = Path(str(previous.get("target") or ""))
+    if (recorded.parent == desktop_dir and re.fullmatch(r"SENTRA(?: \((?:[2-9]|[1-9][0-9]|100)\))?\.exe", recorded.name)
+            and owned_target(recorded)):
+        target = recorded
+    owned = owned_target(target)
     if remove:
         if owned:
             target.unlink()
@@ -137,8 +187,15 @@ def install_desktop_executable(install_dir: Path, desktop_dir: Path, *, remove=F
     source = install_dir / "sentra-launcher.exe"
     if not source.is_file():
         raise FileNotFoundError("SENTRA desktop executable is missing from the installation")
-    if target.exists() and not owned:
-        raise FileExistsError("SENTRA.exe already exists on the desktop and is not owned by this installation")
+    if (target.exists() or target.is_symlink()) and not owned:
+        for number in range(2, 101):
+            candidate = desktop_dir / f"SENTRA ({number}).exe"
+            if not candidate.exists() and not candidate.is_symlink():
+                target = candidate
+                break
+        else:
+            raise FileExistsError("No unused SENTRA desktop launcher name is available")
+    old_digest = file_hash(target) if owned else None
     desktop_dir.mkdir(parents=True, exist_ok=True)
     fd, staged_name = tempfile.mkstemp(prefix=".sentra-launcher-", suffix=".tmp", dir=desktop_dir)
     os.close(fd)
@@ -151,8 +208,20 @@ def install_desktop_executable(install_dir: Path, desktop_dir: Path, *, remove=F
         pending = receipt.with_suffix(".tmp")
         pending.write_text(json.dumps({"target": str(target), "sha256": digest,
                                       "previous_sha256": old_digest if owned else None}), encoding="utf-8")
+        if receipt.exists() and not owned:
+            # Preserve damaged/old ownership evidence before recording the new
+            # launcher; a rename retains the original Windows file permissions.
+            import uuid
+            receipt.replace(receipt.with_name("desktop-launcher.previous-" + uuid.uuid4().hex + ".json"))
         pending.replace(receipt)
-        staged.replace(target)
+        if owned:
+            staged.replace(target)
+        elif os.name == "nt":
+            # Unlike replace(), Windows rename refuses a target that appeared
+            # while the launcher was being staged.
+            staged.rename(target)
+        else:
+            os.link(staged, target)
     finally:
         staged.unlink(missing_ok=True)
     return target

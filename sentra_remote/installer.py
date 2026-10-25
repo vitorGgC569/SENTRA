@@ -396,7 +396,7 @@ def _write_install_marker(install_dir: Path, owned_files: list[str] | None = Non
     existing_owned = []
     if marker.is_file():
         try:
-            existing = json.loads(marker.read_text(encoding="utf-8"))
+            existing = json.loads(marker.read_text(encoding="utf-8-sig"))
             if isinstance(existing, dict):
                 existing_id = str(existing.get("installation_id") or "")
                 existing_owned = existing.get("owned_files", [])
@@ -424,11 +424,15 @@ def _validate_sentra_install(install_dir: Path) -> dict[str, Any]:
     if not marker.is_file():
         raise ValueError("refusing to remove directory without SENTRA install marker")
     try:
-        data = json.loads(marker.read_text(encoding="utf-8"))
+        data = json.loads(marker.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ValueError("SENTRA install marker is unreadable") from exc
     if not isinstance(data, dict) or data.get("product") != "SENTRA Desktop":
         raise ValueError("invalid SENTRA install marker")
+    owned = data.get("owned_files", [])
+    if not isinstance(owned, list) or any(not isinstance(name, str) or Path(name).is_absolute()
+            or ".." in Path(name).parts for name in owned):
+        raise ValueError("invalid SENTRA install marker ownership")
     return data
 
 
@@ -694,10 +698,18 @@ def install(**options) -> dict[str, Any]:
     from contextlib import nullcontext
     from .installation_lock import installation_lock
     install_dir = Path(options["install_dir"]).expanduser().resolve()
+    clean = options.get("clean_install") is True
+    state = (Path(options["state_dir"]).expanduser().resolve() if options.get("state_dir")
+             else ProductPaths.default(install_dir).state_dir)
+    if clean:
+        from .installer_recovery import validate_clean_destination
+        validate_clean_destination(options["install_dir"], state)
     # The coordinated update helper owns this same OS lock across its child.
     lock = nullcontext() if options.get("offline_handoff") is not None else installation_lock(install_dir)
     with lock:
-        if (install_dir / INSTALL_MARKER).is_file():
+        if clean:
+            pass  # Explicit recovery is prepared only after payload verification.
+        elif (install_dir / INSTALL_MARKER).is_file():
             _validate_sentra_install(install_dir)
         elif install_dir.exists() and any(install_dir.iterdir()):
             raise ValueError("choose an empty install directory; destination contains files without SENTRA ownership")
@@ -712,8 +724,6 @@ def install(**options) -> dict[str, Any]:
             # Check before downloads, ownership changes, copying or stopping
             # services. An offline update remains deferred to its restart user.
             verify_credential_protection()
-        state = (Path(options["state_dir"]).expanduser().resolve() if options.get("state_dir")
-                 else ProductPaths.default(install_dir).state_dir)
         if progress:
             progress("Preparando a conexão segura…", 4)
         options["tunnel_archive"] = prepare_tunnel_archive(state / "downloads", options.get("tunnel_archive"))
@@ -732,7 +742,14 @@ def install(**options) -> dict[str, Any]:
 
         options["progress"] = record
         try:
+            clean_result = None
+            if clean:
+                from .installer_recovery import prepare_clean_install
+                record("Guardando os componentes anteriores para instalação limpa", 5)
+                clean_result = prepare_clean_install(install_dir, state, PRODUCTS)
             result = _install_product(**options)
+            if clean_result is not None:
+                result["clean_install"] = clean_result
         except Exception:
             record("Instalação interrompida. Abra o instalador para reparar.", 0, status="failed")
             raise
@@ -764,6 +781,8 @@ def _install_product(
     progress: ProgressCallback | None = None,
     offline_handoff: Path | None = None,
     local_only: bool = False,
+    clean_install: bool = False,
+    repair_damaged_settings: bool = False,
 ) -> dict[str, Any]:
     install_dir = install_dir.expanduser().resolve()
     paths = (
@@ -840,7 +859,11 @@ def _install_product(
     )
     notify("Applying local settings", 60)
     fresh_settings = not paths.settings.is_file()
-    settings = ProductSettings.load(paths.settings)
+    from .installer_recovery import load_install_settings
+    settings, recovery = load_install_settings(paths.settings,
+        repair_damaged=repair_damaged_settings or clean_install)
+    if recovery:
+        result["settings_recovery"] = recovery
     if fresh_settings and profile is None:
         profile = "Full"
     if fresh_settings and access_scope is None:
@@ -1619,6 +1642,7 @@ def _write_setup_report(path: Path, operation: str, result: dict[str, Any], code
     Provider responses and configuration are deliberately excluded: a report
     must be safe to attach to clean-machine QA without exporting credentials.
     """
+    from .installer_diagnostics import diagnose
     verification = result.get("connect_verify") or {}
     status = verification.get("status") or {}
     preflight = result if operation == "check" else result.get("preflight") or {}
@@ -1665,6 +1689,10 @@ def _write_setup_report(path: Path, operation: str, result: dict[str, Any], code
         "account_authorization_verified": False,
         "native_route_recovery": result.get("native_route_recovery"),
         "mcp_roundtrip_verified": browser.get("mcp_roundtrip_verified") is True,
+        "diagnostic": diagnose(result, code),
+        "clean_install": {"requested": (result.get("clean_install") or {}).get("requested") is True,
+                          "backup_directory": (result.get("clean_install") or {}).get("backup")},
+        "settings_recovered": (result.get("settings_recovery") or {}).get("recovered") is True,
         "homologated": False,
     }
     target = Path(_filesystem_path(path))
@@ -1686,6 +1714,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--uninstall", action="store_true")
     parser.add_argument("--keep-config", action="store_true")
     parser.add_argument("--local-only", action="store_true", help="Install local services; configure Web accounts later inside SENTRA.")
+    parser.add_argument("--clean-install", action="store_true", help="Back up old program components before reinstalling; preserve projects and accounts.")
+    parser.add_argument("--repair-damaged-settings", action="store_true", help="Preserve invalid local settings and recover in Safe mode.")
+    parser.add_argument("--setup-message-file", "--failure-message-file", dest="failure_message_file", type=Path)
+    parser.add_argument("--setup-language", choices=("pt-BR", "en"), default="en")
     parser.add_argument("--install-dir", default=str(ProductPaths.default().install_dir))
     parser.add_argument("--state-dir")
     parser.add_argument("--workspace")
@@ -1726,6 +1758,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--upgrade", action="store_true")
     parser.add_argument("--offline-handoff", type=Path)
     args = parser.parse_args(argv)
+    if (args.clean_install or args.repair_damaged_settings) and (not args.silent or not args.local_only or args.offline_handoff or args.uninstall or args.check):
+        parser.error("explicit recovery requires --silent --local-only, outside coordinated updates")
+    if args.failure_message_file and (not args.silent or args.uninstall or args.check):
+        parser.error("--failure-message-file requires silent installation")
     if args.gui_check_report and not args.gui_check:
         parser.error("--gui-check-report requires --gui-check")
     if args.gui_check:
@@ -1740,6 +1776,24 @@ def main(argv: list[str] | None = None) -> int:
         args.report_file = str(report_root / "installer-last-run.json")
 
     def finish(operation: str, result: dict[str, Any], code: int) -> int:
+        if args.failure_message_file:
+            from .installer_diagnostics import diagnose
+            diagnostic = diagnose(result, code)
+            try:
+                target = args.failure_message_file
+                target.parent.mkdir(parents=True, exist_ok=True)
+                text = diagnostic["message_pt" if args.setup_language == "pt-BR" else "message_en"] if diagnostic else ""
+                if not diagnostic:
+                    backup = (result.get("clean_install") or {}).get("backup")
+                    if backup:
+                        text = ("Componentes anteriores guardados em: " if args.setup_language == "pt-BR" else "Previous components backed up at: ") + str(backup)
+                    if (result.get("settings_recovery") or {}).get("recovered"):
+                        text += ("\nConfigurações recuperadas no modo Seguro. Projetos e contas preservados." if args.setup_language == "pt-BR" else "\nSettings recovered in Safe mode. Projects and accounts preserved.")
+                    if "existing_desktop_executable_preserved" in (result.get("shortcuts") or {}).get("warnings", []):
+                        text += ("\nUm acesso antigo foi preservado. Use o novo acesso SENTRA com número na Área de Trabalho." if args.setup_language == "pt-BR" else "\nAn old launcher was preserved. Use the new numbered SENTRA launcher on the Desktop.")
+                target.write_text(text, encoding="utf-8-sig")
+            except OSError:
+                return 2
         if args.report_file:
             try:
                 _write_setup_report(args.report_file, operation, result, code)
@@ -1785,11 +1839,16 @@ def main(argv: list[str] | None = None) -> int:
             stop_after_doctor=args.stop_after_doctor,
             offline_handoff=args.offline_handoff,
             local_only=args.local_only,
+            clean_install=args.clean_install,
+            repair_damaged_settings=args.repair_damaged_settings,
         )
     except Exception as exc:
         from sentra_mcp.errors import sanitize_error
         failure = {"ok": False, "error_type": type(exc).__name__,
                    "message": sanitize_error(_friendly_install_error(exc))[:2000]}
+        from .installer_diagnostics import MESSAGES
+        reason = getattr(exc, "reason", None)
+        failure["failure_reason"] = reason if isinstance(reason, str) and reason in MESSAGES else None
         from .openai_auto_setup import CredentialProtectionUnavailable
         if isinstance(exc, CredentialProtectionUnavailable):
             failure["reason"] = "credential_protection_unavailable"
