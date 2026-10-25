@@ -75,8 +75,9 @@ behaviors were subsequently measured using the complete native Setup above.
   registration/startup behavior and reboot acceptance. A new folder on this
   development computer is not a clean operating-system environment.
 - Physical Android/iPhone LAN or VPN, suspension, reconnection and revocation.
-- Release packaging/upload and download-site updates. No tag, public download
-  or trusted automatic-update eligibility is implied by these local checks.
+- Release packaging/upload and download-site updates were completed in the
+  subsequent publication below. Trusted automatic-update eligibility remains
+  unqualified.
 
 Code signing remains absent as agreed for this preview. Existing automatic
 update signature/admission gates were retained.
@@ -103,3 +104,7 @@ Native library on that x86_64 runtime. An unpublished x86_64 QA build was
 dispatched; this is not evidence of phone pairing or a replacement public APK.
 Hyper-V management is denied to the current session and no Windows installation
 image was available. iOS Simulator requires macOS/Xcode.
+
+See the [subsequent live account and emulator record](LIVE_ACCOUNT_AND_EMULATOR_2026-10-25.md)
+for verified login observations, two source compatibility corrections and their
+separate qualification status. Post-package fixes are not included in Setup 1.0.3.

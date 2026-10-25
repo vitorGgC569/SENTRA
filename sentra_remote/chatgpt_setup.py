@@ -78,7 +78,7 @@ def prepare_app_form(page, tunnel_id: str, *, actions: set | None = None) -> boo
     return True
 
 
-def prepare_connection_message(page, prompt: str):
+def prepare_connection_message(page, prompt: str, *, app_name: str = "SENTRA"):
     """Return one send control only in an empty composer with SENTRA selected.
 
     Existing drafts and ambiguous/app-unbound composers are never overwritten.
@@ -88,12 +88,37 @@ def prepare_connection_message(page, prompt: str):
     if not trusted_chatgpt(page.url):
         return None
     composer = one_visible(page.locator("#prompt-textarea"))
-    if composer is None or composer.inner_text().strip():
+    if composer is None:
+        composer = one_visible(page.get_by_role("textbox").filter(
+            has=page.locator('[plugin-mention-display-name]')))
+    if composer is None:
         return None
-    form = one_visible(page.locator("form").filter(has=page.locator("#prompt-textarea")))
-    if form is None or one_visible(form.get_by_role("button", name=re.compile(r"^SENTRA$"))) is None:
+    form = one_visible(page.locator("form").filter(has=composer))
+    if form is None:
         return None
-    composer.fill(prompt, timeout=3000)
+    mention = one_visible(composer.locator('[plugin-mention-display-name]'))
+    if mention is not None:
+        keyboard = getattr(page, "keyboard", None)
+        if keyboard is None:
+            # The embedded setup DOM protocol deliberately has no generic
+            # keyboard injection. Keep the owner's mention and draft intact;
+            # the visible verification instructions remain the fallback.
+            return None
+        # The modern composer stores the selected app as a noneditable mention.
+        # Preserve it and refuse any other text rather than overwrite a draft.
+        path = mention.get_attribute("plugin-mention-path") or ""
+        if (mention.get_attribute("plugin-mention-display-name") != app_name
+                or mention.get_attribute("contenteditable") != "false"
+                or not path.startswith("plugin://")
+                or composer.inner_text().strip() != mention.inner_text().strip()):
+            return None
+        composer.focus()
+        composer.press("Control+End")
+        keyboard.insert_text(" " + prompt)
+    else:
+        if composer.inner_text().strip() or one_visible(form.get_by_role("button", name=re.compile("^" + re.escape(app_name) + "$"))) is None:
+            return None
+        composer.fill(prompt, timeout=3000)
     send = one_visible(form.get_by_role("button", name=re.compile(r"^(?:Send message|Send|Enviar mensagem|Enviar)$", re.I)))
     return send if send is not None and send.is_enabled() else None
 

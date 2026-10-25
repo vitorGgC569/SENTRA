@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "reviewed_on": "2026-10-25",
+  "scope": "owner-attended private installed Windows components, source coordinator, Android emulator QA build",
+  "installed_user_product_modified": false,
+  "native_provider_routes_redirected": false,
+  "account": {
+    "platform_login_observed": true,
+    "chatgpt_login_observed": true,
+    "local_mcp_and_official_tunnel_healthy": true,
+    "fresh_mcp_challenge_verified": true,
+    "account_consent_by_owner": true,
+    "existing_app_preserved": true,
+    "fully_automatic_frozen_setup_ui_qualified": false,
+    "embedded_probe_uses_manual_fallback": true
+  },
+  "web_model": {
+    "binary_sha256": "35acce75675c460ec1b3e7f718a64d296b2392a442e2ffee367a56df5a3547c2",
+    "model": "sentra/chatgpt-web/auto",
+    "automatic_retry": false,
+    "delivery_kind": "setup-installed-onedir",
+    "observed_after_broker_reopen": true,
+    "physical_user_messages": 1,
+    "observed_answer_sha256": "351d4a174dada467349f5f29218bb880c7e4bfd242bda7ee8bd2e0bb1b93de80",
+    "markdown_escapes_normalized_for_text_comparison": true,
+    "real_response_verified": true,
+    "receipt_confirmed": true,
+    "delivery_status": "SUCCEEDED"
+  },
+  "android": {
+    "schema": 1,
+    "apk_sha256": "38c94f0804f43932e49039b763f1bd1d538096e8e5c3814de899beea38664bc3",
+    "certificate_sha256": "305c42f463397dedd995b4897e022119d059b5766603a57d97ad559c86eb7823",
+    "package": "app.sentra.mobile.preview",
+    "version_code": 10,
+    "workflow_run_id": 40162874283,
+    "source_commit": "76b11fddfd977bdb2819bdae3a5e6db5cc4e11e1",
+    "architectures": [
+      "x86_64"
+    ],
+    "published": false,
+    "physical_device": false,
+    "vpn_tested": false,
+    "qr_camera_tested": false,
+    "model_requests_sent": 0,
+    "pending_approval_seen": true,
+    "pairing_approved": true,
+    "native_app_inventory": true,
+    "draft_survived_app_restart": true,
+    "background_resume": true,
+    "host_restart_reconnected": true,
+    "same_host_identity": true,
+    "revocation_observed": true,
+    "duplicate_pairings": false
+  },
+  "distribution": {
+    "windows_public_version": "1.0.3",
+    "android_public_version_code": 8,
+    "post_package_fixes_shipped": false,
+    "ios_available": false
+  },
+  "clean_windows_vm_tested": false,
+  "cross_version_upgrade_tested": false,
+  "rollback_tested": false,
+  "windows_reboot_tested": false,
+  "physical_mobile_tested": false,
+  "coordinator_file_sha256": "bbd30955b5e84c35a9a24976f909baaa5a415648c6dfe2d0c4c8f26a13d07025"
+}

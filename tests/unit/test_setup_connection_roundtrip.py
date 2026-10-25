@@ -105,7 +105,8 @@ def test_account_setup_only_finishes_after_new_probe_is_observed(tmp_path, monke
     assert proof.setup_probe_observed.call_count == 2
     assert prepare.call_count == 1
     assert prepare.call_args.args == (page, "tunnel_current1234")
-    page.get_by_role.assert_not_called()  # No automatic account approval or send.
+    page.get_by_role.return_value.click.assert_not_called()  # Role inspection grants no consent.
+    page.get_by_role.return_value.fill.assert_not_called()
     assert sum(call.args[0] == "verification_prompt" for call in notify.call_args_list) == 1
 
 
@@ -172,3 +173,41 @@ def test_account_add_navigation_accepts_current_menuitem(account_page, tmp_path,
         SimpleNamespace(state_dir=tmp_path), "tunnel_current1234", Mock(), Event(), timeout_s=10)
     assert result["mcp_roundtrip_verified"]
     assert account_page.evaluate("window.opened === true")
+
+
+@pytest.mark.parametrize("app_name", ["SENTRA", "SENTRA Validação 1.0.3"])
+def test_modern_probe_preserves_selected_app_and_never_submits(account_page, app_name):
+    account_page.set_content('''<form><div role="textbox" contenteditable="true"><p>
+      <span plugin-mention-display-name="APP" plugin-mention-path="plugin://test@local"
+      contenteditable="false">APP</span> </p></div>
+      <button type="button" onclick="window.sent=true">Enviar</button></form>'''.replace("APP", app_name))
+    send = chatgpt_setup.prepare_connection_message(account_page, "read-only probe", app_name=app_name)
+    assert send is not None
+    assert account_page.locator("[plugin-mention-display-name]").get_attribute("plugin-mention-display-name") == app_name
+    assert "read-only probe" in account_page.get_by_role("textbox").inner_text()
+    assert account_page.evaluate("window.sent === true") is False
+
+
+@pytest.mark.parametrize("draft,selected", [("existing user draft", "SENTRA"), ("", "Another app")])
+def test_modern_probe_does_not_replace_a_draft_or_use_another_app(account_page, draft, selected):
+    account_page.set_content('''<form><div role="textbox" contenteditable="true"><p>
+      <span plugin-mention-display-name="APP" plugin-mention-path="plugin://test@local"
+      contenteditable="false">APP</span> DRAFT</p></div><button>Enviar</button></form>'''
+      .replace("APP", selected).replace("DRAFT", draft))
+    before = account_page.get_by_role("textbox").inner_html()
+    assert chatgpt_setup.prepare_connection_message(account_page, "new probe") is None
+    assert account_page.get_by_role("textbox").inner_html() == before
+
+
+def test_bounded_embedded_protocol_keeps_modern_probe_manual():
+    mention, composer, form = Mock(), Mock(), Mock()
+    for locator in (mention, composer, form):
+        locator.filter.return_value = locator
+        locator.count.return_value = 1
+    composer.locator.return_value = mention
+    page = SimpleNamespace(url=chatgpt_setup.CHATGPT_APPS_URL,
+        locator=lambda selector: composer if selector == "#prompt-textarea" else form)
+    assert chatgpt_setup.prepare_connection_message(page, "read-only probe") is None
+    mention.get_attribute.assert_not_called()
+    composer.fill.assert_not_called()
+    composer.press.assert_not_called()
