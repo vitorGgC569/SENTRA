@@ -6,6 +6,11 @@ on:
         description: Reviewed full source commit SHA to build and publish
         required: true
         type: string
+      emulator_qa:
+        description: Build an x86_64 emulator APK artifact without publishing a mobile release
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -79,9 +84,12 @@ jobs:
           SENTRA_ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/sentra-preview.p12
           SENTRA_ANDROID_STORE_PASSWORD: ${{ secrets.SENTRA_ANDROID_STORE_PASSWORD }}
           SENTRA_ANDROID_KEY_ALIAS: ${{ secrets.SENTRA_ANDROID_KEY_ALIAS }}
+          SENTRA_EMULATOR_QA: ${{ inputs.emulator_qa }}
         run: |
           chmod +x gradlew
-          ./gradlew :app:assembleRelease --no-daemon --max-workers=2 -PreactNativeArchitectures=arm64-v8a
+          architectures=arm64-v8a
+          if [ "$SENTRA_EMULATOR_QA" = "true" ]; then architectures=x86_64; fi
+          ./gradlew :app:assembleRelease --no-daemon --max-workers=2 -PreactNativeArchitectures="$architectures"
       - name: Inspect the signed public artifact
         env:
           APK_PATH: integrations/orca-mobile/app/android/app/build/outputs/apk/release/app-release.apk
@@ -104,6 +112,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
       - name: Verify and prepare release
+        if: ${{ !inputs.emulator_qa }}
         env:
           APK_PATH: integrations/orca-mobile/app/android/app/build/outputs/apk/release/app-release.apk
           RUN_NUMBER: ${{ github.run_number }}
@@ -112,6 +121,7 @@ jobs:
           python scripts/site/verify_android.py --apk "$APK_PATH" --signature .tmp/mobile-signature.txt --badging .tmp/mobile-badging.txt --policy scripts/site/android-preview-signing.json --run "$RUN_NUMBER" --out "$VERIFIED_ANDROID_REPORT"
           python scripts/site/package_android.py
       - name: Publish preview only
+        if: ${{ !inputs.emulator_qa }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
