@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "product_version": "1.0.3",
+  "scope": "isolated local install and same-version repair; not a clean Windows VM",
+  "application_source_commit": "ffe72334a0d68b602771d9a675394e1ccf7751f9",
+  "installer_worker_source_commit": "d6726e3df1bcb89d6a31116da5c71eb5d3a976cc",
+  "application_source_snapshot_sha256": "5841a92013f56a52bb8da2c30d8c649833a4cb0285d6308b15c64f727bb7cc02",
+  "worker_source_snapshot_sha256": "41d94aae0d021974ced75875ebc3a387b82da06fac867b1b8117f17962e251ba",
+  "setup_sha256": "60acb92b83a2910bdf356c2d2f30fd4e9c541df40132824740cb6daaaab3905b",
+  "setup_bytes": 2857535116,
+  "setup_script_sha256": "451a409bb8fea4c5274447c3f32ec303a3a84ee64b5c6f5b5a64d141eac08109",
+  "local_install": true,
+  "same_version_repair": true,
+  "draft_preserved": true,
+  "native_provider_configuration_preserved": true,
+  "worker_failure_propagates": true,
+  "rejected_directory_preserved": true,
+  "rejected_exit_code": 2,
+  "receipts": [
+    {
+      "ready": true,
+      "payload_verified": true,
+      "mcp": true,
+      "display": true,
+      "exit_code": 0
+    },
+    {
+      "ready": true,
+      "payload_verified": true,
+      "mcp": true,
+      "display": true,
+      "exit_code": 0
+    }
+  ],
+  "provider_login_tested": false,
+  "cross_version_upgrade_tested": false,
+  "rollback_tested": false,
+  "clean_windows_vm_tested": false,
+  "trusted_authenticode_claimed": false,
+  "installed_user_product_modified": false,
+  "system_registration_enabled": false,
+  "published": false
+}

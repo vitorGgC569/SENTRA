@@ -68,6 +68,10 @@ existing journal proves the baseline and there are no conflicting edits.
 
 ## Evidence and remaining qualification
 
+This initial record is superseded for local Setup acceptance by
+[Windows 1.0.3 isolated acceptance, 2026-10-25](WINDOWS_ONEDIR_ACCEPTANCE_2026-10-25.md).
+The account and clean-operating-system limitations below still apply.
+
 - Source regressions: 237 backend tests and 265 frontend tests passed in the
   initial migration sweep; focused follow-up tests cover the managed setup.
 - Real frozen `onedir` probe: installed sibling dependencies and bundled
