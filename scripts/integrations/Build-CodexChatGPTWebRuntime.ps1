@@ -250,6 +250,8 @@ try {
     & node --test "launcher/tests/sentra-account-control.test.cjs"
     if ($LASTEXITCODE -ne 0) { throw "SENTRA authenticated account controls failed" }
     & node --test "launcher/tests/sentra-setup-host.test.cjs"
+    if ($LASTEXITCODE -ne 0) { throw 'Managed setup tests failed' }
+    & node --test "launcher/tests/sentra-launch-policy.test.cjs"
     if ($LASTEXITCODE -ne 0) { throw "SENTRA managed account setup controls failed" }
     & $Bun run scripts/build-runtime-bundle.ts $Runtime
     if ($LASTEXITCODE -ne 0) { throw "Runtime build failed" }

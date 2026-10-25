@@ -7053,14 +7053,17 @@ index 2c9c565..91de72e 100644
 +        return;
 +      }
 diff --git a/launcher/electron/main.cjs b/launcher/electron/main.cjs
-index 71b95c2..6f14960 100644
+index 71b95c2..c442dda 100644
 --- a/launcher/electron/main.cjs
 +++ b/launcher/electron/main.cjs
-@@ -49,0 +50 @@ const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
+@@ -20,0 +21 @@ const { BrowserHost, navigationErrorForLog } = require("./browser-host.cjs");
++const { shouldStartHidden } = require("./sentra-launch-policy.cjs");
+@@ -49,0 +51,2 @@ const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 +const SENTRA_BROWSER_HOST_ONLY = process.env.SENTRA_BROWSER_HOST_ONLY?.trim() === "1";
-@@ -62,0 +64 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
++const SENTRA_MANAGED = Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim());
+@@ -62,0 +66 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
 +const SENTRA_ONBOARDING_URL = "sentra://onboarding";
-@@ -515,0 +518,25 @@ function syncFreshConversationPreference(stateStore, config) {
+@@ -515,0 +520,25 @@ function syncFreshConversationPreference(stateStore, config) {
 +async function sentraDoctor(runtimeHost, { verifyConnector = false } = {}) {
 +  const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
 +  if (!base) return IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor();
@@ -7086,9 +7089,9 @@ index 71b95c2..6f14960 100644
 +  return name.trim();
 +}
 +
-@@ -538,0 +566 @@ function registerIpc({ logger, stateStore }) {
-+    sentraManaged: Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim()),
-@@ -582,0 +611,7 @@ function registerIpc({ logger, stateStore }) {
+@@ -538,0 +568 @@ function registerIpc({ logger, stateStore }) {
++    sentraManaged: SENTRA_MANAGED,
+@@ -582,0 +613,7 @@ function registerIpc({ logger, stateStore }) {
 +  handle("launcher:open-sentra-onboarding", async () => {
 +    if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
 +      throw new Error("This launcher is not managed by SENTRA");
@@ -7096,22 +7099,22 @@ index 71b95c2..6f14960 100644
 +    await shell.openExternal(SENTRA_ONBOARDING_URL);
 +    return true;
 +  });
-@@ -660 +695 @@ function registerIpc({ logger, stateStore }) {
+@@ -660 +697 @@ function registerIpc({ logger, stateStore }) {
 -    const report = IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor();
 +    const report = await sentraDoctor(runtimeHost);
-@@ -684 +719 @@ function registerIpc({ logger, stateStore }) {
+@@ -684 +721 @@ function registerIpc({ logger, stateStore }) {
 -            message: `Select ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} manually for every Zero Risk turn`,
 +            message: `Select ChatGPT connector ${JSON.stringify(sentraConnectorName())} manually for every Zero Risk turn`,
-@@ -691 +726 @@ function registerIpc({ logger, stateStore }) {
+@@ -691 +728 @@ function registerIpc({ logger, stateStore }) {
 -      await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
 +      await browserHost.verifyConnector(sentraConnectorName());
-@@ -704 +739 @@ function registerIpc({ logger, stateStore }) {
+@@ -704 +741 @@ function registerIpc({ logger, stateStore }) {
 -              message: `ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} is available`,
 +              message: `ChatGPT connector ${JSON.stringify(sentraConnectorName())} is available`,
-@@ -724 +759 @@ function registerIpc({ logger, stateStore }) {
+@@ -724 +761 @@ function registerIpc({ logger, stateStore }) {
 -  handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
 +  handle("launcher:doctor", () => sentraDoctor(runtimeHost, { verifyConnector: true }));
-@@ -819,0 +855,27 @@ function registerIpc({ logger, stateStore }) {
+@@ -819,0 +857,27 @@ function registerIpc({ logger, stateStore }) {
 +    if (process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
 +      if (interactionMode !== "automatic") {
 +        throw new Error("SENTRA-managed Web Models use the single SENTRA tunnel in Automatic mode");
@@ -7139,25 +7142,25 @@ index 71b95c2..6f14960 100644
 +        stdout: "SENTRA tunnel is authoritative; no secondary Codex Web tunnel runtime was started.",
 +      };
 +    }
-@@ -919,0 +982,3 @@ function registerIpc({ logger, stateStore }) {
+@@ -919,0 +984,3 @@ function registerIpc({ logger, stateStore }) {
 +    if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && mode !== "automatic") {
 +      throw new Error("SENTRA-managed Web Models use Automatic mode and the single SENTRA tunnel");
 +    }
-@@ -1040,2 +1105,4 @@ async function start() {
+@@ -1040,2 +1107,4 @@ async function start() {
 -  let installedRuntimeRoot = null;
 -  let runtimeRootResolved = false;
 +  let installedRuntimeRoot = SENTRA_BROWSER_HOST_ONLY && app.isPackaged
 +    ? path.join(process.resourcesPath, "runtime")
 +    : null;
 +  let runtimeRootResolved = Boolean(installedRuntimeRoot);
-@@ -1042,0 +1110,6 @@ async function start() {
+@@ -1042,0 +1112,6 @@ async function start() {
 +    if (SENTRA_BROWSER_HOST_ONLY && app.isPackaged) {
 +      // Browser-host-only mode consumes the signed embedded runtime in place.
 +      // It never installs/replaces ~/.codex-chatgpt-web/versions, so a running
 +      // SENTRA-managed Bun daemon cannot cause Windows EPERM rename failures.
 +      return installedRuntimeRoot;
 +    }
-@@ -1066,0 +1140,7 @@ async function start() {
+@@ -1066,0 +1142,7 @@ async function start() {
 +  if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && stateStore.read().browserInteractionMode !== "automatic") {
 +    stateStore.update({
 +      browserInteractionMode: "automatic",
@@ -7165,17 +7168,19 @@ index 71b95c2..6f14960 100644
 +      mcpSetupComplete: false,
 +    });
 +  }
-@@ -1099 +1179,2 @@ async function start() {
+@@ -1099 +1181,4 @@ async function start() {
 -  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
-+  const startHidden = SENTRA_BROWSER_HOST_ONLY
-+    || (process.argv.includes("--hidden") && stateStore.read().onboardingComplete);
-@@ -1112,0 +1194,18 @@ async function start() {
++  const startHidden = shouldStartHidden({ browserHostOnly: SENTRA_BROWSER_HOST_ONLY,
++    hiddenRequested: process.argv.includes("--hidden"),
++    sentraManaged: Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim()),
++    onboardingComplete: stateStore.read().onboardingComplete });
+@@ -1112,0 +1198,18 @@ async function start() {
 +    configureSentraWeb: async () => {
 +      if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim() || !runtimeHost || browserHost.currentOperation()) {
 +        throw new Error('SENTRA Web configuration requires an idle managed browser');
 +      }
 +      await runtimeHost.setupCore();
-+      stateStore.update({ coreSetupComplete: true, mcpSetupComplete: true, codexRestartRequired: false });
++      stateStore.update({ onboardingComplete: true, coreSetupComplete: true, mcpSetupComplete: true, codexRestartRequired: false });
 +    },
 +    controlRuntime: process.env.SENTRA_TURN_AUTHORITY_TOKEN
 +      ? async (action, body) => {
@@ -7188,17 +7193,17 @@ index 71b95c2..6f14960 100644
 +          );
 +        }
 +      : undefined,
-@@ -1182 +1281,5 @@ async function start() {
+@@ -1182 +1285,5 @@ async function start() {
 -  const trayAvailable = createTray(logger, stateStore.read().language);
 +  // Browser-host-only is infrastructure owned by SENTRA; do not add a second
 +  // launcher tray icon and never reveal the shell just because tray setup was skipped.
-+  const trayAvailable = SENTRA_BROWSER_HOST_ONLY
++  const trayAvailable = SENTRA_BROWSER_HOST_ONLY || SENTRA_MANAGED
 +    ? true
 +    : createTray(logger, stateStore.read().language);
-@@ -1194 +1297 @@ async function start() {
+@@ -1194 +1301 @@ async function start() {
 -  if (!launcherSmokeTest) void updateController.checkOnce();
-+  if (!launcherSmokeTest && !SENTRA_BROWSER_HOST_ONLY) void updateController.checkOnce();
-@@ -1233 +1336,8 @@ async function start() {
++  if (!launcherSmokeTest && !SENTRA_BROWSER_HOST_ONLY && !SENTRA_MANAGED) void updateController.checkOnce();
+@@ -1233 +1340,8 @@ async function start() {
 -  if (IS_DEV_PROFILE) {
 +  if (SENTRA_BROWSER_HOST_ONLY) {
 +    await startupAuthenticationRefresh;
@@ -7208,8 +7213,8 @@ index 71b95c2..6f14960 100644
 +      embeddedRuntime: app.isPackaged,
 +    });
 +  } else if (IS_DEV_PROFILE) {
-@@ -1419,0 +1530,8 @@ void start().catch(async (error) => {
-+  if (SENTRA_BROWSER_HOST_ONLY) {
+@@ -1419,0 +1534,8 @@ void start().catch(async (error) => {
++  if (SENTRA_BROWSER_HOST_ONLY || SENTRA_MANAGED) {
 +    // Infrastructure startup fails closed and silent. SENTRA surfaces the
 +    // diagnostic without interrupting the desktop with a native modal dialog.
 +    try { browserHost?.destroy(); } catch {}
@@ -7217,6 +7222,19 @@ index 71b95c2..6f14960 100644
 +    app.exit(1);
 +    return;
 +  }
+diff --git a/launcher/electron/sentra-launch-policy.cjs b/launcher/electron/sentra-launch-policy.cjs
+new file mode 100644
+index 0000000..e9f740c
+--- /dev/null
++++ b/launcher/electron/sentra-launch-policy.cjs
+@@ -0,0 +1,7 @@
++'use strict';
++
++function shouldStartHidden({ browserHostOnly, hiddenRequested, sentraManaged, onboardingComplete }) {
++  return Boolean(browserHostOnly || (hiddenRequested && (sentraManaged || onboardingComplete)));
++}
++
++module.exports = { shouldStartHidden };
 diff --git a/launcher/electron/sentra-setup-dom.cjs b/launcher/electron/sentra-setup-dom.cjs
 new file mode 100644
 index 0000000..91efea8
@@ -7521,6 +7539,31 @@ index 0000000..c70da95
 +  return result.result;
 +}
 +module.exports = { command, official, auth };
+diff --git a/launcher/tests/sentra-launch-policy.test.cjs b/launcher/tests/sentra-launch-policy.test.cjs
+new file mode 100644
+index 0000000..dbafb84
+--- /dev/null
++++ b/launcher/tests/sentra-launch-policy.test.cjs
+@@ -0,0 +1,19 @@
++const { test } = require('node:test');
++const assert = require('node:assert/strict');
++const { shouldStartHidden } = require('../electron/sentra-launch-policy.cjs');
++
++test('a fresh SENTRA background launch stays hidden before upstream onboarding', () => {
++  assert.equal(shouldStartHidden({ hiddenRequested: true, sentraManaged: true, onboardingComplete: false }), true);
++});
++test('an explicit foreground request remains visible for configured and fresh accounts', () => {
++  for (const onboardingComplete of [false, true]) {
++    assert.equal(shouldStartHidden({ hiddenRequested: false, sentraManaged: true, onboardingComplete }), false);
++  }
++});
++test('browser infrastructure stays hidden without requiring onboarding or a hidden switch', () => {
++  assert.equal(shouldStartHidden({ browserHostOnly: true }), true);
++});
++test('ordinary upstream first use keeps its existing onboarding behavior', () => {
++  assert.equal(shouldStartHidden({ hiddenRequested: true, sentraManaged: false, onboardingComplete: false }), false);
++  assert.equal(shouldStartHidden({ hiddenRequested: true, sentraManaged: false, onboardingComplete: true }), true);
++});
 diff --git a/launcher/tests/sentra-setup-host.test.cjs b/launcher/tests/sentra-setup-host.test.cjs
 new file mode 100644
 index 0000000..4e80652

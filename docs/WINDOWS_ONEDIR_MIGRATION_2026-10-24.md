@@ -55,6 +55,13 @@ composer with SENTRA selected; existing drafts are preserved. Manual account
 approval and a copyable test remain available. After the test, the isolated Web
 adapter is configured without changing native provider routes.
 
+Managed background restarts honor hidden mode even on a fresh profile. Verified
+SENTRA setup records completion without requiring the component's separate
+onboarding. Managed launches add no second tray icon or component update check;
+startup failure is reported through SENTRA rather than a separate native modal.
+Explicit foreground requests remain available. Launch-policy regression tests
+cover fresh and configured profiles as well as ordinary upstream behavior.
+
 Native models use their providers directly. Upstream subprocesses receive an
 isolated Codex home. A legacy global SENTRA route is restored only when its
 existing journal proves the baseline and there are no conflicting edits.
@@ -87,6 +94,11 @@ existing journal proves the baseline and there are no conflicting edits.
   it still refuses conflicting edits or an unproven baseline. Local-only
   installation attempts this recovery even when Web onboarding is postponed
   and records whether review is needed.
+- The final Web component also passed a full packaged, ordinary managed startup
+  with a new profile, system-only PATH and no browser-host-only shortcut. Its
+  embedded runtime executed successfully and Windows enumeration observed zero
+  visible windows. A separate synthetic cookie survived a Chromium process
+  restart. These checks used private profiles and no provider account.
 - The Inno compiler was initially absent and automatic installation was rejected
   with `blocked by policy`. After renewed owner authorization, the official
   7.1.0 installer was downloaded, its pinned hash and valid Pyrsys signature
