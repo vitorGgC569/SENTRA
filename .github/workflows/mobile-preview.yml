@@ -11,6 +11,11 @@ on:
         required: false
         default: false
         type: boolean
+      artifact_only:
+        description: Build and verify a phone APK for coordinated release without publishing it yet
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: read
 concurrency:
@@ -121,7 +126,7 @@ jobs:
           python scripts/site/verify_android.py --apk "$APK_PATH" --signature .tmp/mobile-signature.txt --badging .tmp/mobile-badging.txt --policy scripts/site/android-preview-signing.json --run "$RUN_NUMBER" --out "$VERIFIED_ANDROID_REPORT"
           python scripts/site/package_android.py
       - name: Publish preview only
-        if: ${{ !inputs.emulator_qa }}
+        if: ${{ !inputs.emulator_qa && !inputs.artifact_only }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
