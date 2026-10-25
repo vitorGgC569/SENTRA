@@ -13,6 +13,22 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 
 
+def setup_browser_choices() -> dict[str, str]:
+    """Offer installed browsers, without reading or copying their user profiles."""
+    choices = {"SENTRA · navegador integrado": "sentra", "Avançado · sessão externa existente": "auto"}
+    for name, label, relative in [
+        ("edge", "Microsoft Edge · perfil SENTRA", "Microsoft/Edge/Application/msedge.exe"),
+        ("chrome", "Google Chrome · perfil SENTRA", "Google/Chrome/Application/chrome.exe"),
+    ]:
+        if any((Path(os.environ[root]) / relative).is_file()
+               for root in ("PROGRAMFILES", "PROGRAMFILES(X86)", "LOCALAPPDATA") if os.environ.get(root)):
+            choices[label] = name
+    from .enrollment_extension import _find_firefox
+    if _find_firefox():
+        choices["Firefox · extensão assinada"] = "firefox"
+    return choices
+
+
 @dataclass(frozen=True)
 class BrowserEndpoint:
     browser: str
@@ -107,23 +123,29 @@ def attached_enrollment_context(playwright: Any, endpoints: list[BrowserEndpoint
 
 
 def enrollment_context(playwright: Any, state_dir: Path, notify: Callable[[str, str], None], *, bridge=None,
-                       allow_setup_profile=False):
-    if bridge is not None:
+                       allow_setup_profile=False, browser="auto"):
+    if browser not in {"auto", "edge", "chrome", "firefox"}:
+        raise ValueError("unsupported_setup_browser")
+    reuse_existing = not (allow_setup_profile and browser in {"edge", "chrome"})
+    if bridge is not None and reuse_existing:
         context = bridge.context()
-        if context is not None:
+        if context is not None and (browser == "auto" or context.browser_name.lower() == browser):
             notify("browser_session", "Using the enabled Setup DOM extension in the existing browser profile (" + context.browser_name + ").")
             return context
-    attached = attached_enrollment_context(playwright, discover_browser_endpoints())
+    endpoints = discover_browser_endpoints() if reuse_existing else []
+    if browser != "auto":
+        endpoints = [endpoint for endpoint in endpoints if endpoint.browser == browser]
+    attached = attached_enrollment_context(playwright, endpoints)
     if attached is not None:
         notify("browser_session", "Reusing the existing browser session through its local DOM connection.")
         return attached
-    if not allow_setup_profile:
+    if not allow_setup_profile or browser == "firefox":
         raise ValueError("browser_extension_required")
     # A separate sign-in profile is an explicit assisted opt-in.
     notify("browser_session", "No existing browser DOM connection is available. Sign-in is required in the setup browser.")
     from .openai_auto_setup import edge_automation_profile
-    profile = edge_automation_profile(state_dir)
+    profile = (Path(state_dir) / "chrome-automation") if browser == "chrome" else edge_automation_profile(state_dir)
     return playwright.chromium.launch_persistent_context(
-        str(profile), channel="msedge", headless=False, accept_downloads=False,
+        str(profile), channel="chrome" if browser == "chrome" else "msedge", headless=False, accept_downloads=False,
         args=["--no-first-run", "--no-default-browser-check", "--disable-sync"],
     )

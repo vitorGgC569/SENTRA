@@ -26,23 +26,25 @@ def test_setup_enrollment_recovery_and_completion_are_observed(tmp_path, monkeyp
     monkeypatch.setattr(auto, "recover_enrollment", lambda *_: {"ok": True} if outcome == "recovered" else {"enrollment_needed": True})
     sessions = []
     class Session:
-        def __init__(self, paths, notify, runtime):
+        def __init__(self, paths, notify, runtime, **options):
             self.notify = notify
+            self.options = options
             self.close = Mock()
             sessions.append(self)
         def start(self, *, approved, automatic):
             assert approved and automatic
             if outcome != "timeout":
                 self.notify("tunnel", "not needed by the UI")
-                self.notify(outcome, "fixed status")
+                self.notify("tunnel_ready" if outcome == "recovered" else outcome, "fixed status")
                 self.notify("closed", "")
     monkeypatch.setattr(browser, "OpenAIConsentBrowser", Session)
     notify = Mock()
     result = auto.run_setup_enrollment(ProductPaths(tmp_path / "install", tmp_path / "state"), notify, timeout_s=0)
-    assert result.get("ok") == (outcome in {"ready", "recovered"})
+    assert result.get("ok") == (outcome == "ready")
     assert all(call.args[0] != "tunnel" for call in notify.call_args_list)
     if outcome == "recovered":
-        assert not sessions
+        assert sessions[0].options["tunnel_verified"] is True
+        assert result["tunnel_verified"] is True
     elif outcome == "timeout":
         sessions[0].close.assert_called_once()
         assert result["reason"] == "browser_enrollment_timeout"

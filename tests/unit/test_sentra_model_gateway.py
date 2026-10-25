@@ -229,7 +229,7 @@ def test_missing_upstream_keeps_listener_and_proves_no_post_bytes(tmp_path):
     thread = threading.Thread(target=gateway.serve_forever, daemon=True)
     thread.start()
     try:
-        status, body, _ = call(gateway.server_port, "POST", "/v1/responses", {"model": "gpt-6-sol", "input": "private"})
+        status, body, _ = call(gateway.server_port, "POST", "/v1/responses", {"model": "chatgpt-web/high", "input": "private"})
         assert status == 503
         error = json.loads(body)["error"]
         assert error["phase"] == "connect"
@@ -270,7 +270,7 @@ def test_disconnect_before_headers_is_uncertain_and_never_replayed(tmp_path):
     for thread in threads:
         thread.start()
     try:
-        status, body, _ = call(gateway.server_port, "POST", "/v1/responses", {"model": "gpt-6-sol", "input": "private"})
+        status, body, _ = call(gateway.server_port, "POST", "/v1/responses", {"model": "chatgpt-web/high", "input": "private"})
         error = json.loads(body)["error"]
         assert status == 503
         assert error["delivery_state"] == "UNCONFIRMED"
@@ -293,7 +293,7 @@ def test_optional_transport_initialization_failure_preserves_legacy_route(server
         raise OSError("candidate storage unavailable")
 
     monkeypatch.setattr(candidate, "DurableWebTransport", broken_candidate)
-    assert call(gateway.server_port, "POST", "/v1/responses", {"model": "gpt-6-sol", "input": "legacy"})[0] == 200
+    assert call(gateway.server_port, "POST", "/v1/responses", {"model": "chatgpt-web/high", "input": "legacy"})[0] == 200
     assert gateway._web_transport is None
     status, _, _ = call(gateway.server_port, "POST", "/internal/turn/browser-preflight", {},
                         {"Authorization": "Bearer " + gateway.turn_authority_token})
@@ -490,6 +490,7 @@ def test_launcher_environment_fences_payload_identity(tmp_path: Path) -> None:
     supervisor = LauncherSupervisor(config)
     payload = supervisor.validate_payload()
     environment = supervisor._environment()
+    assert Path(environment["CODEX_HOME"]) == Path(config.state_root).resolve() / "web-models" / "codex-home"
     assert environment["SENTRA_MANAGED_TUNNEL"] == "1"
     assert environment["SENTRA_MANAGED_TUNNEL"] == "1"
     assert environment["SENTRA_INTEGRATION_PATCH_SHA256"] == payload["patch_sha256"]
@@ -877,10 +878,13 @@ def test_gateway_decodes_codex_zstd_request_and_strips_encoding(servers):
     assert upstream.received["content_encoding"] is None
 
 
-def test_native_model_passthrough(servers):
+def test_native_model_never_reaches_web_adapter(servers):
     upstream, gateway = servers
-    assert call(gateway.server_port, "POST", "/v1/responses", {"model": "gpt-6-sol", "input": []})[0] == 200
-    assert upstream.received["body"]["model"] == "gpt-6-sol"
+    before = dict(getattr(upstream, "received", {}))
+    status, body, _ = call(gateway.server_port, "POST", "/v1/responses", {"model": "gpt-6-sol", "input": []})
+    assert status == 400
+    assert b"native_provider_route_required" in body
+    assert getattr(upstream, "received", {}) == before
     status, _, _ = call(gateway.server_port, "POST", "/v1/alpha/search", {"query": "x"}, {"Authorization": "Bearer codex-token"})
     assert status == 200
     assert upstream.received["authorization"] == "Bearer codex-token"

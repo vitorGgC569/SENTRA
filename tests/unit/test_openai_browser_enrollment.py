@@ -142,7 +142,7 @@ def test_isolated_session_does_not_emit_api_key_or_write_unapproved(
             finished.set()
 
     session = en.OpenAIConsentBrowser(
-        ProductPaths(tmp_path / "install", tmp_path / "state"), notify
+        ProductPaths(tmp_path / "install", tmp_path / "state"), notify, browser="auto"
     )
     session.start(approved=True)
     session.request("detect_tunnel")
@@ -228,7 +228,7 @@ def test_startup_errors_disclose_only_fixed_codes(tmp_path, monkeypatch, reason,
     monkeypatch.setattr(enrollment_bridge, "EnrollmentBridge", Bridge)
     monkeypatch.setitem(sys.modules, "playwright.sync_api", SimpleNamespace(sync_playwright=Playwright))
     session = en.OpenAIConsentBrowser(ProductPaths(tmp_path / "install", tmp_path / "state"),
-                                     lambda event, message: observed.append((event, message)))
+                                     lambda event, message: observed.append((event, message)), browser="auto")
     session.start(approved=True, automatic=True)
     session._thread.join(timeout=3)
     assert not session._thread.is_alive()

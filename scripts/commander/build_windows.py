@@ -87,7 +87,7 @@ def _source_fingerprint(root: Path | None = None) -> dict[str, str]:
     # The pinned Web Models patch is a product input just like its PowerShell
     # builder; both must invalidate provenance before a new Setup is accepted.
     # Packaged license/notice text is part of the distributed artifact too.
-    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".cs", ".h", ".go", ".mod", ".sum", ".sh", ".wasm", ".rs", ".toml", ".lock", ".mjs", ".xpi"}
+    extensions = {".py", ".js", ".jsx", ".cjs", ".ts", ".tsx", ".svg", ".css", ".html", ".json", ".ps1", ".cmd", ".yaml", ".yml", ".ico", ".png", ".patch", ".txt", ".md", ".c", ".cs", ".h", ".go", ".mod", ".sum", ".sh", ".wasm", ".rs", ".toml", ".lock", ".mjs", ".xpi", ".iss"}
     files = {root / name for name in (
         "main.py", "sentra_version.py", "config.yaml", "requirements.lock.txt", "LICENSE",
         "README.md", "SECURITY.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md",
@@ -147,6 +147,9 @@ def _write_build_provenance(dist: Path, phase: str, expected: tuple[str, ...], s
         "executables": {name: {"sha256": _file_sha256(dist / name),
                                "bytes": (dist / name).stat().st_size} for name in expected},
     }
+    from sentra_remote.onedir import support_inventory
+    result["distribution_layout"] = "onedir-v1"
+    result["support_files"] = support_inventory(dist, expected)
     binding = _RUNTIME_BINDING.get()
     if binding is not None:
         if hashlib.sha256(Path(binding['path']).read_bytes()).hexdigest() != binding['sha256']:
@@ -260,7 +263,7 @@ def _common(name: str, entry: Path, dist: Path, work: Path, spec: Path) -> list[
     # PyInstaller's global --clean for every executable causes repeated cache
     # churn and can stall later Windows builds under endpoint scanning.
     args = [
-        "--noconfirm", "--onefile",
+        "--noconfirm", "--onedir", "--contents-directory", "_runtime_" + name,
         "--name", name,
         "--distpath", str(dist),
         "--workpath", str(work / name),
@@ -365,11 +368,13 @@ def _build(
     extra: list[str] | None = None,
     timeout_s: int = PYINSTALLER_TIMEOUT_S,
 ) -> None:
-    args = _common(name, ROOT / "scripts" / "commander" / entry_name, dist, work, spec)
+    work.mkdir(parents=True, exist_ok=True)
+    output = Path(tempfile.mkdtemp(prefix="onedir-output-", dir=work))
+    args = _common(name, ROOT / "scripts" / "commander" / entry_name, output, work, spec)
     prefix: list[str] = []
     if windowed:
         prefix.append("--noconsole")
-    if name in {"sentra-canvas", "sentra-desktop", "sentra-human", "SENTRA-Setup"}:
+    if name in {"sentra-canvas", "sentra-desktop", "sentra-human", "SENTRA-Setup", "sentra-installer"}:
         icon_name = "SENTRA-DOT.ico"
         icon = ROOT / "sentra_canvas" / "assets" / icon_name
         if not icon.is_file():
@@ -378,11 +383,11 @@ def _build(
         # The native WebView2 HWND and the system tray also need image bytes
         # at runtime; setting only the executable icon is not sufficient.
         prefix += ["--add-data", f"{ROOT / 'sentra_canvas' / 'assets'}{os.pathsep}sentra_canvas/assets"]
-        if name == "SENTRA-Setup":
+        if name in {"SENTRA-Setup", "sentra-installer"}:
             prefix += ["--add-data", f"{ROOT / 'sentra_canvas/desktop_ui/src/assets/opendots/blue.png'}{os.pathsep}sentra_canvas/assets"]
     if mcp_payload:
         prefix += ["--collect-all", "playwright", "--hidden-import", "pyarrow.parquet"]
-    elif name == "SENTRA-Setup":
+    elif name in {"SENTRA-Setup", "sentra-installer"}:
         # Setup owns DOM enrollment, including the driver, on clean machines.
         prefix += ["--collect-all", "playwright"]
     if mcp_payload or name in {'sentra-canvas', 'sentra-cli', 'sentra-update-helper'}:
@@ -398,7 +403,14 @@ def _build(
             raise PermissionError('embedded runtime pin input changed before build')
         prefix += ['--add-data', f'{resource}{os.pathsep}.']
     args[0:0] = prefix
-    _run(args, timeout_s=timeout_s)
+    try:
+        _run(args, timeout_s=timeout_s)
+        from scripts.commander.onedir import publish_component
+        publish_component(output / name, dist, name + ".exe")
+    finally:
+        if output.resolve().parent != work.resolve():
+            raise ValueError("unsafe onedir build cleanup")
+        shutil.rmtree(output)
     if binding is not None and hashlib.sha256(Path(binding['path']).read_bytes()).hexdigest() != binding['sha256']:
         raise PermissionError('embedded runtime pin input changed during build')
 
@@ -472,6 +484,8 @@ def _publish_payload(staging: Path, dist: Path) -> None:
     file midway through the build. Preflight every existing target first, then
     publish with rollback so dist is either the old complete set or the new one.
     """
+    if (dist / ".sentra-install.json").exists():
+        raise PermissionError("build output cannot replace an installed SENTRA; use Setup")
     dist.mkdir(parents=True, exist_ok=True)
     missing = [
         name for name in PAYLOAD_NAMES
@@ -480,6 +494,9 @@ def _publish_payload(staging: Path, dist: Path) -> None:
     if missing:
         raise RuntimeError("staged payload missing: " + ", ".join(missing))
 
+    from sentra_remote.onedir import support_name
+    names = list(PAYLOAD_NAMES)
+    names += [support_name(name) for name in PAYLOAD_NAMES if (staging / support_name(name)).is_dir()]
     _assert_payload_replaceable(dist)
 
     backup = dist.with_name(dist.name + f".payload-backup-{os.getpid()}")
@@ -488,7 +505,7 @@ def _publish_payload(staging: Path, dist: Path) -> None:
     moved_old: list[str] = []
     published: list[str] = []
     try:
-        for name in PAYLOAD_NAMES:
+        for name in names:
             target = dist / name
             staged = staging / name
             previous = backup / name
@@ -503,7 +520,12 @@ def _publish_payload(staging: Path, dist: Path) -> None:
             target = dist / name
             try:
                 if target.exists():
-                    target.unlink()
+                    if target.is_dir():
+                        if target.resolve().parent != dist.resolve():
+                            raise ValueError("unsafe payload rollback path")
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
             except OSError as rollback_exc:
                 rollback_errors.append(f"{name}: {rollback_exc}")
         for name in moved_old:
@@ -708,7 +730,7 @@ def build_payload(dist: Path, work: Path, spec: Path) -> None:
 
         _verify_frozen_gui(build_staging / "sentra-desktop.exe")
 
-        # Copy only finalized one-file executables back into the OneDrive tree.
+        # Publish executables together with their installed onedir dependencies.
         # The heavy PyInstaller work/cache stays under LOCALAPPDATA.
         publish_staging.mkdir(parents=True, exist_ok=True)
         for name in PAYLOAD_NAMES:
@@ -716,6 +738,8 @@ def build_payload(dist: Path, work: Path, spec: Path) -> None:
             if not source.is_file() or source.stat().st_size == 0:
                 raise RuntimeError(f"local staged payload missing: {source}")
             shutil.copy2(source, publish_staging / name)
+            from sentra_remote.onedir import copy_support
+            copy_support(build_staging, publish_staging, name)
         _publish_payload(publish_staging, dist)
     finally:
         shutil.rmtree(build_staging, ignore_errors=True)
@@ -791,6 +815,18 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     patch_hash = hashlib.sha256(patch.read_bytes()).hexdigest()
     if str(build_state.get("patch_sha256") or "").lower() != patch_hash:
         raise RuntimeError("Web Models payload was built from a stale SENTRA upstream patch")
+    from sentra_remote.onedir import support_inventory, support_name
+    for name in PAYLOAD_NAMES:
+        if name == "sentra-launcher.exe":
+            continue
+        actual = support_inventory(dist, (name,))
+        if not actual or not (dist / support_name(name) / "python312.dll").is_file():
+            raise RuntimeError("onedir payload runtime missing: " + name)
+        if not any(proof.get("distribution_layout") == "onedir-v1" and
+                   {key: value for key, value in proof.get("support_files", {}).items()
+                    if key.startswith(support_name(name) + "/")} == actual
+                   for proof in proofs):
+            raise RuntimeError("stale or unverified onedir runtime: " + name)
     if not (dist / 'runtime-components.json').is_file() or not (dist / 'runtime').is_dir():
         raise RuntimeError('materialized QuickJS/HCS/RustDesk release components required; stage via release_components in final phase')
     binding = _RUNTIME_BINDING.get()
@@ -843,20 +879,6 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     from scripts.commander.stage_terminal import stage_terminal_runtime
     terminal_payload = dist / 'sentra-terminal'
     stage_terminal_runtime(terminal_payload)
-    installer_extra: list[str] = [
-        "--add-data", f"{electron_payload}{os.pathsep}payload/sentra-electron",
-        "--add-data", f"{mobile_payload}{os.pathsep}payload/sentra-mobile",
-        "--add-data", f"{terminal_payload}{os.pathsep}payload/sentra-terminal",
-    ]
-    installer_extra += ['--add-data', f"{dist / 'runtime'}{os.pathsep}payload/runtime",
-                        '--add-data', f"{dist / 'runtime-components.json'}{os.pathsep}payload"]
-    for name in PAYLOAD_NAMES:
-        installer_extra += ["--add-data", f"{dist / name}{os.pathsep}payload"]
-    installer_extra += [
-        "--add-data", f"{staged_extension}{os.pathsep}edge_extension",
-        "--add-data", f"{packaged_docs}{os.pathsep}docs",
-        "--add-data", f"{dist / 'web-models'}{os.pathsep}payload/web-models",
-    ]
     for name in ('opendots', 'guacamole'):
         legal = ROOT / 'sentra_canvas/desktop_ui/src/assets' / name
         required = ('LICENSE', 'PROVENANCE.json', 'NOTICE') if name == 'guacamole' else ('LICENSE', 'PROVENANCE.json')
@@ -876,17 +898,32 @@ def build_installer(dist: Path, work: Path, spec: Path) -> None:
     if archive.resolve() != (prerequisites / "tunnel-client.zip").resolve():
         shutil.copy2(archive, prerequisites / "tunnel-client.zip")
     manifest = write_payload_manifest(dist, staged_extension, packaged_docs, PRODUCT_VERSION, PAYLOAD_NAMES)
-    installer_extra += ["--add-data", f"{prerequisites}{os.pathsep}payload/prerequisites",
-                        "--add-data", f"{manifest}{os.pathsep}payload"]
+    bootstrap = extension_parent / "bootstrap"
+    payload = bootstrap / "payload"
+    payload.mkdir(parents=True)
+    from sentra_remote.onedir import copy_support
+    for name in PAYLOAD_NAMES:
+        shutil.copy2(dist / name, payload / name)
+        copy_support(dist, payload, name)
+    for name in ("runtime", "prerequisites", "web-models", "sentra-electron", "sentra-mobile", "sentra-terminal"):
+        shutil.copytree(dist / name, payload / name)
+    shutil.copy2(dist / "runtime-components.json", payload / "runtime-components.json")
+    shutil.copy2(manifest, payload / manifest.name)
+    shutil.copytree(staged_extension, bootstrap / "edge_extension")
+    shutil.copytree(packaged_docs, bootstrap / "docs")
     _build(
-        "SENTRA-Setup",
+        "sentra-installer",
         "installer_entry.py",
-        dist, work, spec,
+        bootstrap, work, spec,
         windowed=True,
-        extra=installer_extra,
         timeout_s=SETUP_TIMEOUT_S,
     )
-    _verify_frozen_gui(dist / "SENTRA-Setup.exe")
+    _verify_frozen_gui(bootstrap / "sentra-installer.exe")
+    from scripts.commander.inno_setup import build_inno
+    compiled = extension_parent / "compiled"
+    setup = build_inno(bootstrap, compiled, PRODUCT_VERSION)
+    _publish_single_executable(setup, dist / "SENTRA-Setup.exe")
+    shutil.copy2(compiled / "setup-engine.json", dist / "setup-engine.json")
 
 
 def build(dist: Path, work: Path, spec: Path, sources: dict[str, str] | None = None) -> None:
@@ -920,6 +957,9 @@ def main() -> int:
     )
     args = parser.parse_args()
     if args.phase in {"all", "payload", "installer"}:
+        if args.phase in {"all", "installer"}:
+            from scripts.commander.inno_setup import find_compiler
+            find_compiler()  # Fail before a long payload build if ISCC is absent.
         _verify_build_gui_runtime()
     dist = Path(args.dist).resolve()
     work = Path(args.work).resolve()

@@ -9,8 +9,10 @@ import hashlib
 import json
 import re
 import sqlite3
+import secrets
 import time
 from pathlib import Path
+from contextlib import closing
 
 
 _VALID_ID=re.compile(r"^tunnel_[A-Za-z0-9_-]{8,128}$")
@@ -42,6 +44,9 @@ class ConnectorProof:
             columns={r[1] for r in db.execute("PRAGMA table_info(connector_observations)")}
             if "last_local_schema_sha256" not in columns:
                 db.execute("ALTER TABLE connector_observations ADD COLUMN last_local_schema_sha256 TEXT NOT NULL DEFAULT ''")
+            db.execute("""CREATE TABLE IF NOT EXISTS setup_probes(
+                digest TEXT PRIMARY KEY, tunnel_hash TEXT NOT NULL,
+                expires REAL NOT NULL, observed REAL)""")
         finally:
             db.close()
 
@@ -51,6 +56,36 @@ class ConnectorProof:
         db.execute("PRAGMA journal_mode=WAL")
         db.execute("PRAGMA synchronous=FULL")
         return db
+
+    def begin_setup_probe(self, tunnel_id: str, *, lifetime: float = 600) -> str:
+        """A fresh read-only challenge; historical tool calls cannot finish Setup."""
+        tunnel = self._fingerprint(tunnel_id)
+        if tunnel is None or not 0 < lifetime <= 900:
+            raise ValueError("invalid setup probe")
+        challenge = secrets.token_hex(24)
+        with closing(self._db()) as db, db:
+            db.execute("DELETE FROM setup_probes WHERE expires < ?", (time.time(),))
+            db.execute("INSERT INTO setup_probes VALUES(?,?,?,NULL)",
+                       (hashlib.sha256(challenge.encode()).hexdigest(), tunnel, time.time() + lifetime))
+        return challenge
+
+    def observe_setup_probe(self, challenge: str) -> bool:
+        """Called only from the MCP health tool; stores no raw challenge."""
+        if not isinstance(challenge, str) or not re.fullmatch(r"[0-9a-f]{48}", challenge):
+            return False
+        with closing(self._db()) as db, db:
+            cursor = db.execute("""UPDATE setup_probes SET observed=? WHERE digest=?
+                AND tunnel_hash=? AND expires>=? AND observed IS NULL""",
+                (time.time(), hashlib.sha256(challenge.encode()).hexdigest(),
+                 self._fingerprint(self.configured_tunnel_id()), time.time()))
+            return cursor.rowcount == 1
+
+    def setup_probe_observed(self, challenge: str, tunnel_id: str) -> bool:
+        with closing(self._db()) as db:
+            row = db.execute("""SELECT observed FROM setup_probes WHERE digest=?
+                AND tunnel_hash=? AND expires>=?""", (hashlib.sha256(challenge.encode()).hexdigest(),
+                self._fingerprint(tunnel_id), time.time())).fetchone()
+        return bool(row and row[0] is not None)
 
     @staticmethod
     def _fingerprint(tunnel_id):

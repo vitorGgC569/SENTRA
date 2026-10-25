@@ -24,7 +24,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Root dependency lock install failed' }
         & $Bun run typecheck
         if ($LASTEXITCODE -ne 0) { throw 'Web Models TypeScript failed' }
-        & $Bun test tests/chatgpt-web-models.test.ts tests/chatgpt-model-selection.test.ts tests/model-catalog.test.ts tests/server-models.test.ts tests/gemini-web.test.ts tests/gemini-web-adapter.test.ts
+        & $Bun test tests/chatgpt-web-models.test.ts tests/chatgpt-model-selection.test.ts tests/model-catalog.test.ts tests/server-models.test.ts tests/gemini-web.test.ts tests/gemini-web-adapter.test.ts tests/sentra-native-route-isolation.test.ts
         if ($LASTEXITCODE -ne 0) { throw 'Web Models integration regression failed' }
         Push-Location launcher
         try {

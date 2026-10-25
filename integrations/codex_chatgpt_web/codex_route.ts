@@ -1,9 +1,7 @@
 /** Reuse the pinned upstream's journal/snapshot/rollback implementation for Codex. */
-import { loadConfig } from "../../third_party/codex-chatgpt-web/src/config";
 import {
   deactivateCodexIntegration,
   inspectCodexIntegration,
-  installCodexIntegration,
 } from "../../third_party/codex-chatgpt-web/src/codex-integration";
 
 const [action = "status", rawPort = "17842"] = process.argv.slice(2);
@@ -34,26 +32,7 @@ if (action === "status") {
 } else if (action === "disconnect") {
   console.log(JSON.stringify(deactivateCodexIntegration(), null, 2));
 } else if (action === "install") {
-  if (!await gatewayHealthy()) {
-    throw new Error("SENTRA Model Gateway is not healthy");
-  }
-  const config = loadConfig();
-  const result = installCodexIntegration(
-    { ...config, host: "127.0.0.1", port },
-    { replaceExistingRoute: true },
-  );
-  const status = inspectCodexIntegration();
-  if (!status.installed || !status.active || status.routeUrl !== gatewayRoute) {
-    throw new Error("Codex route transaction completed but did not point to the SENTRA Gateway");
-  }
-  console.log(JSON.stringify({
-    active: true,
-    route: gatewayRoute,
-    journal: result.version,
-    pointsToSentra: true,
-    codexRestartRequired: true,
-  }, null, 2));
-  console.error("Restart Codex to refresh its model catalog.");
+  throw new Error("Native provider routing is not managed by SENTRA. Select Web models in SENTRA instead.");
 } else {
   throw new Error("usage: bun run integrations/codex_chatgpt_web/codex_route.ts <status|install|disconnect> [gateway-port]");
 }

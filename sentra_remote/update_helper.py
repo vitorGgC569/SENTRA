@@ -246,6 +246,8 @@ def _apply_update(
         if coordinated_handoff is not None:
             from .lifecycle_effects import checkpoint_effect
             checkpoint_effect()
+        from .installer_engine import install_command
+        command = install_command(installer, command[1:])
         result = subprocess.run(
             command,
             timeout=300,

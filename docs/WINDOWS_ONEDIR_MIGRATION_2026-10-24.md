@@ -1,0 +1,82 @@
+# Windows packaging and embedded account setup — 24 October 2026
+
+Candidate application version: **1.0.3**. This document does not qualify a new
+public Windows release. The published 1.0.2 installer remains a different build.
+
+## Packaging
+
+Python components now use PyInstaller `onedir`. Executable names and sibling
+launch contracts stay stable. Each executable has a uniquely named installed
+support directory, for example `sentra-mcp.exe` and `_runtime_sentra-mcp/`.
+Python libraries and the Playwright driver are loaded from these directories
+instead of being extracted on every process launch.
+
+The build inventories and hashes dependency files. Setup manifests cover them;
+publication rolls back both executable and dependencies when replacement fails.
+The updater ZIP and external uninstall/rollback helpers carry their support
+directories too. Building directly into a marked installation is rejected.
+
+The default `SENTRA-Setup.exe` build now uses **Inno Setup 7.1.0**. Its native
+wizard extracts a compressed offline bundle and runs the SENTRA installation
+worker without opening another setup interface. The worker retains ownership,
+installation locking, protected settings, registration and data-preserving
+uninstall responsibilities; Inno's separate automatic uninstaller is disabled
+intentionally. It is not claimed that Inno performs SENTRA's data migrations.
+
+Installation succeeds independently of Web account onboarding. The final action
+opens SENTRA once. Accounts are configured inside the application. Existing
+signature/admission requirements for automatic updates remain in force.
+
+Build compiler: set `SENTRA_ISCC` to an existing Inno Setup 7.1.0 `ISCC.exe`.
+The full-build entry checks for the compiler before starting lengthy work.
+Velopack is not part of this migration.
+
+## Embedded account setup
+
+The account panel provides an explicit **Configure connection** action. It
+discloses the tunnel/key scope and keeps setup progress and recovery in SENTRA.
+Concurrent clicks attach to the same running setup operation.
+
+Platform and ChatGPT setup use one temporary owned view in the managed Chromium
+window, with the same persistent session partition used by Web models. Closing
+the view preserves that profile. Sign-in and provider consent stay with the
+account owner. The implementation waits through the login redirect instead of
+closing the setup immediately.
+
+The new adapter uses the existing authenticated loopback host control and fixed
+DOM operations. It adds no extension installation or extra debugging listener.
+It exposes no cookie export or arbitrary JavaScript operation. Navigation,
+extraction origins and setup-session identifiers are checked. Setup refuses to
+commandeer a running model turn.
+
+Tunnel health alone does not finish setup. A fresh, expiring challenge must
+return through the MCP health tool. The read-only test can be sent from an empty
+composer with SENTRA selected; existing drafts are preserved. Manual account
+approval and a copyable test remain available. After the test, the isolated Web
+adapter is configured without changing native provider routes.
+
+Native models use their providers directly. Upstream subprocesses receive an
+isolated Codex home. A legacy global SENTRA route is restored only when its
+existing journal proves the baseline and there are no conflicting edits.
+
+## Evidence and remaining qualification
+
+- Source regressions: 237 backend tests and 265 frontend tests passed in the
+  initial migration sweep; focused follow-up tests cover the managed setup.
+- Real frozen `onedir` probe: installed sibling dependencies and bundled
+  Playwright driver passed; no browser, account or product service was opened.
+- The Web component compiled with the new embedded setup modules.
+- The actual packaged setup module passed a real hidden Chromium fixture:
+  Platform extraction, ChatGPT form input, retained synthetic session cookie,
+  foreign-origin rejection and stale-session rejection. All HTTPS requests were
+  intercepted locally; zero visible windows and no provider account were used.
+- The first Web build failed under Windows redirected paths. Native real-path
+  resolution corrected the issue; the second build succeeded.
+- The Inno compiler was absent. Automatic installation was rejected by the
+  environment with `blocked by policy`; the new full Setup is therefore not yet
+  generated or qualified by this evidence.
+- Real provider login/consent, final Setup clean installation, update, rollback
+  and restart acceptance remain required before publishing this candidate.
+
+The user's existing installation, profiles and account sessions were not
+replaced by these build and fixture checks. No new tag or download is implied.

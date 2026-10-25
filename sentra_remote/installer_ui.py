@@ -186,7 +186,7 @@ def build(wizard):
     connection_header = tk.Frame(connection.body, background=BG)
     connection_header.pack(fill="x")
     label(connection_header, "Conectar à OpenAI", size=12, bold=True).pack(side="left")
-    label(connection_header, "OBRIGATÓRIO", size=8, muted=True).pack(side="left", padx=12)
+    label(connection_header, "OPCIONAL · MODELOS WEB", size=8, muted=True).pack(side="left", padx=12)
     wizard.openai_toggle = ttk.Button(connection_header, text="Configuração manual  ⌄", style="Setup.TButton", command=wizard._toggle_openai)
     wizard.openai_toggle.pack(side="right")
     label(connection.body, "O GPT6-WEB precisa do túnel conectado. O Setup configura a conexão pelo DOM do navegador. Login e autorização do plugin são feitos na sua conta.", muted=True, wrap=True).pack(anchor="w", pady=(4, 0))
@@ -217,10 +217,22 @@ def build(wizard):
     ttk.Button(links, text="↗  Runtime API Keys", style="Setup.TButton", command=lambda: webbrowser.open(OPENAI_API_KEYS_URL)).pack(side="left")
     consent = ttk.Checkbutton(connection.body, text="Conectar minha conta automaticamente pelo navegador", variable=wizard.browser_setup_var)
     consent.pack(anchor="w")
+    from .browser_enrollment_session import setup_browser_choices
+    wizard.browser_choices = setup_browser_choices()
+    preferred = next(iter(wizard.browser_choices))
+    wizard.browser_choice = tk.StringVar(value=preferred)
+    label(connection.body, "Navegador da configuração", muted=True).pack(anchor="w", pady=(8, 4))
+    browser_selector = ttk.Combobox(connection.body, state="readonly", textvariable=wizard.browser_choice,
+                                   values=list(wizard.browser_choices), width=39)
+    browser_selector.pack(anchor="w")
+    label(connection.body, "O navegador integrado mantém as contas conectadas e reaparece quando você precisa entrar ou autorizar. Navegadores externos são uma opção avançada.", muted=True, wrap=True, size=9).pack(anchor="w", pady=(4, 0))
+    wizard.connection_test_prompt = ""
+    wizard.copy_connection_test = ttk.Button(connection.body, text="Copiar teste de conexão",
+        command=lambda: (root.clipboard_clear(), root.clipboard_append(wizard.connection_test_prompt)))
     connect_button = ttk.Button(connection.body, text="Configurar / verificar conexão", style="Setup.TButton",
                                 command=wizard._primary_action)
     connect_button.pack(anchor="w", pady=(6, 0))
-    models_button = ttk.Button(connection.body, text="Abrir Web Models · entrar na conta", style="Setup.TButton",
+    models_button = ttk.Button(details, text="Diagnóstico dos modelos Web (avançado)", style="Setup.TButton",
                                command=wizard._open_web_models)
     models_button.pack(anchor="w", pady=(6, 0))
     label(connection.body, "Ao marcar, você autoriza criar ou selecionar o túnel e criar uma chave com todas as permissões, sem expiração. A chave é protegida neste Windows. Login e verificações da conta permanecem com você.", muted=True, wrap=True, size=9).pack(anchor="w", pady=(4, 0))
@@ -231,7 +243,7 @@ def build(wizard):
     ready.pack(fill="x", pady=(0, 14))
     wizard._ready_heading = label(ready.body, "Pronto para instalar", size=11, bold=True)
     wizard._ready_heading.pack(anchor="w")
-    display_status = tk.StringVar(value="Instale o aplicativo e conclua a conexão obrigatória com a OpenAI.")
+    display_status = tk.StringVar(value="Instale o aplicativo. A conexão Web pode ser configurada agora ou depois.")
     label(ready.body, textvariable=display_status, muted=True, wrap=True).pack(anchor="w", pady=(4, 8))
     wizard.progress_bar = ttk.Progressbar(ready.body, variable=wizard.progress_value, maximum=100, style="Setup.Horizontal.TProgressbar")
     wizard.progress_bar.pack(fill="x")
@@ -245,7 +257,7 @@ def build(wizard):
     wizard.advanced_frame = tk.Frame(advanced.body, background=BG)
     form = wizard.advanced_frame
     form.columnconfigure(1, weight=1)
-    controls = [tunnel_entry, key_entry, show_key, consent, connect_button, models_button]
+    controls = [tunnel_entry, key_entry, show_key, consent, connect_button, models_button, browser_selector]
 
     def browse(variable):
         chosen = filedialog.askdirectory(parent=root, title="Escolher pasta", initialdir=variable.get() or None)
@@ -284,7 +296,7 @@ def build(wizard):
             key_entry.configure(show="•")
             show_key.configure(text="Mostrar")
         translations = {
-            "Install SENTRA — local use works without OpenAI": "Instale e configure a conexão obrigatória com a OpenAI.",
+            "Install SENTRA — local use works without OpenAI": "Instale o SENTRA; a conexão Web é opcional.",
             "Preparing installation": "Preparando a instalação…",
             "Installing SENTRA components": "Instalando os componentes do SENTRA…",
             "Installing secure tunnel client": "Instalando o cliente de conexão segura…",

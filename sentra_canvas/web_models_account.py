@@ -10,7 +10,7 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def account_control(action="status"):
+def _host_account_control(action="status"):
     if action not in {"status", "login"}:
         raise ValueError("invalid account action")
     descriptor = Path.home() / ".codex-chatgpt-web" / "runtime" / "launcher-browser.json"
@@ -40,3 +40,19 @@ def account_control(action="status"):
             "status": str(result.get("status", "unknown"))[:40],
             "login_open": result.get("login_open") is True,
             "saved_chats": result.get("saved_chats") is True}
+
+
+def account_control(action="status", *, paths=None):
+    if action not in {"status", "login", "setup"}:
+        raise ValueError("invalid account action")
+    from sentra_remote.product import ProductPaths
+    from sentra_remote.account_setup import start_account_setup, setup_status
+    if paths is None:
+        import sys
+        install = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1] / "dist"
+        paths = ProductPaths.default(install)
+    if action == "setup":
+        return {"available": True, "authenticated": False, "setup": start_account_setup(paths)}
+    result = _host_account_control(action)
+    result["setup"] = setup_status(paths)
+    return result

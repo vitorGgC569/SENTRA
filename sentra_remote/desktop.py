@@ -323,7 +323,7 @@ class SentraDesktop:
         ttk.Label(self.web_models_tab, text="ChatGPT Web via SENTRA Model Gateway", font=("Segoe UI", 13, "bold")).pack(anchor="w")
         ttk.Label(
             self.web_models_tab,
-            text=("Uso normal: 1) Abrir interface Web e concluir o login; 2) Conectar Codex; "
+            text=("Uso normal: 1) Abrir modelos Web e concluir o login; 2) Verificar conexão Web; "
                   "3) reiniciar o Codex; 4) Verificar conexões. O Codex deve apontar para o "
                   "Gateway SENTRA em 127.0.0.1:17842/v1, nunca diretamente para o sidecar :17841."),
             wraplength=900,
@@ -331,8 +331,7 @@ class SentraDesktop:
         controls = ttk.Frame(self.web_models_tab)
         controls.pack(anchor="w", pady=8)
         ttk.Button(controls, text="Abrir interface Web", command=self.start_web_models).pack(side="left", padx=3)
-        ttk.Button(controls, text="Conectar Codex", command=self.connect_web_models_codex).pack(side="left", padx=3)
-        ttk.Button(controls, text="Desconectar Codex", command=self.disconnect_web_models_codex).pack(side="left", padx=3)
+        ttk.Button(controls, text="Verificar conexão Web", command=self.connect_web_models_codex).pack(side="left", padx=3)
         ttk.Button(controls, text="Verificar conexões", command=self.verify_web_models).pack(side="left", padx=3)
         ttk.Button(controls, text="Drain", command=lambda: self.drain_web_models(False)).pack(side="left", padx=3)
         ttk.Button(controls, text="Resume", command=lambda: self.drain_web_models(True)).pack(side="left", padx=3)
@@ -497,12 +496,12 @@ class SentraDesktop:
                 route_text = "Codex: rota não verificada"
                 try:
                     route = self._web_gateway_admin_json("/sentra/codex/status")
-                    if route.get("points_to_sentra"):
-                        route_text = "Codex: conectado ao Gateway SENTRA"
+                    if route.get("scope") == "sentra-web-only":
+                        route_text = "Modelos Web: adaptador isolado · modelos oficiais usam seus provedores"
                     elif route.get("installed") and route.get("active"):
-                        route_text = "Codex: rota ativa aponta fora do SENTRA · clique Conectar Codex para migrar"
+                        route_text = "Modelos Web: isolamento ainda não verificado; atualize os componentes"
                     else:
-                        route_text = "Codex: conclua o setup na interface Web e clique Conectar Codex"
+                        route_text = "Modelos Web: conclua o login e verifique a conexão"
                 except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                     route_text = f"Codex: rota ainda não verificada ({type(exc).__name__})"
                 self.root.after(0, lambda: self.web_models_route.configure(text=route_text))
@@ -518,10 +517,10 @@ class SentraDesktop:
                     "/sentra/codex/connect",
                     method="POST",
                 )
-                if not route.get("points_to_sentra"):
-                    raise RuntimeError("O Codex ainda não aponta para o Gateway SENTRA")
+                if route.get("scope") != "sentra-web-only":
+                    raise RuntimeError("Atualize o componente Web para preservar as rotas dos modelos oficiais")
                 self.root.after(0, lambda: self.web_models_route.configure(
-                    text="Codex: conectado ao Gateway SENTRA · reinicie o Codex para atualizar os modelos"))
+                    text="Modelos Web: conexão verificada · configuração dos provedores preservada"))
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
                 self.root.after(0, lambda: self.web_models_route.configure(text=f"Codex: {exc}"))
         threading.Thread(target=worker, daemon=True).start()
@@ -554,9 +553,9 @@ class SentraDesktop:
                     f"{item.get('id', 'check')}: {item.get('status', '?')}"
                     for item in checks if isinstance(item, dict)
                 )
-                route_ok = bool(route.get("installed") and route.get("active") and route.get("points_to_sentra"))
+                route_ok = bool(route.get("scope") == "sentra-web-only" and route.get("gatewayHealthy"))
                 text = ("Conexões verificadas" if report.get("ok") and route_ok else "Conexões precisam de atenção")
-                route_state = "codex-route: ok" if route_ok else "codex-route: fora do SENTRA"
+                route_state = "Web: isolado" if route_ok else "Web: isolamento não verificado"
                 self.root.after(0, lambda: self.web_models_checks.configure(
                     text=f"{text} · {route_state}" + (f" · {summary}" if summary else "")
                 ))
@@ -640,6 +639,8 @@ class SentraDesktop:
             return True, ""
         try:
             route = self.web_gateway.launcher.route("status")
+            if route.get("scope") == "sentra-web-only":
+                return True, ""
             if not route.get("points_to_sentra"):
                 return True, ""
             restored = self.web_gateway.launcher.route("disconnect")
@@ -1162,6 +1163,14 @@ class SentraDesktop:
                     self.quick_status.configure(text="OpenAI tunnel connected")
                     self.quick_detail.configure(text=message)
                     self.refresh_async()
+                elif event == "verification_prompt":
+                    status.set("Install/authorize the SENTRA app in ChatGPT, then send the copied read-only connection test.")
+                    def copy_test():
+                        self.root.clipboard_clear()
+                        self.root.clipboard_append(message)
+                    ttk.Button(view, text="Copy connection test", command=copy_test).pack(anchor="w", pady=6)
+                elif event == "tunnel_ready":
+                    status.set(message)
                 elif event in {"opened", "progress", "workspace_required", "browser_session"}:
                     status.set(message)
                 elif event == "closed":
@@ -1449,10 +1458,7 @@ class SentraDesktop:
             messagebox.showerror("SENTRA Terminal", str(exc))
 
     def open_web_models_setup(self) -> None:
-        if not self.advanced_visible:
-            self._toggle_advanced_tabs()
-        self.tabs.select(self.web_models_tab)
-        self.start_web_models()
+        self.start_openai_browser_enrollment()
 
     def repair_local(self) -> None:
         from tkinter import messagebox

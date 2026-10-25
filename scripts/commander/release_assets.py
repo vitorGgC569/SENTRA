@@ -49,6 +49,8 @@ def build_staging(dist: Path, staging: Path, tunnel_archive: Path) -> Path:
         if not source.is_file():
             raise FileNotFoundError(f"release binary missing: {source}")
         shutil.copy2(source, staging / name)
+        from sentra_remote.onedir import copy_support
+        copy_support(dist, staging, name)
     _copy_tree(ROOT / "edge_extension", staging / "edge_extension")
     web_models = dist / "web-models" / "win-unpacked"
     if not (web_models / "Codex Web GPT.exe").is_file() or not (web_models / "resources" / "runtime" / "manifest.json").is_file():
@@ -295,6 +297,10 @@ def build_update_zip(staging: Path, output: Path) -> Path:
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for name in ("SENTRA-Setup.exe", "sentra-update-helper.exe"):
             archive.write(staging / name, name)
+        from sentra_remote.onedir import support_inventory
+        from sentra_remote.windows_paths import filesystem_path
+        for name in support_inventory(staging, ("sentra-update-helper.exe",)):
+            archive.write(filesystem_path(staging / name), name)
         archive.write(tunnel_archives[0], tunnel_archives[0].name)
     return output
 

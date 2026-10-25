@@ -33,7 +33,8 @@ def verify_credential_protection() -> None:
         raise CredentialProtectionUnavailable("credential_protection_unavailable") from None
 
 
-def run_setup_enrollment(paths: ProductPaths, notify: Callable, *, timeout_s: float = 650) -> dict:
+def run_setup_enrollment(paths: ProductPaths, notify: Callable, *, timeout_s: float = 1250,
+                         browser: str = "sentra", allow_setup_profile: bool = False) -> dict:
     """Keep enrollment in Setup, with verified recovery before browser effects."""
     # Repeat immediately before account effects; pre-install success may be old.
     try:
@@ -44,9 +45,7 @@ def run_setup_enrollment(paths: ProductPaths, notify: Callable, *, timeout_s: fl
     from .product import ProductSettings
     runtime = LocalRuntime(paths, ProductSettings.load(paths.settings))
     recovered = recover_enrollment(paths, runtime)
-    if recovered.get("ok"):
-        return recovered
-    if not recovered.get("enrollment_needed"):
+    if not recovered.get("ok") and not recovered.get("enrollment_needed"):
         return {"ok": False, "reason": "manual_recovery_required"}
     from .openai_browser_enrollment import OpenAIConsentBrowser
     closed = threading.Event()
@@ -54,13 +53,17 @@ def run_setup_enrollment(paths: ProductPaths, notify: Callable, *, timeout_s: fl
 
     def on_event(event: str, message: str) -> None:
         if event == "ready":
-            result.update(ok=True, reason="tunnel_verified")
+            result.update(ok=True, reason="mcp_roundtrip_verified", mcp_roundtrip_verified=True)
+        elif event == "tunnel_ready":
+            result.update(tunnel_verified=True)
         elif event == "attention":
             known = {"browser_account_selection_required", "login_required",
                      "browser_extension_required", "browser_enrollment_already_running",
                      "all_permissions_unavailable", "platform_ui_needs_attention",
                      "chatgpt_workspace_required", "workspace_association_unverified",
                      "manual_recovery_required", "tunnel_verification_failed"}
+            known |= {"chatgpt_browser_required", "chatgpt_call_pending", "chatgpt_setup_cancelled",
+                      "chatgpt_login_required", "chatgpt_app_selection_required"}
             result.update(ok=False, reason=message if message in known else "browser_enrollment_needs_attention")
         elif event == "closed":
             closed.set()
@@ -69,7 +72,9 @@ def run_setup_enrollment(paths: ProductPaths, notify: Callable, *, timeout_s: fl
         if event != "tunnel":
             notify(event, message)
 
-    session = OpenAIConsentBrowser(paths, on_event, runtime=runtime)
+    session = OpenAIConsentBrowser(paths, on_event, runtime=runtime, browser=browser,
+                                  allow_setup_profile=allow_setup_profile,
+                                  tunnel_verified=recovered.get("ok") is True)
     session.start(approved=True, automatic=True)
     if not closed.wait(timeout_s):
         session.close()

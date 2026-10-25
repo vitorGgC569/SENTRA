@@ -10,14 +10,18 @@ MANIFEST = "setup-payload.json"
 
 
 def payload_files(source, extension, docs, products):
-    roots = {"payload": Path(source), "edge_extension": Path(extension), "docs": Path(docs)}
+    from .onedir import support_name
+    from .windows_paths import filesystem_path
+    support = {support_name(name) for name in products}
+    roots = {"payload": Path(filesystem_path(source)), "edge_extension": Path(filesystem_path(extension)),
+             "docs": Path(filesystem_path(docs))}
     for prefix, root in roots.items():
         if not root.is_dir():
             continue
         for path in sorted(root.rglob("*")):
             relative = path.relative_to(root).as_posix()
             if prefix == "payload" and not (relative in products or relative == "runtime-components.json"
-                    or relative.split("/")[0] in {"web-models", "sentra-electron", "runtime", "prerequisites"}):
+                    or relative.split("/")[0] in {"web-models", "sentra-electron", "sentra-mobile", "sentra-terminal", "runtime", "prerequisites"} | support):
                 continue
             if path.is_symlink():
                 raise ValueError("Setup payload must not contain symbolic links")

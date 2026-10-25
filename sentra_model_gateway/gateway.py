@@ -488,6 +488,12 @@ class LauncherSupervisor:
 
     def _environment(self) -> dict[str, str]:
         environment = os.environ.copy()
+        # This subprocess is a Web-model adapter, never the user's native Codex.
+        # Upstream setup/doctor/subagent commands may write Codex configuration;
+        # every such write must stay inside this installation's private home.
+        state_root = Path(self.config.state_root or ProductPaths.default().state_dir).expanduser().resolve()
+        environment["CODEX_HOME"] = str(state_root / "web-models" / "codex-home")
+        environment["SENTRA_NATIVE_CODEX_HOME"] = str(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve())
         environment["SENTRA_TURN_AUTHORITY_URL"] = f"http://{self.config.host}:{self.authority_port}"
         environment["SENTRA_WEB_GATEWAY_URL"] = f"http://{self.config.host}:{self.authority_port}/v1"
         environment["SENTRA_CONNECTOR_NAME"] = self.config.connector_name.strip()
@@ -636,7 +642,7 @@ class LauncherSupervisor:
         }
 
     def runtime_control(self, action: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        if action not in {"drain", "resume", "interrupt-turn", "verify-connector"}:
+        if action not in {"drain", "resume", "interrupt-turn", "verify-connector", "setup", "configure-web"}:
             raise ValueError("invalid upstream runtime control action")
         descriptor = json.loads(self._browser_descriptor_path().read_text(encoding="utf-8"))
         if descriptor.get("version") != 3 or descriptor.get("kind") != "codex-web-gpt-launcher":
@@ -657,7 +663,8 @@ class LauncherSupervisor:
             raise ValueError("launcher browser control token is invalid")
         body = {"action": action, **(payload or {})}
         encoded = json.dumps(body, separators=(",", ":")).encode("utf-8")
-        connection = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=8)
+        connection = http.client.HTTPConnection(parsed.hostname, parsed.port,
+            timeout=180 if action == "configure-web" else 35 if action == "setup" else 8)
         try:
             connection.request(
                 "POST",
@@ -681,7 +688,7 @@ class LauncherSupervisor:
             connection.close()
 
     def route(self, action: str = "status") -> dict:
-        if action not in {"status", "sentra", "disconnect", "doctor"}:
+        if action not in {"status", "sentra", "disconnect", "doctor", "recover-native"}:
             raise ValueError("invalid Codex route action")
         checkout = self.config.checkout.resolve()
         packaged = self._packaged_launcher_path()
@@ -712,7 +719,7 @@ class LauncherSupervisor:
             route["points_to_sentra"] = route.get("routeUrl") == self._environment()["SENTRA_WEB_GATEWAY_URL"]
         return route
 
-    def start(self, *, hidden: bool = False) -> dict:
+    def start(self, *, hidden: bool = False, browser_host_only: bool = False) -> dict:
         with self.lock:
             checkout = self.config.checkout.resolve()
             packaged = self._packaged_launcher_path()
@@ -724,6 +731,9 @@ class LauncherSupervisor:
                     f"stale Web Models launcher is still running (pid={current.get('stale_pid')}); "
                     "stop the old launcher before starting the rebuilt payload"
                 )
+            # Undo only a journal-proven legacy SENTRA global route, preserving
+            # unrelated provider settings and refusing conflicting user edits.
+            self.route("recover-native")
             if current["running"]:
                 if not hidden and packaged.is_file():
                     subprocess.Popen([str(packaged)],
@@ -732,6 +742,8 @@ class LauncherSupervisor:
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 return current
             environment = self._environment()
+            if browser_host_only:
+                environment["SENTRA_BROWSER_HOST_ONLY"] = "1"
             if packaged.is_file():
                 self.process = subprocess.Popen(
                     [str(packaged), *(["--hidden"] if hidden else [])], cwd=str(packaged.parent), env=environment,
@@ -1291,12 +1303,12 @@ class GatewayServer(ThreadingHTTPServer):
 
         try:
             route = self.launcher.route("status")
-            route_ok = bool(route.get("installed") and route.get("active") and route.get("points_to_sentra"))
+            route_ok = bool(route.get("scope") == "sentra-web-only" and route.get("gatewayHealthy"))
             add(
                 "codex-route",
                 "ok" if route_ok else "warning",
-                "Codex model route points to the SENTRA Gateway" if route_ok
-                else "Codex model route is not connected to the SENTRA Gateway",
+                "SENTRA Web adapter is isolated; native providers keep their own routes" if route_ok
+                else "SENTRA Web adapter isolation or gateway health could not be verified",
             )
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as exc:
             add("codex-route", "error", "Codex model route could not be verified", str(exc))
@@ -2092,6 +2104,10 @@ class GatewayHandler(BaseHTTPRequestHandler):
         canonical_web_model = bool(web_route and web_route[2])
         legacy_web_model = bool(web_route and not web_route[2])
         managed_web_model = canonical_web_model or legacy_web_model
+        if isinstance(model, str) and model and not managed_web_model:
+            self._json(400, {"error": {"type": "native_provider_route_required",
+                                      "message": "Use the provider directly for native models; this endpoint serves Web models only"}})
+            return
         bare_web_prefixes = {prefix for pair in WEB_MODEL_PREFIXES for prefix in pair}
         if (not isinstance(model, str) or not model
                 or (model.startswith("sentra/") and not canonical_web_model)

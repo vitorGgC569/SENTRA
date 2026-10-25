@@ -115,8 +115,15 @@ def broker_command(arguments):
     return [sys.executable,"-m","sentra_canvas",*arguments]
 
 
-def connect_or_start(root, state_dir=None, *, port=0, timeout=15):
-    """Reuse the authenticated owner or start exactly one hidden local owner."""
+def connect_or_start(root, state_dir=None, *, port=0, timeout=120):
+    """Reuse one owner, allowing frozen cold starts to extract on clean Windows.
+
+    Lock contention and process readiness have separate budgets. The launch lock
+    stays held until this child publishes or is reaped, so another launch cannot
+    create a duplicate while the first one is still extracting its payload.
+    """
+    if not isinstance(timeout, (int, float)) or not 0 < timeout <= 600:
+        raise ValueError("invalid Canvas startup timeout")
     root = Path(root).resolve()
     state = Path(state_dir).resolve() if state_dir is not None else root / ".sentra" / "canvas"
     state.mkdir(parents=True, exist_ok=True)
@@ -143,7 +150,8 @@ def connect_or_start(root, state_dir=None, *, port=0, timeout=15):
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 close_fds=True,
             )
-            while time.monotonic() < deadline:
+            startup_deadline = time.monotonic() + timeout
+            while time.monotonic() < startup_deadline:
                 endpoint = read_endpoint(state)
                 if endpoint:
                     return endpoint
@@ -156,7 +164,7 @@ def connect_or_start(root, state_dir=None, *, port=0, timeout=15):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2)
-            raise RuntimeError("Canvas broker did not become ready")
+            raise RuntimeError("Canvas broker startup timed out; retry or repair the installation")
         finally:
             lock.close()
     raise RuntimeError("Canvas broker startup is already in progress")

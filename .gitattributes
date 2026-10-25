@@ -9,7 +9,11 @@
 *.yml text eol=lf
 *.yaml text eol=lf
 *.ps1 text eol=lf
+*.iss text eol=lf
 *.patch text eol=lf
+# Empty unified-diff context lines contain a significant space. The materialized
+# Web source is separately checked by git diff --check before packaging.
+/integrations/codex_chatgpt_web/sentra-upstream.patch whitespace=-blank-at-eol
 *.toml text eol=lf
 *.ini text eol=lf
 *.bat text eol=crlf

@@ -192,7 +192,7 @@
     "src/vendor/coucou/views/dom.ts": "6d6cd546a47d63ff5ad3d458aaccb954cbb8e94b81e02d6fd6b809e3c8a69ce3",
     "src/vendor/coucou/views/icons.ts": "fbbbca49e1d8d4639a869f2cecd8d9f6dd5d3abe21de7ab5b30d8437eaecad3e",
     "src/vendor/coucou/views/ticker.ts": "e9d6d1909cd220cab4691ff3f3c0ab9eeb971b93916cb6cc802dd94d068bb969",
-    "src/web-models-account.js": "25d6ff94265de862f90e44acdfb7c75eeaaf105dd928a27942dfdfdcd2c69080",
+    "src/web-models-account.js": "1a0a72705bc7e92734181b02412d988207d006df3bcbcae7b8d8153cab5493bc",
     "src/workspace/BrowserDesignCanvas.jsx": "862b48ccbad9bbfbed09028a65d46ba8b346f377ee8b21c2bdf22a161bf07b6a",
     "src/workspace/BrowserPane.jsx": "4651ac13d3a1e76eee0b3740909c89135dfbdd33b17434e26d9d2b5e70fce2bb",
     "src/workspace/ConversationResource.jsx": "5831cd91aa0033d950d58cf90925030404bc6931e17267e68ce097561910440e",

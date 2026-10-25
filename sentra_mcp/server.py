@@ -325,7 +325,10 @@ class SentraMCPServer:
 
     def _register_tools(self) -> None:
         @self.mcp.tool()
-        def sentra_health() -> ResponseEnvelope:
+        def sentra_health(setup_challenge: str = "") -> ResponseEnvelope:
+            """Read SENTRA health; optionally confirm the current Setup connection challenge."""
+            if setup_challenge:
+                self.connector_proof.observe_setup_probe(setup_challenge)
             self.audit.emit("tool.sentra_health", "ok", {"transport": self.config.transport})
             return ResponseEnvelope.success({
                 "status": "ok",

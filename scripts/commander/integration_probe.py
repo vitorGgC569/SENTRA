@@ -103,7 +103,8 @@ def probe(install_dir: Path) -> dict[str, Any]:
         )},
         "codex": {
             "ready": bool(codex["ready"]), "installed": bool(codex["installed"]),
-            "model_route_to_sentra": bool(_codex_route_points_to_sentra()),
+            "model_route_to_sentra": False,
+            "legacy_native_route_needs_recovery": bool(_codex_route_points_to_sentra()),
             "detail": (
                 "Codex CLI available; confirm Web Models account and gateway separately"
                 if codex["ready"] else "Codex CLI missing or not responding"

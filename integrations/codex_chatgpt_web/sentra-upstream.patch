@@ -1,585 +1,3 @@
-diff --git a/launcher/electron/browser-host.cjs b/launcher/electron/browser-host.cjs
---- a/launcher/electron/browser-host.cjs
-+++ b/launcher/electron/browser-host.cjs
-@@ -1,7 +1,8 @@
- const fs = require("node:fs");
- const path = require("node:path");
- const { createHash, randomBytes } = require("node:crypto");
--const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
-+const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell, safeStorage } = require("electron");
-+const { SavedConversations } = require("./saved-conversations.cjs");
- const { writePrivateFileAtomic } = require("./atomic-file.cjs");
- const {
-   runBrowserHelperOperation,
-@@ -301,6 +302,367 @@
-   });
- }
- 
-+// This collector reads only UI identity primitives. No session endpoints, storage or credentials.
-+function collectSentraUiIdentity() {
-+  if (location.origin !== "https://chatgpt.com") return { reason: "wrong_origin" };
-+  const identity = globalThis.__SENTRA_WEB_DOCUMENT__;
-+  if (!identity) return { reason: "document_unowned" };
-+  const accounts = new Set(), users = new Set(), models = new Set(), efforts = new Set();
-+  let catalogComplete = false;
-+  const primitiveId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
-+  const own = (object, key) => {
-+    if (!object || typeof object !== "object") return undefined;
-+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
-+    return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
-+  };
-+  // Restrict traversal to the committed account-menu ancestry. Never walk session objects.
-+  for (const element of document.querySelectorAll('[data-testid="accounts-profile-button"], [data-testid="profile-button"]')) {
-+    for (const key of Object.keys(element).filter(key => key.startsWith("__reactFiber$"))) {
-+      let fiber = element[key], root = fiber;
-+      let depth = 0;
-+      while (root?.return && depth++ < 80) root = root.return;
-+      if (root?.tag !== 3 || root.stateNode?.current !== root) continue;
-+      let reachedRoot = false;
-+      const candidateAccounts = new Set(), candidateUsers = new Set();
-+      for (depth = 0; fiber && depth++ < 80; fiber = fiber.return) {
-+        const props = own(fiber, "memoizedProps");
-+        const accountId = own(own(props, "account"), "id");
-+        const userId = own(own(props, "user"), "id");
-+        // Only committed UI option primitives: no session endpoint/cookies/storage.
-+        const modelOptions = own(props, "availableModels");
-+        const effortOptions = own(props, "reasoningEfforts");
-+        if (Array.isArray(modelOptions) && modelOptions.length > 0 && modelOptions.length <= 64) {
-+          for (const option of modelOptions) {
-+            const value = typeof option === "string" ? option : own(option, "slug");
-+            if (typeof value === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(value)) models.add(value);
-+          }
-+          catalogComplete = models.size === modelOptions.length;
-+        }
-+        if (Array.isArray(effortOptions) && effortOptions.length <= 64) {
-+          for (const value of effortOptions) if (typeof value === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(value)) efforts.add(value);
-+        }
-+        if (own(props, "automaticMode") === true) models.add("automatic");
-+        if (primitiveId(accountId)) candidateAccounts.add(accountId);
-+        if (primitiveId(userId)) candidateUsers.add(userId);
-+        if (fiber === root) { reachedRoot = true; break; }
-+      }
-+      if (reachedRoot) {
-+        for (const value of candidateAccounts) accounts.add(value);
-+        for (const value of candidateUsers) users.add(value);
-+      }
-+    }
-+  }
-+  const selectionText = selector => {
-+    const values = [...document.querySelectorAll(selector)].map(element => element.textContent?.trim()).filter(Boolean);
-+    return values.length === 1 && values[0].length <= 160 ? values[0] : null;
-+  };
-+  const visible = element => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
-+  const picked = [...document.querySelectorAll('[role="menuitemradio"][aria-checked="true"]')].filter(visible);
-+  const sliders = [...document.querySelectorAll('[data-model-reasoning-effort-slider], [data-model-picker-power-slider]')].filter(visible);
-+  const providerSelection = { model: null, effort: null, selection_verified: false,
-+    selected_radio_text: picked.length === 1 ? picked[0].textContent?.trim().slice(0, 160) : null,
-+    slider_min: null, slider_max: null, slider_value: null, slider_description: null };
-+  if (picked.length === 1 && sliders.length === 1) {
-+    const slider = sliders[0], item = slider.closest('[role="menuitem"]');
-+    const attributes = ["aria-valuemin", "aria-valuemax", "aria-valuenow"].map(key => slider.getAttribute(key));
-+    const [min, max, value] = attributes.map(Number);
-+    const described = (item?.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean)
-+      .map(id => document.getElementById(id)?.textContent || "").filter(Boolean);
-+    const description = (described.length === 1 ? described[0] : item?.textContent || "").trim();
-+    providerSelection.slider_description = description.slice(0, 160);
-+    if (attributes.every(attribute => attribute !== null && /^\d+$/.test(attribute))
-+      && min <= value && value <= max && max - min <= 4) {
-+      Object.assign(providerSelection, { slider_min: min, slider_max: max, slider_value: value });
-+      const radioFamily = /^(?:GPT[-\s]?)?(5\.6|6)(?:\s+(?:Sol|Astra))?(?:\s+Pro)?$/i.exec(providerSelection.selected_radio_text || "");
-+      const detail = /^(?:GPT[-\s]?)?(5\.6|6)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i.exec(description);
-+      const effort = ["low", "medium", "high", "xhigh", "max"][value - min];
-+      if (radioFamily && detail && radioFamily[1] === detail[1] && effort
-+        && (!detail[2] || detail[2].toLowerCase() === (detail[1] === "6" ? "astra" : "sol"))
-+        && (effort === "max" ? /^Pro$/i.test(detail[3].trim()) : !/^Pro$/i.test(detail[3].trim()))) {
-+        Object.assign(providerSelection, { model: "gpt-" + detail[1], effort, selection_verified: true });
-+      }
-+    }
-+  }
-+  const approval = document.querySelector('[data-testid="connector-approval"], [data-testid="tool-approval"], [data-testid="approval-card"]');
-+  return { document_id: identity.document_id, identity_epoch: identity.identity_epoch,
-+    surface_id: identity.surface_id, account_id: accounts.size === 1 ? [...accounts][0] : null,
-+    user_id: users.size === 1 ? [...users][0] : null,
-+    model_selection_text: selectionText('[data-testid="model-switcher-dropdown-button"]'),
-+    effort_selection_text: selectionText('[data-testid="thinking-effort-dropdown-button"]'),
-+    observed_models: [...models], observed_efforts: [...efforts], catalog_complete: catalogComplete,
-+    provider_selection: providerSelection, approval_state: approval ? "pending" : null,
-+    reason: accounts.size > 1 || users.size > 1 ? "identity_conflict"
-+      : accounts.size === 0 ? "account_ui_identity_unavailable" : "collector_schema_unverified" };
-+}
-+
-+async function sentraObservedSnapshot(binding, kind) {
-+  const provider = binding?.provider;
-+  if (kind === "catalog" && provider !== "chatgpt") throw new Error("SENTRA catalog provider unowned");
-+  const allowed = new Set(["traceId", "surface_id", "document_id", "identity_epoch", ...(kind === "catalog" ? ["provider"] : [])]);
-+  if (!binding || Object.keys(binding).some(key => !allowed.has(key))) throw new Error("SENTRA snapshot selectors invalid");
-+  const identity = await sentraIdentitySnapshot.call(this, binding);
-+  const tab = [...this.turnTabs.values()].find(item => item.traceId === binding.traceId && item.surfaceId === binding.surface_id);
-+  const contents = tab?.view?.webContents, documentIdentity = tab?.sentraDocument;
-+  if (!contents || contents.isDestroyed()) throw new Error("SENTRA snapshot tab unavailable");
-+  const observation = await contents.executeJavaScript(`(${collectSentraCommittedMessages.toString()})()`, false);
-+  if (this.turnTabs.get(tab.id) !== tab || tab.status !== "running" || tab.interactionMode !== "automatic"
-+    || tab.sentraDocument !== documentIdentity || this.authenticationRevision !== identity.authentication_revision
-+    || new URL(contents.getURL()).origin !== CHATGPT_ORIGIN || observation?.document_id !== binding.document_id
-+    || observation?.identity_epoch !== binding.identity_epoch) throw new Error("SENTRA snapshot changed during collection");
-+  const approval = ["idle", "pending"].includes(observation.approval_state) ? observation.approval_state : "unknown";
-+  if (kind === "approval") return { ...identity, approval_state: approval, approval_source: observation.approval_source,
-+    conversation_id: observation.conversation_id, tool_name: null, effect_performed: false };
-+  return { ...identity, provider, models: identity.observed_models || [], efforts: identity.observed_efforts || [],
-+    approval_state: approval, catalog_complete: identity.catalog_complete === true,
-+    selection_verified: identity.provider_selection?.selection_verified === true,
-+    model: identity.provider_selection?.model || null, effort: identity.provider_selection?.effort || null };
-+}
-+
-+async function sentraIdentitySnapshot(binding) {
-+  requireAutomaticBrowserInspection(this, "SENTRA UI identity observation");
-+  if (!binding || typeof binding.traceId !== "string" || typeof binding.surface_id !== "string"
-+    || typeof binding.document_id !== "string" || typeof binding.identity_epoch !== "string") {
-+    throw new Error("SENTRA identity binding is invalid");
-+  }
-+  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === binding.traceId
-+    && tab.surfaceId === binding.surface_id && tab.status === "running" && tab.interactionMode === "automatic");
-+  if (matches.length !== 1) throw new Error("SENTRA identity requires one owned active turn");
-+  const tab = matches[0], contents = tab.view.webContents, documentIdentity = tab.sentraDocument;
-+  const revision = this.authenticationRevision;
-+  const validate = () => {
-+    if (contents.isDestroyed() || this.turnTabs.get(tab.id) !== tab || tab.status !== "running"
-+      || tab.sentraDocument !== documentIdentity || this.authenticationRevision !== revision
-+      || documentIdentity?.document_id !== binding.document_id
-+      || documentIdentity?.identity_epoch !== binding.identity_epoch
-+      || documentIdentity?.surface_id !== binding.surface_id
-+      || new URL(contents.getURL()).origin !== CHATGPT_ORIGIN) throw new Error("SENTRA identity changed");
-+  };
-+  validate();
-+  const observation = await contents.executeJavaScript(`(${collectSentraUiIdentity.toString()})()`, false);
-+  validate();
-+  for (const field of ["document_id", "identity_epoch", "surface_id"]) {
-+    if (observation?.[field] !== binding[field]) throw new Error("SENTRA identity document mismatch");
-+  }
-+  return { ...observation, ok: true, account_verified: false, profile: this.profile, partition: this.partition, observed_at: new Date().toISOString(), authentication_revision: revision,
-+    collector_id: "sentra-committed-account-menu-v1",
-+    collector_sha256: createHash("sha256").update(collectSentraUiIdentity.toString()).digest("hex"),
-+    host_source_sha256: createHash("sha256").update(fs.readFileSync(__filename)).digest("hex") };
-+}
-+
-+// Independent Host collector. The challenge never enters the renderer reader.
-+function collectSentraCommittedMessages() {
-+  const unknown = reason => ({ state: "UNKNOWN", reason, messages: [], approval_state: "UNKNOWN", approval_source: null });
-+  const own = (object, key) => {
-+    if (!object || typeof object !== "object") return undefined;
-+    const descriptor = Object.getOwnPropertyDescriptor(object, key);
-+    return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
-+  };
-+  const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(value);
-+  const identity = own(globalThis, "__SENTRA_WEB_DOCUMENT__");
-+  if (location.origin !== "https://chatgpt.com" || !identity
-+    || !/^[a-f0-9]{32}$/.test(own(identity, "document_id"))
-+    || !/^[a-f0-9]{32}$/.test(own(identity, "identity_epoch"))) return unknown("document_unowned");
-+  const route = /^\/c\/([A-Za-z0-9_-]{8,160})(?:\/|$)/.exec(location.pathname)?.[1] || null;
-+  const messages = new Map(), approvalStates = new Set();
-+  let conversation = null, budget = 20000;
-+  const elements = [...document.querySelectorAll('[data-message-id],[data-turn-key],[data-turn-id-container]')];
-+  if (elements.length > 200) return unknown("collector_budget");
-+  for (const element of elements) {
-+    const keys = Object.keys(element).filter(key => key.startsWith("__reactFiber$"));
-+    if (keys.length > 1) return unknown("fiber_ambiguous");
-+    if (!keys.length) continue;
-+    let node = own(element, keys[0]);
-+    const path = [], visited = new Set();
-+    while (node && own(node, "tag") !== 3 && path.length < 2048 && !visited.has(node)) {
-+      visited.add(node); path.push(node); node = own(node, "return");
-+    }
-+    const root = own(node, "stateNode"), current = own(root, "current");
-+    if (!current || (current !== node && current !== own(node, "alternate"))) continue;
-+    node = current;
-+    const props = [own(node, "memoizedProps") || {}];
-+    let valid = true;
-+    for (const expected of path.reverse()) {
-+      let selected;
-+      const siblings = new Set();
-+      for (let child = own(node, "child"); child; child = own(child, "sibling")) {
-+        if (--budget < 0 || siblings.has(child)) return unknown("collector_budget");
-+        siblings.add(child);
-+        if (child !== expected && child !== own(expected, "alternate")) continue;
-+        if (selected) { valid = false; break; }
-+        selected = child;
-+      }
-+      if (!valid || !selected || own(root, "current") !== current) { valid = false; break; }
-+      node = selected; props.push(own(node, "memoizedProps") || {});
-+    }
-+    if (!valid) continue;
-+    let branch = null;
-+    const values = [];
-+    for (const p of props.slice(-80)) {
-+      for (const value of [own(p, "conversationId"), own(p, "clientThreadId"),
-+        own(own(p, "conversation"), "id"), own(own(p, "turn"), "conversationId")]) {
-+        if (!id(value)) continue;
-+        if (branch && value !== branch) return unknown("conversation_conflict");
-+        branch = value;
-+      }
-+      const approval = own(p, "approvalState");
-+      if (["idle", "pending", "awaiting_approval"].includes(approval)) approvalStates.add(approval === "awaiting_approval" ? "pending" : approval);
-+      for (const list of [own(p, "messages"), own(p, "allMessages"), own(own(p, "turn"), "messages")]) {
-+        if (!Array.isArray(list)) continue;
-+        if (list.length > 600) return unknown("collector_budget");
-+        values.push(...list);
-+      }
-+      if (own(p, "message")) values.push(own(p, "message"));
-+    }
-+    if (!branch) continue;
-+    if ((route && branch !== route) || (conversation && branch !== conversation)) return unknown("conversation_conflict");
-+    conversation = branch;
-+    for (const message of values) {
-+      if (--budget < 0) return unknown("collector_budget");
-+      const messageId = own(message, "id"), role = own(own(message, "author"), "role");
-+      if (!id(messageId)) continue;
-+      // Never derive role from the challenge, a selector, text or a parent ID.
-+      if (!["user", "assistant"].includes(role)) {
-+        const old = messages.get(messageId);
-+        if (old) return unknown("message_conflict");
-+        messages.set(messageId, { message_id: messageId, role: "UNKNOWN" });
-+        continue;
-+      }
-+      const parts = own(own(message, "content"), "parts");
-+      if (!Array.isArray(parts) || parts.some(part => typeof part !== "string")) {
-+        return unknown("message_content_unsupported");
-+      }
-+      const body = parts.join("\n");
-+      if (body.length > 2000000) return unknown("message_too_large");
-+      const metadata = own(message, "metadata"), request = own(metadata, "request_id"), parent = own(message, "parent_id");
-+      const providerRevision = own(metadata, "revision"), status = own(message, "status");
-+      const observed = { message_id: messageId, role, body,
-+        metadata_request_id: id(request) ? request : null, parent_id: id(parent) ? parent : null,
-+        provider_revision: Number.isSafeInteger(providerRevision) && providerRevision >= 0 ? providerRevision : null,
-+        complete: status === "finished_successfully" ? true : status === "in_progress" ? false : null };
-+      const old = messages.get(messageId);
-+      if (old && JSON.stringify(old) !== JSON.stringify(observed)) return unknown("message_conflict");
-+      messages.set(messageId, observed);
-+    }
-+  }
-+  const visible = element => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
-+  const pending = [...document.querySelectorAll('[data-testid="connector-approval"],[data-testid="tool-approval"],[data-testid="approval-card"]')].some(visible);
-+  let approval = "UNKNOWN", approvalSource = null;
-+  if (pending) { approval = "pending"; approvalSource = "visible-approval-card"; }
-+  else if (approvalStates.size === 1) { approval = [...approvalStates][0]; approvalSource = "committed-react:approvalState"; }
-+  return { state: conversation ? "OBSERVED" : "UNKNOWN", reason: conversation ? null : "conversation_unobserved",
-+    document_id: own(identity, "document_id"), identity_epoch: own(identity, "identity_epoch"), surface_id: own(identity, "surface_id"),
-+    conversation_id: conversation, messages: [...messages.values()], approval_state: approval, approval_source: approvalSource };
-+}
-+
-+async function sentraMessageChallenge(payload) {
-+  requireAutomaticBrowserInspection(this, "SENTRA committed message challenge");
-+  const allowed = new Set(["traceId", "surface_id", "document_id", "identity_epoch",
-+    "conversation_id", "message_id", "expected_role", "observed_request_id", "parent_user_message_id", "body_sha256", "complete"]);
-+  const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(value);
-+  if (!payload || typeof payload !== "object" || Array.isArray(payload) || Object.keys(payload).some(key => !allowed.has(key))
-+    || !id(payload.traceId) || !id(payload.surface_id) || !id(payload.conversation_id) || !id(payload.message_id)
-+    || !id(payload.observed_request_id) || !["user", "assistant"].includes(payload.expected_role)
-+    || !/^[a-f0-9]{32}$/.test(payload.document_id || "") || !/^[a-f0-9]{32}$/.test(payload.identity_epoch || "")
-+    || !/^[a-f0-9]{64}$/.test(payload.body_sha256 || "")
-+    || (payload.expected_role === "assistant" && !id(payload.parent_user_message_id))
-+    || (payload.expected_role === "user" && payload.parent_user_message_id !== undefined)
-+    || (payload.complete !== undefined && typeof payload.complete !== "boolean")) throw new Error("SENTRA message challenge is invalid");
-+  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === payload.traceId && tab.surfaceId === payload.surface_id
-+    && tab.status === "running" && tab.interactionMode === "automatic");
-+  if (matches.length !== 1) throw new Error("SENTRA message challenge surface is unowned");
-+  const tab = matches[0], doc = tab.sentraDocument, contents = tab.view.webContents;
-+  if (contents.isDestroyed() || doc?.document_id !== payload.document_id || doc?.identity_epoch !== payload.identity_epoch
-+    || doc?.surface_id !== payload.surface_id || new URL(contents.getURL()).origin !== CHATGPT_ORIGIN) throw new Error("SENTRA message challenge document changed");
-+  const started = Date.now();
-+  this.sentraMessageChallenges ||= new Map();
-+  for (const [nonce, record] of this.sentraMessageChallenges) if (record.expiry <= started) this.sentraMessageChallenges.delete(nonce);
-+  if (this.sentraMessageChallenges.size >= 256) throw new Error("SENTRA message challenge capacity reached");
-+  const challengeId = randomBytes(16).toString("hex");
-+  const challenge = Object.freeze(Object.fromEntries([...allowed].filter(key => Object.hasOwn(payload, key)).map(key => [key, payload[key]])));
-+  const digest = createHash("sha256").update(JSON.stringify(challenge)).digest("hex");
-+  this.sentraMessageChallenges.set(challengeId, { challenge, digest, expiry: started + 10000,
-+    tab, doc, authenticationRevision: this.authenticationRevision, profile: this.profile, partition: this.partition });
-+  return { ok: true, state: "CHALLENGED", role: "UNKNOWN", challenge_id: challengeId,
-+    challenge_sha256: digest, expires_at: new Date(started + 10000).toISOString(), account_verified: false };
-+}
-+
-+async function sentraMessageSnapshot(payload) {
-+  requireAutomaticBrowserInspection(this, "SENTRA committed message observation");
-+  if (!payload || Object.keys(payload).length !== 1 || !/^[a-f0-9]{32}$/.test(payload.challenge_id || "")) throw new Error("SENTRA message snapshot challenge is invalid");
-+  const record = this.sentraMessageChallenges?.get(payload.challenge_id);
-+  // One-use, Host-issued challenge. Caller cannot replace expectations at snapshot time.
-+  this.sentraMessageChallenges?.delete(payload.challenge_id);
-+  const started = Date.now();
-+  const base = { ok: true, matched: false, state: "UNKNOWN", role: "UNKNOWN", challenge_id: payload.challenge_id,
-+    challenge_sha256: record?.digest || null, account_verified: false, collector_id: "sentra-committed-message-v1",
-+    collector_sha256: createHash("sha256").update(collectSentraCommittedMessages.toString()).digest("hex"),
-+    host_source_sha256: createHash("sha256").update(fs.readFileSync(__filename)).digest("hex") };
-+  const unknown = reason => ({ ...base, reason, approval_state: "UNKNOWN", observed_at: new Date().toISOString() });
-+  if (!record) return unknown("challenge_unknown_or_consumed");
-+  if (record.expiry <= started) return unknown("challenge_expired");
-+  const challenge = record.challenge;
-+  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === challenge.traceId && tab.surfaceId === challenge.surface_id
-+    && tab.status === "running" && tab.interactionMode === "automatic");
-+  if (matches.length !== 1) return unknown("surface_unowned");
-+  const tab = matches[0], contents = tab.view.webContents, doc = tab.sentraDocument, authRevision = record.authenticationRevision;
-+  const valid = () => tab === record.tab && doc === record.doc && this.profile === record.profile && this.partition === record.partition
-+    && !contents.isDestroyed() && this.turnTabs.get(tab.id) === tab && tab.status === "running"
-+    && tab.sentraDocument === doc && this.authenticationRevision === authRevision
-+    && doc?.document_id === challenge.document_id && doc?.identity_epoch === challenge.identity_epoch
-+    && doc?.surface_id === challenge.surface_id && new URL(contents.getURL()).origin === CHATGPT_ORIGIN;
-+  if (!valid()) return unknown("document_changed");
-+  if (tab.sentraMessageObservationBusy) return unknown("observation_busy");
-+  tab.sentraMessageObservationBusy = true;
-+  let timeout;
-+  try {
-+    const read = () => contents.executeJavaScript(`(${collectSentraCommittedMessages.toString()})()`, false);
-+    const observations = await Promise.race([
-+      (async () => [await read(), await read()])(),
-+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("snapshot_timeout")), 5000); }),
-+    ]);
-+    if (!valid() || Date.now() - started > 5000) return unknown("document_changed");
-+    if (JSON.stringify(observations[0]) !== JSON.stringify(observations[1])) return unknown("observation_changed");
-+    const observed = observations[1];
-+    if (observed?.state !== "OBSERVED") return unknown(observed?.reason || "snapshot_unavailable");
-+    for (const field of ["document_id", "identity_epoch", "surface_id", "conversation_id"]) {
-+      if (observed[field] !== challenge[field]) return unknown("document_or_conversation_changed");
-+    }
-+    const exact = observed.messages.filter(message => message.message_id === challenge.message_id);
-+    if (exact.length !== 1 || exact[0].role !== challenge.expected_role) return unknown("message_role_unverified");
-+    const message = exact[0];
-+    if (message.role === "user" && message.metadata_request_id !== challenge.observed_request_id) return unknown("request_mismatch");
-+    if (message.role === "assistant") {
-+      if (message.parent_id !== challenge.parent_user_message_id) return unknown("parent_mismatch");
-+      const parents = observed.messages.filter(parent => parent.message_id === message.parent_id && parent.role === "user");
-+      if (parents.length !== 1 || parents[0].metadata_request_id !== challenge.observed_request_id) return unknown("parent_request_unverified");
-+    }
-+    const bodySha = createHash("sha256").update(message.body, "utf8").digest("hex");
-+    if (bodySha !== challenge.body_sha256) return unknown("body_changed");
-+    if (challenge.complete !== undefined && message.complete !== challenge.complete) return unknown("completion_unverified");
-+    tab.sentraMessageObservations ||= new Map();
-+    const observationKey = JSON.stringify([observed.document_id, observed.identity_epoch, observed.conversation_id, message.message_id]);
-+    if (!tab.sentraMessageObservations.has(observationKey) && tab.sentraMessageObservations.size >= 2048) return unknown("revision_capacity");
-+    const signature = JSON.stringify([message.role, message.metadata_request_id, message.parent_id, bodySha, message.complete, message.provider_revision]);
-+    const prior = tab.sentraMessageObservations.get(observationKey);
-+    if (prior && (prior.role !== message.role || prior.parent !== message.parent_id || prior.request !== message.metadata_request_id)) return unknown("message_binding_changed");
-+    if (prior && prior.provider_revision !== null && (message.provider_revision === null || message.provider_revision < prior.provider_revision)) return unknown("provider_revision_regressed");
-+    const hostRevision = prior ? prior.revision + (prior.signature !== signature ? 1 : 0) : 1;
-+    tab.sentraMessageObservations.set(observationKey, { signature, revision: hostRevision, role: message.role,
-+      parent: message.parent_id, request: message.metadata_request_id, provider_revision: message.provider_revision });
-+    return { ...base, matched: true, state: "OBSERVED", role: message.role, reason: null,
-+      document_id: observed.document_id, identity_epoch: observed.identity_epoch, surface_id: observed.surface_id,
-+      conversation_id: observed.conversation_id, message_id: message.message_id, metadata_request_id: message.metadata_request_id,
-+      observed_request_id: message.role === "user" ? message.metadata_request_id
-+        : observed.messages.find(parent => parent.message_id === message.parent_id && parent.role === "user").metadata_request_id,
-+      parent_user_message_id: message.role === "assistant" ? message.parent_id : null, body_sha256: bodySha,
-+      body_length: message.body.length, host_revision: hostRevision, revision_source: "host-observation",
-+      provider_revision: message.provider_revision, complete: message.complete,
-+      approval_state: observed.approval_state, approval_source: observed.approval_source,
-+      authentication_revision: authRevision, observed_at: new Date().toISOString() };
-+  } catch { return unknown("snapshot_unavailable"); }
-+  finally { clearTimeout(timeout); tab.sentraMessageObservationBusy = false; }
-+}
-+
- class BrowserHost {
-   constructor({
-     window,
-@@ -349,6 +711,10 @@
-     this.clipboard = clipboardApi;
-     this.getBrowserInteractionMode = getBrowserInteractionMode;
-     this.getUseSavedChats = getUseSavedChats;
-+    this.savedConversations = new SavedConversations(
-+      path.join(path.dirname(descriptorPath), "saved-conversations.bin"),
-+      profile, partition, safeStorage,
-+    );
-     this.runBrowserHelperOperation = runBrowserHelperOperation;
-     this.verifyConnectorWithBrowserHelper = verifyConnectorWithBrowserHelper;
-     this.surfaceId = randomBytes(24).toString("base64url");
-@@ -816,6 +1182,9 @@
-       tab.url = url;
-       tab.loading = true;
-       if (!inPlace) {
-+        tab.sentraDocument = null;
-+        tab.sentraMessageObservations = new Map();
-+        this.writeDescriptor();
-         tab.rendererReady = false;
-         tab.deviceEmulationDirty = true;
-       }
-@@ -894,6 +1263,26 @@
-     });
-   }
- 
-+  async sentraMessageChallenge(expected) {
-+    return sentraMessageChallenge.call(this, expected);
-+  }
-+
-+  async sentraMessageSnapshot(challenge) {
-+    return sentraMessageSnapshot.call(this, challenge);
-+  }
-+
-+  async sentraApprovalSnapshot(binding) {
-+    return sentraObservedSnapshot.call(this, binding, "approval");
-+  }
-+
-+  async sentraAccountCatalog(binding) {
-+    return sentraObservedSnapshot.call(this, binding, "catalog");
-+  }
-+
-+  async sentraIdentitySnapshot(binding) {
-+    return sentraIdentitySnapshot.call(this, binding);
-+  }
-+
-   async markTurnTabSurface(tab) {
-     requireAutomaticBrowserInspection(this, "ChatGPT turn surface ownership marking");
-     const contents = tab?.view?.webContents;
-@@ -902,13 +1291,24 @@
-     }
-     void contents.insertCSS(CHATGPT_VIEWPORT_CSS).catch(() => {});
-     const encoded = JSON.stringify(tab.surfaceId);
-+    if (process.env.SENTRA_TURN_AUTHORITY_TOKEN && !tab.sentraDocument) {
-+      tab.sentraDocument = { document_id: randomBytes(16).toString("hex"),
-+        identity_epoch: randomBytes(16).toString("hex"), surface_id: tab.surfaceId };
-+    }
-+    const documentIdentity = JSON.stringify(tab.sentraDocument || null);
-     await contents.executeJavaScript(`(() => {
-       Object.defineProperty(globalThis, "__CODEX_WEB_GPT_SURFACE_ID__", {
-         value: ${encoded}, configurable: true, enumerable: false, writable: false,
-       });
-+      if (${documentIdentity} && !globalThis.__SENTRA_WEB_DOCUMENT__) {
-+        Object.defineProperty(globalThis, "__SENTRA_WEB_DOCUMENT__", {
-+          value: Object.freeze(${documentIdentity}), configurable: false, writable: false, enumerable: false,
-+        });
-+      }
-       document.documentElement.dataset.codexWebGptSurface = ${encoded};
-       (${configureChatGptAnnouncementDismissal.toString()})(true);
-     })()`, true);
-+    this.writeDescriptor();
-   }
- 
-   async configureAnnouncementDismissal(enabled) {
-@@ -1210,13 +1610,14 @@
-     });
-   }
- 
--  async refreshChatGptHomeDocument() {
--    // A navigation from the idle host already creates a fresh ChatGPT document. Reload only an
--    // existing Temporary Chat document so the helper observes one authoritative SPA bootstrap.
--    if (isTemporaryChatUrl(this.view.webContents.getURL())) {
-+  async refreshChatGptHomeDocument(useSavedChats = false) {
-+    // Verify in the same mode as actual turns. Temporary Chat may not expose account plugins.
-+    // Inspection/smoke keep their temporary surface; verification never submits a message.
-+    const targetUrl = useSavedChats ? "https://chatgpt.com/" : TEMPORARY_CHAT_URL;
-+    if (this.view.webContents.getURL() === targetUrl) {
-       await this.hardRefreshHome();
-     } else {
--      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
-+      await this.view.webContents.loadURL(targetUrl);
-     }
-     await this.waitForAuthenticated(60_000);
-   }
-@@ -1419,6 +1820,7 @@
-       tab.deviceEmulationDirty = true;
-       this.syncViewVisibility();
-     }
-+    this.writeDescriptor();
-     return this.snapshot();
-   }
- 
-@@ -2447,6 +2849,39 @@
-         connectorBound: existing.connectorBound === true,
-       };
-     }
-+    const saved = this.getUseSavedChats?.() === true
-+      ? this.savedConversations?.get(conversationKey, connectorIdentity) : null;
-+    if (saved) {
-+      const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal);
-+      const onAbort = () => {
-+        if (this.turnTabs.get(tab.id) === tab) this.removeTurnTab(tab, false);
-+      };
-+      try {
-+        signal?.throwIfAborted();
-+        signal?.addEventListener("abort", onAbort, { once: true });
-+        await loadCommittedBrowserSurface(tab.view.webContents, saved.url, BROWSER_NAVIGATION_TIMEOUT_MS);
-+        signal?.throwIfAborted();
-+        await this.markTurnTabSurface(tab);
-+        // A restored document must acquire its connector again. The binding in
-+        // an old document is never evidence for the new composer.
-+        tab.connectorBound = false;
-+        tab.lastHeartbeatAt = Date.now();
-+        this.selectedTabId = tab.id;
-+        if (reveal) this.show();
-+        else this.syncViewVisibility();
-+        this.publishState?.(this.snapshot());
-+        this.writeDescriptor();
-+        this.logger.info("browser.saved_conversation_restored", { tabId: tab.id, traceId });
-+        return { surfaceId: tab.surfaceId, tabId: tab.id, reused: true, connectorBound: false };
-+      } catch (cause) {
-+        if (this.turnTabs.get(tab.id) === tab) this.removeTurnTab(tab, false);
-+        const error = new Error("The saved ChatGPT conversation could not be reopened", { cause });
-+        error.code = "retained_conversation_unavailable";
-+        throw error;
-+      } finally {
-+        signal?.removeEventListener("abort", onAbort);
-+      }
-+    }
-     if (requireRetainedConversation) {
-       const error = new Error("The retained ChatGPT conversation is no longer available");
-       error.code = "retained_conversation_unavailable";
-@@ -2500,6 +2935,9 @@
-       && tab.conversationKey
-       && (!tab.connectorIdentity || connectorBound)) {
-       tab.connectorBound = connectorBound === true;
-+      if (this.getUseSavedChats?.() === true) {
-+        this.savedConversations.set(tab.conversationKey, tab.connectorIdentity, tab.view.webContents.getURL());
-+      }
-       tab.lastHeartbeatAt = Date.now();
-       if (hideAfterTurn && !this.activeTraceId) this.hide();
-       this.logger.info("browser.tab_retained", { tabId: tab.id, traceId });
-@@ -2913,12 +3351,14 @@
-     requireAutomaticBrowserInspection(this, "ChatGPT connector verification");
-     const connectorName = validateConnectorName(appName);
-     this.setState({ status: "testing", message: "Checking ChatGPT connector" });
--    await this.refreshChatGptHomeDocument();
-+    const useSavedChats = this.getUseSavedChats?.() === true;
-+    await this.refreshChatGptHomeDocument(useSavedChats);
-     try {
-       const result = await this.verifyConnectorWithBrowserHelper({
-         helper: this.helper,
-         descriptorPath: this.descriptorPath,
-         appName: connectorName,
-+        useSavedChats,
-         logger: this.logger,
-       });
-       this.logger.info("connector.verified", { appName: connectorName });
-@@ -3039,6 +3479,24 @@
-       idleUrl: IDLE_BROWSER_URL,
-       surfaceId: this.surfaceId,
-       surfaceTargets,
-+      sentraMessageCollector: { id: "sentra-committed-message-v1", sha256: createHash("sha256").update(collectSentraCommittedMessages.toString()).digest("hex") },
-+      sentraIdentityCollector: { id: "sentra-committed-account-menu-v1", sha256: createHash("sha256").update(collectSentraUiIdentity.toString()).digest("hex"), verified: false },
-+      sentraManaged: Boolean(process.env.SENTRA_TURN_AUTHORITY_TOKEN),
-+      sentraIntegrationPatchSha256: process.env.SENTRA_INTEGRATION_PATCH_SHA256 || null,
-+      sentraTabs: [...this.turnTabs.values()]
-+        .filter(tab => !tab.view.webContents.isDestroyed())
-+        .map(tab => ({
-+          tabId: tab.id,
-+          surfaceId: tab.surfaceId,
-+          documentId: tab.sentraDocument?.document_id || null,
-+          identityEpoch: tab.sentraDocument?.identity_epoch || null,
-+          traceId: tab.traceId,
-+          conversationKey: tab.conversationKey || null,
-+          helperPid: tab.helperPid,
-+          status: tab.status,
-+          interactionMode: tab.interactionMode,
-+          lastHeartbeatAt: tab.lastHeartbeatAt,
-+        })),
-       createdAt: new Date().toISOString(),
-     };
-     writePrivateFileAtomic(this.descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
-@@ -3098,6 +3556,8 @@
- }
- 
- module.exports = {
-+  collectSentraCommittedMessages,
-+  collectSentraUiIdentity,
-   allowedAuthUrl,
-   BrowserHost,
-   BrowserTurnCancelledError,
 diff --git a/launcher/electron/connector-identity.cjs b/launcher/electron/connector-identity.cjs
 index 320ec5af058a0244eed710605fc375ec22190765..711ff518deac2d0792efe7a147a25b171b632005 100644
 --- a/launcher/electron/connector-identity.cjs
@@ -641,410 +59,6 @@ index 320ec5af058a0244eed710605fc375ec22190765..711ff518deac2d0792efe7a147a25b17
  }
  
  module.exports = {
-diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
-index 2c9c565..0a702a7 100644
---- a/launcher/electron/control-server.cjs
-+++ b/launcher/electron/control-server.cjs
-@@ -38,12 +38,13 @@ function writeJson(response, status, body) {
- }
- 
- class BrowserControlServer {
--  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits }) {
-+  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits, controlRuntime }) {
-     this.logger = logger;
-     this.getBrowserHost = getBrowserHost;
-     this.getPreferences = getPreferences;
-     this.resolveProxy = resolveProxy;
-     this.limits = limits;
-+    this.controlRuntime = controlRuntime;
-     this.token = randomBytes(32).toString("base64url");
-     this.port = 0;
-     this.server = createServer((request, response) => {
-@@ -100,8 +101,15 @@ class BrowserControlServer {
-       || request.url === "/v1/turn/usage"
-       || request.url === "/v1/turn/end";
-     const isTurnRelease = request.url === "/v1/turn/release";
-+    const isSentraMessageChallenge = request.url === "/v1/sentra/message-challenge";
-+    const isSentraMessageSnapshot = request.url === "/v1/sentra/message-snapshot";
-+    const isSentraIdentitySnapshot = request.url === "/v1/sentra/identity-snapshot";
-+    const isSentraApprovalSnapshot = request.url === "/v1/sentra/approval-snapshot";
-+    const isSentraAccountCatalog = request.url === "/v1/sentra/account-catalog";
-+    const isSentraAccount = request.url === "/v1/sentra/account";
-     const isSessionInspect = request.url === "/v1/session/inspect";
-     const isProxyResolution = request.url === "/v1/network/resolve-proxy";
-+    const isSentraRuntimeControl = Boolean(this.controlRuntime) && request.url === "/v1/sentra/runtime-control";
-     const manualAction = new Map([
-       ["/v1/manual/start", "start"],
-       ["/v1/manual/wait-sent", "wait-sent"],
-@@ -110,7 +118,7 @@ class BrowserControlServer {
-       ["/v1/manual/end", "end"],
-       ["/v1/manual/cancel", "cancel"],
-     ]).get(request.url);
--    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
-+    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isSentraIdentitySnapshot && !isSentraApprovalSnapshot && !isSentraAccountCatalog && !isSentraAccount && !isSentraMessageSnapshot && !isSentraMessageChallenge && !isProxyResolution && !isSentraRuntimeControl && !manualAction)) {
-       writeJson(response, 404, { error: "not_found" });
-       return;
-     }
-@@ -119,6 +127,35 @@ class BrowserControlServer {
-         request,
-         manualAction === "start" ? MAX_MANUAL_START_BODY_BYTES : MAX_BODY_BYTES,
-       );
-+      if (isSentraRuntimeControl) {
-+        const action = body?.action;
-+        if (!["drain", "resume", "interrupt-turn", "verify-connector"].includes(action)) {
-+          throw new Error("SENTRA runtime control action is invalid");
-+        }
-+        if (action === "verify-connector") {
-+          const connectorName = body?.connectorName;
-+          if (typeof connectorName !== "string" || !connectorName.trim() || connectorName.length > 80
-+            || /[\r\n\0]/.test(connectorName)) {
-+            throw new Error("SENTRA connector identity is invalid");
-+          }
-+          const browserHost = this.getBrowserHost();
-+          if (!browserHost) throw new Error("browser host is not ready");
-+          await browserHost.verifyConnector(connectorName.trim());
-+          writeJson(response, 200, { ok: true, verified: true, connectorName: connectorName.trim() });
-+          return;
-+        }
-+        let payload;
-+        if (action === "interrupt-turn") {
-+          if (typeof body?.threadId !== "string" || !body.threadId || body.threadId.length > 256
-+            || typeof body?.turnId !== "string" || !body.turnId || body.turnId.length > 256) {
-+            throw new Error("SENTRA runtime interrupt identity is invalid");
-+          }
-+          payload = { threadId: body.threadId, turnId: body.turnId };
-+        }
-+        const result = await this.controlRuntime(action, payload);
-+        writeJson(response, 200, result);
-+        return;
-+      }
-       if (isProxyResolution) {
-         const url = new URL(body?.url);
-         if (url.origin !== "https://chatgpt.com" || url.username || url.password
-@@ -135,6 +172,47 @@ class BrowserControlServer {
-       const preferences = this.getPreferences();
-       const host = this.getBrowserHost();
-       if (!host) throw new Error("browser host is not ready");
-+      if (isSentraAccount) {
-+        if (!body || Object.keys(body).length !== 1 || !["status", "login"].includes(body.action)) {
-+          writeJson(response, 400, { error: "invalid_account_action" });
-+          return;
-+        }
-+        // Account controls never create turns, switch profiles or return cookies.
-+        if (body.action === "login") {
-+          await host.reveal(false);
-+          host.window.show();
-+          host.window.focus();
-+        }
-+        const state = host.snapshot();
-+        writeJson(response, 200, {
-+          authenticated: state.authenticated === true,
-+          status: typeof state.status === "string" ? state.status.slice(0, 40) : "unknown",
-+          login_open: state.visible === true && host.window?.isVisible?.() === true,
-+          saved_chats: host.getUseSavedChats?.() === true,
-+          proves_model_delivery: false,
-+        });
-+        return;
-+      }
-+      if (isSentraApprovalSnapshot || isSentraAccountCatalog) {
-+        const result = isSentraApprovalSnapshot ? await host.sentraApprovalSnapshot(body) : await host.sentraAccountCatalog(body);
-+        writeJson(response, 200, result);
-+        return;
-+      }
-+      if (isSentraMessageChallenge) {
-+        const result = await host.sentraMessageChallenge(body);
-+        writeJson(response, 200, result);
-+        return;
-+      }
-+      if (isSentraMessageSnapshot) {
-+        const result = await host.sentraMessageSnapshot(body);
-+        writeJson(response, 200, result);
-+        return;
-+      }
-+      if (isSentraIdentitySnapshot) {
-+        const result = await host.sentraIdentitySnapshot(body);
-+        writeJson(response, 200, result);
-+        return;
-+      }
-       if (isSessionInspect) {
-         if (host.browserInteractionMode() === "manual") {
-           const error = new Error(
-diff --git a/launcher/electron/main.cjs b/launcher/electron/main.cjs
---- a/launcher/electron/main.cjs
-+++ b/launcher/electron/main.cjs
-@@ -47,6 +47,7 @@
- } = require("./window-state.cjs");
- 
- const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
-+const SENTRA_BROWSER_HOST_ONLY = process.env.SENTRA_BROWSER_HOST_ONLY?.trim() === "1";
- const SOURCE_ROOT = path.resolve(__dirname, "../..");
- const LAUNCHER_PROFILE = resolveLauncherProfile({ appData: app.getPath("appData") });
- const IS_DEV_PROFILE = LAUNCHER_PROFILE.kind === DEVELOPMENT_PROFILE;
-@@ -60,6 +61,7 @@
- const CONNECTORS_URL = "https://chatgpt.com/#settings/Plugins";
- const TUNNELS_URL = "https://platform.openai.com/settings/organization/tunnels";
- const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
-+const SENTRA_ONBOARDING_URL = "sentra://onboarding";
- const ALLOWED_EXTERNAL_URLS = new Set([GITHUB_URL, X_URL, CONNECTORS_URL, TUNNELS_URL, KEYS_URL, LIMITS_SOURCE_URL]);
- const PACKAGED_RENDERER_URL = pathToFileURL(path.join(__dirname, "..", "dist", "index.html")).href;
- const APP_ICON_PATH = path.join(__dirname, "..", "assets", "icon.png");
-@@ -513,6 +515,31 @@
-   send("launcher:state-changed", state);
-   return state;
- }
-+async function sentraDoctor(runtimeHost, { verifyConnector = false } = {}) {
-+  const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
-+  if (!base) return IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor();
-+  const doctorPath = verifyConnector ? "/sentra/doctor?verify_connector=1" : "/sentra/doctor";
-+  const response = await fetch(new URL(doctorPath, base), {
-+    headers: process.env.SENTRA_TURN_AUTHORITY_TOKEN
-+      ? { authorization: `Bearer ${process.env.SENTRA_TURN_AUTHORITY_TOKEN}` }
-+      : {},
-+    // Local doctor can start a cold service; its subprocess budget is already 60 seconds.
-+    signal: AbortSignal.timeout(90_000),
-+  });
-+  if (!response.ok) throw new Error(`SENTRA doctor returned HTTP ${response.status}`);
-+  const report = await response.json();
-+  if (!report || typeof report !== "object" || !Array.isArray(report.checks)) {
-+    throw new Error("SENTRA doctor returned an invalid report");
-+  }
-+  return report;
-+}
-+
-+function sentraConnectorName() {
-+  const name = process.env.SENTRA_CONNECTOR_NAME || "SENTRA";
-+  if (typeof name !== "string" || !name.trim() || name.length > 80) throw new Error("SENTRA connector name is invalid");
-+  return name.trim();
-+}
-+
- 
- function registerIpc({ logger, stateStore }) {
-   const handle = (channel, handler) => registerLoggedIpc(ipcMain, logger, channel, handler);
-@@ -536,6 +563,7 @@
-       manual: "Codex Zero Risk",
-     },
-     mcpCredentialsConfigured: runtimeHost?.mcpCredentialsConfigured() ?? false,
-+    sentraManaged: Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim()),
-     logs: logger.recent(),
-     urls: { github: GITHUB_URL, x: X_URL, connectors: CONNECTORS_URL, tunnels: TUNNELS_URL, keys: KEYS_URL },
-     platform: process.platform,
-@@ -578,6 +606,13 @@
-   handle("launcher:open-external", async (_event, url) => {
-     if (!ALLOWED_EXTERNAL_URLS.has(url)) throw new Error("External URL is not allowlisted");
-     await openWebUrl(url);
-+    return true;
-+  });
-+  handle("launcher:open-sentra-onboarding", async () => {
-+    if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
-+      throw new Error("This launcher is not managed by SENTRA");
-+    }
-+    await shell.openExternal(SENTRA_ONBOARDING_URL);
-     return true;
-   });
- 
-@@ -657,7 +692,7 @@
-       return report;
-     }
-     publishOperation({ name: operationName, status: "running", message: "Checking local runtime" });
--    const report = IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor();
-+    const report = await sentraDoctor(runtimeHost);
-     if (!report.ok) {
-       const message = report.checks
-         .filter((check) => check.status === "error")
-@@ -681,14 +716,14 @@
-           {
-             id: "connector",
-             status: "warning",
--            message: `Select ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} manually for every Zero Risk turn`,
-+            message: `Select ChatGPT connector ${JSON.stringify(sentraConnectorName())} manually for every Zero Risk turn`,
-           },
-         ],
-       };
-     }
-     try {
-       publishOperation({ name: operationName, status: "running", message: "Checking ChatGPT connector" });
--      await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
-+      await browserHost.verifyConnector(sentraConnectorName());
-       const state = stateStore.update({ mcpSetupComplete: true });
-       send("launcher:state-changed", state);
-       const successMessage = IS_DEV_PROFILE
-@@ -701,7 +736,7 @@
-           ? {
-               id: "connector",
-               status: "ok",
--              message: `ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} is available`,
-+              message: `ChatGPT connector ${JSON.stringify(sentraConnectorName())} is available`,
-             }
-           : check),
-       };
-@@ -721,7 +756,7 @@
-     }
-   });
- 
--  handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
-+  handle("launcher:doctor", () => sentraDoctor(runtimeHost, { verifyConnector: true }));
-   handle("launcher:cancel-turns", () => {
-     if (IS_DEV_PROFILE) throw new Error("DEV chat turns are owned by the repository CLI process");
-     return runtimeHost.cancelActiveTurns();
-@@ -817,6 +852,33 @@
-       ? currentMode
-       : validateBrowserInteractionMode(input.interactionMode);
-     const interactionModeChange = interactionMode !== currentMode;
-+    if (process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
-+      if (interactionMode !== "automatic") {
-+        throw new Error("SENTRA-managed Web Models use the single SENTRA tunnel in Automatic mode");
-+      }
-+      const report = await sentraDoctor(runtimeHost);
-+      if (!report.ok) {
-+        const message = report.checks
-+          .filter((check) => check.status === "error")
-+          .map((check) => check.message)
-+          .filter(Boolean)
-+          .join("; ") || "SENTRA runtime is not healthy";
-+        throw new Error(message);
-+      }
-+      const state = stateStore.update({
-+        browserInteractionMode: "automatic",
-+        coreSetupComplete: true,
-+        mcpRuntimeInstalled: true,
-+        mcpSetupComplete: false,
-+        mcpGuideStep: 2,
-+        codexRestartRequired: false,
-+      });
-+      send("launcher:state-changed", state);
-+      return {
-+        ok: true,
-+        stdout: "SENTRA tunnel is authoritative; no secondary Codex Web tunnel runtime was started.",
-+      };
-+    }
-     const setup = IS_DEV_PROFILE
-       ? runtimeHost.setupDevMcp.bind(runtimeHost)
-       : runtimeHost.setupMcp.bind(runtimeHost);
-@@ -917,6 +979,9 @@
-   });
-   handle("launcher:browser-interaction-mode", async (_event, rawMode) => {
-     const mode = validateBrowserInteractionMode(rawMode);
-+    if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && mode !== "automatic") {
-+      throw new Error("SENTRA-managed Web Models use Automatic mode and the single SENTRA tunnel");
-+    }
-     const current = stateStore.read();
-     if (current.browserInteractionMode === mode) {
-       return { state: current, credentialsRequired: false, targetMode: mode };
-@@ -1037,9 +1102,17 @@
-   app.on("activate", () => showMainWindow());
- 
-   await waitForPackagedRuntimeSource({ app, resourcesPath: process.resourcesPath });
--  let installedRuntimeRoot = null;
--  let runtimeRootResolved = false;
-+  let installedRuntimeRoot = SENTRA_BROWSER_HOST_ONLY && app.isPackaged
-+    ? path.join(process.resourcesPath, "runtime")
-+    : null;
-+  let runtimeRootResolved = Boolean(installedRuntimeRoot);
-   const runtimeRootProvider = () => {
-+    if (SENTRA_BROWSER_HOST_ONLY && app.isPackaged) {
-+      // Browser-host-only mode consumes the signed embedded runtime in place.
-+      // It never installs/replaces ~/.codex-chatgpt-web/versions, so a running
-+      // SENTRA-managed Bun daemon cannot cause Windows EPERM rename failures.
-+      return installedRuntimeRoot;
-+    }
-     const packagedRuntimeWasRemoved = app.isPackaged
-       && (!installedRuntimeRoot || !fs.existsSync(installedRuntimeRoot));
-     if (!runtimeRootResolved || packagedRuntimeWasRemoved) {
-@@ -1064,6 +1137,13 @@
-   await app.whenReady();
- 
-   const stateStore = createStateStore(path.join(app.getPath("userData"), "launcher-state.json"));
-+  if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && stateStore.read().browserInteractionMode !== "automatic") {
-+    stateStore.update({
-+      browserInteractionMode: "automatic",
-+      zeroRiskProEnabled: false,
-+      mcpSetupComplete: false,
-+    });
-+  }
-   limitsController = new LimitsController(path.join(app.getPath("userData"), "limits.json"), {
-     getInteractionMode: () => stateStore.read().browserInteractionMode,
-   });
-@@ -1096,7 +1176,8 @@
-     filePath: path.join(app.getPath("logs"), "launcher.jsonl"),
-     publish: (record) => send("launcher:log", record),
-   });
--  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
-+  const startHidden = SENTRA_BROWSER_HOST_ONLY
-+    || (process.argv.includes("--hidden") && stateStore.read().onboardingComplete);
-   nativeTheme.themeSource = "system";
-   mainWindow = createWindow({
-     logger,
-@@ -1110,6 +1191,17 @@
-     getPreferences: () => syncFreshConversationPreference(stateStore, runtimeHost.runtimeConfigSnapshot().config),
-     resolveProxy: url => session.fromPartition(LAUNCHER_PROFILE.browserPartition).resolveProxy(url),
-     limits: limitsController,
-+    controlRuntime: process.env.SENTRA_TURN_AUTHORITY_TOKEN
-+      ? async (action, body) => {
-+          const config = runtimeHost?.runtimeConfigSnapshot().config;
-+          if (!runtimeSupervisor || !config) throw new Error("SENTRA runtime control is unavailable");
-+          return runtimeSupervisor.control(
-+            config,
-+            action,
-+            body === undefined ? {} : { body },
-+          );
-+        }
-+      : undefined,
-   }).start();
-   runtimeSupervisor = new RuntimeSupervisor({
-     app,
-@@ -1179,7 +1271,11 @@
-     logger,
-   });
-   registerIpc({ logger, stateStore });
--  const trayAvailable = createTray(logger, stateStore.read().language);
-+  // Browser-host-only is infrastructure owned by SENTRA; do not add a second
-+  // launcher tray icon and never reveal the shell just because tray setup was skipped.
-+  const trayAvailable = SENTRA_BROWSER_HOST_ONLY
-+    ? true
-+    : createTray(logger, stateStore.read().language);
-   if (startHidden && !trayAvailable) mainWindow.once("ready-to-show", () => showMainWindow());
-   const launcherSmokeTest = process.argv.includes("--launcher-smoke-test");
-   let startupAuthenticationRefresh = Promise.resolve();
-@@ -1191,7 +1287,7 @@
-     });
-   }
-   await loadRenderer(mainWindow);
--  if (!launcherSmokeTest) void updateController.checkOnce();
-+  if (!launcherSmokeTest && !SENTRA_BROWSER_HOST_ONLY) void updateController.checkOnce();
-   if (launcherSmokeTest) {
-     const smokeRuntimeRoot = runtimeRootProvider();
-     if (app.isPackaged && !smokeRuntimeRoot) {
-@@ -1230,7 +1326,14 @@
-     app.quit();
-     return;
-   }
--  if (IS_DEV_PROFILE) {
-+  if (SENTRA_BROWSER_HOST_ONLY) {
-+    await startupAuthenticationRefresh;
-+    logger.info("sentra.browser_host_only_ready", {
-+      descriptorPath: BROWSER_DESCRIPTOR_PATH,
-+      cdpPort,
-+      embeddedRuntime: app.isPackaged,
-+    });
-+  } else if (IS_DEV_PROFILE) {
-     let config = null;
-     try {
-       config = runtimeSupervisor.readConfig();
-@@ -1417,6 +1520,14 @@
-   try {
-     fs.appendFileSync(path.join(app.getPath("logs"), "launcher-fatal.log"), `${new Date().toISOString()} ${error?.stack || error}\n`);
-   } catch {}
-+  if (SENTRA_BROWSER_HOST_ONLY) {
-+    // Infrastructure startup fails closed and silent. SENTRA surfaces the
-+    // diagnostic without interrupting the desktop with a native modal dialog.
-+    try { browserHost?.destroy(); } catch {}
-+    try { await browserControl?.close(); } catch {}
-+    app.exit(1);
-+    return;
-+  }
-   try {
-     // Browser bootstrap can fail before the renderer is loaded. Keep the error reachable
-     // through the existing instance, and release browser resources before a user retry.
 diff --git a/launcher/electron/orphan-runtime-recovery.cjs b/launcher/electron/orphan-runtime-recovery.cjs
 new file mode 100644
 index 0000000000000000000000000000000000000000..90696a21ff109b07a6873f4691595a8d03dc4dda
@@ -4785,51 +3799,6 @@ index bd0f4ebd6d5edecc8afc3ddd5c36e150dfb054e7..a37af37e17745164954300209fe32a52
    if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
      if (capabilities.solAvailable) {
        throw new Error(`${route.displayName} is only available for Luna-only accounts`);
-diff --git a/src/cli.ts b/src/cli.ts
-index 006da679ae74532ec6da71bd575d9dbccf261083..aa05f5f0446457c6719c5fd671efa4ee438d4afe 100644
---- a/src/cli.ts
-+++ b/src/cli.ts
-@@ -16,6 +16,7 @@ import {
-   activateCodexIntegration,
-   deactivateCodexIntegration,
-   inspectCodexIntegration,
-+  installCodexIntegration,
-   readCodexSubagentProtocol,
-   setCodexSubagentProtocol,
-   uninstallCodexIntegration,
-@@ -81,7 +82,7 @@ Setup options:
-   --fresh-conversation         Start each automatic turn in a fresh browser chat
-   --retained-conversation      Reuse the browser chat between turns (default)
-   --saved-chats                Keep task conversations in ChatGPT history
--  --temporary-chats            Use Temporary Chat for task conversations (default)
-+  --temporary-chats            Use Temporary Chat instead of saved task conversations
-   --skill-attachments         Experimental selected skills as text attachments
-   --inline-skills             Keep selected skills inline (default)
-   --standard-context           Disable experimental multi-message context
-@@ -385,9 +386,20 @@ async function doctorCommand(args: string[]): Promise<void> {
-   if (!report.ok) process.exitCode = 1;
- }
- 
--async function routeCommand(args: string[]): Promise<void> {
--  const action = args.shift() ?? "status";
--  assertNoArgs(args);
-+  async function routeCommand(args: string[]): Promise<void> {
-+    const action = args.shift() ?? "status";
-+    assertNoArgs(args);
-+    if (action === "sentra") {
-+      const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
-+      if (!base) throw new Error("SENTRA_WEB_GATEWAY_URL is required");
-+      const health = await fetch(new URL("/healthz", base), { signal: AbortSignal.timeout(5000) });
-+      if (!health.ok || (await health.json()).service !== "sentra-model-gateway") {
-+        throw new Error("SENTRA Gateway is not healthy");
-+      }
-+      const journal = installCodexIntegration(loadConfig(), { replaceExistingRoute: true });
-+      stdout.write(`${JSON.stringify({ installed: true, active: true, routeUrl: base, journalVersion: journal.version, codexRestartRequired: true }, null, 2)}\n`);
-+      return;
-+    }
-   const result = action === "status"
-     ? (() => {
-         const status = inspectCodexIntegration();
 diff --git a/src/codex-integration-shared.ts b/src/codex-integration-shared.ts
 index bb685f29a7b567336f66ac6736071376ec9e1272..7921bd38695c0d5e6f262cdb7f4575e1e25c21aa 100644
 --- a/src/codex-integration-shared.ts
@@ -7423,7 +6392,6 @@ diff --git a/tests/prompt-contract.test.ts b/tests/prompt-contract.test.ts
  });
  
  test("Full-mode Pro prompts pass one stable turn token directly to native actions", () => {
-
 diff --git a/launcher/tests/sentra-account-control.test.cjs b/launcher/tests/sentra-account-control.test.cjs
 new file mode 100644
 index 0000000..071b303
@@ -7469,4 +6437,1331 @@ index 0000000..071b303
 +    assert.equal(response.status,200);
 +    const status = await response.json();assert.equal(status.authenticated,false);assert.equal(status.saved_chats,false);assert.equal(status.proves_model_delivery,false);
 +  } finally { await server.close(); }
++});
+diff --git a/launcher/electron/browser-host.cjs b/launcher/electron/browser-host.cjs
+index 9025c18..3333793 100644
+--- a/launcher/electron/browser-host.cjs
++++ b/launcher/electron/browser-host.cjs
+@@ -4 +4,2 @@ const { createHash, randomBytes } = require("node:crypto");
+-const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell } = require("electron");
++const { clipboard, WebContentsView, powerMonitor, powerSaveBlocker, shell, safeStorage } = require("electron");
++const { SavedConversations } = require("./saved-conversations.cjs");
+@@ -303,0 +305,361 @@ function loadCommittedBrowserSurface(
++// This collector reads only UI identity primitives. No session endpoints, storage or credentials.
++function collectSentraUiIdentity() {
++  if (location.origin !== "https://chatgpt.com") return { reason: "wrong_origin" };
++  const identity = globalThis.__SENTRA_WEB_DOCUMENT__;
++  if (!identity) return { reason: "document_unowned" };
++  const accounts = new Set(), users = new Set(), models = new Set(), efforts = new Set();
++  let catalogComplete = false;
++  const primitiveId = value => typeof value === "string" && /^[A-Za-z0-9_-]{1,128}$/.test(value);
++  const own = (object, key) => {
++    if (!object || typeof object !== "object") return undefined;
++    const descriptor = Object.getOwnPropertyDescriptor(object, key);
++    return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
++  };
++  // Restrict traversal to the committed account-menu ancestry. Never walk session objects.
++  for (const element of document.querySelectorAll('[data-testid="accounts-profile-button"], [data-testid="profile-button"]')) {
++    for (const key of Object.keys(element).filter(key => key.startsWith("__reactFiber$"))) {
++      let fiber = element[key], root = fiber;
++      let depth = 0;
++      while (root?.return && depth++ < 80) root = root.return;
++      if (root?.tag !== 3 || root.stateNode?.current !== root) continue;
++      let reachedRoot = false;
++      const candidateAccounts = new Set(), candidateUsers = new Set();
++      for (depth = 0; fiber && depth++ < 80; fiber = fiber.return) {
++        const props = own(fiber, "memoizedProps");
++        const accountId = own(own(props, "account"), "id");
++        const userId = own(own(props, "user"), "id");
++        // Only committed UI option primitives: no session endpoint/cookies/storage.
++        const modelOptions = own(props, "availableModels");
++        const effortOptions = own(props, "reasoningEfforts");
++        if (Array.isArray(modelOptions) && modelOptions.length > 0 && modelOptions.length <= 64) {
++          for (const option of modelOptions) {
++            const value = typeof option === "string" ? option : own(option, "slug");
++            if (typeof value === "string" && /^[A-Za-z0-9_.:-]{1,120}$/.test(value)) models.add(value);
++          }
++          catalogComplete = models.size === modelOptions.length;
++        }
++        if (Array.isArray(effortOptions) && effortOptions.length <= 64) {
++          for (const value of effortOptions) if (typeof value === "string" && /^[A-Za-z0-9_-]{1,120}$/.test(value)) efforts.add(value);
++        }
++        if (own(props, "automaticMode") === true) models.add("automatic");
++        if (primitiveId(accountId)) candidateAccounts.add(accountId);
++        if (primitiveId(userId)) candidateUsers.add(userId);
++        if (fiber === root) { reachedRoot = true; break; }
++      }
++      if (reachedRoot) {
++        for (const value of candidateAccounts) accounts.add(value);
++        for (const value of candidateUsers) users.add(value);
++      }
++    }
++  }
++  const selectionText = selector => {
++    const values = [...document.querySelectorAll(selector)].map(element => element.textContent?.trim()).filter(Boolean);
++    return values.length === 1 && values[0].length <= 160 ? values[0] : null;
++  };
++  const visible = element => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
++  const picked = [...document.querySelectorAll('[role="menuitemradio"][aria-checked="true"]')].filter(visible);
++  const sliders = [...document.querySelectorAll('[data-model-reasoning-effort-slider], [data-model-picker-power-slider]')].filter(visible);
++  const providerSelection = { model: null, effort: null, selection_verified: false,
++    selected_radio_text: picked.length === 1 ? picked[0].textContent?.trim().slice(0, 160) : null,
++    slider_min: null, slider_max: null, slider_value: null, slider_description: null };
++  if (picked.length === 1 && sliders.length === 1) {
++    const slider = sliders[0], item = slider.closest('[role="menuitem"]');
++    const attributes = ["aria-valuemin", "aria-valuemax", "aria-valuenow"].map(key => slider.getAttribute(key));
++    const [min, max, value] = attributes.map(Number);
++    const described = (item?.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean)
++      .map(id => document.getElementById(id)?.textContent || "").filter(Boolean);
++    const description = (described.length === 1 ? described[0] : item?.textContent || "").trim();
++    providerSelection.slider_description = description.slice(0, 160);
++    if (attributes.every(attribute => attribute !== null && /^\d+$/.test(attribute))
++      && min <= value && value <= max && max - min <= 4) {
++      Object.assign(providerSelection, { slider_min: min, slider_max: max, slider_value: value });
++      const radioFamily = /^(?:GPT[-\s]?)?(5\.6|6)(?:\s+(?:Sol|Astra))?(?:\s+Pro)?$/i.exec(providerSelection.selected_radio_text || "");
++      const detail = /^(?:GPT[-\s]?)?(5\.6|6)(?:\s+(Sol|Astra))?\s+([^,，]+)(?:[,，]|$)/i.exec(description);
++      const effort = ["low", "medium", "high", "xhigh", "max"][value - min];
++      if (radioFamily && detail && radioFamily[1] === detail[1] && effort
++        && (!detail[2] || detail[2].toLowerCase() === (detail[1] === "6" ? "astra" : "sol"))
++        && (effort === "max" ? /^Pro$/i.test(detail[3].trim()) : !/^Pro$/i.test(detail[3].trim()))) {
++        Object.assign(providerSelection, { model: "gpt-" + detail[1], effort, selection_verified: true });
++      }
++    }
++  }
++  const approval = document.querySelector('[data-testid="connector-approval"], [data-testid="tool-approval"], [data-testid="approval-card"]');
++  return { document_id: identity.document_id, identity_epoch: identity.identity_epoch,
++    surface_id: identity.surface_id, account_id: accounts.size === 1 ? [...accounts][0] : null,
++    user_id: users.size === 1 ? [...users][0] : null,
++    model_selection_text: selectionText('[data-testid="model-switcher-dropdown-button"]'),
++    effort_selection_text: selectionText('[data-testid="thinking-effort-dropdown-button"]'),
++    observed_models: [...models], observed_efforts: [...efforts], catalog_complete: catalogComplete,
++    provider_selection: providerSelection, approval_state: approval ? "pending" : null,
++    reason: accounts.size > 1 || users.size > 1 ? "identity_conflict"
++      : accounts.size === 0 ? "account_ui_identity_unavailable" : "collector_schema_unverified" };
++}
++
++async function sentraObservedSnapshot(binding, kind) {
++  const provider = binding?.provider;
++  if (kind === "catalog" && provider !== "chatgpt") throw new Error("SENTRA catalog provider unowned");
++  const allowed = new Set(["traceId", "surface_id", "document_id", "identity_epoch", ...(kind === "catalog" ? ["provider"] : [])]);
++  if (!binding || Object.keys(binding).some(key => !allowed.has(key))) throw new Error("SENTRA snapshot selectors invalid");
++  const identity = await sentraIdentitySnapshot.call(this, binding);
++  const tab = [...this.turnTabs.values()].find(item => item.traceId === binding.traceId && item.surfaceId === binding.surface_id);
++  const contents = tab?.view?.webContents, documentIdentity = tab?.sentraDocument;
++  if (!contents || contents.isDestroyed()) throw new Error("SENTRA snapshot tab unavailable");
++  const observation = await contents.executeJavaScript(`(${collectSentraCommittedMessages.toString()})()`, false);
++  if (this.turnTabs.get(tab.id) !== tab || tab.status !== "running" || tab.interactionMode !== "automatic"
++    || tab.sentraDocument !== documentIdentity || this.authenticationRevision !== identity.authentication_revision
++    || new URL(contents.getURL()).origin !== CHATGPT_ORIGIN || observation?.document_id !== binding.document_id
++    || observation?.identity_epoch !== binding.identity_epoch) throw new Error("SENTRA snapshot changed during collection");
++  const approval = ["idle", "pending"].includes(observation.approval_state) ? observation.approval_state : "unknown";
++  if (kind === "approval") return { ...identity, approval_state: approval, approval_source: observation.approval_source,
++    conversation_id: observation.conversation_id, tool_name: null, effect_performed: false };
++  return { ...identity, provider, models: identity.observed_models || [], efforts: identity.observed_efforts || [],
++    approval_state: approval, catalog_complete: identity.catalog_complete === true,
++    selection_verified: identity.provider_selection?.selection_verified === true,
++    model: identity.provider_selection?.model || null, effort: identity.provider_selection?.effort || null };
++}
++
++async function sentraIdentitySnapshot(binding) {
++  requireAutomaticBrowserInspection(this, "SENTRA UI identity observation");
++  if (!binding || typeof binding.traceId !== "string" || typeof binding.surface_id !== "string"
++    || typeof binding.document_id !== "string" || typeof binding.identity_epoch !== "string") {
++    throw new Error("SENTRA identity binding is invalid");
++  }
++  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === binding.traceId
++    && tab.surfaceId === binding.surface_id && tab.status === "running" && tab.interactionMode === "automatic");
++  if (matches.length !== 1) throw new Error("SENTRA identity requires one owned active turn");
++  const tab = matches[0], contents = tab.view.webContents, documentIdentity = tab.sentraDocument;
++  const revision = this.authenticationRevision;
++  const validate = () => {
++    if (contents.isDestroyed() || this.turnTabs.get(tab.id) !== tab || tab.status !== "running"
++      || tab.sentraDocument !== documentIdentity || this.authenticationRevision !== revision
++      || documentIdentity?.document_id !== binding.document_id
++      || documentIdentity?.identity_epoch !== binding.identity_epoch
++      || documentIdentity?.surface_id !== binding.surface_id
++      || new URL(contents.getURL()).origin !== CHATGPT_ORIGIN) throw new Error("SENTRA identity changed");
++  };
++  validate();
++  const observation = await contents.executeJavaScript(`(${collectSentraUiIdentity.toString()})()`, false);
++  validate();
++  for (const field of ["document_id", "identity_epoch", "surface_id"]) {
++    if (observation?.[field] !== binding[field]) throw new Error("SENTRA identity document mismatch");
++  }
++  return { ...observation, ok: true, account_verified: false, profile: this.profile, partition: this.partition, observed_at: new Date().toISOString(), authentication_revision: revision,
++    collector_id: "sentra-committed-account-menu-v1",
++    collector_sha256: createHash("sha256").update(collectSentraUiIdentity.toString()).digest("hex"),
++    host_source_sha256: createHash("sha256").update(fs.readFileSync(__filename)).digest("hex") };
++}
++
++// Independent Host collector. The challenge never enters the renderer reader.
++function collectSentraCommittedMessages() {
++  const unknown = reason => ({ state: "UNKNOWN", reason, messages: [], approval_state: "UNKNOWN", approval_source: null });
++  const own = (object, key) => {
++    if (!object || typeof object !== "object") return undefined;
++    const descriptor = Object.getOwnPropertyDescriptor(object, key);
++    return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
++  };
++  const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(value);
++  const identity = own(globalThis, "__SENTRA_WEB_DOCUMENT__");
++  if (location.origin !== "https://chatgpt.com" || !identity
++    || !/^[a-f0-9]{32}$/.test(own(identity, "document_id"))
++    || !/^[a-f0-9]{32}$/.test(own(identity, "identity_epoch"))) return unknown("document_unowned");
++  const route = /^\/c\/([A-Za-z0-9_-]{8,160})(?:\/|$)/.exec(location.pathname)?.[1] || null;
++  const messages = new Map(), approvalStates = new Set();
++  let conversation = null, budget = 20000;
++  const elements = [...document.querySelectorAll('[data-message-id],[data-turn-key],[data-turn-id-container]')];
++  if (elements.length > 200) return unknown("collector_budget");
++  for (const element of elements) {
++    const keys = Object.keys(element).filter(key => key.startsWith("__reactFiber$"));
++    if (keys.length > 1) return unknown("fiber_ambiguous");
++    if (!keys.length) continue;
++    let node = own(element, keys[0]);
++    const path = [], visited = new Set();
++    while (node && own(node, "tag") !== 3 && path.length < 2048 && !visited.has(node)) {
++      visited.add(node); path.push(node); node = own(node, "return");
++    }
++    const root = own(node, "stateNode"), current = own(root, "current");
++    if (!current || (current !== node && current !== own(node, "alternate"))) continue;
++    node = current;
++    const props = [own(node, "memoizedProps") || {}];
++    let valid = true;
++    for (const expected of path.reverse()) {
++      let selected;
++      const siblings = new Set();
++      for (let child = own(node, "child"); child; child = own(child, "sibling")) {
++        if (--budget < 0 || siblings.has(child)) return unknown("collector_budget");
++        siblings.add(child);
++        if (child !== expected && child !== own(expected, "alternate")) continue;
++        if (selected) { valid = false; break; }
++        selected = child;
++      }
++      if (!valid || !selected || own(root, "current") !== current) { valid = false; break; }
++      node = selected; props.push(own(node, "memoizedProps") || {});
++    }
++    if (!valid) continue;
++    let branch = null;
++    const values = [];
++    for (const p of props.slice(-80)) {
++      for (const value of [own(p, "conversationId"), own(p, "clientThreadId"),
++        own(own(p, "conversation"), "id"), own(own(p, "turn"), "conversationId")]) {
++        if (!id(value)) continue;
++        if (branch && value !== branch) return unknown("conversation_conflict");
++        branch = value;
++      }
++      const approval = own(p, "approvalState");
++      if (["idle", "pending", "awaiting_approval"].includes(approval)) approvalStates.add(approval === "awaiting_approval" ? "pending" : approval);
++      for (const list of [own(p, "messages"), own(p, "allMessages"), own(own(p, "turn"), "messages")]) {
++        if (!Array.isArray(list)) continue;
++        if (list.length > 600) return unknown("collector_budget");
++        values.push(...list);
++      }
++      if (own(p, "message")) values.push(own(p, "message"));
++    }
++    if (!branch) continue;
++    if ((route && branch !== route) || (conversation && branch !== conversation)) return unknown("conversation_conflict");
++    conversation = branch;
++    for (const message of values) {
++      if (--budget < 0) return unknown("collector_budget");
++      const messageId = own(message, "id"), role = own(own(message, "author"), "role");
++      if (!id(messageId)) continue;
++      // Never derive role from the challenge, a selector, text or a parent ID.
++      if (!["user", "assistant"].includes(role)) {
++        const old = messages.get(messageId);
++        if (old) return unknown("message_conflict");
++        messages.set(messageId, { message_id: messageId, role: "UNKNOWN" });
++        continue;
++      }
++      const parts = own(own(message, "content"), "parts");
++      if (!Array.isArray(parts) || parts.some(part => typeof part !== "string")) {
++        return unknown("message_content_unsupported");
++      }
++      const body = parts.join("\n");
++      if (body.length > 2000000) return unknown("message_too_large");
++      const metadata = own(message, "metadata"), request = own(metadata, "request_id"), parent = own(message, "parent_id");
++      const providerRevision = own(metadata, "revision"), status = own(message, "status");
++      const observed = { message_id: messageId, role, body,
++        metadata_request_id: id(request) ? request : null, parent_id: id(parent) ? parent : null,
++        provider_revision: Number.isSafeInteger(providerRevision) && providerRevision >= 0 ? providerRevision : null,
++        complete: status === "finished_successfully" ? true : status === "in_progress" ? false : null };
++      const old = messages.get(messageId);
++      if (old && JSON.stringify(old) !== JSON.stringify(observed)) return unknown("message_conflict");
++      messages.set(messageId, observed);
++    }
++  }
++  const visible = element => element.getClientRects().length > 0 && getComputedStyle(element).visibility !== "hidden";
++  const pending = [...document.querySelectorAll('[data-testid="connector-approval"],[data-testid="tool-approval"],[data-testid="approval-card"]')].some(visible);
++  let approval = "UNKNOWN", approvalSource = null;
++  if (pending) { approval = "pending"; approvalSource = "visible-approval-card"; }
++  else if (approvalStates.size === 1) { approval = [...approvalStates][0]; approvalSource = "committed-react:approvalState"; }
++  return { state: conversation ? "OBSERVED" : "UNKNOWN", reason: conversation ? null : "conversation_unobserved",
++    document_id: own(identity, "document_id"), identity_epoch: own(identity, "identity_epoch"), surface_id: own(identity, "surface_id"),
++    conversation_id: conversation, messages: [...messages.values()], approval_state: approval, approval_source: approvalSource };
++}
++
++async function sentraMessageChallenge(payload) {
++  requireAutomaticBrowserInspection(this, "SENTRA committed message challenge");
++  const allowed = new Set(["traceId", "surface_id", "document_id", "identity_epoch",
++    "conversation_id", "message_id", "expected_role", "observed_request_id", "parent_user_message_id", "body_sha256", "complete"]);
++  const id = value => typeof value === "string" && /^[A-Za-z0-9_-]{8,160}$/.test(value);
++  if (!payload || typeof payload !== "object" || Array.isArray(payload) || Object.keys(payload).some(key => !allowed.has(key))
++    || !id(payload.traceId) || !id(payload.surface_id) || !id(payload.conversation_id) || !id(payload.message_id)
++    || !id(payload.observed_request_id) || !["user", "assistant"].includes(payload.expected_role)
++    || !/^[a-f0-9]{32}$/.test(payload.document_id || "") || !/^[a-f0-9]{32}$/.test(payload.identity_epoch || "")
++    || !/^[a-f0-9]{64}$/.test(payload.body_sha256 || "")
++    || (payload.expected_role === "assistant" && !id(payload.parent_user_message_id))
++    || (payload.expected_role === "user" && payload.parent_user_message_id !== undefined)
++    || (payload.complete !== undefined && typeof payload.complete !== "boolean")) throw new Error("SENTRA message challenge is invalid");
++  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === payload.traceId && tab.surfaceId === payload.surface_id
++    && tab.status === "running" && tab.interactionMode === "automatic");
++  if (matches.length !== 1) throw new Error("SENTRA message challenge surface is unowned");
++  const tab = matches[0], doc = tab.sentraDocument, contents = tab.view.webContents;
++  if (contents.isDestroyed() || doc?.document_id !== payload.document_id || doc?.identity_epoch !== payload.identity_epoch
++    || doc?.surface_id !== payload.surface_id || new URL(contents.getURL()).origin !== CHATGPT_ORIGIN) throw new Error("SENTRA message challenge document changed");
++  const started = Date.now();
++  this.sentraMessageChallenges ||= new Map();
++  for (const [nonce, record] of this.sentraMessageChallenges) if (record.expiry <= started) this.sentraMessageChallenges.delete(nonce);
++  if (this.sentraMessageChallenges.size >= 256) throw new Error("SENTRA message challenge capacity reached");
++  const challengeId = randomBytes(16).toString("hex");
++  const challenge = Object.freeze(Object.fromEntries([...allowed].filter(key => Object.hasOwn(payload, key)).map(key => [key, payload[key]])));
++  const digest = createHash("sha256").update(JSON.stringify(challenge)).digest("hex");
++  this.sentraMessageChallenges.set(challengeId, { challenge, digest, expiry: started + 10000,
++    tab, doc, authenticationRevision: this.authenticationRevision, profile: this.profile, partition: this.partition });
++  return { ok: true, state: "CHALLENGED", role: "UNKNOWN", challenge_id: challengeId,
++    challenge_sha256: digest, expires_at: new Date(started + 10000).toISOString(), account_verified: false };
++}
++
++async function sentraMessageSnapshot(payload) {
++  requireAutomaticBrowserInspection(this, "SENTRA committed message observation");
++  if (!payload || Object.keys(payload).length !== 1 || !/^[a-f0-9]{32}$/.test(payload.challenge_id || "")) throw new Error("SENTRA message snapshot challenge is invalid");
++  const record = this.sentraMessageChallenges?.get(payload.challenge_id);
++  // One-use, Host-issued challenge. Caller cannot replace expectations at snapshot time.
++  this.sentraMessageChallenges?.delete(payload.challenge_id);
++  const started = Date.now();
++  const base = { ok: true, matched: false, state: "UNKNOWN", role: "UNKNOWN", challenge_id: payload.challenge_id,
++    challenge_sha256: record?.digest || null, account_verified: false, collector_id: "sentra-committed-message-v1",
++    collector_sha256: createHash("sha256").update(collectSentraCommittedMessages.toString()).digest("hex"),
++    host_source_sha256: createHash("sha256").update(fs.readFileSync(__filename)).digest("hex") };
++  const unknown = reason => ({ ...base, reason, approval_state: "UNKNOWN", observed_at: new Date().toISOString() });
++  if (!record) return unknown("challenge_unknown_or_consumed");
++  if (record.expiry <= started) return unknown("challenge_expired");
++  const challenge = record.challenge;
++  const matches = [...this.turnTabs.values()].filter(tab => tab.traceId === challenge.traceId && tab.surfaceId === challenge.surface_id
++    && tab.status === "running" && tab.interactionMode === "automatic");
++  if (matches.length !== 1) return unknown("surface_unowned");
++  const tab = matches[0], contents = tab.view.webContents, doc = tab.sentraDocument, authRevision = record.authenticationRevision;
++  const valid = () => tab === record.tab && doc === record.doc && this.profile === record.profile && this.partition === record.partition
++    && !contents.isDestroyed() && this.turnTabs.get(tab.id) === tab && tab.status === "running"
++    && tab.sentraDocument === doc && this.authenticationRevision === authRevision
++    && doc?.document_id === challenge.document_id && doc?.identity_epoch === challenge.identity_epoch
++    && doc?.surface_id === challenge.surface_id && new URL(contents.getURL()).origin === CHATGPT_ORIGIN;
++  if (!valid()) return unknown("document_changed");
++  if (tab.sentraMessageObservationBusy) return unknown("observation_busy");
++  tab.sentraMessageObservationBusy = true;
++  let timeout;
++  try {
++    const read = () => contents.executeJavaScript(`(${collectSentraCommittedMessages.toString()})()`, false);
++    const observations = await Promise.race([
++      (async () => [await read(), await read()])(),
++      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error("snapshot_timeout")), 5000); }),
++    ]);
++    if (!valid() || Date.now() - started > 5000) return unknown("document_changed");
++    if (JSON.stringify(observations[0]) !== JSON.stringify(observations[1])) return unknown("observation_changed");
++    const observed = observations[1];
++    if (observed?.state !== "OBSERVED") return unknown(observed?.reason || "snapshot_unavailable");
++    for (const field of ["document_id", "identity_epoch", "surface_id", "conversation_id"]) {
++      if (observed[field] !== challenge[field]) return unknown("document_or_conversation_changed");
++    }
++    const exact = observed.messages.filter(message => message.message_id === challenge.message_id);
++    if (exact.length !== 1 || exact[0].role !== challenge.expected_role) return unknown("message_role_unverified");
++    const message = exact[0];
++    if (message.role === "user" && message.metadata_request_id !== challenge.observed_request_id) return unknown("request_mismatch");
++    if (message.role === "assistant") {
++      if (message.parent_id !== challenge.parent_user_message_id) return unknown("parent_mismatch");
++      const parents = observed.messages.filter(parent => parent.message_id === message.parent_id && parent.role === "user");
++      if (parents.length !== 1 || parents[0].metadata_request_id !== challenge.observed_request_id) return unknown("parent_request_unverified");
++    }
++    const bodySha = createHash("sha256").update(message.body, "utf8").digest("hex");
++    if (bodySha !== challenge.body_sha256) return unknown("body_changed");
++    if (challenge.complete !== undefined && message.complete !== challenge.complete) return unknown("completion_unverified");
++    tab.sentraMessageObservations ||= new Map();
++    const observationKey = JSON.stringify([observed.document_id, observed.identity_epoch, observed.conversation_id, message.message_id]);
++    if (!tab.sentraMessageObservations.has(observationKey) && tab.sentraMessageObservations.size >= 2048) return unknown("revision_capacity");
++    const signature = JSON.stringify([message.role, message.metadata_request_id, message.parent_id, bodySha, message.complete, message.provider_revision]);
++    const prior = tab.sentraMessageObservations.get(observationKey);
++    if (prior && (prior.role !== message.role || prior.parent !== message.parent_id || prior.request !== message.metadata_request_id)) return unknown("message_binding_changed");
++    if (prior && prior.provider_revision !== null && (message.provider_revision === null || message.provider_revision < prior.provider_revision)) return unknown("provider_revision_regressed");
++    const hostRevision = prior ? prior.revision + (prior.signature !== signature ? 1 : 0) : 1;
++    tab.sentraMessageObservations.set(observationKey, { signature, revision: hostRevision, role: message.role,
++      parent: message.parent_id, request: message.metadata_request_id, provider_revision: message.provider_revision });
++    return { ...base, matched: true, state: "OBSERVED", role: message.role, reason: null,
++      document_id: observed.document_id, identity_epoch: observed.identity_epoch, surface_id: observed.surface_id,
++      conversation_id: observed.conversation_id, message_id: message.message_id, metadata_request_id: message.metadata_request_id,
++      observed_request_id: message.role === "user" ? message.metadata_request_id
++        : observed.messages.find(parent => parent.message_id === message.parent_id && parent.role === "user").metadata_request_id,
++      parent_user_message_id: message.role === "assistant" ? message.parent_id : null, body_sha256: bodySha,
++      body_length: message.body.length, host_revision: hostRevision, revision_source: "host-observation",
++      provider_revision: message.provider_revision, complete: message.complete,
++      approval_state: observed.approval_state, approval_source: observed.approval_source,
++      authentication_revision: authRevision, observed_at: new Date().toISOString() };
++  } catch { return unknown("snapshot_unavailable"); }
++  finally { clearTimeout(timeout); tab.sentraMessageObservationBusy = false; }
++}
++
+@@ -351,0 +714,4 @@ class BrowserHost {
++    this.savedConversations = new SavedConversations(
++      path.join(path.dirname(descriptorPath), "saved-conversations.bin"),
++      profile, partition, safeStorage,
++    );
+@@ -818,0 +1185,3 @@ class BrowserHost {
++        tab.sentraDocument = null;
++        tab.sentraMessageObservations = new Map();
++        this.writeDescriptor();
+@@ -896,0 +1266,20 @@ class BrowserHost {
++  async sentraMessageChallenge(expected) {
++    return sentraMessageChallenge.call(this, expected);
++  }
++
++  async sentraMessageSnapshot(challenge) {
++    return sentraMessageSnapshot.call(this, challenge);
++  }
++
++  async sentraApprovalSnapshot(binding) {
++    return sentraObservedSnapshot.call(this, binding, "approval");
++  }
++
++  async sentraAccountCatalog(binding) {
++    return sentraObservedSnapshot.call(this, binding, "catalog");
++  }
++
++  async sentraIdentitySnapshot(binding) {
++    return sentraIdentitySnapshot.call(this, binding);
++  }
++
+@@ -904,0 +1294,5 @@ class BrowserHost {
++    if (process.env.SENTRA_TURN_AUTHORITY_TOKEN && !tab.sentraDocument) {
++      tab.sentraDocument = { document_id: randomBytes(16).toString("hex"),
++        identity_epoch: randomBytes(16).toString("hex"), surface_id: tab.surfaceId };
++    }
++    const documentIdentity = JSON.stringify(tab.sentraDocument || null);
+@@ -908,0 +1303,5 @@ class BrowserHost {
++      if (${documentIdentity} && !globalThis.__SENTRA_WEB_DOCUMENT__) {
++        Object.defineProperty(globalThis, "__SENTRA_WEB_DOCUMENT__", {
++          value: Object.freeze(${documentIdentity}), configurable: false, writable: false, enumerable: false,
++        });
++      }
+@@ -911,0 +1311 @@ class BrowserHost {
++    this.writeDescriptor();
+@@ -1213,4 +1613,5 @@ class BrowserHost {
+-  async refreshChatGptHomeDocument() {
+-    // A navigation from the idle host already creates a fresh ChatGPT document. Reload only an
+-    // existing Temporary Chat document so the helper observes one authoritative SPA bootstrap.
+-    if (isTemporaryChatUrl(this.view.webContents.getURL())) {
++  async refreshChatGptHomeDocument(useSavedChats = false) {
++    // Verify in the same mode as actual turns. Temporary Chat may not expose account plugins.
++    // Inspection/smoke keep their temporary surface; verification never submits a message.
++    const targetUrl = useSavedChats ? "https://chatgpt.com/" : TEMPORARY_CHAT_URL;
++    if (this.view.webContents.getURL() === targetUrl) {
+@@ -1219 +1620 @@ class BrowserHost {
+-      await this.view.webContents.loadURL(TEMPORARY_CHAT_URL);
++      await this.view.webContents.loadURL(targetUrl);
+@@ -1421,0 +1823 @@ class BrowserHost {
++    this.writeDescriptor();
+@@ -1553 +1955 @@ class BrowserHost {
+-    return this.authView || this.selectedTurnTab()?.view || this.view;
++    return this.sentraSetupView || this.authView || this.selectedTurnTab()?.view || this.view;
+@@ -1650,0 +2053,8 @@ class BrowserHost {
++    if (this.sentraSetupView) {
++      this.sentraSetupView.setBounds(this.bounds);
++      this.sentraSetupView.setVisible(this.window.isVisible() && !this.window.isMinimized());
++      this.presentPrimaryView(false);
++      for (const tab of this.turnTabs.values()) this.presentTurnView(tab, false);
++      this.authView?.setVisible(false);
++      return;
++    }
+@@ -2449,0 +2860,33 @@ class BrowserHost {
++    const saved = this.getUseSavedChats?.() === true
++      ? this.savedConversations?.get(conversationKey, connectorIdentity) : null;
++    if (saved) {
++      const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity, signal);
++      const onAbort = () => {
++        if (this.turnTabs.get(tab.id) === tab) this.removeTurnTab(tab, false);
++      };
++      try {
++        signal?.throwIfAborted();
++        signal?.addEventListener("abort", onAbort, { once: true });
++        await loadCommittedBrowserSurface(tab.view.webContents, saved.url, BROWSER_NAVIGATION_TIMEOUT_MS);
++        signal?.throwIfAborted();
++        await this.markTurnTabSurface(tab);
++        // A restored document must acquire its connector again. The binding in
++        // an old document is never evidence for the new composer.
++        tab.connectorBound = false;
++        tab.lastHeartbeatAt = Date.now();
++        this.selectedTabId = tab.id;
++        if (reveal) this.show();
++        else this.syncViewVisibility();
++        this.publishState?.(this.snapshot());
++        this.writeDescriptor();
++        this.logger.info("browser.saved_conversation_restored", { tabId: tab.id, traceId });
++        return { surfaceId: tab.surfaceId, tabId: tab.id, reused: true, connectorBound: false };
++      } catch (cause) {
++        if (this.turnTabs.get(tab.id) === tab) this.removeTurnTab(tab, false);
++        const error = new Error("The saved ChatGPT conversation could not be reopened", { cause });
++        error.code = "retained_conversation_unavailable";
++        throw error;
++      } finally {
++        signal?.removeEventListener("abort", onAbort);
++      }
++    }
+@@ -2502,0 +2946,3 @@ class BrowserHost {
++      if (this.getUseSavedChats?.() === true) {
++        this.savedConversations.set(tab.conversationKey, tab.connectorIdentity, tab.view.webContents.getURL());
++      }
+@@ -2916 +3362,2 @@ class BrowserHost {
+-    await this.refreshChatGptHomeDocument();
++    const useSavedChats = this.getUseSavedChats?.() === true;
++    await this.refreshChatGptHomeDocument(useSavedChats);
+@@ -2921,0 +3369 @@ class BrowserHost {
++        useSavedChats,
+@@ -3041,0 +3490,18 @@ class BrowserHost {
++      sentraMessageCollector: { id: "sentra-committed-message-v1", sha256: createHash("sha256").update(collectSentraCommittedMessages.toString()).digest("hex") },
++      sentraIdentityCollector: { id: "sentra-committed-account-menu-v1", sha256: createHash("sha256").update(collectSentraUiIdentity.toString()).digest("hex"), verified: false },
++      sentraManaged: Boolean(process.env.SENTRA_TURN_AUTHORITY_TOKEN),
++      sentraIntegrationPatchSha256: process.env.SENTRA_INTEGRATION_PATCH_SHA256 || null,
++      sentraTabs: [...this.turnTabs.values()]
++        .filter(tab => !tab.view.webContents.isDestroyed())
++        .map(tab => ({
++          tabId: tab.id,
++          surfaceId: tab.surfaceId,
++          documentId: tab.sentraDocument?.document_id || null,
++          identityEpoch: tab.sentraDocument?.identity_epoch || null,
++          traceId: tab.traceId,
++          conversationKey: tab.conversationKey || null,
++          helperPid: tab.helperPid,
++          status: tab.status,
++          interactionMode: tab.interactionMode,
++          lastHeartbeatAt: tab.lastHeartbeatAt,
++        })),
+@@ -3100,0 +3567,2 @@ module.exports = {
++  collectSentraCommittedMessages,
++  collectSentraUiIdentity,
+diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
+index 2c9c565..91de72e 100644
+--- a/launcher/electron/control-server.cjs
++++ b/launcher/electron/control-server.cjs
+@@ -41 +41 @@ class BrowserControlServer {
+-  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits }) {
++  constructor({ logger, getBrowserHost, getPreferences, resolveProxy, limits, controlRuntime, configureSentraWeb }) {
+@@ -46,0 +47,2 @@ class BrowserControlServer {
++    this.controlRuntime = controlRuntime;
++    this.configureSentraWeb = configureSentraWeb;
+@@ -102,0 +105,6 @@ class BrowserControlServer {
++    const isSentraMessageChallenge = request.url === "/v1/sentra/message-challenge";
++    const isSentraMessageSnapshot = request.url === "/v1/sentra/message-snapshot";
++    const isSentraIdentitySnapshot = request.url === "/v1/sentra/identity-snapshot";
++    const isSentraApprovalSnapshot = request.url === "/v1/sentra/approval-snapshot";
++    const isSentraAccountCatalog = request.url === "/v1/sentra/account-catalog";
++    const isSentraAccount = request.url === "/v1/sentra/account";
+@@ -104,0 +113 @@ class BrowserControlServer {
++    const isSentraRuntimeControl = Boolean(this.controlRuntime || this.configureSentraWeb) && request.url === "/v1/sentra/runtime-control";
+@@ -113 +122 @@ class BrowserControlServer {
+-    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isProxyResolution && !manualAction)) {
++    if (request.method !== "POST" || (!isTurn && !isTurnRelease && !isSessionInspect && !isSentraIdentitySnapshot && !isSentraApprovalSnapshot && !isSentraAccountCatalog && !isSentraAccount && !isSentraMessageSnapshot && !isSentraMessageChallenge && !isProxyResolution && !isSentraRuntimeControl && !manualAction)) {
+@@ -121,0 +131,41 @@ class BrowserControlServer {
++      if (isSentraRuntimeControl) {
++        const action = body?.action;
++        if (!["drain", "resume", "interrupt-turn", "verify-connector", "setup", "configure-web"].includes(action)) {
++          throw new Error("SENTRA runtime control action is invalid");
++        }
++        if (action === 'configure-web') {
++          if (!this.configureSentraWeb) throw new Error('SENTRA Web configuration is unavailable');
++          await this.configureSentraWeb();
++          writeJson(response, 200, { ok: true, configured: true, nativeProvidersChanged: false });
++          return;
++        }
++        if (action === 'setup') {
++          const result = await require('./sentra-setup-host.cjs').command(this.getBrowserHost(), body);
++          writeJson(response, 200, { ok: true, result });
++          return;
++        }
++        if (action === "verify-connector") {
++          const connectorName = body?.connectorName;
++          if (typeof connectorName !== "string" || !connectorName.trim() || connectorName.length > 80
++            || /[\r\n\0]/.test(connectorName)) {
++            throw new Error("SENTRA connector identity is invalid");
++          }
++          const browserHost = this.getBrowserHost();
++          if (!browserHost) throw new Error("browser host is not ready");
++          await browserHost.verifyConnector(connectorName.trim());
++          writeJson(response, 200, { ok: true, verified: true, connectorName: connectorName.trim() });
++          return;
++        }
++        let payload;
++        if (action === "interrupt-turn") {
++          if (typeof body?.threadId !== "string" || !body.threadId || body.threadId.length > 256
++            || typeof body?.turnId !== "string" || !body.turnId || body.turnId.length > 256) {
++            throw new Error("SENTRA runtime interrupt identity is invalid");
++          }
++          payload = { threadId: body.threadId, turnId: body.turnId };
++        }
++        if (!this.controlRuntime) throw new Error('SENTRA turn runtime control is unavailable');
++        const result = await this.controlRuntime(action, payload);
++        writeJson(response, 200, result);
++        return;
++      }
+@@ -137,0 +188,41 @@ class BrowserControlServer {
++      if (isSentraAccount) {
++        if (!body || Object.keys(body).length !== 1 || !["status", "login"].includes(body.action)) {
++          writeJson(response, 400, { error: "invalid_account_action" });
++          return;
++        }
++        // Account controls never create turns, switch profiles or return cookies.
++        if (body.action === "login") {
++          await host.reveal(false);
++          host.window.show();
++          host.window.focus();
++        }
++        const state = host.snapshot();
++        writeJson(response, 200, {
++          authenticated: state.authenticated === true,
++          status: typeof state.status === "string" ? state.status.slice(0, 40) : "unknown",
++          login_open: state.visible === true && host.window?.isVisible?.() === true,
++          saved_chats: host.getUseSavedChats?.() === true,
++          proves_model_delivery: false,
++        });
++        return;
++      }
++      if (isSentraApprovalSnapshot || isSentraAccountCatalog) {
++        const result = isSentraApprovalSnapshot ? await host.sentraApprovalSnapshot(body) : await host.sentraAccountCatalog(body);
++        writeJson(response, 200, result);
++        return;
++      }
++      if (isSentraMessageChallenge) {
++        const result = await host.sentraMessageChallenge(body);
++        writeJson(response, 200, result);
++        return;
++      }
++      if (isSentraMessageSnapshot) {
++        const result = await host.sentraMessageSnapshot(body);
++        writeJson(response, 200, result);
++        return;
++      }
++      if (isSentraIdentitySnapshot) {
++        const result = await host.sentraIdentitySnapshot(body);
++        writeJson(response, 200, result);
++        return;
++      }
+diff --git a/launcher/electron/main.cjs b/launcher/electron/main.cjs
+index 71b95c2..6f14960 100644
+--- a/launcher/electron/main.cjs
++++ b/launcher/electron/main.cjs
+@@ -49,0 +50 @@ const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
++const SENTRA_BROWSER_HOST_ONLY = process.env.SENTRA_BROWSER_HOST_ONLY?.trim() === "1";
+@@ -62,0 +64 @@ const KEYS_URL = "https://platform.openai.com/settings/organization/api-keys";
++const SENTRA_ONBOARDING_URL = "sentra://onboarding";
+@@ -515,0 +518,25 @@ function syncFreshConversationPreference(stateStore, config) {
++async function sentraDoctor(runtimeHost, { verifyConnector = false } = {}) {
++  const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
++  if (!base) return IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor();
++  const doctorPath = verifyConnector ? "/sentra/doctor?verify_connector=1" : "/sentra/doctor";
++  const response = await fetch(new URL(doctorPath, base), {
++    headers: process.env.SENTRA_TURN_AUTHORITY_TOKEN
++      ? { authorization: `Bearer ${process.env.SENTRA_TURN_AUTHORITY_TOKEN}` }
++      : {},
++    // Local doctor can start a cold service; its subprocess budget is already 60 seconds.
++    signal: AbortSignal.timeout(90_000),
++  });
++  if (!response.ok) throw new Error(`SENTRA doctor returned HTTP ${response.status}`);
++  const report = await response.json();
++  if (!report || typeof report !== "object" || !Array.isArray(report.checks)) {
++    throw new Error("SENTRA doctor returned an invalid report");
++  }
++  return report;
++}
++
++function sentraConnectorName() {
++  const name = process.env.SENTRA_CONNECTOR_NAME || "SENTRA";
++  if (typeof name !== "string" || !name.trim() || name.length > 80) throw new Error("SENTRA connector name is invalid");
++  return name.trim();
++}
++
+@@ -538,0 +566 @@ function registerIpc({ logger, stateStore }) {
++    sentraManaged: Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim()),
+@@ -582,0 +611,7 @@ function registerIpc({ logger, stateStore }) {
++  handle("launcher:open-sentra-onboarding", async () => {
++    if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
++      throw new Error("This launcher is not managed by SENTRA");
++    }
++    await shell.openExternal(SENTRA_ONBOARDING_URL);
++    return true;
++  });
+@@ -660 +695 @@ function registerIpc({ logger, stateStore }) {
+-    const report = IS_DEV_PROFILE ? await runtimeHost.devDoctor() : await runtimeHost.doctor();
++    const report = await sentraDoctor(runtimeHost);
+@@ -684 +719 @@ function registerIpc({ logger, stateStore }) {
+-            message: `Select ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} manually for every Zero Risk turn`,
++            message: `Select ChatGPT connector ${JSON.stringify(sentraConnectorName())} manually for every Zero Risk turn`,
+@@ -691 +726 @@ function registerIpc({ logger, stateStore }) {
+-      await browserHost.verifyConnector(runtimeHost.mcpConnectorName());
++      await browserHost.verifyConnector(sentraConnectorName());
+@@ -704 +739 @@ function registerIpc({ logger, stateStore }) {
+-              message: `ChatGPT connector ${JSON.stringify(runtimeHost.mcpConnectorName())} is available`,
++              message: `ChatGPT connector ${JSON.stringify(sentraConnectorName())} is available`,
+@@ -724 +759 @@ function registerIpc({ logger, stateStore }) {
+-  handle("launcher:doctor", () => IS_DEV_PROFILE ? runtimeHost.devDoctor() : runtimeHost.doctor());
++  handle("launcher:doctor", () => sentraDoctor(runtimeHost, { verifyConnector: true }));
+@@ -819,0 +855,27 @@ function registerIpc({ logger, stateStore }) {
++    if (process.env.SENTRA_WEB_GATEWAY_URL?.trim()) {
++      if (interactionMode !== "automatic") {
++        throw new Error("SENTRA-managed Web Models use the single SENTRA tunnel in Automatic mode");
++      }
++      const report = await sentraDoctor(runtimeHost);
++      if (!report.ok) {
++        const message = report.checks
++          .filter((check) => check.status === "error")
++          .map((check) => check.message)
++          .filter(Boolean)
++          .join("; ") || "SENTRA runtime is not healthy";
++        throw new Error(message);
++      }
++      const state = stateStore.update({
++        browserInteractionMode: "automatic",
++        coreSetupComplete: true,
++        mcpRuntimeInstalled: true,
++        mcpSetupComplete: false,
++        mcpGuideStep: 2,
++        codexRestartRequired: false,
++      });
++      send("launcher:state-changed", state);
++      return {
++        ok: true,
++        stdout: "SENTRA tunnel is authoritative; no secondary Codex Web tunnel runtime was started.",
++      };
++    }
+@@ -919,0 +982,3 @@ function registerIpc({ logger, stateStore }) {
++    if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && mode !== "automatic") {
++      throw new Error("SENTRA-managed Web Models use Automatic mode and the single SENTRA tunnel");
++    }
+@@ -1040,2 +1105,4 @@ async function start() {
+-  let installedRuntimeRoot = null;
+-  let runtimeRootResolved = false;
++  let installedRuntimeRoot = SENTRA_BROWSER_HOST_ONLY && app.isPackaged
++    ? path.join(process.resourcesPath, "runtime")
++    : null;
++  let runtimeRootResolved = Boolean(installedRuntimeRoot);
+@@ -1042,0 +1110,6 @@ async function start() {
++    if (SENTRA_BROWSER_HOST_ONLY && app.isPackaged) {
++      // Browser-host-only mode consumes the signed embedded runtime in place.
++      // It never installs/replaces ~/.codex-chatgpt-web/versions, so a running
++      // SENTRA-managed Bun daemon cannot cause Windows EPERM rename failures.
++      return installedRuntimeRoot;
++    }
+@@ -1066,0 +1140,7 @@ async function start() {
++  if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && stateStore.read().browserInteractionMode !== "automatic") {
++    stateStore.update({
++      browserInteractionMode: "automatic",
++      zeroRiskProEnabled: false,
++      mcpSetupComplete: false,
++    });
++  }
+@@ -1099 +1179,2 @@ async function start() {
+-  const startHidden = process.argv.includes("--hidden") && stateStore.read().onboardingComplete;
++  const startHidden = SENTRA_BROWSER_HOST_ONLY
++    || (process.argv.includes("--hidden") && stateStore.read().onboardingComplete);
+@@ -1112,0 +1194,18 @@ async function start() {
++    configureSentraWeb: async () => {
++      if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim() || !runtimeHost || browserHost.currentOperation()) {
++        throw new Error('SENTRA Web configuration requires an idle managed browser');
++      }
++      await runtimeHost.setupCore();
++      stateStore.update({ coreSetupComplete: true, mcpSetupComplete: true, codexRestartRequired: false });
++    },
++    controlRuntime: process.env.SENTRA_TURN_AUTHORITY_TOKEN
++      ? async (action, body) => {
++          const config = runtimeHost?.runtimeConfigSnapshot().config;
++          if (!runtimeSupervisor || !config) throw new Error("SENTRA runtime control is unavailable");
++          return runtimeSupervisor.control(
++            config,
++            action,
++            body === undefined ? {} : { body },
++          );
++        }
++      : undefined,
+@@ -1182 +1281,5 @@ async function start() {
+-  const trayAvailable = createTray(logger, stateStore.read().language);
++  // Browser-host-only is infrastructure owned by SENTRA; do not add a second
++  // launcher tray icon and never reveal the shell just because tray setup was skipped.
++  const trayAvailable = SENTRA_BROWSER_HOST_ONLY
++    ? true
++    : createTray(logger, stateStore.read().language);
+@@ -1194 +1297 @@ async function start() {
+-  if (!launcherSmokeTest) void updateController.checkOnce();
++  if (!launcherSmokeTest && !SENTRA_BROWSER_HOST_ONLY) void updateController.checkOnce();
+@@ -1233 +1336,8 @@ async function start() {
+-  if (IS_DEV_PROFILE) {
++  if (SENTRA_BROWSER_HOST_ONLY) {
++    await startupAuthenticationRefresh;
++    logger.info("sentra.browser_host_only_ready", {
++      descriptorPath: BROWSER_DESCRIPTOR_PATH,
++      cdpPort,
++      embeddedRuntime: app.isPackaged,
++    });
++  } else if (IS_DEV_PROFILE) {
+@@ -1419,0 +1530,8 @@ void start().catch(async (error) => {
++  if (SENTRA_BROWSER_HOST_ONLY) {
++    // Infrastructure startup fails closed and silent. SENTRA surfaces the
++    // diagnostic without interrupting the desktop with a native modal dialog.
++    try { browserHost?.destroy(); } catch {}
++    try { await browserControl?.close(); } catch {}
++    app.exit(1);
++    return;
++  }
+diff --git a/launcher/electron/sentra-setup-dom.cjs b/launcher/electron/sentra-setup-dom.cjs
+new file mode 100644
+index 0000000..91efea8
+--- /dev/null
++++ b/launcher/electron/sentra-setup-dom.cjs
+@@ -0,0 +1,203 @@
++"use strict";
++module.exports = function(command) {
++  // These functions are inlined from the same reviewed Python enrollment source.
++  const extractTunnels = () => {
++    const items = [location.pathname];
++    const nodes = document.querySelectorAll(
++      'code, pre, [role="row"], [role="dialog"], a[href*="tunnels"], input[readonly]'
++    );
++    for (const el of nodes) {
++      if (!el.getClientRects().length) continue;
++      const content = ('value' in el ? el.value : el.innerText || el.textContent || '');
++      if (typeof content === 'string') items.push(content.slice(0, 5000));
++      if (el instanceof HTMLAnchorElement) items.push(el.getAttribute('href') || '');
++    }
++    // Text nodes keep adjacent code elements from becoming one fake ID.
++    if (document.body) {
++      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
++      let node, length = 0;
++      while ((node = walker.nextNode()) && length < 120000) {
++        if (!node.parentElement?.getClientRects().length) continue;
++        const text = node.textContent || '';
++        items.push(text); length += text.length;
++      }
++    }
++    const match = items.flatMap(text => text.match(
++      /(?<![A-Za-z0-9_-])tunnel_[A-Za-z0-9_-]{8,128}(?![A-Za-z0-9_-])/g
++    ) || []);
++    // Prefer atomic tokens over container text that concatenated two IDs.
++    const atomic = match.filter(token => !token.slice(7).includes('tunnel_'));
++    return [...new Set(atomic)].slice(0, 16);
++};
++const extractKey = () => {
++    const scopes = [...document.querySelectorAll(
++      '[role="dialog"], [aria-modal="true"]'
++    )].filter(node => node.getClientRects().length);
++    const found = [];
++    for (const scope of scopes) {
++      // Some Platform dialogs render the one-time secret in an ordinary
++      // text node instead of an input/code element.
++      const visibleText = scope.innerText || '';
++      found.push(...(visibleText.match(/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,256}(?![A-Za-z0-9_-])/g) || []));
++      for (const node of scope.querySelectorAll('input, textarea, code, pre')) {
++        if (!node.getClientRects().length || node.type === 'hidden') continue;
++        const text = ('value' in node ? node.value : node.innerText || '');
++        if (typeof text !== 'string') continue;
++        const matches = text.match(/(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,256}(?![A-Za-z0-9_-])/g) || [];
++        found.push(...matches);
++      }
++    }
++    return [...new Set(found)].slice(0, 8);
++};
++  const visible = element => Boolean(element.getClientRects().length) &&
++    getComputedStyle(element).visibility !== "hidden" && getComputedStyle(element).display !== "none";
++  const normalized = value => String(value || "").replace(/\s+/g, " ").trim();
++  function matches(value, specification) {
++    if (!specification) return true;
++    if (typeof specification.literal === "string") return normalized(value) === normalized(specification.literal);
++    if (typeof specification.source !== "string" || specification.source.length > 2048 || !/^(?:i)?$/.test(specification.flags)) return false;
++    return new RegExp(specification.source, specification.flags).test(normalized(value));
++  }
++  function role(element) {
++    if (element.hasAttribute("role")) return element.getAttribute("role").split(/\s+/)[0];
++    const tag = element.tagName.toLowerCase();
++    if (tag === "button" || (tag === "input" && /^(button|submit|reset)$/.test(element.type))) return "button";
++    if (tag === "input" && element.type === "radio") return "radio";
++    if (tag === "input" && element.type === "checkbox") return "checkbox";
++    if (tag === "textarea" || (tag === "input" && /^(text|email|search|tel|url|password)$/.test(element.type))) return "textbox";
++    if (tag === "option") return "option";
++    if (tag === "select") return "combobox";
++    if (tag === "dialog") return "dialog";
++    if (tag === "a" && element.hasAttribute("href")) return "link";
++    return "";
++  }
++  function name(element) {
++    const labelled = (element.getAttribute("aria-labelledby") || "").trim().split(/\s+/).filter(Boolean);
++    if (labelled.length) return labelled.map(id => document.getElementById(id)?.textContent || "").join(" ");
++    if (element.hasAttribute("aria-label")) return element.getAttribute("aria-label");
++    if (element.labels?.length) return [...element.labels].map(label => label.textContent || "").join(" ");
++    return element.innerText || element.getAttribute("title") || element.getAttribute("placeholder") || element.value || "";
++  }
++  function locate(steps, scopes = [document], depth = 0) {
++    if (depth > 4) throw Error("bridge_selector_ambiguous");
++    let nodes = scopes;
++    if (!Array.isArray(steps) || steps.length > 16) throw Error("bridge_selector_ambiguous");
++    for (const step of steps) {
++      switch (step.kind) {
++        case "css": {
++          if (typeof step.selector !== "string" || step.selector.length > 2048) throw Error("bridge_selector_ambiguous");
++          const selectors = step.selector.split(",").map(part => part.trim());
++          nodes = nodes.flatMap(scope => selectors.flatMap(selector => {
++            const onlyVisible = selector.includes(":visible");
++            return [...scope.querySelectorAll(selector.replace(/:visible/g, ""))].filter(element => !onlyVisible || visible(element));
++          }));
++          break;
++        }
++        case "role": nodes = nodes.flatMap(scope => [...scope.querySelectorAll("*")].filter(element =>
++          role(element) === step.role && visible(element) && matches(name(element), step.name))); break;
++        case "text": nodes = nodes.flatMap(scope => [...scope.querySelectorAll("*")].filter(element =>
++          visible(element) && matches(element.textContent, step.name) && ![...element.children].some(child =>
++            visible(child) && matches(child.textContent, step.name)))); break;
++        case "nth": nodes = Number.isSafeInteger(step.index) && step.index >= 0 && nodes[step.index] ? [nodes[step.index]] : []; break;
++        case "has": nodes = nodes.filter(scope => locate(step.steps, [scope], depth + 1).length > 0); break;
++        case "visible": nodes = nodes.filter(element => visible(element) === step.value); break;
++        default: throw Error("bridge_selector_ambiguous");
++      }
++      nodes = [...new Set(nodes)];
++      if (nodes.length > 10000) throw Error("bridge_selector_ambiguous");
++    }
++    return nodes;
++  }
++  try {
++    if (location.origin !== "https://chatgpt.com" && (location.origin !== "https://platform.openai.com" ||
++        !/^\/settings\/organization\/(?:tunnels|api-keys)(?:\/|$)/.test(location.pathname))) throw Error("bridge_origin_changed");
++    if (command.operation === "extract") {
++      if (location.origin !== "https://platform.openai.com") throw Error("bridge_origin_changed");
++      if (command.kind === "tunnels" && /^\/settings\/organization\/tunnels(?:\/|$)/.test(location.pathname)) return {ok: true, result: extractTunnels()};
++      if (command.kind === "new_key" && /^\/settings\/organization\/api-keys(?:\/|$)/.test(location.pathname)) return {ok: true, result: extractKey()};
++      throw Error("bridge_origin_changed");
++    }
++    if (command.operation !== "dom" || !new Set(["count", "visible", "enabled", "checked", "attribute", "text", "click", "pointer_click", "fill", "press", "select_label", "select_value", "input_value"]).has(command.action)) {
++      throw Error("bridge_selector_ambiguous");
++    }
++    const nodes = locate(command.steps);
++    if (command.action === "count") return {ok: true, result: nodes.length};
++    if (command.action === "visible") return {ok: true, result: nodes.length === 1 && visible(nodes[0])};
++    if (nodes.length !== 1) throw Error(nodes.length ? "bridge_selector_ambiguous" : "bridge_element_missing");
++    const element = nodes[0];
++    if (!(element instanceof HTMLElement)) throw Error("bridge_selector_ambiguous");
++    const enabled = !element.disabled && element.getAttribute("aria-disabled") !== "true";
++    let result = null;
++    switch (command.action) {
++      case "enabled": result = enabled; break;
++      case "checked": result = element.checked === true || element.getAttribute("aria-checked") === "true"; break;
++      case "input_value":
++        if (location.origin !== "https://chatgpt.com" || /^(password|hidden|file)$/.test(element.type)) throw Error("bridge_element_disabled");
++        result = String(element.value || "").slice(0,2048); break;
++      case "attribute":
++        if (!["id", "aria-checked", ...(location.origin === "https://chatgpt.com" ? ["value"] : [])].includes(command.name)) throw Error("bridge_selector_ambiguous");
++        result = element.getAttribute(command.name); break;
++      case "text": result = (element.innerText || "").slice(0, 5000); break;
++      case "select_value":
++      case "select_label": {
++        if (!(element instanceof HTMLSelectElement) || element.multiple || !enabled || !visible(element) ||
++            (command.action === "select_label" ? typeof command.label !== "string" || !command.label || command.label.length > 500 : typeof command.value !== "string" || command.value.length > 500 || location.origin !== "https://chatgpt.com")) throw Error("bridge_element_disabled");
++        const options = [...element.options].filter(option => command.action === "select_label" ? normalized(option.textContent) === normalized(command.label) : option.value === command.value);
++        if (options.length !== 1) throw Error(options.length ? "bridge_selector_ambiguous" : "bridge_element_missing");
++        const option = options[0];
++        if (option.disabled || option.closest("optgroup[disabled]")) throw Error("bridge_element_disabled");
++        // Use the browser's native value setter so controlled form libraries
++        // receive the same input/change events as a real selection. Option
++        // values stay in the browser; only the chosen visible label returns.
++        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(element, option.value);
++        element.dispatchEvent(new Event("input", {bubbles: true}));
++        element.dispatchEvent(new Event("change", {bubbles: true}));
++        result = normalized(element.selectedOptions[0]?.textContent || ""); break;
++      }
++      case "click":
++        if (!enabled || !visible(element)) throw Error("bridge_element_disabled");
++        element.click(); result = true; break;
++      case "pointer_click": {
++        if (!enabled || !visible(element)) throw Error("bridge_element_disabled");
++        // Custom select triggers/items often handle pointerdown/pointerup,
++        // rather than HTMLElement.click(). Keep this a fixed DOM action;
++        // no scripts, coordinates or option values come from the client.
++        const rect = element.getBoundingClientRect();
++        const common = {bubbles: true, cancelable: true, composed: true,
++          view: window, button: 0, clientX: rect.left + rect.width / 2,
++          clientY: rect.top + rect.height / 2};
++        element.focus({preventScroll: true});
++        const compatible = element.dispatchEvent(new PointerEvent("pointerdown", {
++          ...common, buttons: 1, pointerId: 1, pointerType: "mouse", isPrimary: true}));
++        if (compatible) element.dispatchEvent(new MouseEvent("mousedown", {...common, buttons: 1}));
++        element.dispatchEvent(new PointerEvent("pointerup", {
++          ...common, buttons: 0, pointerId: 1, pointerType: "mouse", isPrimary: true}));
++        if (compatible) element.dispatchEvent(new MouseEvent("mouseup", {...common, buttons: 0}));
++        element.click(); result = true; break;
++      }
++      case "fill": {
++        if (location.origin === "https://chatgpt.com" && element.isContentEditable && visible(element) && typeof command.value === "string" && command.value.length <= 2048) {
++          element.focus(); element.textContent = command.value; element.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: command.value })); result = true; break;
++        }
++        if (!enabled || !visible(element) || element.readOnly || !["INPUT", "TEXTAREA"].includes(element.tagName) ||
++            /^(?:password|hidden|file)$/.test(element.type) || typeof command.value !== "string" || command.value.length > 2048) throw Error("bridge_element_disabled");
++        const prototype = element.tagName === "INPUT" ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype;
++        Object.getOwnPropertyDescriptor(prototype, "value").set.call(element, command.value);
++        element.dispatchEvent(new Event("input", {bubbles: true}));
++        element.dispatchEvent(new Event("change", {bubbles: true})); result = true; break;
++      }
++      case "press":
++        if (command.value !== "Escape") throw Error("bridge_selector_ambiguous");
++        element.dispatchEvent(new KeyboardEvent("keydown", {key: "Escape", code: "Escape", bubbles: true}));
++        element.dispatchEvent(new KeyboardEvent("keyup", {key: "Escape", code: "Escape", bubbles: true})); result = true; break;
++      default: throw Error("bridge_selector_ambiguous");
++    }
++    return {ok: true, result};
++  } catch (error) {
++    const safe = new Set(["bridge_origin_changed", "bridge_selector_ambiguous", "bridge_element_missing", "bridge_element_disabled"]);
++    return {ok: false, error: safe.has(error.message) ? error.message : "browser_dom_needs_attention"};
++  }
++};
++// Firefox clones the completion value of a packaged injection. The assignment
++// above evaluates to a function, which cannot cross that boundary.
++void 0;
+diff --git a/launcher/electron/sentra-setup-host.cjs b/launcher/electron/sentra-setup-host.cjs
+new file mode 100644
+index 0000000..08cb403
+--- /dev/null
++++ b/launcher/electron/sentra-setup-host.cjs
+@@ -0,0 +1,87 @@
++'use strict';
++const { randomBytes } = require('node:crypto');
++const { WebContentsView } = require('electron');
++const dom = require('./sentra-setup-dom.cjs');
++const sessions = new WeakMap();
++function release(host, scope) {
++  if (sessions.get(host) !== scope) return;
++  sessions.delete(host); clearTimeout(scope.timer);
++  host.sentraSetupView = null;
++  host.window.removeListener('closed', scope.onClosed);
++  host.window.removeListener('close', scope.onClosed);
++  if (!host.window.isDestroyed?.()) host.window.contentView.removeChildView(scope.view);
++  if (!scope.view.webContents.isDestroyed()) scope.view.webContents.close();
++  host.manualOperation = null;
++  if (!host.window.isDestroyed?.()) {
++    host.syncViewVisibility();
++    if (!scope.visibleBefore) { host.hide(); host.window.hide(); }
++  }
++}
++function official(url) {
++  try {
++    const value = new URL(url);
++    return value.protocol === 'https:' && !value.username && !value.password && (!value.port || value.port === '443') &&
++      (value.hostname === 'chatgpt.com' || (value.hostname === 'platform.openai.com' &&
++        /^\/settings\/organization\/(tunnels|api-keys)(\/|$)/.test(value.pathname)));
++  } catch { return false; }
++}
++function auth(url) {
++  try {
++    const value = new URL(url);
++    return value.protocol === 'https:' && !value.username && !value.password && (!value.port || value.port === '443') &&
++      ['auth.openai.com', 'auth0.openai.com', 'accounts.google.com', 'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com'].includes(value.hostname);
++  } catch { return false; }
++}
++async function command(host, body) {
++  if (!host || body?.action !== 'setup' || typeof body.operation !== 'string') throw Error('invalid_setup_command');
++  const operation = body.operation;
++  let scope = sessions.get(host);
++  if (operation === 'status') return { ready: true, active: Boolean(scope) };
++  if (operation === 'open') {
++    if (scope) throw Error('setup_already_running');
++    await host.ready();
++    if (host.browserInteractionMode?.() === 'manual') throw Error('setup_requires_automatic_mode');
++    if (host.currentOperation() || [...host.turnTabs.values()].some(tab => tab.status === 'running')) throw Error('browser_busy');
++    const view = new WebContentsView({ webPreferences: { partition: host.partition,
++      contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, backgroundThrottling: false } });
++    scope = { id: randomBytes(24).toString('hex'), view, expires: Date.now() + 1_200_000,
++      visibleBefore: host.window.isVisible() };
++    sessions.set(host, scope);
++    scope.onClosed = () => release(host, scope);
++    host.window.on('closed', scope.onClosed);
++    host.window.on('close', scope.onClosed);
++    scope.timer = setTimeout(() => release(host, scope), 1_200_000);
++    scope.timer.unref?.();
++    host.sentraSetupView = view; host.manualOperation = 'SENTRA account setup';
++    host.window.contentView.addChildView(view);
++    view.webContents.setWindowOpenHandler(({ url }) => {
++      if (official(url) || auth(url)) void view.webContents.loadURL(url).catch(() => {});
++      return { action: 'deny' };
++    });
++    const navigation = (event, url) => { if (!official(url) && !auth(url)) event.preventDefault(); };
++    view.webContents.on('will-navigate', navigation);
++    view.webContents.on('will-redirect', navigation);
++    host.show(); host.window.show(); host.window.focus(); host.syncViewVisibility();
++    return scope.id;
++  }
++  if (!scope || body.tab !== scope.id) throw Error('setup_session_unavailable');
++  if (operation === 'close') { release(host, scope); return true; }
++  if (Date.now() > scope.expires || scope.view.webContents.isDestroyed()) {
++    release(host, scope); throw Error('setup_session_unavailable');
++  }
++  const contents = scope.view.webContents;
++  if (operation === 'closed') return false;
++  if (operation === 'url') return contents.getURL();
++  if (operation === 'navigate') {
++    if (!official(body.url)) throw Error('setup_origin_denied');
++    await contents.loadURL(body.url); return true;
++  }
++  if (!official(contents.getURL())) throw Error('bridge_origin_changed');
++  if (!['dom', 'extract'].includes(operation)) throw Error('invalid_setup_command');
++  const request = { ...body }; delete request.action; delete request.tab;
++  request.action = request.dom_action; delete request.dom_action;
++  const result = await contents.executeJavaScript(`(${dom.toString()})(${JSON.stringify(request)})`, true);
++  if (!result || result.ok !== true) throw Error(result?.error || 'browser_dom_needs_attention');
++  return result.result;
++}
++module.exports = { command, official, auth };
+diff --git a/launcher/tests/sentra-setup-host.test.cjs b/launcher/tests/sentra-setup-host.test.cjs
+new file mode 100644
+index 0000000..4e80652
+--- /dev/null
++++ b/launcher/tests/sentra-setup-host.test.cjs
+@@ -0,0 +1,82 @@
++'use strict';
++const test = require('node:test'), assert = require('node:assert/strict');
++const { EventEmitter } = require('node:events');
++const fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
++function fixture() {
++  const views = [];
++  class View {
++    constructor(options) {
++      this.options = options; views.push(this);
++      this.webContents = new EventEmitter();
++      Object.assign(this.webContents, { url: 'about:blank', destroyed: false,
++        setWindowOpenHandler: handler => { this.popup = handler; },
++        loadURL: async url => { this.webContents.url = url; },
++        getURL: () => this.webContents.url, isDestroyed: () => this.webContents.destroyed,
++        executeJavaScript: async () => ({ ok: true, result: 'fixed-dom-result' }),
++        close: () => { this.webContents.destroyed = true; } });
++    }
++  }
++  const window = new EventEmitter();
++  Object.assign(window, { isVisible: () => false, isDestroyed: () => false,
++    show() {}, focus() {}, hide() {}, contentView: { addChildView() {}, removeChildView() {} } });
++  const host = { partition: 'persist:codex-web-gpt-chatgpt', window, turnTabs: new Map(),
++    ready: async () => {}, currentOperation() { return this.manualOperation; },
++    show() {}, hide() {}, syncViewVisibility() {} };
++  const file = path.join(__dirname, '../electron/sentra-setup-host.cjs');
++  const module = { exports: {} };
++  vm.runInNewContext(fs.readFileSync(file, 'utf8'), { module, exports: module.exports, URL, Date, setTimeout, clearTimeout,
++    require: name => name === 'electron' ? { WebContentsView: View } : name === './sentra-setup-dom.cjs' ? function fixed() {} : require(name) });
++  const call = body => module.exports.command(host, { action: 'setup', ...body });
++  return { host, views, call, ...module.exports };
++}
++test('one owned setup view shares persistent account partition; closing does not log out', async () => {
++  const f = fixture(), tab = await f.call({ operation: 'open' });
++  assert.equal(f.views.length, 1);
++  assert.equal(f.views[0].options.webPreferences.partition, f.host.partition);
++  assert.equal(f.views[0].options.webPreferences.sandbox, true);
++  await assert.rejects(f.call({ operation: 'open' }), /setup_already_running/);
++  await f.call({ operation: 'navigate', tab, url: 'https://platform.openai.com/settings/organization/tunnels' });
++  assert.equal(await f.call({ operation: 'dom', tab, dom_action: 'count', steps: [] }), 'fixed-dom-result');
++  await f.call({ operation: 'close', tab });
++  assert.equal(f.views[0].webContents.destroyed, true);
++  assert.equal(f.host.manualOperation, null);
++  const next = await f.call({ operation: 'open' });
++  assert.notEqual(next, tab);
++  assert.equal(f.views[1].options.webPreferences.partition, f.host.partition);
++  await f.call({ operation: 'close', tab: next });
++});
++test('session and origin guards reject foreign tabs, forged hosts, auth-page DOM and script requests', async () => {
++  const f = fixture(), tab = await f.call({ operation: 'open' });
++  await assert.rejects(f.call({ operation: 'url', tab: 'foreign' }), /setup_session_unavailable/);
++  for (const url of ['http://chatgpt.com', 'https://chatgpt.com.evil', 'https://user@chatgpt.com', 'https://platform.openai.com/settings/organization/billing'])
++    await assert.rejects(f.call({ operation: 'navigate', tab, url }), /setup_origin_denied/);
++  f.views[0].webContents.url = 'https://auth.openai.com/login';
++  await assert.rejects(f.call({ operation: 'dom', tab }), /bridge_origin_changed/);
++  f.views[0].webContents.url = 'https://chatgpt.com/plugins';
++  await assert.rejects(f.call({ operation: 'execute-script', tab, script: 'stealCookies()' }), /invalid_setup_command/);
++  await f.call({ operation: 'close', tab });
++});
++test('setup cannot commandeer a running turn', async () => {
++  const f = fixture(); f.host.turnTabs.set('work', { status: 'running' });
++  await assert.rejects(f.call({ operation: 'open' }), /browser_busy/);
++  assert.equal(f.views.length, 0);
++});
++
++test('private runtime configuration requires the control bearer and confirms native routing unchanged', async () => {
++  const { BrowserControlServer } = require('../electron/control-server.cjs');
++  let configurations = 0;
++  const server = await new BrowserControlServer({ logger: { info() {}, error() {} },
++    getBrowserHost: () => ({}), getPreferences: () => ({}),
++    configureSentraWeb: async () => { configurations++; } }).start();
++  const { endpoint, token } = server.descriptor();
++  const call = auth => fetch(endpoint + '/v1/sentra/runtime-control', { method: 'POST',
++    headers: { authorization: 'Bearer ' + auth, 'content-type': 'application/json' },
++    body: JSON.stringify({ action: 'configure-web' }) });
++  try {
++    assert.equal((await call('wrong')).status, 401); assert.equal(configurations, 0);
++    const response = await call(token);
++    assert.equal(response.status, 200);
++    assert.deepEqual(await response.json(), { ok: true, configured: true, nativeProvidersChanged: false });
++    assert.equal(configurations, 1);
++  } finally { await server.close(); }
++});
+diff --git a/launcher/vite.config.ts b/launcher/vite.config.ts
+index 69481ee..18bc7bd 100644
+--- a/launcher/vite.config.ts
++++ b/launcher/vite.config.ts
+@@ -2,0 +3,2 @@ import react from "@vitejs/plugin-react";
++import { realpathSync } from "node:fs";
++import { fileURLToPath } from "node:url";
+@@ -6 +8 @@ export default defineConfig({
+-  root: ".",
++  root: realpathSync.native(fileURLToPath(new URL(".", import.meta.url))),
+diff --git a/src/cli.ts b/src/cli.ts
+index 006da67..41e11cf 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -18,0 +19 @@ import {
++  installCodexIntegration,
+@@ -84 +85 @@ Setup options:
+-  --temporary-chats            Use Temporary Chat for task conversations (default)
++  --temporary-chats            Use Temporary Chat instead of saved task conversations
+@@ -388,3 +389,37 @@ async function doctorCommand(args: string[]): Promise<void> {
+-async function routeCommand(args: string[]): Promise<void> {
+-  const action = args.shift() ?? "status";
+-  assertNoArgs(args);
++  async function routeCommand(args: string[]): Promise<void> {
++    const action = args.shift() ?? "status";
++    assertNoArgs(args);
++    if (action === "recover-native") {
++      const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
++      const nativeHome = process.env.SENTRA_NATIVE_CODEX_HOME?.trim();
++      if (!base || !nativeHome) throw new Error("SENTRA native route recovery requires its explicit native home");
++      const isolatedHome = process.env.CODEX_HOME;
++      try {
++        process.env.CODEX_HOME = nativeHome;
++        const status = inspectCodexIntegration();
++        if (status.installed && status.active && status.routeUrl === base) {
++          if (status.errors.length) throw new Error("Legacy native route has conflicting edits; review its integration journal before recovery");
++          const result = deactivateCodexIntegration();
++          stdout.write(`${JSON.stringify({ ...result, nativeRouteRestored: true })}\n`);
++        } else {
++          stdout.write(`${JSON.stringify({ changed: false, nativeRouteRestored: false })}\n`);
++        }
++      } finally {
++        if (isolatedHome === undefined) delete process.env.CODEX_HOME;
++        else process.env.CODEX_HOME = isolatedHome;
++      }
++      return;
++    }
++    if (action === "sentra" || (action === "status" && process.env.SENTRA_WEB_GATEWAY_URL?.trim())) {
++      const base = process.env.SENTRA_WEB_GATEWAY_URL?.trim();
++      if (!base) throw new Error("SENTRA_WEB_GATEWAY_URL is required");
++      const health = await fetch(new URL("/healthz", base), { signal: AbortSignal.timeout(5000) });
++      if (!health.ok || (await health.json()).service !== "sentra-model-gateway") {
++        throw new Error("SENTRA Gateway is not healthy");
++      }
++      stdout.write(`${JSON.stringify({ installed: true, active: true, routeUrl: base, scope: "sentra-web-only", gatewayHealthy: true, codexRestartRequired: false }, null, 2)}\n`);
++      return;
++    }
++  if (process.env.SENTRA_WEB_GATEWAY_URL?.trim() && action === "connect") {
++    throw new Error("Native provider routing is not managed by SENTRA; select a SENTRA Web model in SENTRA instead");
++  }
+diff --git a/src/doctor.ts b/src/doctor.ts
+index ddbc062..90b0b67 100644
+--- a/src/doctor.ts
++++ b/src/doctor.ts
+@@ -151,2 +151,4 @@ export async function runDoctor(): Promise<DoctorReport> {
+-  const codex = inspectCodexIntegration();
+-  if (!codex.installed) {
++  const codex = process.env.SENTRA_WEB_GATEWAY_URL?.trim() ? null : inspectCodexIntegration();
++  if (codex === null) {
++    checks.push({ id: "codex", status: "ok", message: "SENTRA Web adapter is isolated; native provider configuration is not required" });
++  } else if (!codex.installed) {
+diff --git a/src/setup.ts b/src/setup.ts
+index 3190324..c10bc9c 100644
+--- a/src/setup.ts
++++ b/src/setup.ts
+@@ -74 +74 @@ export interface SetupResult {
+-  codexRestartRequired: true;
++  codexRestartRequired: boolean;
+@@ -489 +489 @@ export function preflightSetup(options: SetupOptions): void {
+-  preflightCodexIntegration(config, {
++  if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim()) preflightCodexIntegration(config, {
+@@ -496 +496 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
+-  preflightCodexIntegration(config, {
++  if (!process.env.SENTRA_WEB_GATEWAY_URL?.trim()) preflightCodexIntegration(config, {
+@@ -638,3 +638,6 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
+-  installCodexIntegration(config, {
+-    replaceExistingRoute: options.replaceCodexRoute,
+-  });
++  const sentraManaged = Boolean(process.env.SENTRA_WEB_GATEWAY_URL?.trim());
++  if (!sentraManaged) {
++    installCodexIntegration(config, {
++      replaceExistingRoute: options.replaceCodexRoute,
++    });
++  }
+@@ -648 +651 @@ export async function setup(options: SetupOptions): Promise<SetupResult> {
+-    codexRestartRequired: true,
++    codexRestartRequired: !sentraManaged,
+diff --git a/tests/sentra-native-route-isolation.test.ts b/tests/sentra-native-route-isolation.test.ts
+new file mode 100644
+index 0000000..526ba37
+--- /dev/null
++++ b/tests/sentra-native-route-isolation.test.ts
+@@ -0,0 +1,56 @@
++import { test, expect } from "bun:test";
++import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join, resolve } from "node:path";
++
++test("managed route does not rewrite native provider configuration or catalog", async () => {
++  const home = mkdtempSync(join(tmpdir(), "sentra-native-preserved-"));
++  const config = 'model = "gpt-6"\nmodel_provider = "openai"\n# native user settings\n';
++  const server = Bun.serve({ hostname: "127.0.0.1", port: 0,
++    fetch() { return Response.json({ service: "sentra-model-gateway" }); } });
++  try {
++    mkdirSync(home, { recursive: true });
++    writeFileSync(join(home, "config.toml"), config);
++    writeFileSync(join(home, "models_cache.json"), "native cache");
++    for (const action of ["sentra", "status", "connect", "recover-native"]) {
++      const child = Bun.spawn([process.execPath, "run", resolve("src/cli.ts"), "route", action], {
++        env: { ...process.env, CODEX_HOME: home, CODEX_CHATGPT_WEB_HOME: join(home, "web"),
++          SENTRA_NATIVE_CODEX_HOME: home, SENTRA_WEB_GATEWAY_URL: `http://127.0.0.1:${server.port}/v1` },
++        stdout: "pipe", stderr: "pipe",
++      });
++      const output = await new Response(child.stdout).text();
++      await new Response(child.stderr).text();
++      expect(await child.exited).toBe(action === "connect" ? 1 : 0);
++      if (action === "sentra" || action === "status") expect(JSON.parse(output).scope).toBe("sentra-web-only");
++      expect(readFileSync(join(home, "config.toml"), "utf8")).toBe(config);
++      expect(readFileSync(join(home, "models_cache.json"), "utf8")).toBe("native cache");
++    }
++  } finally { server.stop(true); rmSync(home, { recursive: true, force: true }); }
++});
++
++test("legacy SENTRA route restores the journal baseline without touching isolated Web home", async () => {
++  const root = mkdtempSync(join(tmpdir(), "sentra-legacy-recovery-"));
++  const native = join(root, "native"), isolated = join(root, "isolated");
++  const baseline = 'model = "gpt-6"\nmodel_provider = "openai"\n# keep my native settings\n';
++  const base = "http://127.0.0.1:17842/v1";
++  const env = { ...process.env, CODEX_HOME: native, CODEX_CHATGPT_WEB_HOME: join(root, "web"), SENTRA_WEB_GATEWAY_URL: base };
++  async function run(args: string[], environment: NodeJS.ProcessEnv = env) {
++    const child = Bun.spawn([process.execPath, ...args], { env: environment, stdout: "pipe", stderr: "pipe" });
++    const out = await new Response(child.stdout).text();
++    const err = await new Response(child.stderr).text();
++    expect(await child.exited, err).toBe(0);
++    return out;
++  }
++  try {
++    mkdirSync(native); mkdirSync(isolated);
++    writeFileSync(join(native, "config.toml"), baseline);
++    writeFileSync(join(isolated, "config.toml"), "# isolated Web home\n");
++    await run(["-e", 'import {installCodexIntegration} from "./src/codex-integration"; import {defaultConfig} from "./src/config"; installCodexIntegration(defaultConfig("browser-only"), {replaceExistingRoute:true});']);
++    expect(readFileSync(join(native, "config.toml"), "utf8")).toContain(base);
++    const recovered = JSON.parse(await run(["run", "src/cli.ts", "route", "recover-native"],
++      { ...env, CODEX_HOME: isolated, SENTRA_NATIVE_CODEX_HOME: native }));
++    expect(recovered.nativeRouteRestored).toBe(true);
++    expect(readFileSync(join(native, "config.toml"), "utf8")).toBe(baseline);
++    expect(readFileSync(join(isolated, "config.toml"), "utf8")).toBe("# isolated Web home\n");
++  } finally { rmSync(root, { recursive: true, force: true }); }
 +});

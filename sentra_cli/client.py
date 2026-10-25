@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Generator
 from urllib.parse import urlsplit
 from sentra_mcp.errors import sanitize_error
+from sentra_remote.product import ProductPaths
 
 from .config import CLIConfig, SENTRA_ROOT
 
@@ -703,6 +704,7 @@ class ModelClient:
         from .authority_environment import provider_child_environment
         env = provider_child_environment(self.config.state_root, os.environ)
         env["SENTRA_BROWSER_HOST_ONLY"] = "1"
+        env["CODEX_HOME"] = str(Path(self.config.state_root or ProductPaths.default().state_dir).resolve() / "web-models" / "codex-home")
         env["SENTRA_MANAGED_TUNNEL"] = "1"
         env["SENTRA_WEB_GATEWAY_URL"] = self.config.gateway_url
         turn_authority_token = self._turn_authority_token()
@@ -903,6 +905,7 @@ class ModelClient:
         from .authority_environment import provider_child_environment
         env = provider_child_environment(self.config.state_root, os.environ)
         authority_origin = self._gateway_origin()
+        env["CODEX_HOME"] = str(Path(self.config.state_root or ProductPaths.default().state_dir).resolve() / "web-models" / "codex-home")
         env["SENTRA_WEB_GATEWAY_URL"] = authority_origin + "/v1"
         env["SENTRA_TURN_AUTHORITY_URL"] = authority_origin
         env["SENTRA_MANAGED_TUNNEL"] = "1"
@@ -1569,7 +1572,7 @@ class ModelClient:
         tools: list[dict[str, Any]] | None = None,
         model_override: str | None = None,
     ) -> Generator[str, None, None]:
-        """Stream one turn using Web first, then pre-send fallbacks only."""
+        """Route explicit Web selections to SENTRA and native models directly."""
         del tools
         self.last_delivery_state = "not_submitted"
         self.last_error = None
@@ -1608,6 +1611,8 @@ class ModelClient:
             yield "\n" + self.last_error + "\n"
             return
         pre_send_errors: list[str] = []
+        is_web_model = model.startswith(("sentra/chatgpt-web/", "chatgpt-web/",
+                                         "sentra/gemini-web/", "gemini-web/"))
 
         is_chatgpt_web = (
             model.startswith("sentra/chatgpt-web/")
@@ -1638,13 +1643,13 @@ class ModelClient:
                         "chatgpt browser host: " + action
                     )
 
-        if not health["gateway"] and self.config.auto_start_gateway:
+        if is_web_model and not health["gateway"] and self.config.auto_start_gateway:
             status = self.ensure_gateway_ready()
             health["gateway"] = bool(status["turn_ready"])
             health["gateway_reachable"] = bool(status["reachable"])
             health["gateway_status"] = status
 
-        if health["gateway"] and browser_host_ready:
+        if is_web_model and health["gateway"] and browser_host_ready:
             self.active_provider = "gateway"
             self.active_model = model
             try:
@@ -1675,13 +1680,13 @@ class ModelClient:
         )
         if openai_key:
             self.active_provider = "openai"
-            self.active_model = self.config.fallback_model
+            self.active_model = model
             try:
                 yield from self._chat_completions_stream(
                     self.config.openai_base_url,
                     openai_key,
                     messages,
-                    self.config.fallback_model,
+                    model,
                     "openai",
                 )
                 self.last_error = None

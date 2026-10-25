@@ -520,10 +520,10 @@ class CanvasHandler(BaseHTTPRequestHandler):
             value=owner_control(a,p) if route.endswith("control") else gateway_call(a,p)
             self._send(200,{"ok":True,"value":value});return
         if route == "/api/web-models/account":
-            if p != {"action": "login"}:
-                raise ValueError("explicit login action required")
+            if p not in ({"action": "login"}, {"action": "setup", "approved": True}):
+                raise ValueError("explicit account action required")
             from .web_models_account import account_control
-            self._send(200, account_control("login"));return
+            self._send(200, account_control(p["action"]));return
         if route=="/api/shell/bridge":
             try:
                 response=a.shell_bridge(p)

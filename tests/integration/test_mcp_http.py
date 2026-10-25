@@ -34,6 +34,13 @@ def _wait_port(port: int, process: subprocess.Popen[str]) -> None:
 
 
 def test_real_streamable_http_client_on_loopback(tmp_path: Path) -> None:
+    from sentra_remote.connector_proof import ConnectorProof
+    state = tmp_path / ".sentra"
+    state.mkdir()
+    tunnel_id = "tunnel_http_probe123456"
+    (state / "tunnel.json").write_text(json.dumps({"tunnel_id": tunnel_id}), encoding="utf-8")
+    proof = ConnectorProof(state)
+    challenge = proof.begin_setup_probe(tunnel_id)
     (tmp_path / "hello.txt").write_text("http-ok\n", encoding="utf-8")
     run = tmp_path / "runs" / "RUN-HTTP"
     run.mkdir(parents=True)
@@ -61,6 +68,8 @@ def test_real_streamable_http_client_on_loopback(tmp_path: Path) -> None:
         str(audit),
         "--surface",
         "all",
+        "--state-dir",
+        str(state),
     ]
     process = subprocess.Popen(
         command,
@@ -94,6 +103,10 @@ def test_real_streamable_http_client_on_loopback(tmp_path: Path) -> None:
                 health = await client.call_tool("sentra_health", {})
                 assert health.is_error is False
                 assert health.structured_content["data"]["capabilities"]["security"]["http_loopback_only"] is True
+                assert not proof.setup_probe_observed(challenge, tunnel_id)
+                checked = await client.call_tool("sentra_health", {"setup_challenge": challenge})
+                assert checked.is_error is False
+                assert proof.setup_probe_observed(challenge, tunnel_id)
 
                 capability = await client.read_resource("sentra://capabilities")
                 assert "streamable-http" in capability.contents[0].text

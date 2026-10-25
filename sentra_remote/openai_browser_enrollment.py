@@ -134,7 +134,8 @@ class OpenAIConsentBrowser:
     reads cookies or forwards credentials to callbacks.
     """
 
-    def __init__(self, paths: ProductPaths, notify: Notify, *, runtime: Any = None) -> None:
+    def __init__(self, paths: ProductPaths, notify: Notify, *, runtime: Any = None,
+                 browser="sentra", allow_setup_profile=False, tunnel_verified=False) -> None:
         self.paths = paths
         self.notify = notify
         self._commands: queue.Queue[Action] = queue.Queue()
@@ -146,6 +147,20 @@ class OpenAIConsentBrowser:
         self._approved = False
         self._automatic = False
         self.runtime = runtime
+        self.browser = browser
+        self.allow_setup_profile = allow_setup_profile
+        self.tunnel_verified = tunnel_verified
+
+    def _finish_account_setup(self, context, tunnel_id):
+        from .chatgpt_setup import run_chatgpt_connection
+        self._emit("tunnel_ready", "MCP e túnel verificados; falta confirmar a conexão do app no ChatGPT.")
+        result = run_chatgpt_connection(context, self.paths, tunnel_id, self._emit, self._cancelled)
+        if result.get("ok") and hasattr(context, "configure_runtime"):
+            context.close()
+            self._emit("progress", "Configurando o adaptador Web isolado do SENTRA; os modelos oficiais permanecem nos provedores.")
+            context.configure_runtime()
+            (self.paths.state_dir / "web-models-enabled").write_text("enabled\n", encoding="utf-8")
+        self._emit("ready" if result.get("ok") else "attention", result["reason"])
 
     def start(self, *, approved: bool = False, automatic: bool = False) -> None:
         if not approved:
@@ -187,13 +202,29 @@ class OpenAIConsentBrowser:
         try:
             from playwright.sync_api import sync_playwright
 
-            from .enrollment_bridge import EnrollmentBridge
-            with EnrollmentBridge(self.paths) as bridge, sync_playwright() as playwright:
+            from contextlib import ExitStack
+            with ExitStack() as resources:
                 from .browser_enrollment_session import enrollment_context
-                context = enrollment_context(playwright, self.paths.state_dir, self._emit, bridge=bridge)
+                if self.browser == "sentra":
+                    from .managed_enrollment import ManagedEnrollmentContext
+                    context = ManagedEnrollmentContext(self.paths)
+                    self._emit("browser_session", "Usando o Chromium integrado do SENTRA. Login, Platform e ChatGPT compartilham o perfil persistente.")
+                else:
+                    from .enrollment_bridge import EnrollmentBridge
+                    bridge = resources.enter_context(EnrollmentBridge(self.paths))
+                    playwright = resources.enter_context(sync_playwright())
+                    context = enrollment_context(playwright, self.paths.state_dir, self._emit, bridge=bridge,
+                                                 browser=self.browser, allow_setup_profile=self.allow_setup_profile)
                 try:
+                        if self._automatic and self.tunnel_verified:
+                            from .product import load_tunnel_config
+                            self._finish_account_setup(context, load_tunnel_config(self.paths)["tunnel_id"])
+                            return
                         page = context.new_page()
                         page.goto(OPENAI_TUNNELS_URL, wait_until="domcontentloaded", timeout=30000)
+                        if self.browser == "sentra":
+                            from .managed_enrollment import wait_for_platform_login
+                            wait_for_platform_login(page, self._cancelled, self._emit)
                         self._running.set()
                         if self._automatic:
                             from .openai_auto_setup import (AutomaticEnrollment, configure_and_verify,
@@ -223,7 +254,7 @@ class OpenAIConsentBrowser:
                                 secret = ""
                             if result.get("ok"):
                                 clear_remembered_enrollment_tunnel(self.paths, tunnel_id)
-                                self._emit("ready", "SENTRA configured. MCP and the authenticated OpenAI tunnel are verified.")
+                                self._finish_account_setup(context, tunnel_id)
                             else:
                                 self._emit("attention", "tunnel_verification_failed" if result.get("rollback_restored") else "manual_recovery_required")
                             return
@@ -305,6 +336,8 @@ class OpenAIConsentBrowser:
                 "browser_bridge_disconnected", "browser_dom_needs_attention", "browser_bridge_timeout",
                 "project_selection_required", "expiry_selection_required",
                 "saved_tunnel_not_visible",
+                "chatgpt_login_required", "chatgpt_app_selection_required",
+                "managed_runtime_configuration_failed",
             }
             self._emit("attention", (
                 "playwright_or_edge_unavailable"

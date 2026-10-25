@@ -49,6 +49,28 @@ def test_endpoint_representation_never_exposes_bearer_token():
     assert endpoint.secret not in repr(endpoint)
 
 
+def test_cold_start_has_full_readiness_budget_after_lock_wait(tmp_path, monkeypatch):
+    from sentra_canvas import broker
+    from unittest.mock import Mock
+    clock = [0.0]
+    monkeypatch.setattr(broker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(broker.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    lock = Mock()
+    def acquire(_path):
+        clock[0] += .8
+        return lock
+    endpoint = Endpoint(1234, "test-token", "a" * 32, 1234)
+    monkeypatch.setattr(broker, "InstanceLock", acquire)
+    monkeypatch.setattr(broker, "read_endpoint", lambda _state: endpoint if clock[0] >= 1.2 else None)
+    process = Mock(poll=lambda: None)
+    launch = Mock(return_value=process)
+    monkeypatch.setattr(broker, "launch_independent", launch)
+    assert broker.connect_or_start(tmp_path, timeout=1) is endpoint
+    launch.assert_called_once()
+    process.terminate.assert_not_called()
+    lock.close.assert_called_once()
+
+
 def test_frozen_mcp_launcher_selects_canvas_sibling_not_the_mcp_binary(tmp_path,monkeypatch):
     from sentra_canvas.broker import broker_command
     canvas=tmp_path/"sentra-canvas.exe";canvas.write_bytes(b"owned launch fixture")

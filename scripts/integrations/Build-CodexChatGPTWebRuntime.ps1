@@ -225,7 +225,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Root dependency install failed" }
     & $Bun run typecheck
     if ($LASTEXITCODE -ne 0) { throw "Patched upstream typecheck failed" }
-    & $Bun test "tests/gemini-web.test.ts" "tests/gemini-web-adapter.test.ts" "tests/chatgpt-model-selection.test.ts" "tests/chatgpt-web-models.test.ts" "tests/model-catalog.test.ts" "tests/server-models.test.ts" "tests/runtime-layout.test.ts"
+    & $Bun test "tests/gemini-web.test.ts" "tests/gemini-web-adapter.test.ts" "tests/chatgpt-model-selection.test.ts" "tests/chatgpt-web-models.test.ts" "tests/model-catalog.test.ts" "tests/server-models.test.ts" "tests/runtime-layout.test.ts" "tests/sentra-native-route-isolation.test.ts"
     if ($LASTEXITCODE -ne 0) { throw "Patched Gemini Web integration tests failed" }
     # Fresh detached worktrees have no launcher/node_modules yet.
     # Install the pinned Electron dependencies before running launcher tests,
@@ -249,6 +249,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Saved ChatGPT conversation persistence tests failed" }
     & node --test "launcher/tests/sentra-account-control.test.cjs"
     if ($LASTEXITCODE -ne 0) { throw "SENTRA authenticated account controls failed" }
+    & node --test "launcher/tests/sentra-setup-host.test.cjs"
+    if ($LASTEXITCODE -ne 0) { throw "SENTRA managed account setup controls failed" }
     & $Bun run scripts/build-runtime-bundle.ts $Runtime
     if ($LASTEXITCODE -ne 0) { throw "Runtime build failed" }
     Push-Location (Join-Path $Source "launcher")
@@ -259,7 +261,7 @@ try {
         # ancestors. The runner loads the same TS config without that traversal.
         # Store-hosted Windows sessions may redirect LOCALAPPDATA. Rollup sees
         # canonical HTML paths while cwd retains the alias; use one real root.
-        $CanonicalLauncher = (& node -e "process.stdout.write(require('node:fs').realpathSync(process.cwd()))").Trim()
+        $CanonicalLauncher = (& node -e "process.stdout.write(require('node:fs').realpathSync.native(process.cwd()))").Trim()
         if ($LASTEXITCODE -ne 0 -or -not $CanonicalLauncher) { throw "Could not resolve launcher build root" }
         & node "node_modules/vite/bin/vite.js" build $CanonicalLauncher --configLoader runner
         if ($LASTEXITCODE -ne 0) { throw "Electron renderer build failed" }

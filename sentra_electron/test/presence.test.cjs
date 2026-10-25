@@ -42,6 +42,22 @@ function fixture() {
 }
 const sample = () => ({ schema: 1, enabled: true, connected: true, observedAt: Date.now(), projectId: 'p',
   sessions: [{ dotId: 'dot', name: 'Real Dot', tone: 'work', workingValidated: true, conversationId: 'chat' }], events: [], decisions: 1 });
+test('owner destruction during presence load cleans up without reading destroyed BrowserWindow', async () => {
+  const f = fixture(), contents = f.owner.webContents;
+  Object.defineProperty(f.owner, 'webContents', { get() {
+    if (f.owner.isDestroyed()) throw new TypeError('Object has been destroyed');
+    return contents;
+  } });
+  const p = f.installPresenceWindow(f.owner);
+  p.update(sample());
+  assert.doesNotThrow(() => f.owner.destroy());
+  await Promise.resolve();
+  assert.equal(f.windows[1].isDestroyed(), true);
+  assert.equal(contents.listenerCount('did-start-loading'), 0);
+  assert.equal(f.ipcMain.listenerCount('sentra:presence:publish'), 0);
+  assert.doesNotThrow(() => { p.dispose(); p.show(); f.screen.emit('display-added'); });
+  assert.equal(f.windows.length, 2);
+});
 test('bar stays inside negative-coordinate, scaled, tiny and portrait work areas', () => {
   const { islandBounds } = fixture();
   for (const area of [{ x: -1920, y: -200, width: 1920, height: 1040 }, { x: 0, y: 0, width: 800, height: 1280 },

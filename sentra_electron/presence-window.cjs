@@ -33,6 +33,9 @@ function projection(value) {
   };
 }
 function installPresenceWindow(owner, { preview = false, ownerURL = null, onReady, onState, saved = {}, onPreference } = {}) {
+  // Electron's BrowserWindow.webContents getter throws after native destruction.
+  // Keep the emitter we subscribed to, including during the owner's closed event.
+  const ownerContents = owner.webContents;
   let island = null, snapshot = null, expanded = false, hidden = false, disposed = false;
   let displayId = saved.displayId ?? null, visiblePreference = saved.visible !== false;
   let rendererReady = false, pendingAction = null, recoverAt = 0;
@@ -67,7 +70,7 @@ function installPresenceWindow(owner, { preview = false, ownerURL = null, onRead
     if (island && !island.isDestroyed() && snapshot) island.webContents.send('sentra:presence:snapshot', { ...snapshot, preview, expanded });
   }
   function create() {
-    if (disposed || island || Date.now() < recoverAt || !fs.existsSync(file)) return;
+    if (disposed || owner.isDestroyed() || island || Date.now() < recoverAt || !fs.existsSync(file)) return;
     island = new BrowserWindow({ ...bounds(), title: 'SENTRA · Atividade dos Dots', frame: false,
       transparent: true, backgroundColor: '#00000000', show: false, resizable: false,
       maximizable: false, minimizable: false, skipTaskbar: true, alwaysOnTop: true, hasShadow: false,
@@ -76,6 +79,7 @@ function installPresenceWindow(owner, { preview = false, ownerURL = null, onRead
         backgroundThrottling: false, partition: 'sentra-presence-' + require('node:crypto').randomUUID() },
     });
     island.setMenu(null);
+    const created = island;
     island.setAlwaysOnTop(true, 'floating');
     const updateInput = () => {
       if (!island || island.isDestroyed() || !island.isVisible() || !screen.getCursorScreenPoint) return;
@@ -93,10 +97,20 @@ function installPresenceWindow(owner, { preview = false, ownerURL = null, onRead
     ses.webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*', 'ws://*/*', 'wss://*/*'] }, (_request, done) => done({ cancel: true }));
     island.webContents.on('will-navigate', (event, target) => { if (target !== url) event.preventDefault(); });
     island.webContents.on('will-redirect', event => event.preventDefault());
-    island.on('closed', () => { island = null; });
-    island.webContents.on('render-process-gone', () => { recoverAt = Date.now() + 3000; island?.destroy(); report(); });
-    island.once('ready-to-show', () => { send(); if (!hidden && visiblePreference && snapshot?.enabled) island.showInactive(); report(); onReady?.(island); });
-    island.loadFile(file).catch(() => { recoverAt = Date.now() + 3000; island?.destroy(); report(); });
+    created.on('closed', () => { if (island === created) island = null; });
+    const failed = () => {
+      if (disposed || island !== created) return;
+      recoverAt = Date.now() + 3000;
+      if (!created.isDestroyed()) created.destroy();
+      report();
+    };
+    created.webContents.on('render-process-gone', failed);
+    created.once('ready-to-show', () => {
+      if (disposed || island !== created || created.isDestroyed()) return;
+      send(); if (!hidden && visiblePreference && snapshot?.enabled) created.showInactive();
+      report(); onReady?.(created);
+    });
+    created.loadFile(file).catch(failed);
   }
   function update(value) {
     const next = projection(value);
@@ -147,8 +161,9 @@ function installPresenceWindow(owner, { preview = false, ownerURL = null, onRead
     else pendingAction = action;
   }
   const activate = (event, value) => { if (fromIsland(event)) request(value); };
-  const reposition = () => { if (island && !island.isDestroyed()) island.setBounds(bounds(), false); };
+  const reposition = () => { if (!disposed && !owner.isDestroyed() && island && !island.isDestroyed()) island.setBounds(bounds(), false); };
   function show() {
+    if (disposed || owner.isDestroyed()) return;
     hidden = false; visiblePreference = true; preference();
     hit = { width: 288, height: 32 };
     if (snapshot) snapshot = { ...snapshot, enabled: true };
@@ -179,20 +194,24 @@ function installPresenceWindow(owner, { preview = false, ownerURL = null, onRead
   ipcMain.on('sentra:presence:activate', activate);
   ipcMain.on('sentra:presence:toggle', toggle);
   ipcMain.on('sentra:presence:owner-ready', ownerReady);
-  owner.webContents.on('did-start-loading', ownerLoading);
+  ownerContents.on('did-start-loading', ownerLoading);
   screen.on('display-metrics-changed', reposition);
   screen.on('display-removed', reposition);
   screen.on('display-added', reposition);
   owner.on('move', reposition);
   function dispose() {
+    if (disposed) return;
     disposed = true;
     clearInterval(cursorTimer);
     for (const [name, listener] of [['publish', publish], ['ready', ready], ['expand', expand], ['geometry', geometry], ['activate', activate], ['toggle', toggle], ['owner-ready', ownerReady]])
       ipcMain.removeListener('sentra:presence:' + name, listener);
     screen.removeListener('display-metrics-changed', reposition); screen.removeListener('display-removed', reposition);
     screen.removeListener('display-added', reposition);
-    owner.webContents.removeListener('did-start-loading', ownerLoading);
-    owner.removeListener('move', reposition); island?.destroy(); island = null;
+    ownerContents.removeListener('did-start-loading', ownerLoading);
+    owner.removeListener('move', reposition);
+    owner.removeListener('closed', dispose);
+    if (island && !island.isDestroyed()) island.destroy();
+    island = null;
   }
   owner.once('closed', dispose);
   return { update, dispose, show, request, selectDisplay, setOwnerURL(value) {

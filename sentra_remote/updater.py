@@ -310,6 +310,8 @@ def rollback_previous_update(install_dir: Path) -> subprocess.Popen[str]:
     temp_root = Path(tempfile.mkdtemp(prefix="sentra-rollback-helper-"))
     helper = temp_root / "sentra-update-helper.exe"
     shutil.copy2(installed_helper, helper)
+    from .onedir import copy_support
+    copy_support(install_dir, temp_root, "sentra-update-helper.exe")
     return subprocess.Popen(
         [
             str(helper), "rollback",

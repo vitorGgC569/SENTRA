@@ -120,19 +120,22 @@ PRODUCTS = (
 
 def payload_root() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(getattr(sys, "_MEIPASS")) / "payload"
+        embedded = Path(getattr(sys, "_MEIPASS")) / "payload"
+        return embedded if embedded.is_dir() else Path(sys.executable).parent / "payload"
     return Path(__file__).resolve().parents[1] / "dist"
 
 
 def extension_source() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(getattr(sys, "_MEIPASS")) / "edge_extension"
+        embedded = Path(getattr(sys, "_MEIPASS")) / "edge_extension"
+        return embedded if embedded.is_dir() else Path(sys.executable).parent / "edge_extension"
     return Path(__file__).resolve().parents[1] / "edge_extension"
 
 
 def docs_source() -> Path:
     if getattr(sys, "frozen", False):
-        return Path(getattr(sys, "_MEIPASS")) / "docs"
+        embedded = Path(getattr(sys, "_MEIPASS")) / "docs"
+        return embedded if embedded.is_dir() else Path(sys.executable).parent / "docs"
     return Path(__file__).resolve().parents[1] / "docs"
 
 
@@ -260,11 +263,14 @@ def _copy_product_files(install_dir: Path) -> list[str]:
     if not source.is_dir():
         raise FileNotFoundError(f"installer payload missing: {source}")
     install_dir.mkdir(parents=True, exist_ok=True)
+    support_files = []
     for name in PRODUCTS:
         candidate = source / name
         if not candidate.is_file():
             raise FileNotFoundError(f"release payload missing {name}")
         shutil.copy2(_filesystem_path(candidate), _filesystem_path(install_dir / name))
+        from .onedir import copy_support
+        support_files.extend(copy_support(source, install_dir, name))
     ext_source = extension_source()
     if not ext_source.is_dir():
         raise FileNotFoundError("Edge extension payload is missing")
@@ -328,7 +334,9 @@ def _copy_product_files(install_dir: Path) -> list[str]:
 
     if getattr(sys, "frozen", False):
         shutil.copy2(_filesystem_path(Path(sys.executable)), _filesystem_path(install_dir / "sentra-installer.exe"))
-    owned = list(PRODUCTS)
+        from .onedir import copy_support
+        support_files.extend(copy_support(Path(sys.executable).parent, install_dir, "sentra-installer.exe"))
+    owned = list(PRODUCTS) + support_files
     runtime_source = source / 'runtime'
     if runtime_source.is_dir():
         shutil.copytree(_filesystem_path(runtime_source), _filesystem_path(install_dir / 'runtime'), dirs_exist_ok=True)
@@ -725,9 +733,9 @@ def install(**options) -> dict[str, Any]:
             record("Instalação interrompida. Abra o instalador para reparar.", 0, status="failed")
             raise
         result["preflight"] = preflight
-        ready = _installation_ready(result.get("connect_verify") or {})
+        ready = _installation_ready(result.get("connect_verify") or {}, openai_required=not options.get("local_only", False))
         deferred = bool(options.get("offline_handoff"))
-        record("Atualização preparada" if deferred else "Túnel verificado; autorize o plugin no ChatGPT" if ready else "Conexão obrigatória precisa de atenção",
+        record("Atualização preparada" if deferred else "SENTRA instalado; contas Web podem ser conectadas no aplicativo" if options.get("local_only") and ready else "Túnel verificado; autorize o plugin no ChatGPT" if ready else "A configuração precisa de atenção",
                95 if ready else 85, status="deferred" if deferred else "account_authorization_pending" if ready else "needs_attention")
         return result
 
@@ -751,6 +759,7 @@ def _install_product(
     stop_after_doctor: bool = False,
     progress: ProgressCallback | None = None,
     offline_handoff: Path | None = None,
+    local_only: bool = False,
 ) -> dict[str, Any]:
     install_dir = install_dir.expanduser().resolve()
     paths = (
@@ -800,7 +809,8 @@ def _install_product(
     _write_install_marker(install_dir)
     owned_files = _copy_product_files(install_dir) or []
     result["install_marker"] = str(_write_install_marker(install_dir, owned_files))
-    result["web_models"] = _enable_web_models_autostart(paths, install_dir)
+    result["web_models"] = ({"deferred": "account_setup_in_sentra"} if local_only
+                            else _enable_web_models_autostart(paths, install_dir))
     notify("Installing secure tunnel client", 45)
     result["tunnel_client"] = download_tunnel_client(install_dir, tunnel_archive)
     tunnel_license_dir = install_dir / "licenses" / "tunnel-client"
@@ -879,7 +889,7 @@ def _install_product(
         verification = {'started': {}, 'status': {}, 'next_url': None,
                         'deferred': 'post_update_restart', 'external_completion_claimed': False}
     result["startup"] = verification["started"]
-    verification['web_models_required'] = True
+    verification['web_models_required'] = not local_only
     if register_system and offline_handoff is None:
         notify("Registrando o plugin SENTRA no Codex…", 90)
         verification["codex_plugin"] = configure_codex(paths.state_dir, settings.mcp_port,
@@ -900,10 +910,10 @@ def _install_product(
     result["chatgpt_plugin"] = chatgpt_plugin_install_plan(
         verification.get("status") or {}, tunnel_id=tunnel_id,
     )
-    ready = _installation_ready(verification)
-    result["tunnel_required"] = True
+    ready = _installation_ready(verification, openai_required=not local_only)
+    result["tunnel_required"] = not local_only
     result["external_completion_claimed"] = False
-    notify("Túnel verificado; autorize o plugin no ChatGPT" if ready else "Conexão obrigatória precisa de atenção", 95 if ready else 85)
+    notify("SENTRA instalado; conexão Web opcional" if local_only and ready else "Túnel verificado; autorize o plugin no ChatGPT" if ready else "A configuração precisa de atenção", 95 if ready else 85)
 
     if stop_after_doctor and runtime is not None:
         runtime.stop_all()
@@ -1097,6 +1107,8 @@ def uninstall(
         temp_root = Path(tempfile.mkdtemp(prefix="sentra-uninstall-"))
         external_helper = temp_root / "sentra-update-helper.exe"
         shutil.copy2(helper, external_helper)
+        from .onedir import copy_support
+        copy_support(helper.parent, temp_root, "sentra-update-helper.exe")
         subprocess.Popen(
             [
                 str(external_helper),
@@ -1344,17 +1356,8 @@ class InstallerWizard:
                     self.root.after(0, lambda: self.runtime_key.set(""))
                     self.root.after(0, lambda: self.tunnel_id.set(""))
                     verification = result["connect_verify"]
-                    install_dir = selected["install_dir"].expanduser().resolve()
-                    control = install_dir / "sentra-desktop.exe"
-                    if control.is_file() and _display_ready(verification):
-                        ready = _installation_ready(verification, openai_required=True)
-                        command = [str(control), "--hidden"] if ready else [
-                            str(control), "--open-url", str(verification.get("next_url") or "sentra://onboarding")
-                        ]
-                        subprocess.Popen(
-                            command,
-                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                        )
+                    # Setup remains the owner of account onboarding. Do not
+                    # launch a second Quick Start window on a partial result.
                 else:
                     result = install(
                         **selected,
@@ -1384,16 +1387,17 @@ class InstallerWizard:
                         if _installation_ready(verification):
                             self._show_tunnel_verified(verification)
                             return
-                        self.status.set("Etapa 2 de 3 — configure o túnel obrigatório para GPT6-WEB.")
+                        self.status.set("SENTRA instalado. Configure a conexão Web se desejar.")
                         self.progress_value.set(85)
                         if browser_setup and enroll:
                             self._start_browser_setup()
                             return
                         else:
                             self.connect_hint.configure(
-                                text="Conecte o túnel e entre nos modelos WEB em Abrir Web Models. Depois, verifique novamente. "
-                                     + str((verification.get("codex_plugin") or {}).get("reason") or "")
+                                text="O uso local e os modelos oficiais não dependem desta conexão. Você pode conectar os modelos Web mais tarde."
                             )
+                            self.install_button.configure(state="normal", text="Abrir SENTRA", command=self._open_main_app)
+                            return
                         self.install_button.configure(
                             state="normal", text="Verificar conexão  →",
                             command=lambda: self._install(require_openai=False, verify_only=True, enroll=False),
@@ -1461,11 +1465,20 @@ class InstallerWizard:
             return
         self._browser_setup_running = True
         install_dir = Path(self.install_dir.get()).expanduser().resolve()
+        browser_options = {}
+        if hasattr(self, "browser_choice"):
+            browser = self.browser_choices[self.browser_choice.get()]
+            browser_options = {"browser": browser, "allow_setup_profile": browser in {"edge", "chrome"}}
         self.install_button.configure(state="disabled")
         self.status.set("Configurando a conexão pelo navegador neste Setup…")
         self.connect_hint.configure(text="Usando uma conexão DOM disponível. Conclua login ou consentimento no navegador se solicitado.")
 
         def notify(event: str, message: str) -> None:
+            if event == "verification_prompt":
+                def show_test():
+                    self.connection_test_prompt = message
+                    self.copy_connection_test.pack(anchor="w", pady=(8, 0))
+                self.root.after(0, show_test)
             if event in {"browser_session", "opened", "progress", "workspace_required"}:
                 def update_hint(text: str = message) -> None:
                     self.connect_hint.configure(text=text)
@@ -1473,13 +1486,14 @@ class InstallerWizard:
 
         def worker() -> None:
             try:
-                result = run_setup_enrollment(ProductPaths.default(install_dir), notify)
+                result = run_setup_enrollment(ProductPaths.default(install_dir), notify, **browser_options)
             except Exception:
                 result = {"ok": False, "reason": "browser_enrollment_needs_attention"}
 
             def finished() -> None:
                 self._browser_setup_running = False
                 if result.get("ok"):
+                    self._account_roundtrip_verified = result.get("mcp_roundtrip_verified") is True
                     self._install(require_openai=False, verify_only=True, enroll=False)
                     return
                 messages = {
@@ -1492,11 +1506,14 @@ class InstallerWizard:
                     "login_required": "Entre na conta Platform no navegador para continuar a configuração.",
                     "chatgpt_workspace_required": "Selecione o workspace ChatGPT desejado no formulário do navegador.",
                     "workspace_association_unverified": "O provedor não confirmou a associação do workspace. Verifique essa etapa na Platform.",
+                    "chatgpt_browser_required": "MCP e túnel verificados. Para concluir o app no ChatGPT, selecione Edge ou Chrome; a ponte Firefox atual só permite configurar a Platform.",
+                    "chatgpt_call_pending": "MCP e túnel configurados. Conclua a instalação/autorização do app SENTRA no ChatGPT e use Copiar teste de conexão para verificar a chamada real.",
+                    "chatgpt_setup_cancelled": "A etapa ChatGPT foi interrompida. O túnel foi preservado; tente novamente para continuar sem criar outra chave.",
                 }
                 self.status.set("A configuração automática precisa de atenção.")
                 self.connect_hint.configure(text=messages.get(result.get("reason"), "Verifique a etapa indicada no navegador e tente novamente pelo Setup."))
                 self.install_button.configure(state="normal", text="Tentar configuração novamente  →", command=self._start_browser_setup)
-                if result.get("reason") == "browser_extension_required":
+                if result.get("reason") == "browser_extension_required" and browser_options.get("browser", "auto") in {"auto", "firefox"}:
                     from .enrollment_extension import installed_firefox_package
                     try:
                         installed_firefox_package(install_dir)
@@ -1526,6 +1543,12 @@ class InstallerWizard:
 
     def _show_tunnel_verified(self, verification: dict) -> None:
         self._connection_deadline = 0
+        if getattr(self, "_account_roundtrip_verified", False):
+            self.progress_value.set(100)
+            self.status.set("Conexão verificada — o ChatGPT chamou o MCP desta instalação.")
+            self.connect_hint.configure(text="MCP, túnel e teste de ida e volta verificados. Modelos oficiais preservam suas configurações.")
+            self.install_button.configure(state="normal", text="Abrir SENTRA", command=self._open_main_app)
+            return
         self.progress_value.set(95)
         self.status.set("Etapa 3 de 3 — túnel verificado; autorização no ChatGPT pendente.")
         self.connect_hint.configure(text="O plugin local foi verificado. No ChatGPT, conecte o túnel SENTRA, "
@@ -1552,9 +1575,11 @@ class InstallerWizard:
         self._connection_timer = self.root.after(10000, check)
 
     def _open_chatgpt_plugin(self) -> None:
-        desktop = Path(self.install_dir.get()).expanduser().resolve() / "sentra-desktop.exe"
-        subprocess.Popen([str(desktop), "--open-url", "sentra://chatgpt-plugin"],
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        self._start_browser_setup()
+
+    def _open_main_app(self) -> None:
+        launcher = Path(self.install_dir.get()).expanduser().resolve() / "sentra-launcher.exe"
+        subprocess.Popen([str(launcher)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
     def _open_web_models(self) -> None:
         from tkinter import messagebox
@@ -1594,7 +1619,8 @@ def _write_setup_report(path: Path, operation: str, result: dict[str, Any], code
     if browser_reason not in {"credential_protection_unavailable", "manual_recovery_required",
                               "browser_extension_required", "browser_account_selection_required", "browser_enrollment_already_running",
                               "browser_enrollment_needs_attention", "browser_enrollment_incomplete",
-                              "browser_enrollment_timeout", "tunnel_verified"}:
+                              "browser_enrollment_timeout", "tunnel_verified", "mcp_roundtrip_verified",
+                              "chatgpt_browser_required", "chatgpt_call_pending", "chatgpt_setup_cancelled"}:
         browser_reason = None
     report = {
         "schema": 1, "version": PRODUCT_VERSION, "operation": operation,
@@ -1605,7 +1631,7 @@ def _write_setup_report(path: Path, operation: str, result: dict[str, Any], code
         "preflight_failure": ("credential_protection_unavailable"
                               if result.get("reason") == "credential_protection_unavailable" else None),
         "local_ready": verification.get("core_ready") is True,
-        "ready": code == 0 and operation == "install" and _installation_ready(verification),
+        "ready": code == 0 and operation == "install" and _installation_ready(verification, openai_required=result.get("tunnel_required", True)),
         "verification_deferred": verification.get("deferred") == "post_update_restart",
         "browser_enrollment": {"attempted": "browser_automation" in result,
                                "ok": browser.get("ok") is True, "reason": browser_reason},
@@ -1619,6 +1645,7 @@ def _write_setup_report(path: Path, operation: str, result: dict[str, Any], code
             for name in ("payload_complete", "ready", "catalog_ready", "turn_ready")
         },
         "account_authorization_verified": False,
+        "mcp_roundtrip_verified": browser.get("mcp_roundtrip_verified") is True,
         "homologated": False,
     }
     target = Path(_filesystem_path(path))
@@ -1639,6 +1666,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="sentra-installer")
     parser.add_argument("--uninstall", action="store_true")
     parser.add_argument("--keep-config", action="store_true")
+    parser.add_argument("--local-only", action="store_true", help="Install local services; configure Web accounts later inside SENTRA.")
     parser.add_argument("--install-dir", default=str(ProductPaths.default().install_dir))
     parser.add_argument("--state-dir")
     parser.add_argument("--workspace")
@@ -1688,6 +1716,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("browser enrollment requires an online installation")
     if args.report_file and not (args.check or args.silent):
         parser.error("--report-file requires --check or --silent")
+    if args.silent and args.local_only and not args.report_file:
+        report_root = Path(args.state_dir) if args.state_dir else ProductPaths.default(Path(args.install_dir)).state_dir
+        args.report_file = str(report_root / "installer-last-run.json")
 
     def finish(operation: str, result: dict[str, Any], code: int) -> int:
         if args.report_file:
@@ -1734,6 +1765,7 @@ def main(argv: list[str] | None = None) -> int:
             relay_port=args.relay_port,
             stop_after_doctor=args.stop_after_doctor,
             offline_handoff=args.offline_handoff,
+            local_only=args.local_only,
         )
     except Exception as exc:
         from sentra_mcp.errors import sanitize_error
@@ -1777,7 +1809,7 @@ def main(argv: list[str] | None = None) -> int:
     verification = result.get("connect_verify") or {}
     if args.offline_handoff and verification.get("deferred") == "post_update_restart":
         return finish("install", result, 0)  # The authenticated update helper verifies after restart.
-    return finish("install", result, 0 if _installation_ready(verification) else 2)
+    return finish("install", result, 0 if _installation_ready(verification, openai_required=not args.local_only) else 2)
 
 
 
