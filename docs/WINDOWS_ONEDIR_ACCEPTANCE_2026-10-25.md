@@ -2,7 +2,7 @@
 
 The unsigned PyInstaller `onedir` + Inno Setup 7.1.0 candidate passed local
 installation, same-version repair and rejection of an unowned destination.
-It has not been published. The developer's installed SENTRA, account profiles
+It is published as an unsigned prerelease. The developer's installed SENTRA, account profiles
 and provider configuration were not replaced.
 
 Machine-readable evidence:
@@ -80,3 +80,26 @@ behaviors were subsequently measured using the complete native Setup above.
 
 Code signing remains absent as agreed for this preview. Existing automatic
 update signature/admission gates were retained.
+
+
+## Preview publication and subsequent checks
+
+[Windows Setup 1.0.3](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261025-1)
+was published with three installer parts and six metadata/helper/evidence files.
+All nine GitHub asset sizes and SHA-256 digests matched the reviewed local plan.
+Independent streamed concatenation matched the complete Setup hash. This does
+not qualify a stable release, MSI or signed automatic update.
+
+The later owner-attended account trial recognized Platform login, but automatic
+tunnel selection reported multiple visible identifiers. An exact named test
+tunnel was reconciled by read-only observation and reused. No verified MCP
+roundtrip or model response is claimed by this record. A test-harness-only
+USERPROFILE override initially prevented Electron resolving AppData; it was
+removed, without changing the packaged application or Windows profile settings.
+
+An Android 35 x86_64 emulator booted with WHPX, without changing Windows optional
+features. The published ARM64 APK installed but could not load its ARM64 React
+Native library on that x86_64 runtime. An unpublished x86_64 QA build was
+dispatched; this is not evidence of phone pairing or a replacement public APK.
+Hyper-V management is denied to the current session and no Windows installation
+image was available. iOS Simulator requires macOS/Xcode.

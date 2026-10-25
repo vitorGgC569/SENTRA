@@ -39,5 +39,15 @@
   "trusted_authenticode_claimed": false,
   "installed_user_product_modified": false,
   "system_registration_enabled": false,
-  "published": false
+  "published": true,
+  "publication": {
+    "tag": "installer-preview-20261025-1",
+    "release_url": "https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261025-1",
+    "prerelease": true,
+    "published_at": "2026-10-25T04:12:37Z",
+    "asset_count": 9,
+    "asset_digests_verified": true,
+    "msi_published": false,
+    "automatic_update_zip_published": false
+  }
 }

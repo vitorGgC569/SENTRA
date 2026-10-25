@@ -25,9 +25,11 @@ metadata have been published. iPhone installation remains unavailable until an
 Apple distribution channel is configured. Physical-device qualification is a
 separate milestone from producing a build.
 
-Latest platform previews: [Windows Setup 1.0.2](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261024-1) and
-[Android v8](https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261024-8), both built from source `62d61fa`.
-The Windows Setup is unsigned; the Android APK uses the preserved preview key.
+Latest platform previews: [Windows Setup 1.0.3](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261025-1) and
+[Android v8](https://github.com/vitorGgC569/SENTRA/releases/tag/mobile-preview-20261024-8).
+The Windows Setup uses onedir + Inno Setup and is unsigned; the Android APK uses
+the preserved preview key. Builds have independent source identities; see the
+[Windows acceptance and build origins](docs/WINDOWS_ONEDIR_ACCEPTANCE_2026-10-25.md).
 
 ## SENTRA Desktop
 
