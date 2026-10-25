@@ -29,7 +29,25 @@ def one_visible(locator):
     return visible if visible.count() == 1 else None
 
 
-def prepare_app_form(page, tunnel_id: str, *, actions: set | None = None) -> bool:
+def prepare_tunnel_auth(dialog):
+    # The official tunnel authenticates access; this local MCP endpoint does
+    # not implement a second OAuth server. Only select its explicit None option.
+    candidates = []
+    selectors = dialog.locator("select")
+    for index in range(selectors.count()):
+        selector = selectors.nth(index)
+        options = selector.locator("option")
+        labels = [options.nth(i).inner_text().strip() for i in range(options.count())]
+        matches = [label for label in labels if re.fullmatch(r"(?:None|No authentication|Sem autenticação)", label, re.I)]
+        if len(matches) == 1:
+            candidates.append((selector, matches[0]))
+    if len(candidates) != 1:
+        return False
+    candidates[0][0].select_option(label=candidates[0][1], timeout=3000)
+    return True
+
+
+def prepare_app_form(page, tunnel_id: str, *, actions: set | None = None, app_name: str = "SENTRA") -> bool:
     """Fill an exact app form; ambiguous UI and all consent stay with the user."""
     if not trusted_chatgpt(page.url):
         raise ValueError("chatgpt_login_required")
@@ -40,10 +58,13 @@ def prepare_app_form(page, tunnel_id: str, *, actions: set | None = None) -> boo
     if field is None:
         return False
     current = field.input_value()
-    if current not in ("", "SENTRA"):
+    if current not in ("", app_name):
         raise ValueError("chatgpt_app_selection_required")
     if not current:
-        field.fill("SENTRA", timeout=3000)
+        field.fill(app_name, timeout=3000)
+        if actions is not None:
+            actions.add("new_app")
+    new_app = not current or (actions is not None and "new_app" in actions)
     selector = one_visible(dialog.get_by_role("combobox", name=re.compile(r"tunnel|túnel", re.I)))
     if selector is None:
         # Current ChatGPT uses a free-text tunnel ID, alongside suggestions
@@ -56,7 +77,7 @@ def prepare_app_form(page, tunnel_id: str, *, actions: set | None = None) -> boo
                 raise ValueError("chatgpt_app_selection_required")
             if not current_tunnel:
                 tunnel_field.fill(tunnel_id, timeout=3000)
-            return True
+            return prepare_tunnel_auth(dialog) if new_app else True
         tunnel_button = one_visible(dialog.get_by_role("button", name=re.compile(r"^(?:Tunnel|Túnel)$", re.I)))
         if tunnel_button is not None and (actions is None or "tunnel" not in actions):
             if actions is not None:
@@ -68,14 +89,14 @@ def prepare_app_form(page, tunnel_id: str, *, actions: set | None = None) -> boo
     values = [options.nth(i).get_attribute("value") for i in range(options.count())]
     if values.count(tunnel_id) == 1:
         selector.select_option(value=tunnel_id, timeout=3000)
-        return True
+        return prepare_tunnel_auth(dialog) if new_app else True
     matches = [label for label in labels if tunnel_id in label.split() or label == tunnel_id]
     if len(matches) != 1:
         return False
     selector.select_option(label=matches[0], timeout=3000)
     # Creating/authorizing an app may include account-specific policy, OAuth and
     # safety acknowledgements. Never click generic Accept/Allow/Create here.
-    return True
+    return prepare_tunnel_auth(dialog) if new_app else True
 
 
 def prepare_connection_message(page, prompt: str, *, app_name: str = "SENTRA"):
@@ -87,6 +108,14 @@ def prepare_connection_message(page, prompt: str, *, app_name: str = "SENTRA"):
     """
     if not trusted_chatgpt(page.url):
         return None
+    from .managed_enrollment import ManagedPage
+    if isinstance(page, ManagedPage):
+        match = re.fullmatch(r'Use apenas o app ' + re.escape(app_name) +
+            r' para chamar sentra_health com setup_challenge="([a-f0-9]{48})"\. Não execute comandos nem altere arquivos\.', prompt)
+        if match is None or not page.prepare_probe(app_name, match[1]):
+            return None
+        send = one_visible(page.get_by_role("button", name=re.compile(r"^(?:Send message|Send|Enviar mensagem|Enviar)$", re.I)))
+        return send if send is not None and send.is_enabled() else None
     composer = one_visible(page.locator("#prompt-textarea"))
     if composer is None:
         composer = one_visible(page.get_by_role("textbox").filter(
@@ -123,7 +152,7 @@ def prepare_connection_message(page, prompt: str, *, app_name: str = "SENTRA"):
     return send if send is not None and send.is_enabled() else None
 
 
-def run_chatgpt_connection(context, paths, tunnel_id, notify, cancelled, *, timeout_s=600):
+def run_chatgpt_connection(context, paths, tunnel_id, notify, cancelled, *, timeout_s=600, app_name="SENTRA"):
     from .enrollment_bridge import ExtensionEnrollmentContext
     if isinstance(context, ExtensionEnrollmentContext):
         # The shipped signed extension is Platform-only. Its permissions cannot
@@ -134,7 +163,9 @@ def run_chatgpt_connection(context, paths, tunnel_id, notify, cancelled, *, time
     page = context.new_page()
     notify("progress", "Túnel e MCP verificados. Conecte o app SENTRA no ChatGPT; confirme login e autorização nesta janela.")
     page.goto(CHATGPT_APPS_URL, wait_until="domcontentloaded", timeout=30000)
-    prompt = ('Use apenas o app SENTRA para chamar sentra_health com setup_challenge="' + challenge + '". '
+    if not re.fullmatch(r'SENTRA(?: [\w .-]{1,70})?', app_name):
+        raise ValueError("chatgpt_app_selection_required")
+    prompt = ('Use apenas o app ' + app_name + ' para chamar sentra_health com setup_challenge="' + challenge + '". '
               'Não execute comandos nem altere arquivos.')
     notify("verification_prompt", prompt)
     deadline = time.monotonic() + timeout_s
@@ -142,6 +173,9 @@ def run_chatgpt_connection(context, paths, tunnel_id, notify, cancelled, *, time
     navigation_clicked = set()
     form_actions = set()
     probe_attempted = False
+    existing_app = False
+    existing_checked = False
+    test_chat_opened = False
     while time.monotonic() < deadline:
         if cancelled.is_set() or page.is_closed():
             return {"ok": False, "reason": "chatgpt_setup_cancelled", "tunnel_verified": True}
@@ -150,21 +184,49 @@ def run_chatgpt_connection(context, paths, tunnel_id, notify, cancelled, *, time
             notify("progress", "Conclua o login e retorne à página de apps do ChatGPT para continuar.")
             page.wait_for_timeout(1000)
             continue
-        if not form_prepared and prepare_app_form(page, tunnel_id, actions=form_actions):
-            form_prepared = True
-            notify("progress", "Nome e túnel preenchidos. Revise a autenticação e confirme a criação/instalação do app no ChatGPT.")
-        # A real user-authorized call, carrying this run's one-time challenge,
-        # is required. Never approve an account dialog or replay a test turn.
         if proof.setup_probe_observed(challenge, tunnel_id):
             return {"ok": True, "reason": "mcp_roundtrip_verified", "tunnel_verified": True,
                     "mcp_roundtrip_verified": True}
+        if not existing_checked:
+            # Reuse is proven by this run's fresh challenge, never by a matching
+            # display name alone. Never edit/reinstall an existing account app.
+            installed = one_visible(page.locator("main").get_by_role("link", name=re.compile("^" + re.escape(app_name) + "$")))
+            add = one_visible(page.get_by_role("button", name=re.compile(r"^(?:Add|Adicionar|\+)$", re.I)))
+            if installed is not None:
+                existing_checked = existing_app = True
+                installed.click(timeout=3000)
+                notify("progress", "Encontrei o app instalado. Verificando a conexão deste computador sem recriá-lo.")
+                continue
+            if add is not None or one_visible(page.get_by_role("dialog")) is not None:
+                existing_checked = True
+            else:
+                page.wait_for_timeout(500)
+                continue
+        if not existing_app and not form_prepared and prepare_app_form(page, tunnel_id, actions=form_actions,
+                **({"app_name": app_name} if app_name != "SENTRA" else {})):
+            form_prepared = True
+            notify("progress", "Nome e túnel preenchidos. Revise a autenticação e confirme a criação/instalação do app no ChatGPT.")
+        if form_prepared and not existing_app:
+            installed = one_visible(page.locator("main").get_by_role("link", name=re.compile("^" + re.escape(app_name) + "$")))
+            if installed is not None:
+                existing_app = True
+                installed.click(timeout=3000)
+                continue
+        # A real user-authorized call, carrying this run's one-time challenge,
+        # is required. Never approve an account dialog or replay a test turn.
+        if not test_chat_opened:
+            test = one_visible(page.get_by_role("button", name=re.compile(r"^(?:Test in chat|Try in chat|Testar no chat)$", re.I)))
+            if test is not None:
+                test_chat_opened = True
+                test.click(timeout=3000)
+                continue
         if not probe_attempted:
-            send = prepare_connection_message(page, prompt)
+            send = prepare_connection_message(page, prompt, app_name=app_name)
             if send is not None:
                 probe_attempted = True
                 notify("progress", "Enviando um teste somente de leitura pelo app SENTRA. Se o ChatGPT pedir aprovação, confirme na conta.")
                 send.click(timeout=3000)
-        if not form_prepared:
+        if not existing_app and not form_prepared:
             for name in (r"^(?:Add|Adicionar|\+)$", r"^(?:Create MCP App|Create custom MCP server|Add custom MCP server|Criar app MCP|Adicionar servidor MCP personalizado)$"):
                 if name in navigation_clicked:
                     continue

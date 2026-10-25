@@ -66,6 +66,10 @@ class ManagedPage(ExtensionPage, ManagedLocator):
     def close(self):
         self.closed = True  # One owned setup view is released by its context.
 
+    def prepare_probe(self, app_name, challenge):
+        return self.client.request("dom", action="prepare_probe", app_name=app_name,
+                                   challenge=challenge) is True
+
 
 class ManagedClient:
     browser_name = "sentra"

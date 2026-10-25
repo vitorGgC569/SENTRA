@@ -103,8 +103,7 @@ def test_account_setup_only_finishes_after_new_probe_is_observed(tmp_path, monke
         "tunnel_current1234", notify, Event(), timeout_s=5)
     assert result["ok"] and result["mcp_roundtrip_verified"]
     assert proof.setup_probe_observed.call_count == 2
-    assert prepare.call_count == 1
-    assert prepare.call_args.args == (page, "tunnel_current1234")
+    assert prepare.call_count == 0  # An arriving proof also completes during UI loading.
     page.get_by_role.return_value.click.assert_not_called()  # Role inspection grants no consent.
     page.get_by_role.return_value.fill.assert_not_called()
     assert sum(call.args[0] == "verification_prompt" for call in notify.call_args_list) == 1
@@ -147,7 +146,7 @@ def test_current_account_tunnel_field_preserves_consent(account_page, existing):
     assert chatgpt_setup.prepare_app_form(account_page, "tunnel_current1234")
     assert field.input_value() == "tunnel_current1234"
     assert account_page.locator("#name").input_value() == "SENTRA"
-    assert account_page.get_by_role("combobox").input_value() == "OAuth"
+    assert account_page.get_by_role("combobox").input_value() == "Sem autenticação"
     assert not account_page.get_by_role("checkbox").is_checked()
     assert account_page.evaluate("window.created === true") is False
 

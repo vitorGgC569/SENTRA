@@ -7237,10 +7237,10 @@ index 0000000..e9f740c
 +module.exports = { shouldStartHidden };
 diff --git a/launcher/electron/sentra-setup-dom.cjs b/launcher/electron/sentra-setup-dom.cjs
 new file mode 100644
-index 0000000..91efea8
+index 0000000..663468f
 --- /dev/null
 +++ b/launcher/electron/sentra-setup-dom.cjs
-@@ -0,0 +1,203 @@
+@@ -0,0 +1,227 @@
 +"use strict";
 +module.exports = function(command) {
 +  // These functions are inlined from the same reviewed Python enrollment source.
@@ -7359,6 +7359,30 @@ index 0000000..91efea8
 +      if (command.kind === "tunnels" && /^\/settings\/organization\/tunnels(?:\/|$)/.test(location.pathname)) return {ok: true, result: extractTunnels()};
 +      if (command.kind === "new_key" && /^\/settings\/organization\/api-keys(?:\/|$)/.test(location.pathname)) return {ok: true, result: extractKey()};
 +      throw Error("bridge_origin_changed");
++    }
++    if (command.operation === 'dom' && command.action === 'prepare_probe') {
++      // A fixed read-only enrollment probe, not a generic keyboard/script API.
++      if (location.origin !== 'https://chatgpt.com' ||
++          typeof command.app_name !== 'string' || !/^SENTRA(?: [\p{L}\p{N} ._-]{1,70})?$/u.test(command.app_name) ||
++          typeof command.challenge !== 'string' || !/^[a-f0-9]{48}$/.test(command.challenge) ||
++          Object.keys(command).some(key => !['operation','action','app_name','challenge'].includes(key))) throw Error('bridge_selector_ambiguous');
++      const composers = [...document.querySelectorAll('[contenteditable="true"][role="textbox"], #prompt-textarea')].filter(visible);
++      if (composers.length !== 1) return {ok:true,result:false};
++      const composer = composers[0], form = composer.closest('form');
++      if (!form || !composer.isContentEditable) return {ok:true,result:false};
++      const mentions = [...composer.querySelectorAll('[plugin-mention-display-name]')];
++      const mention = mentions.length === 1 ? mentions[0] : null;
++      if (!mention || mention.getAttribute('plugin-mention-display-name') !== command.app_name ||
++          mention.getAttribute('contenteditable') !== 'false' ||
++          !(mention.getAttribute('plugin-mention-path') || '').startsWith('plugin://') ||
++          normalized(composer.innerText) !== normalized(mention.innerText)) return {ok:true,result:false};
++      const prompt = `Use apenas o app ${command.app_name} para chamar sentra_health com setup_challenge="${command.challenge}". Não execute comandos nem altere arquivos.`;
++      composer.focus();
++      const range = document.createRange(); range.selectNodeContents(composer); range.collapse(false);
++      const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
++      if (!document.execCommand('insertText',false,' '+prompt) || !composer.contains(mention) ||
++          !composer.innerText.includes(prompt)) throw Error('bridge_element_disabled');
++      return {ok:true,result:true};
 +    }
 +    if (command.operation !== "dom" || !new Set(["count", "visible", "enabled", "checked", "attribute", "text", "click", "pointer_click", "fill", "press", "select_label", "select_value", "input_value"]).has(command.action)) {
 +      throw Error("bridge_selector_ambiguous");
