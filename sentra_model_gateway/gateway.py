@@ -493,7 +493,10 @@ class LauncherSupervisor:
         # every such write must stay inside this installation's private home.
         state_root = Path(self.config.state_root or ProductPaths.default().state_dir).expanduser().resolve()
         environment["CODEX_HOME"] = str(state_root / "web-models" / "codex-home")
-        environment["SENTRA_NATIVE_CODEX_HOME"] = str(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve())
+        # Preserve the user's lexical home identity: the upstream ownership
+        # journal intentionally binds that exact path. Resolving MSIX aliases
+        # here would incorrectly turn a valid journal into a foreign one.
+        environment["SENTRA_NATIVE_CODEX_HOME"] = str(Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().absolute())
         environment["SENTRA_TURN_AUTHORITY_URL"] = f"http://{self.config.host}:{self.authority_port}"
         environment["SENTRA_WEB_GATEWAY_URL"] = f"http://{self.config.host}:{self.authority_port}/v1"
         environment["SENTRA_CONNECTOR_NAME"] = self.config.connector_name.strip()

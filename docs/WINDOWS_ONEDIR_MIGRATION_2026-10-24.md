@@ -72,6 +72,21 @@ existing journal proves the baseline and there are no conflicting edits.
   intercepted locally; zero visible windows and no provider account were used.
 - The first Web build failed under Windows redirected paths. Native real-path
   resolution corrected the issue; the second build succeeded.
+- A stronger fixture using the full packaged BrowserHost then reproduced a
+  first-use setup view sized at 1 by 1 pixel. The initial payload build was
+  stopped and marked superseded. The setup now uses the actual window content
+  size, independently of whether the ordinary browser panel has mounted.
+- The third Web build passed the full BrowserHost fixture: setup filled the
+  window, Platform login redirects remained navigable, automation on the login
+  page was rejected, synthetic profile data survived closing the setup view,
+  and no visible window or real provider account was used. This does not prove
+  real provider authentication or consent.
+- The packaged CLI restored a synthetic legacy native-provider configuration
+  from its ownership journal. The test used private homes only. Recovery keeps
+  the original lexical home identity across Windows redirected-path aliases;
+  it still refuses conflicting edits or an unproven baseline. Local-only
+  installation attempts this recovery even when Web onboarding is postponed
+  and records whether review is needed.
 - The Inno compiler was absent. Automatic installation was rejected by the
   environment with `blocked by policy`; the new full Setup is therefore not yet
   generated or qualified by this evidence.

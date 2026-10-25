@@ -809,6 +809,20 @@ def _install_product(
     _write_install_marker(install_dir)
     owned_files = _copy_product_files(install_dir) or []
     result["install_marker"] = str(_write_install_marker(install_dir, owned_files))
+    if local_only:
+        # Repair a journal-proven global route left by older failed installers,
+        # even when the owner postpones Web account setup. Never invent a
+        # provider baseline or overwrite conflicting user changes.
+        try:
+            from sentra_model_gateway.gateway import GatewayConfig, LauncherSupervisor
+            adapter = LauncherSupervisor(GatewayConfig(
+                checkout=install_dir / "third_party/codex-chatgpt-web",
+                launcher_executable=install_dir / "web-models/win-unpacked/Codex Web GPT.exe",
+                state_root=paths.state_dir))
+            recovery = adapter.route("recover-native")
+            result["native_route_recovery"] = {"ok": True, "restored": recovery.get("nativeRouteRestored") is True}
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            result["native_route_recovery"] = {"ok": False, "needs_review": True}
     result["web_models"] = ({"deferred": "account_setup_in_sentra"} if local_only
                             else _enable_web_models_autostart(paths, install_dir))
     notify("Installing secure tunnel client", 45)
@@ -1645,6 +1659,7 @@ def _write_setup_report(path: Path, operation: str, result: dict[str, Any], code
             for name in ("payload_complete", "ready", "catalog_ready", "turn_ready")
         },
         "account_authorization_verified": False,
+        "native_route_recovery": result.get("native_route_recovery"),
         "mcp_roundtrip_verified": browser.get("mcp_roundtrip_verified") is True,
         "homologated": False,
     }

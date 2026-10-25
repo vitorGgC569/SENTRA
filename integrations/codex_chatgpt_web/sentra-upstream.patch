@@ -6439,7 +6439,7 @@ index 0000000..071b303
 +  } finally { await server.close(); }
 +});
 diff --git a/launcher/electron/browser-host.cjs b/launcher/electron/browser-host.cjs
-index 9025c18..3333793 100644
+index 9025c18..a04d463 100644
 --- a/launcher/electron/browser-host.cjs
 +++ b/launcher/electron/browser-host.cjs
 @@ -4 +4,2 @@ const { createHash, randomBytes } = require("node:crypto");
@@ -6870,16 +6870,17 @@ index 9025c18..3333793 100644
 @@ -1553 +1955 @@ class BrowserHost {
 -    return this.authView || this.selectedTurnTab()?.view || this.view;
 +    return this.sentraSetupView || this.authView || this.selectedTurnTab()?.view || this.view;
-@@ -1650,0 +2053,8 @@ class BrowserHost {
+@@ -1650,0 +2053,9 @@ class BrowserHost {
 +    if (this.sentraSetupView) {
-+      this.sentraSetupView.setBounds(this.bounds);
++      const [width, height] = this.window.getContentSize();
++      this.sentraSetupView.setBounds({ x: 0, y: 0, width: Math.max(1, width), height: Math.max(1, height) });
 +      this.sentraSetupView.setVisible(this.window.isVisible() && !this.window.isMinimized());
 +      this.presentPrimaryView(false);
 +      for (const tab of this.turnTabs.values()) this.presentTurnView(tab, false);
 +      this.authView?.setVisible(false);
 +      return;
 +    }
-@@ -2449,0 +2860,33 @@ class BrowserHost {
+@@ -2449,0 +2861,33 @@ class BrowserHost {
 +    const saved = this.getUseSavedChats?.() === true
 +      ? this.savedConversations?.get(conversationKey, connectorIdentity) : null;
 +    if (saved) {
@@ -6913,17 +6914,17 @@ index 9025c18..3333793 100644
 +        signal?.removeEventListener("abort", onAbort);
 +      }
 +    }
-@@ -2502,0 +2946,3 @@ class BrowserHost {
+@@ -2502,0 +2947,3 @@ class BrowserHost {
 +      if (this.getUseSavedChats?.() === true) {
 +        this.savedConversations.set(tab.conversationKey, tab.connectorIdentity, tab.view.webContents.getURL());
 +      }
-@@ -2916 +3362,2 @@ class BrowserHost {
+@@ -2916 +3363,2 @@ class BrowserHost {
 -    await this.refreshChatGptHomeDocument();
 +    const useSavedChats = this.getUseSavedChats?.() === true;
 +    await this.refreshChatGptHomeDocument(useSavedChats);
-@@ -2921,0 +3369 @@ class BrowserHost {
+@@ -2921,0 +3370 @@ class BrowserHost {
 +        useSavedChats,
-@@ -3041,0 +3490,18 @@ class BrowserHost {
+@@ -3041,0 +3491,18 @@ class BrowserHost {
 +      sentraMessageCollector: { id: "sentra-committed-message-v1", sha256: createHash("sha256").update(collectSentraCommittedMessages.toString()).digest("hex") },
 +      sentraIdentityCollector: { id: "sentra-committed-account-menu-v1", sha256: createHash("sha256").update(collectSentraUiIdentity.toString()).digest("hex"), verified: false },
 +      sentraManaged: Boolean(process.env.SENTRA_TURN_AUTHORITY_TOKEN),
@@ -6942,7 +6943,7 @@ index 9025c18..3333793 100644
 +          interactionMode: tab.interactionMode,
 +          lastHeartbeatAt: tab.lastHeartbeatAt,
 +        })),
-@@ -3100,0 +3567,2 @@ module.exports = {
+@@ -3100,0 +3568,2 @@ module.exports = {
 +  collectSentraCommittedMessages,
 +  collectSentraUiIdentity,
 diff --git a/launcher/electron/control-server.cjs b/launcher/electron/control-server.cjs
@@ -7427,10 +7428,10 @@ index 0000000..91efea8
 +void 0;
 diff --git a/launcher/electron/sentra-setup-host.cjs b/launcher/electron/sentra-setup-host.cjs
 new file mode 100644
-index 0000000..08cb403
+index 0000000..c70da95
 --- /dev/null
 +++ b/launcher/electron/sentra-setup-host.cjs
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,89 @@
 +'use strict';
 +const { randomBytes } = require('node:crypto');
 +const { WebContentsView } = require('electron');
@@ -7445,6 +7446,7 @@ index 0000000..08cb403
 +  if (!host.window.isDestroyed?.()) host.window.contentView.removeChildView(scope.view);
 +  if (!scope.view.webContents.isDestroyed()) scope.view.webContents.close();
 +  host.manualOperation = null;
++  if (scope.titleBefore !== undefined && !host.window.isDestroyed?.()) host.window.setTitle?.(scope.titleBefore);
 +  if (!host.window.isDestroyed?.()) {
 +    host.syncViewVisibility();
 +    if (!scope.visibleBefore) { host.hide(); host.window.hide(); }
@@ -7462,7 +7464,7 @@ index 0000000..08cb403
 +  try {
 +    const value = new URL(url);
 +    return value.protocol === 'https:' && !value.username && !value.password && (!value.port || value.port === '443') &&
-+      ['auth.openai.com', 'auth0.openai.com', 'accounts.google.com', 'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com'].includes(value.hostname);
++      ['platform.openai.com', 'auth.openai.com', 'auth0.openai.com', 'accounts.google.com', 'login.microsoftonline.com', 'login.live.com', 'appleid.apple.com'].includes(value.hostname);
 +  } catch { return false; }
 +}
 +async function command(host, body) {
@@ -7478,7 +7480,8 @@ index 0000000..08cb403
 +    const view = new WebContentsView({ webPreferences: { partition: host.partition,
 +      contextIsolation: true, nodeIntegration: false, sandbox: true, webSecurity: true, backgroundThrottling: false } });
 +    scope = { id: randomBytes(24).toString('hex'), view, expires: Date.now() + 1_200_000,
-+      visibleBefore: host.window.isVisible() };
++      visibleBefore: host.window.isVisible(), titleBefore: host.window.getTitle?.() };
++    host.window.setTitle?.('SENTRA · Conectar conta');
 +    sessions.set(host, scope);
 +    scope.onClosed = () => release(host, scope);
 +    host.window.on('closed', scope.onClosed);
