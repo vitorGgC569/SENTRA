@@ -1,11 +1,11 @@
 {
   "schema": 1,
   "reviewed_on": "2026-10-25",
-  "application_baseline": "6c98ae16cd0800f805fe66d0ab370c069cfb2e42",
+  "application_baseline": "24e293b7d52360643859f497d3faea28cb815213",
   "status": "development-preview",
   "stable_release_qualified": false,
   "current_interface_installer_sources": [
-    "6c98ae16cd0800f805fe66d0ab370c069cfb2e42"
+    "24e293b7d52360643859f497d3faea28cb815213"
   ],
-  "readiness": "https://github.com/vitorGgC569/SENTRA/blob/main/docs/RELEASE_1_0_4_ACCEPTANCE_2026-10-25.md"
+  "readiness": "https://github.com/vitorGgC569/SENTRA/blob/main/docs/RELEASE_1_0_5_ACCEPTANCE_2026-10-25.md"
 }

@@ -1,0 +1,68 @@
+{
+  "schema": 1,
+  "reviewed_on": "2026-10-25",
+  "source_commit": "24e293b7d52360643859f497d3faea28cb815213",
+  "setup_sha256": "7767c72b7f2ed157b650ad586e580a5e114665397f59207650fc27f31d6a54da",
+  "qualification": {
+    "clean_install_over_residue_fixtures": true,
+    "previous_program_components_backed_up": true,
+    "invalid_settings_preserved_and_recovered_in_safe_mode": true,
+    "packaged_shortcut_residue_recovery": true,
+    "isolated_local_install": true,
+    "same_version_repair_preserves_data": true,
+    "native_provider_configuration_preserved": true,
+    "unowned_destination_rejected_with_nonzero_exit": true,
+    "existing_plugin_reuse_with_fresh_mcp_proof": true,
+    "embedded_fixed_probe_protocol": true,
+    "installed_frozen_canvas_real_model_response": true,
+    "physical_model_messages": 1,
+    "fully_automatic_frozen_setup_account_ui": false,
+    "clean_windows_vm": false,
+    "cross_version_upgrade_and_rollback": false,
+    "windows_reboot": false,
+    "physical_mobile": false
+  },
+  "installed_user_product_modified": false,
+  "test_results": {
+    "onboarding_installer": {
+      "passed": 134,
+      "warnings": 1
+    },
+    "site_python": {
+      "passed": 23
+    },
+    "site_node": {
+      "passed": 8
+    }
+  },
+  "model": {
+    "model": "sentra/chatgpt-web/auto",
+    "binary_sha256": "812955cf65852d726793bac59ad5571d18ab76d8b990d0c3a7bd3da793f3a865",
+    "receipt_confirmed": true,
+    "physical_user_messages": 1,
+    "automatic_replay": false
+  },
+  "environment": {
+    "clean_vm_creation": "blocked_by_automatic_approval_review",
+    "host_security_configuration_changed": false
+  },
+  "physical_device_tests": "deferred_by_owner",
+  "ios_installable": false,
+  "publication": {
+    "windows_release": "https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261025-3",
+    "windows_assets_verified": 9,
+    "prerelease": true
+  },
+  "android_public_version_code": 11,
+  "clean_recovery": {
+    "clean_residue_recovery": true,
+    "previous_components_backed_up": true,
+    "invalid_settings_preserved": true,
+    "safe_settings_recovery": true,
+    "unrelated_files_preserved": true,
+    "packaged_shortcut_residue_recovery": true
+  },
+  "diagnostics": {
+    "source_gateway_idle_keepalive_resets_observed": true
+  }
+}

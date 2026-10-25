@@ -62,3 +62,11 @@ users can choose the equivalent options in the wizard without a terminal.
 Full 1.0.5 Setup packaging, installed residue-recovery qualification and
 publication are pending at this source checkpoint. This record does not claim
 acceptance on the owner's failed PC or a clean Windows OS.
+
+
+## Packaged follow-up
+
+The complete Setup, clean residue recovery, same-version repair, frozen shortcut
+probe and installed model turn subsequently passed. See the [1.0.5 acceptance
+record](RELEASE_1_0_5_ACCEPTANCE_2026-10-25.md) for exact published identities and
+remaining limits.
