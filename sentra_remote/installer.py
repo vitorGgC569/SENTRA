@@ -259,6 +259,9 @@ def _owned_tree_files(folder: Path, prefix: str) -> list[str]:
 
 
 def _copy_product_files(install_dir: Path) -> list[str]:
+    from functools import partial
+    from .product_copy import copy_product_file
+    copy_file = partial(copy_product_file, root=install_dir)
     source = payload_root()
     if not source.is_dir():
         raise FileNotFoundError(f"installer payload missing: {source}")
@@ -268,14 +271,14 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         candidate = source / name
         if not candidate.is_file():
             raise FileNotFoundError(f"release payload missing {name}")
-        shutil.copy2(_filesystem_path(candidate), _filesystem_path(install_dir / name))
+        copy_file(_filesystem_path(candidate), _filesystem_path(install_dir / name))
         from .onedir import copy_support
         support_files.extend(copy_support(source, install_dir, name))
     ext_source = extension_source()
     if not ext_source.is_dir():
         raise FileNotFoundError("Edge extension payload is missing")
     target = install_dir / "edge_extension"
-    shutil.copytree(_filesystem_path(ext_source), _filesystem_path(target), dirs_exist_ok=True)
+    shutil.copytree(_filesystem_path(ext_source), _filesystem_path(target), dirs_exist_ok=True, copy_function=copy_file)
     web_source = source / "web-models" / "win-unpacked"
     if not (web_source / "Codex Web GPT.exe").is_file() or not (web_source / "resources" / "runtime" / "manifest.json").is_file():
         raise FileNotFoundError("packaged Electron Web Models payload is missing")
@@ -286,7 +289,7 @@ def _copy_product_files(install_dir: Path) -> list[str]:
     web_target = (install_dir / "web-models").resolve()
     if not web_target.is_relative_to(install_dir.resolve()):
         raise ValueError("Web Models install target escaped install directory")
-    shutil.copytree(_filesystem_path(source / "web-models"), _filesystem_path(web_target), dirs_exist_ok=True)
+    shutil.copytree(_filesystem_path(source / "web-models"), _filesystem_path(web_target), dirs_exist_ok=True, copy_function=copy_file)
 
     # The optional Electron view is not a second control plane. Only the
     # staged, fingerprinted renderer is copied, never node_modules/npm hooks.
@@ -298,7 +301,7 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         if not electron_target.is_relative_to(install_dir.resolve()):
             raise ValueError("Electron installation escaped product directory")
         shutil.copytree(_filesystem_path(electron_source), _filesystem_path(electron_target),
-                        dirs_exist_ok=True)
+                        dirs_exist_ok=True, copy_function=copy_file)
         validate_electron_payload(electron_target)
 
     mobile_source = source / 'sentra-mobile'
@@ -308,7 +311,7 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         mobile_target = (install_dir / 'sentra-mobile').resolve()
         if not mobile_target.is_relative_to(install_dir.resolve()):
             raise ValueError('Mobile runtime installation escaped product directory')
-        shutil.copytree(_filesystem_path(mobile_source), _filesystem_path(mobile_target), dirs_exist_ok=True)
+        shutil.copytree(_filesystem_path(mobile_source), _filesystem_path(mobile_target), dirs_exist_ok=True, copy_function=copy_file)
         validate_mobile_runtime(mobile_target)
 
     terminal_source = source / 'sentra-terminal'
@@ -318,7 +321,7 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         terminal_target = (install_dir / 'sentra-terminal').resolve()
         if not terminal_target.is_relative_to(install_dir.resolve()):
             raise ValueError('Terminal runtime installation escaped product directory')
-        shutil.copytree(_filesystem_path(terminal_source), _filesystem_path(terminal_target), dirs_exist_ok=True)
+        shutil.copytree(_filesystem_path(terminal_source), _filesystem_path(terminal_target), dirs_exist_ok=True, copy_function=copy_file)
         validate_terminal_runtime(terminal_target)
 
     docs = docs_source()
@@ -330,26 +333,27 @@ def _copy_product_files(install_dir: Path) -> list[str]:
     docs_target = (install_dir / "docs").resolve()
     if not docs_target.is_relative_to(install_dir.resolve()):
         raise ValueError("docs install target escaped install directory")
-    shutil.copytree(_filesystem_path(docs), _filesystem_path(docs_target), dirs_exist_ok=True)
+    shutil.copytree(_filesystem_path(docs), _filesystem_path(docs_target), dirs_exist_ok=True, copy_function=copy_file)
 
     if getattr(sys, "frozen", False):
-        shutil.copy2(_filesystem_path(Path(sys.executable)), _filesystem_path(install_dir / "sentra-installer.exe"))
+        copy_file(_filesystem_path(Path(sys.executable)), _filesystem_path(install_dir / "sentra-installer.exe"))
         from .onedir import copy_support
         support_files.extend(copy_support(Path(sys.executable).parent, install_dir, "sentra-installer.exe"))
     owned = list(PRODUCTS) + support_files
     runtime_source = source / 'runtime'
     if runtime_source.is_dir():
-        shutil.copytree(_filesystem_path(runtime_source), _filesystem_path(install_dir / 'runtime'), dirs_exist_ok=True)
+        shutil.copytree(_filesystem_path(runtime_source), _filesystem_path(install_dir / 'runtime'),
+                        dirs_exist_ok=True, copy_function=copy_file)
     runtime_record = source / 'runtime-components.json'
     if runtime_record.is_file():
-        shutil.copy2(_filesystem_path(runtime_record), _filesystem_path(install_dir / runtime_record.name))
+        copy_file(_filesystem_path(runtime_record), _filesystem_path(install_dir / runtime_record.name))
         owned.append(runtime_record.name)
     folders = [(ext_source, "edge_extension"), (source / "web-models", "web-models"),
                (runtime_source, "runtime"), (docs, "docs")]
     bridge_source = source / "prerequisites/browser-enrollment"
     bridge_target = install_dir / "browser-enrollment"
     if bridge_source.is_dir():
-        shutil.copytree(_filesystem_path(bridge_source), _filesystem_path(bridge_target), dirs_exist_ok=True)
+        shutil.copytree(_filesystem_path(bridge_source), _filesystem_path(bridge_target), dirs_exist_ok=True, copy_function=copy_file)
         folders.append((bridge_source, "browser-enrollment"))
     elif not getattr(sys, "frozen", False):
         from .enrollment_extension import stage_extensions
@@ -363,7 +367,7 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         validate_registration_runtime(registration_source)
         registration_target = install_dir / "runtime/codex-registration"
         shutil.copytree(_filesystem_path(registration_source), _filesystem_path(registration_target),
-                        dirs_exist_ok=True)
+                        dirs_exist_ok=True, copy_function=copy_file)
         validate_registration_runtime(registration_target)
         folders.append((registration_source, "runtime/codex-registration"))
     if electron_source.exists():

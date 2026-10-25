@@ -42,5 +42,8 @@ def copy_support(source: Path, destination: Path, executable: str) -> list[str]:
     target = Path(destination) / name
     if target.is_symlink() or not target.resolve().is_relative_to(Path(destination).resolve()):
         raise ValueError("component target escaped installation")
-    shutil.copytree(filesystem_path(tree), filesystem_path(target), dirs_exist_ok=True)
+    from functools import partial
+    from .product_copy import copy_product_file
+    shutil.copytree(filesystem_path(tree), filesystem_path(target), dirs_exist_ok=True,
+                    copy_function=partial(copy_product_file, root=destination))
     return list(inventory)
