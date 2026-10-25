@@ -18,6 +18,7 @@ import orcaLicense from './THIRD_PARTY_LICENSES/orca-license.json';
 import {MessageSquare,Layers,Folder,Terminal,Monitor,Globe,ArrowUp,RefreshCw,Link as LinkIcon,ShieldCheck,ArrowLeft} from 'lucide-react-native';
 import {MobileClient,EffectJournal,ScopedRefresh,bindRequestContext,requireRequestContext,parseOffer,canonicalIntent,journalIntent,upsertDevice,deviceAtAddress,deviceAtOffer,type Device,type PendingEffect} from '@sentra/mobile-transport';
 import {primitives} from '@sentra/mobile-transport/crypto';
+import {createNativeWebSocket} from './native-websocket';
 
 // Storage policy adapted from ORCA pairing-keychain.ts: device-only Keychain.
 const storageKey='sentra-mobile-paired-hosts-v1';
@@ -42,7 +43,7 @@ function Studio(){
  const journal=useRef(new EffectJournal({read:()=>SecureStore.getItemAsync('sentra-pending-effects-v1',options),write:value=>SecureStore.setItemAsync('sentra-pending-effects-v1',value,options)}));
  const client=useRef<MobileClient|null>(null),vm=useRef<any>(null),activeScreen=useRef(screen),activeConversation=useRef(conversation),activeDevice=useRef(device);
  activeScreen.current=screen;activeConversation.current=conversation;activeDevice.current=device;vm.current=vmStatus;
- function createClient(){const next=new MobileClient(primitives(n=>new Uint8Array(Crypto.getRandomBytes(n))),url=>new WebSocket(url),value=>{if(client.current===next)setStatus(value)});return next;}
+ function createClient(){const next=new MobileClient(primitives(n=>new Uint8Array(Crypto.getRandomBytes(n))),createNativeWebSocket,value=>{if(client.current===next)setStatus(value)});return next;}
  async function save(list:Device[]){await protectedDrafts.write(storageKey+'-chunks',JSON.stringify(list));await SecureStore.deleteItemAsync(storageKey,options);setDevices(list)}
  async function readDevices(){const chunks=await SecureStore.getItemAsync(storageKey+'-chunks',options);return chunks?await protectedDrafts.read(storageKey+'-chunks'):await SecureStore.getItemAsync(storageKey,options)}
  async function connect(item:Device,persistAddress=false){++navigation.current;++lifecycle.current;setBusy(true);setNotice('');try{await release();client.current?.disconnect();setConversation(null);setMessages([]);setInventory(null);setSharedProfile(null);setVmStatus(null);setFrame(null);setEntries([]);setFile(null);const next=createClient();client.current=next;const resumed=await next.resume(item,updated=>save(upsertDevice(devices,updated)));if(persistAddress)await save(upsertDevice(devices,resumed));activeDevice.current=resumed;setDevice(resumed);setPairing(false);await load(next)}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}

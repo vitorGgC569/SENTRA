@@ -12,6 +12,7 @@ export type {TerminalOutputFrame} from './contracts';
 export {bindRequestContext,requireRequestContext} from './request-context';
 export {ScopedRefresh} from './scoped-refresh';
 export {ProjectFeed,sseFrames,reduceProjection} from './presentation-stream.js';
+export {NATIVE_MOBILE_ORIGIN} from './native-origin';
 export type {PresentationScope,PresentationPreview,PresentationFrame,PresentationObserver} from './presentation-stream.js';
 export {pairedDiscoveryCandidates} from './lan-discovery';
 export type PairingOffer={endpoint:string;public_key:string;invite_id:string;invite:string;protocol_version:1};

@@ -46,6 +46,17 @@ def prepare_app_form(page, tunnel_id: str, *, actions: set | None = None) -> boo
         field.fill("SENTRA", timeout=3000)
     selector = one_visible(dialog.get_by_role("combobox", name=re.compile(r"tunnel|túnel", re.I)))
     if selector is None:
+        # Current ChatGPT uses a free-text tunnel ID, alongside suggestions
+        # from the account. Only fill the ID already verified by LocalRuntime;
+        # never choose a similarly named suggestion or replace another ID.
+        tunnel_field = one_visible(dialog.get_by_role("textbox", name=re.compile(r"^(?:Tunnel ID|ID do túnel)$", re.I)))
+        if tunnel_field is not None:
+            current_tunnel = tunnel_field.input_value().strip()
+            if current_tunnel not in ("", tunnel_id):
+                raise ValueError("chatgpt_app_selection_required")
+            if not current_tunnel:
+                tunnel_field.fill(tunnel_id, timeout=3000)
+            return True
         tunnel_button = one_visible(dialog.get_by_role("button", name=re.compile(r"^(?:Tunnel|Túnel)$", re.I)))
         if tunnel_button is not None and (actions is None or "tunnel" not in actions):
             if actions is not None:
@@ -133,6 +144,8 @@ def run_chatgpt_connection(context, paths, tunnel_id, notify, cancelled, *, time
                 if name in navigation_clicked:
                     continue
                 button = one_visible(page.get_by_role("button", name=re.compile(name, re.I)))
+                if button is None:
+                    button = one_visible(page.get_by_role("menuitem", name=re.compile(name, re.I)))
                 if button is not None:
                     navigation_clicked.add(name)  # Never replay an uncertain click.
                     button.click(timeout=3000)

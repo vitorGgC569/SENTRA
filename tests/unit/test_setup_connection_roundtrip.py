@@ -118,3 +118,57 @@ def test_closing_account_window_keeps_verified_tunnel_and_is_not_success(tmp_pat
     result = chatgpt_setup.run_chatgpt_connection(Mock(new_page=lambda: page),
         SimpleNamespace(state_dir=tmp_path), "tunnel_current1234", Mock(), Event(), timeout_s=5)
     assert result == {"ok": False, "reason": "chatgpt_setup_cancelled", "tunnel_verified": True}
+
+
+@pytest.fixture
+def account_page():
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.fulfill(body="<main></main>", content_type="text/html"))
+            page.goto(chatgpt_setup.CHATGPT_APPS_URL)
+            yield page
+        finally:
+            browser.close()
+
+
+@pytest.mark.parametrize("existing", ["", "tunnel_current1234"])
+def test_current_account_tunnel_field_preserves_consent(account_page, existing):
+    account_page.set_content('''<section role="dialog">
+      <label>Nome<input id="name"></label><input aria-label="ID do túnel">
+      <select aria-label="Autenticação"><option>OAuth</option><option>Sem autenticação</option></select>
+      <label><input type="checkbox">Entendo e quero continuar</label>
+      <button onclick="window.created=true">Criar como plugin</button></section>''')
+    field = account_page.get_by_role("textbox", name="ID do túnel")
+    field.fill(existing)
+    assert chatgpt_setup.prepare_app_form(account_page, "tunnel_current1234")
+    assert field.input_value() == "tunnel_current1234"
+    assert account_page.locator("#name").input_value() == "SENTRA"
+    assert account_page.get_by_role("combobox").input_value() == "OAuth"
+    assert not account_page.get_by_role("checkbox").is_checked()
+    assert account_page.evaluate("window.created === true") is False
+
+
+def test_current_account_tunnel_field_does_not_replace_another_app(account_page):
+    account_page.set_content('''<section role="dialog"><label>Nome<input value="SENTRA"></label>
+      <input aria-label="Tunnel ID" value="tunnel_other12345"></section>''')
+    with pytest.raises(ValueError, match="chatgpt_app_selection_required"):
+        chatgpt_setup.prepare_app_form(account_page, "tunnel_current1234")
+    assert account_page.get_by_role("textbox", name="Tunnel ID").input_value() == "tunnel_other12345"
+
+
+def test_account_add_navigation_accepts_current_menuitem(account_page, tmp_path, monkeypatch):
+    html = '''<button onclick="document.querySelector('menu').hidden=false">Adicionar</button>
+      <menu role="menu" hidden><button role="menuitem" onclick="window.opened=true">
+      Adicionar servidor MCP personalizado</button></menu>'''
+    account_page.route("**/*", lambda route: route.fulfill(body=html, content_type="text/html"))
+    proof = Mock()
+    proof.begin_setup_probe.return_value = "a" * 48
+    proof.setup_probe_observed.side_effect = [False, False, True]
+    monkeypatch.setattr(chatgpt_setup, "ConnectorProof", lambda _: proof)
+    result = chatgpt_setup.run_chatgpt_connection(Mock(new_page=lambda: account_page),
+        SimpleNamespace(state_dir=tmp_path), "tunnel_current1234", Mock(), Event(), timeout_s=10)
+    assert result["mcp_roundtrip_verified"]
+    assert account_page.evaluate("window.opened === true")

@@ -6,7 +6,7 @@ import {randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {once} from 'node:events';
 import WebSocket from 'ws';
-import {MobileClient,type Device} from '../src/client';
+import {MobileClient,NATIVE_MOBILE_ORIGIN,type Device} from '../src/client';
 import {primitives} from '../src/primitives';
 
 test('real LAN gateway pins crypto identity and never replays effects on reconnect', {timeout:20000}, async t=>{
@@ -29,7 +29,7 @@ test('real LAN gateway pins crypto identity and never replays effects on reconne
  child.stdin.end(JSON.stringify({bind:'127.0.0.1',port,broker:'http://127.0.0.1:'+(broker.address() as any).port,bearer:'test-host-only',secret_key:randomBytes(32).toString('base64')}));
  const host=await ready,p=primitives(n=>new Uint8Array(randomBytes(n))),keys=p.generateKeyPair();
  const device:Device={device_id:'test-device',credential:'test-device-credential',endpoint:`ws://127.0.0.1:${port}/sentra/mobile/v1`,public_key:host.public_key,keys:{publicKey:p.encodeBase64(keys.publicKey),secretKey:p.encodeBase64(keys.secretKey)},scope:{project_id:'project',space_id:'space',dot_id:'dot',actions:['workspace_inventory','message_send']}};
- const client=new MobileClient(p,url=>new WebSocket(url) as any);t.after(()=>client.disconnect());
+ const client=new MobileClient(p,url=>new WebSocket(url,{origin:NATIVE_MOBILE_ORIGIN}) as any);t.after(()=>client.disconnect());
  await client.resume(device);
  await client.request({action:'message_send',request_key:'physical-intent-once',content:'test content'});
  await client.rpc({method:'request',public_key:'forged',request:{action:'workspace_inventory'}});
@@ -38,6 +38,8 @@ test('real LAN gateway pins crypto identity and never replays effects on reconne
  assert.equal(observed.filter(b=>b.request?.action==='message_send').length,1);
  assert.equal(observed.filter(b=>b.request?.action==='workspace_inventory').length,3);
  assert.ok(observed.every(b=>b.public_key===device.keys.publicKey));
- const browser=new WebSocket(device.endpoint,{origin:'https://untrusted.example'});
- const [code]=await once(browser,'close');assert.equal(code,1008);
+ for(const origin of ['https://untrusted.example','null',`http://127.0.0.1:${port}`,'sentra-mobile://native.evil']){
+  const browser=new WebSocket(device.endpoint,{origin});
+  const [code]=await once(browser,'close');assert.equal(code,1008);
+ }
 });

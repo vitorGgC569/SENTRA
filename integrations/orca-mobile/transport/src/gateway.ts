@@ -10,6 +10,7 @@ import {ServerSession} from './server-session';
 import {isLocalIPv4,lanAddresses} from './lan-address';
 import {advertiseLan,type Advertisement} from './lan-advertisement';
 import {sseFrames} from './presentation-stream.js';
+import {allowedMobileOrigin} from './native-origin';
 
 const lines=createInterface({input:process.stdin,crlfDelay:Infinity})[Symbol.asyncIterator]();
 const first=await lines.next();
@@ -56,7 +57,7 @@ void(async()=>{try{for await(const line of { [Symbol.asyncIterator]:()=>lines })
  }}})();
 server.on('connection',(socket,request)=>{
  const remote=request.socket.remoteAddress?.replace(/^::ffff:/,'')||'';
- if(server.clients.size>16||request.headers.origin||!isLocalIPv4(remote)){socket.close(1008);return;}
+ if(server.clients.size>16||!allowedMobileOrigin(request.headers.origin)||!isLocalIPv4(remote)){socket.close(1008);return;}
  let session:ServerSession|null=null,queue=Promise.resolve(),count=0,queued=0;
  const streams=new Map<string,AbortController>();
  function send(value:unknown){
