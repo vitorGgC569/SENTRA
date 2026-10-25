@@ -166,7 +166,7 @@ def test_account_add_navigation_accepts_current_menuitem(account_page, tmp_path,
     account_page.route("**/*", lambda route: route.fulfill(body=html, content_type="text/html"))
     proof = Mock()
     proof.begin_setup_probe.return_value = "a" * 48
-    proof.setup_probe_observed.side_effect = [False, False, True]
+    proof.setup_probe_observed.side_effect = lambda *_: account_page.evaluate("window.opened === true")
     monkeypatch.setattr(chatgpt_setup, "ConnectorProof", lambda _: proof)
     result = chatgpt_setup.run_chatgpt_connection(Mock(new_page=lambda: account_page),
         SimpleNamespace(state_dir=tmp_path), "tunnel_current1234", Mock(), Event(), timeout_s=10)

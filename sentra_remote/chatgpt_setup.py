@@ -176,6 +176,7 @@ def run_chatgpt_connection(context, paths, tunnel_id, notify, cancelled, *, time
     existing_app = False
     existing_checked = False
     test_chat_opened = False
+    inventory_settles_at = time.monotonic() + 4
     while time.monotonic() < deadline:
         if cancelled.is_set() or page.is_closed():
             return {"ok": False, "reason": "chatgpt_setup_cancelled", "tunnel_verified": True}
@@ -197,7 +198,9 @@ def run_chatgpt_connection(context, paths, tunnel_id, notify, cancelled, *, time
                 installed.click(timeout=3000)
                 notify("progress", "Encontrei o app instalado. Verificando a conexão deste computador sem recriá-lo.")
                 continue
-            if add is not None or one_visible(page.get_by_role("dialog")) is not None:
+            loading = one_visible(page.get_by_text(re.compile(r"^(?:Carregando plugins[.…]*|Loading plugins[.…]*)$", re.I)))
+            if (one_visible(page.get_by_role("dialog")) is not None or
+                    (add is not None and loading is None and time.monotonic() >= inventory_settles_at)):
                 existing_checked = True
             else:
                 page.wait_for_timeout(500)

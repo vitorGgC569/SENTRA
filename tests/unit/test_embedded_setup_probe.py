@@ -82,8 +82,13 @@ def test_python_uses_fixed_protocol_and_preserves_journal_before_send():
     assert not any(c.kwargs.get("action") == "click" for c in client.request.call_args_list)
 
 
-def test_existing_plugin_reuses_test_chat_without_creation(page, tmp_path, monkeypatch):
+@pytest.mark.parametrize("delayed", [False, True])
+def test_existing_plugin_reuses_test_chat_without_creation(page, tmp_path, monkeypatch, delayed):
     catalog = '<main><a href="/plugins/owned">SENTRA</a><button onclick="window.created=true">Adicionar</button></main>'
+    if delayed:
+        catalog = '''<main><button onclick="window.created=true">Adicionar</button></main>
+          <script>setTimeout(()=>document.querySelector('main').insertAdjacentHTML('afterbegin',
+          '<a href="/plugins/owned">SENTRA</a>'),1500)</script>'''
     details = '''<button onclick="document.querySelector('main').innerHTML = document.querySelector('template').innerHTML">Testar no chat</button>
       <main></main><template><form><div role="textbox" contenteditable="true"><p>
       <span plugin-mention-display-name="SENTRA" plugin-mention-path="plugin://owned@local" contenteditable="false">SENTRA</span> </p></div>
