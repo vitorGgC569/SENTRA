@@ -194,7 +194,7 @@ def test_backup_registered_before_first_move(tmp_path, offline):
     def callback(value):
         observed.append(value)
         assert old.read_bytes()==b'old'
-        assert json.loads((Path(value['backup'])/'clean-install.json').read_text())['schema']==2
+        assert json.loads((Path(value['backup'])/'clean-install.json').read_text())['schema']==3
     recovery.prepare_clean_install(app,tmp_path/'state',(old.name,),on_backup=callback)
     assert len(observed)==1
 
@@ -421,3 +421,83 @@ def test_interrupted_recovery_never_modifies_active_installation(tmp_path, offli
         recovery.recover_interrupted_clean_installs(state, app)
     assert not (app / 'sentra-canvas.exe').exists()
     assert (Path(result['backup']) / 'sentra-canvas.exe').read_bytes() == b'old canvas'
+
+
+def test_second_interruption_during_recovery_is_idempotent(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    marker = app / '.sentra-install.json'
+    marker.write_text(json.dumps({'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    marker.unlink()
+    script = '''
+import os, sys
+from pathlib import Path
+from sentra_remote import installer_recovery as recovery, app_exit_update
+app_exit_update.assert_installation_offline = lambda _: None
+link = os.link
+def exit_after_link(source, target):
+    link(source, target)
+    os._exit(23)
+os.link = exit_after_link
+recovery.recover_interrupted_clean_installs(Path(sys.argv[2]), Path(sys.argv[1]))
+'''
+    proc = subprocess.run([sys.executable, '-c', script, str(app), str(state)],
+                          cwd=Path(__file__).resolve().parents[2], timeout=30,
+                          capture_output=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    assert proc.returncode == 23, proc.stderr.decode('utf-8', 'replace')
+    restored = recovery.recover_interrupted_clean_installs(state, app)
+    assert not restored[0]['recovery']['manual_recovery_required']
+    assert (app / 'sentra-canvas.exe').read_bytes() == b'old canvas'
+    assert (Path(result['backup']) / 'sentra-canvas.exe').read_bytes() == b'old canvas'
+    assert recovery.recover_interrupted_clean_installs(state, app) == []
+
+
+def test_missing_original_and_backup_requires_manual_recovery(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    (app / '.sentra-install.json').write_text(json.dumps({
+        'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    (Path(result['backup']) / 'sentra-canvas.exe').unlink()
+    with pytest.raises(recovery.InstallationRecoveryError, match='interrupted_clean_recovery') as exc:
+        recovery.recover_interrupted_clean_installs(state, app)
+    assert exc.value._sentra_clean_install['recovery']['uncertain'] == 1
+    assert not (app / 'sentra-canvas.exe').exists()
+
+
+def test_old_manifest_without_backup_or_hash_stays_uncertain(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    (app / '.sentra-install.json').write_text(json.dumps({
+        'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    manifest_path = Path(result['backup']) / 'clean-install.json'
+    manifest = json.loads(manifest_path.read_text()); manifest['schema'] = 2; manifest.pop('sha256')
+    manifest_path.write_text(json.dumps(manifest))
+    (Path(result['backup']) / 'sentra-canvas.exe').unlink()
+    (app / 'sentra-canvas.exe').write_bytes(b'unknown')
+    with pytest.raises(recovery.InstallationRecoveryError, match='interrupted_clean_recovery'):
+        recovery.recover_interrupted_clean_installs(state, app)
+    assert (app / 'sentra-canvas.exe').read_bytes() == b'unknown'
+
+
+def test_corrupt_backup_is_not_restored(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    (app / '.sentra-install.json').write_text(json.dumps({
+        'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    (Path(result['backup']) / 'sentra-canvas.exe').write_bytes(b'corrupt')
+    with pytest.raises(recovery.InstallationRecoveryError, match='interrupted_clean_recovery') as exc:
+        recovery.recover_interrupted_clean_installs(state, app)
+    assert exc.value._sentra_clean_install['recovery']['uncertain'] == 1
+    assert not (app / 'sentra-canvas.exe').exists()

@@ -29,8 +29,8 @@ MESSAGES = {
         "Um arquivo existente não pertence a uma instalação SENTRA identificada e seria substituído. Ele foi preservado. Escolha uma pasta exclusiva para o aplicativo ou mova o arquivo por conta própria antes de tentar novamente.",
         "An existing file is not owned by an identified SENTRA installation and would be replaced. It was preserved. Choose a dedicated application folder or move the file yourself before retrying."),
     "interrupted_clean_recovery": (
-        "Uma instalação limpa anterior foi interrompida. A recuperação encontrou arquivos que não pode substituir com segurança. Preserve a cópia indicada e resolva o conflito antes de instalar novamente.",
-        "A previous clean installation was interrupted. Recovery found files it cannot safely replace. Keep the indicated backup and resolve the conflict before installing again."),
+        "Uma instalação limpa anterior foi interrompida. Há arquivos conflitantes, ausentes ou que não puderam ser verificados. Preserve a cópia indicada e resolva a situação antes de instalar novamente.",
+        "A previous clean installation was interrupted. Some files conflict, are missing, or could not be verified. Keep the indicated backup and resolve the issue before installing again."),
     "shortcut_failed": (
         "O Windows impediu a criação do acesso ao SENTRA. Verifique o acesso à Área de Trabalho e ao menu Iniciar. Arquivos antigos não identificados foram preservados.",
         "Windows prevented creating the SENTRA launcher. Check Desktop and Start Menu access. Unidentified old files were preserved."),

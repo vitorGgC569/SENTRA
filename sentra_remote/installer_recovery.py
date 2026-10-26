@@ -6,6 +6,7 @@ import tempfile
 import time
 import uuid
 import shutil
+import hashlib
 
 from .product import ProductSettings
 from .windows_paths import filesystem_path, resolved_path
@@ -59,6 +60,11 @@ def _assert_unlinked(root, relative):
     if not resolved_path(path).is_relative_to(root):
         raise InstallationRecoveryError('unsafe_clean_destination')
     return path
+
+
+def _digest_file(path):
+    with _disk(path).open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def prepare_clean_install(destination, state, products, *, incoming=None, on_backup=None):
@@ -121,9 +127,11 @@ def prepare_clean_install(destination, state, products, *, incoming=None, on_bac
     try:
         # Persist the complete plan and the backup path before the first move.
         # On interruption the backup itself shows which planned moves happened.
+        digests = {p.as_posix(): _digest_file(_assert_unlinked(root, p)) for p in targets}
         with _disk(backup / 'clean-install.json').open('x', encoding='utf-8') as stream:
-            json.dump({'schema': 2, 'install_dir': str(root),
-                       'components': [p.as_posix() for p in targets], 'created_at': time.time()}, stream)
+            json.dump({'schema': 3, 'install_dir': str(root),
+                       'components': [p.as_posix() for p in targets], 'sha256': digests,
+                       'created_at': time.time()}, stream)
             stream.flush()
             os.fsync(stream.fileno())
         if on_backup is not None:
@@ -200,16 +208,39 @@ def restore_missing_clean_backup(destination, backup):
     if folder.parent != root.parent or not folder.name.startswith('.sentra-clean-'):
         raise InstallationRecoveryError('unsafe_clean_destination')
     manifest = json.loads(_disk(folder / 'clean-install.json').read_text(encoding='utf-8'))
-    if manifest.get('schema') != 2 or manifest.get('install_dir') != str(root):
+    if manifest.get('schema') not in (2, 3) or manifest.get('install_dir') != str(root):
         raise InstallationRecoveryError('unsafe_clean_destination')
     restored = 0
     conflicts = 0
+    uncertain = 0
+    digests = manifest.get('sha256') if manifest.get('schema') == 3 else {}
+    if not isinstance(digests, dict) or not isinstance(manifest.get('components'), list):
+        raise InstallationRecoveryError('unsafe_clean_destination')
     for name in manifest.get('components', []):
         relative = _relative_name(name)
         source = _assert_unlinked(folder, relative)
-        if not _disk(source).is_file():
-            continue  # A planned move may not have happened before interruption.
         target = _assert_unlinked(root, relative)
+        expected = digests.get(name)
+        if manifest.get('schema') == 3 and expected is None:
+            uncertain += 1
+            continue
+        if expected is not None and (not isinstance(expected, str) or len(expected) != 64
+                                     or any(c not in '0123456789abcdef' for c in expected)):
+            raise InstallationRecoveryError('unsafe_clean_destination')
+        if not _disk(source).is_file():
+            # It may not have moved yet, but that is provable only with a
+            # digest of the original. Old receipts without one stay uncertain.
+            if not expected or not _disk(target).is_file() or _digest_file(target) != expected:
+                uncertain += 1
+            continue
+        source_digest = _digest_file(source)
+        if expected and source_digest != expected:
+            uncertain += 1
+            continue
+        if _disk(target).exists():
+            if not _disk(target).is_file() or _digest_file(target) != source_digest:
+                conflicts += 1
+            continue
         _disk(target.parent).mkdir(parents=True, exist_ok=True)
         # Copy into the same directory first. A disk error or interruption
         # must not leave a partial file at the original installation path.
@@ -219,17 +250,22 @@ def restore_missing_clean_backup(destination, backup):
                 shutil.copyfileobj(src, dst)
                 dst.flush()
                 os.fsync(dst.fileno())
+            if _digest_file(pending) != source_digest:
+                uncertain += 1
+                continue
             shutil.copystat(_disk(source), _disk(pending))
             # A hard link creates the final name atomically and fails if a
             # new file appeared while the backup was being copied.
             os.link(_disk(pending), _disk(target))
             restored += 1
         except FileExistsError:
+            # A concurrent creator might have installed different bytes; no
+            # overwrite occurs. Even identical bytes require another pass.
             conflicts += 1
         finally:
             _disk(pending).unlink(missing_ok=True)
-    return {'restored_missing': restored, 'conflicts': conflicts,
-            'manual_recovery_required': conflicts > 0}
+    return {'restored_missing': restored, 'conflicts': conflicts, 'uncertain': uncertain,
+            'manual_recovery_required': conflicts > 0 or uncertain > 0}
 
 
 def record_clean_recovery(state, destination, result, status):
