@@ -38,6 +38,11 @@ class MachineHost:
         self._loop = asyncio.new_event_loop()
         self._ready = threading.Event()
         self._closed = False
+        self._draining = False
+        self._teardown_started = False
+        self._admission_lock = threading.Lock()
+        self._close_lock = threading.Lock()
+        self._active_calls: set[asyncio.Task[Any]] = set()
         self._factories: dict[str, Callable] = {}
         self._inventory: dict[str, dict[str, Any]] = {}
         self._catalog_reads: set[asyncio.Task[Any]] = set()
@@ -89,14 +94,28 @@ class MachineHost:
             finally:
                 self._loop.close()
 
-    def _call(self, coroutine, *, timeout=150):
+    def _call(self, coroutine, *, timeout=150, _drain=False):
         if threading.current_thread() is self._thread:
             coroutine.close()
             raise RuntimeError('synchronous machine host call from its own event loop; use the async host operation')
-        if self._closed:
-            coroutine.close()
-            raise RuntimeError("machine host is closed")
-        future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
+        async def admitted():
+            # Calls submitted immediately before draining can still be queued
+            # on the event loop. Recheck before running their coroutine.
+            with self._admission_lock:
+                if self._closed or self._draining:
+                    coroutine.close()
+                    raise RuntimeError('machine host is draining or closed')
+                task = asyncio.current_task()
+                self._active_calls.add(task)
+            try:
+                return await coroutine
+            finally:
+                self._active_calls.discard(task)
+        with self._admission_lock:
+            if self._closed or (self._draining and not _drain):
+                coroutine.close()
+                raise RuntimeError('machine host is draining or closed')
+            future = asyncio.run_coroutine_threadsafe(coroutine if _drain else admitted(), self._loop)
         try:
             return future.result(timeout)
         except TimeoutError:
@@ -843,21 +862,49 @@ class MachineHost:
             return value
         return self._call(recover(), timeout=10)
 
-    def close(self):
-        if self._closed:
-            return
+    def close(self, *, drain_timeout=0):
+        if not isinstance(drain_timeout, (int, float)) or not 0 <= drain_timeout <= 10:
+            raise ValueError('invalid machine host drain timeout')
+        with self._close_lock:
+            with self._admission_lock:
+                if self._closed:
+                    return
+                self._draining = True
+            try:
+                self._close_draining(drain_timeout)
+            finally:
+                with self._admission_lock:
+                    # A busy preflight has changed no resources and may reopen
+                    # admission. Partial teardown must stay fenced on failure.
+                    self._draining = self._teardown_started and not self._closed
+
+    def _close_draining(self, drain_timeout):
         async def cleanup():
             from .effect_boundary import _ResourceLock, ResourceEffectBusy
-            if any(not reader.done() for reader in self._catalog_reads):
-                raise RuntimeError('catalog readers have not stopped; machine host retained')
-            for machine_id in self._factories:
-                probe = _ResourceLock(self.control.durable.root / "effect-locks", machine_id)
-                try:
-                    probe.acquire(0)
-                except ResourceEffectBusy as exc:
-                    raise RuntimeError("physical workers have not stopped; machine host retained") from exc
+            deadline = time.monotonic() + drain_timeout
+            while True:
+                busy = None
+                if any(not reader.done() for reader in self._catalog_reads):
+                    busy = 'catalog readers have not stopped; machine host retained'
+                elif self._active_calls:
+                    busy = 'host calls have not stopped; machine host retained'
                 else:
-                    probe.release()
+                    for machine_id in self._factories:
+                        probe = _ResourceLock(self.control.durable.root / "effect-locks", machine_id)
+                        try:
+                            probe.acquire(0)
+                        except ResourceEffectBusy:
+                            busy = 'physical workers have not stopped; machine host retained'
+                            break
+                        else:
+                            probe.release()
+                if busy is None:
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(busy)
+                await asyncio.sleep(min(.05, remaining))
+            self._teardown_started = True
             seen = set()
             for factory in self._factories.values():
                 direct_shutdown=getattr(factory,"shutdown",None)
@@ -869,7 +916,7 @@ class MachineHost:
                         shutdown = getattr(backend, "shutdown", None)
                         if callable(shutdown):
                             await asyncio.to_thread(shutdown)
-        self._call(cleanup(), timeout=10)
+        self._call(cleanup(), timeout=10 + drain_timeout, _drain=True)
         if self._telemetry:self._telemetry.close()
         self._closed = True
         self._loop.call_soon_threadsafe(self._loop.stop)

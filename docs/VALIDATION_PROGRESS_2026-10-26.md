@@ -38,6 +38,11 @@ APK, installed application or public downloads contain them.
   by its scope leaves the device session connected.
 - Credential rotation fences concurrent requests and stale responses while the
   new credential is stored. The durable rotation receipt supports recovery.
+- Canvas shutdown performs a bounded drain of machine-host readers and active
+  calls, fencing new admissions while dependencies are being closed. If the
+  timeout expires, resources remain owned and an in-process caller may retry.
+  Once the HTTP server is closed, its endpoint is removed even if shutdown
+  fails; there is no remote retry through a closed endpoint.
 - Gateway request audit failures no longer interrupt the model request. Native
   models remain outside the Web-only gateway.
 - The older Windows wrapper calls the Inno installer with its supported flags;
@@ -84,6 +89,13 @@ applicable license, notices and pinned provenance.
   worker, and the receipt was reconciled without resending. The command ran
   once. Evidence: `.tmp/candidate-20261026-frozen-crash/report.json`. This
   candidate predates the latest installer and mobile changes.
+- A later source-mode three-Dot interruption attempt did not reach a verified
+  result. Durable records showed three creations and three delegations, with
+  one user message per worker, but all worker turns were `UNCERTAIN` and no
+  execution worktrees were recorded. Shutdown raised while catalog readers
+  remained active. The temporary fixture initially failed to persist its
+  report when cleanup also failed; it has since been corrected. This does not
+  prove any duplicate or the absence of effects outside the recorded scope.
 - Android candidate APK: GitHub Actions run `40394905514`, commit
   `4a90c2217429d9f56115b91f848cf854f055224e`, package
   `app.sentra.mobile.preview`, versionCode 12. The build verified its v2

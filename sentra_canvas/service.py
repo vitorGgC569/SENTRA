@@ -2675,7 +2675,7 @@ class Canvas:
                 except (OSError,TerminalError): pass
         if self._machine_host is not None:
             # Keep central databases alive if a physical worker still owns I/O.
-            self._machine_host.close()
+            self._machine_host.close(drain_timeout=3)
         if self._task_runtime:
             # Publish final task states before closing the shared registry.
             try:

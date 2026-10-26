@@ -838,6 +838,9 @@ def main(argv=None):
         try:
             app.shutdown()
         finally:
+            # HTTP is already closed even when resource drain fails; retaining
+            # its endpoint cannot offer a remote retry. A caller that owns the
+            # Canvas object can retry shutdown while the process remains alive.
             if server is not None:
                 remove_endpoint(server)
     return 0
