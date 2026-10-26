@@ -5,7 +5,7 @@ sessions from the audit round."""
 import json
 from pathlib import Path
 
-OUT = Path(__file__).parent / "runs" / "fix_batch_1.json"
+OUT = Path(__file__).resolve().parents[1] / "runs" / "fix_batch_1.json"
 
 FOOTER = """
 FORMATO DA RESPOSTA:

@@ -145,6 +145,10 @@ class CLIConfig:
             self.maestri_cli_path = find_maestri_cli()
         self._load_sentra_config()
         self._load_api_key_from_codex_auth()
+        # Core installations need configuration outside the package directory.
+        self.local_base_url = os.environ.get("SENTRA_LOCAL_BASE_URL", self.local_base_url)
+        self.local_model_name = os.environ.get("SENTRA_LOCAL_MODEL", self.local_model_name)
+        self.local_api_key = os.environ.get("SENTRA_LOCAL_API_KEY", self.local_api_key)
 
     def _load_api_key_from_codex_auth(self) -> None:
         """Load only a real API key; never reuse Codex OAuth as OpenAI API auth."""

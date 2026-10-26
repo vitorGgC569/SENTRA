@@ -221,15 +221,13 @@ class ModelClient:
 
     def probe_health(self) -> dict[str, Any]:
         gateway = self.gateway_status()
+        api_key = self.config.openai_api_key or os.environ.get("OPENAI_API_KEY", "")
         return {
             "gateway": bool(gateway["turn_ready"]),
             "gateway_reachable": bool(gateway["reachable"]),
             "gateway_status": gateway,
             "browser_host": self._browser_host_ready(),
-            "openai": bool(
-                self.config.openai_api_key
-                or os.environ.get("OPENAI_API_KEY")
-            ),
+            "openai": bool(api_key and api_key.strip().lower() != "none"),
             "local": self._local_available(),
         }
 
@@ -1678,6 +1676,8 @@ class ModelClient:
             self.config.openai_api_key
             or os.environ.get("OPENAI_API_KEY", "")
         )
+        if openai_key.strip().lower() == "none":
+            openai_key = ""
         if openai_key:
             self.active_provider = "openai"
             self.active_model = model

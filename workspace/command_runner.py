@@ -91,7 +91,7 @@ class CommandRunner:
                 "browser", "dashboard", "local_model", "native_bridge",
                 "orchestrator", "repository", "sentra_mcp",
                 "sentra_model_gateway", "sentra_remote", "workspace",
-                "main.py", "swarm.py", "swarm_poll.py", "sentra_version.py",
+                "main.py", "scripts/legacy/swarm.py", "scripts/legacy/swarm_poll.py", "sentra_version.py",
             ]
             existing = [
                 str(resolve_workspace_path(self.cwd, item))

@@ -1,3 +1,5 @@
+![SENTRA — Agents propose. SENTRA verifies.](docs/media/readme/sentra-cover.png)
+
 # SENTRA
 
 **Auditable coordination and execution with AI agents.**
@@ -5,6 +7,28 @@
 SENTRA brings Dots, permanent conversations, terminals, files, browser tools, and computer access into a shared workspace. Models propose actions; the runtime enforces permissions, records execution, and checks evidence. Model consensus alone does not establish correctness.
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue) ![Windows](https://img.shields.io/badge/platform-Windows-blue) ![Edge MV3](https://img.shields.io/badge/edge-MV3-orange) ![Tests pytest](https://img.shields.io/badge/tests-pytest-green) ![CI](https://github.com/vitorGgC569/SENTRA/actions/workflows/ci.yml/badge.svg)
+
+![Visual preview of SENTRA Home, assistant selection and Canvas](docs/media/readme/sentra-preview.gif)
+
+*Visual preview using demonstration data; not a recording of a live agent run.*
+
+## Quick start: core CLI
+
+With Git, Python 3.11+ and [pipx](https://pipx.pypa.io/) installed:
+
+```sh
+git clone https://github.com/vitorGgC569/SENTRA.git
+pipx install ./SENTRA
+sentra --help
+```
+
+This installs the Python core from the checked-out source; it does not install the Windows desktop. The package is a development preview, not yet published on PyPI. Windows and Linux container smoke tests use simulated providers; macOS has not yet been validated. On Linux and macOS, protected conversation storage requires a working system keyring. See [contributing](CONTRIBUTING.md) and [starter issues](docs/GOOD_FIRST_ISSUES.md).
+
+### Choose a model connection
+
+Web Models and browser automation are optional. For an OpenAI-compatible API, set `OPENAI_API_KEY` in your environment, optionally set `OPENAI_BASE_URL`, then run `sentra --model <model> -p "Hello"`. Keep keys out of the repository.
+
+For a local OpenAI-compatible server, start the model service and set `OPENAI_API_KEY=none`, `SENTRA_LOCAL_BASE_URL` (default `http://127.0.0.1:11434/v1`) and `SENTRA_LOCAL_MODEL` (default `qwen2.5:0.5b-instruct-q4_K_M`), then run `sentra -p "Hello"`. Availability depends on the local server and model. The core does not start Web Models by default; explicitly selected Web models require their separate integration.
 
 ## Current status
 

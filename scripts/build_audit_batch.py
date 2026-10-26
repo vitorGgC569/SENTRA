@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 PROJECT = Path(r"C:\Users\vitor\OneDrive\Desktop\TycoonCardAnimeRoblox")
-OUT = Path(__file__).parent / "runs" / "audit_batch.json"
+OUT = Path(__file__).resolve().parents[1] / "runs" / "audit_batch.json"
 
 
 def read(rel):

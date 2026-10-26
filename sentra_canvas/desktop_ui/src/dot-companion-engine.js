@@ -1,7 +1,7 @@
 /*!
  * SENTRA animated Dot companions.
  * Drawing and character data adapted from the user's local
- * Mini companions (1).html. No gallery markup, cards or backgrounds are imported.
+ * docs/design/mini-companions.html. No gallery markup, cards or backgrounds are imported.
  * The host remains authoritative for task state and completion.
  */
 const TAU=Math.PI*2,clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),R=Math.random;

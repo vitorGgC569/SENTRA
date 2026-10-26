@@ -16,7 +16,7 @@
   "assets_imported": false,
   "new_dependencies": false,
   "execution_authority": "Existing SENTRA Core, Grants and protected request journal.",
-  "companion_origin": "User-provided Mini companions (1).html; original SENTRA characters, not Mochi assets.",
+  "companion_origin": "User-provided docs/design/mini-companions.html; original SENTRA characters, not Mochi assets.",
   "source_sha256": {
     "scripts/commander/Open-InstalledCanvas.ps1": "8e3b00e6a631154c40af7d8aef3adfb7f70ceec468c3bb43455d474e8d32e901",
     "scripts/commander/stage_electron.py": "b09aa4a15249da7f18299e9288cf950c0b7620b51064c9aef7e31b0a2d089b7f",
