@@ -501,3 +501,149 @@ def test_corrupt_backup_is_not_restored(tmp_path, offline):
         recovery.recover_interrupted_clean_installs(state, app)
     assert exc.value._sentra_clean_install['recovery']['uncertain'] == 1
     assert not (app / 'sentra-canvas.exe').exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='placeholder recovery requires Windows no-replace rename')
+def test_recovery_after_placeholder_restores_original_marker(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    original = json.dumps({'product': 'SENTRA Desktop', 'installation_id': 'original',
+                           'owned_files': ['sentra-canvas.exe']})
+    marker = app / '.sentra-install.json'; marker.write_text(original)
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    placeholder = marker.read_bytes()
+    recovered = recovery.recover_interrupted_clean_installs(state, app)
+    assert not recovered[0]['recovery']['manual_recovery_required']
+    assert marker.read_text() == original
+    assert (app / 'sentra-canvas.exe').read_bytes() == b'old canvas'
+    manifest = json.loads((Path(result['backup']) / 'clean-install.json').read_text())
+    assert (Path(result['backup']) / manifest['placeholder']['quarantine']).read_bytes() == placeholder
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='placeholder recovery requires Windows no-replace rename')
+def test_interruption_after_quarantining_placeholder_can_resume(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    marker = app / '.sentra-install.json'
+    marker.write_text(json.dumps({'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    script = '''
+import os, sys
+from pathlib import Path
+from sentra_remote import installer_recovery as recovery, app_exit_update
+app_exit_update.assert_installation_offline = lambda _: None
+rename = Path.rename
+def exit_after_quarantine(self, target):
+    result = rename(self, target)
+    if self.name == '.sentra-install.json':
+        os._exit(24)
+    return result
+Path.rename = exit_after_quarantine
+recovery.recover_interrupted_clean_installs(Path(sys.argv[2]), Path(sys.argv[1]))
+'''
+    proc = subprocess.run([sys.executable, '-c', script, str(app), str(state)],
+                          cwd=Path(__file__).resolve().parents[2], timeout=30,
+                          capture_output=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    assert proc.returncode == 24, proc.stderr.decode('utf-8', 'replace')
+    assert not marker.exists()
+    recovered = recovery.recover_interrupted_clean_installs(state, app)
+    assert not recovered[0]['recovery']['manual_recovery_required']
+    assert json.loads(marker.read_text())['owned_files'] == ['sentra-canvas.exe']
+    assert (Path(result['backup']) / '.sentra-install.json').exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='placeholder recovery requires Windows no-replace rename')
+def test_concurrent_marker_change_is_preserved(tmp_path, offline, monkeypatch):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    marker = app / '.sentra-install.json'
+    marker.write_text(json.dumps({'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    rename = Path.rename
+    def concurrent_change(path, destination):
+        if path.name == '.sentra-install.json':
+            path.write_bytes(b'changed concurrently')
+        return rename(path, destination)
+    monkeypatch.setattr(Path, 'rename', concurrent_change)
+    with pytest.raises(recovery.InstallationRecoveryError, match='interrupted_clean_recovery'):
+        recovery.recover_interrupted_clean_installs(state, app)
+    assert marker.read_bytes() == b'changed concurrently'
+    manifest = json.loads((Path(result['backup']) / 'clean-install.json').read_text())
+    assert (Path(result['backup']) / manifest['placeholder']['quarantine']).read_bytes() == b'changed concurrently'
+    assert (Path(result['backup']) / '.sentra-install.json').exists()
+
+
+def test_no_replace_rename_fails_closed_without_windows(tmp_path, monkeypatch):
+    source = tmp_path / 'marker'; source.write_bytes(b'placeholder')
+    target = tmp_path / 'quarantine'; target.write_bytes(b'other bytes')
+    with monkeypatch.context() as context:
+        context.setattr(recovery.os, 'name', 'posix')
+        assert not recovery._rename_no_replace(source, target)
+    assert source.read_bytes() == b'placeholder'
+    assert target.read_bytes() == b'other bytes'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='tests Windows no-replace rename behavior')
+def test_quarantine_created_during_rename_is_never_replaced(tmp_path, offline, monkeypatch):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    marker = app / '.sentra-install.json'
+    marker.write_text(json.dumps({'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    placeholder = marker.read_bytes()
+    rename = Path.rename
+    def create_destination(path, destination):
+        if path.name == '.sentra-install.json':
+            Path(destination).write_bytes(b'concurrent file')
+        return rename(path, destination)
+    monkeypatch.setattr(Path, 'rename', create_destination)
+    with pytest.raises(recovery.InstallationRecoveryError, match='interrupted_clean_recovery'):
+        recovery.recover_interrupted_clean_installs(state, app)
+    assert marker.read_bytes() == placeholder
+    manifest = json.loads((Path(result['backup']) / 'clean-install.json').read_text())
+    assert (Path(result['backup']) / manifest['placeholder']['quarantine']).read_bytes() == b'concurrent file'
+
+
+@pytest.mark.parametrize('already_present', [False, True])
+@pytest.mark.parametrize('remove', [False, True])
+def test_final_verification_detects_concurrent_change(tmp_path, offline, monkeypatch, already_present, remove):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    marker = app / '.sentra-install.json'
+    marker.write_text(json.dumps({'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+    marker.unlink()
+    backup = Path(result['backup'])
+    if already_present:
+        marker.write_bytes((backup / '.sentra-install.json').read_bytes())
+    digest = recovery._digest_file
+    changed = False
+    def interleaved(path):
+        nonlocal changed
+        if path == backup / 'sentra-canvas.exe' and not changed:
+            changed = True
+            if remove:
+                marker.unlink()
+            else:
+                marker.write_bytes(b'changed concurrently')
+        return digest(path)
+    monkeypatch.setattr(recovery, '_digest_file', interleaved)
+    with pytest.raises(recovery.InstallationRecoveryError, match='interrupted_clean_recovery') as exc:
+        recovery.recover_interrupted_clean_installs(state, app)
+    assert changed
+    assert exc.value._sentra_clean_install['recovery']['uncertain'] >= 1
+    if remove:
+        assert not marker.exists()
+    else:
+        assert marker.read_bytes() == b'changed concurrently'
+    assert (backup / '.sentra-install.json').is_file()

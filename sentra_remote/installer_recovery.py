@@ -75,11 +75,17 @@ def prepare_clean_install(destination, state, products, *, incoming=None, on_bac
     assert_installation_offline(root)
     state = resolved_path(Path(state))
     marker = root / ".sentra-install.json"
+    if _disk(marker).is_symlink() or _disk(marker).is_junction():
+        raise InstallationRecoveryError('unsafe_clean_destination')
     try:
         old_marker = json.loads(_disk(marker).read_text(encoding="utf-8-sig"))
     except (ValueError, OSError):
         old_marker = {}
     recognized = isinstance(old_marker, dict) and old_marker.get('product') == 'SENTRA Desktop'
+    # The reserved filename alone is not evidence that existing bytes belong
+    # to SENTRA. Do not move even the marker when its contents are unrecognized.
+    if _disk(marker).exists() and not recognized:
+        raise InstallationRecoveryError('unowned_clean_conflict')
     identity = old_marker.get("installation_id") if recognized else None
     if not isinstance(identity, str) or not 1 <= len(identity) <= 128:
         identity = uuid.uuid4().hex
@@ -124,6 +130,11 @@ def prepare_clean_install(destination, state, products, *, incoming=None, on_bac
     backup = resolved_path(backup_disk)
     moved = []
     pending = root / (".sentra-install.clean-" + uuid.uuid4().hex + ".tmp")
+    placeholder_bytes = json.dumps({"product": "SENTRA Desktop", "installation_id": identity,
+                                    "owned_files": [], "installed_at": time.time()}).encode('utf-8')
+    placeholder = {'installation_id': identity,
+                   'sha256': hashlib.sha256(placeholder_bytes).hexdigest(),
+                   'quarantine': '.sentra-placeholder-' + uuid.uuid4().hex}
     try:
         # Persist the complete plan and the backup path before the first move.
         # On interruption the backup itself shows which planned moves happened.
@@ -131,6 +142,7 @@ def prepare_clean_install(destination, state, products, *, incoming=None, on_bac
         with _disk(backup / 'clean-install.json').open('x', encoding='utf-8') as stream:
             json.dump({'schema': 3, 'install_dir': str(root),
                        'components': [p.as_posix() for p in targets], 'sha256': digests,
+                       'placeholder': placeholder,
                        'created_at': time.time()}, stream)
             stream.flush()
             os.fsync(stream.fileno())
@@ -144,8 +156,7 @@ def prepare_clean_install(destination, state, products, *, incoming=None, on_bac
             moved.append(relative)
         # Claim only the new product files. Unrelated files, state, projects,
         # browser profiles and the desktop-launcher ownership receipt stay put.
-        _disk(pending).write_text(json.dumps({"product": "SENTRA Desktop", "installation_id": identity,
-                                      "owned_files": [], "installed_at": time.time()}), encoding="utf-8")
+        _disk(pending).write_bytes(placeholder_bytes)
         if os.name == "nt":
             _disk(pending).rename(_disk(marker))
         else:
@@ -213,6 +224,7 @@ def restore_missing_clean_backup(destination, backup):
     restored = 0
     conflicts = 0
     uncertain = 0
+    verified_targets = {}
     digests = manifest.get('sha256') if manifest.get('schema') == 3 else {}
     if not isinstance(digests, dict) or not isinstance(manifest.get('components'), list):
         raise InstallationRecoveryError('unsafe_clean_destination')
@@ -232,15 +244,23 @@ def restore_missing_clean_backup(destination, backup):
             # digest of the original. Old receipts without one stay uncertain.
             if not expected or not _disk(target).is_file() or _digest_file(target) != expected:
                 uncertain += 1
+            else:
+                verified_targets[relative] = expected
             continue
         source_digest = _digest_file(source)
         if expected and source_digest != expected:
             uncertain += 1
             continue
         if _disk(target).exists():
-            if not _disk(target).is_file() or _digest_file(target) != source_digest:
+            if _disk(target).is_file() and _digest_file(target) == source_digest:
+                verified_targets[relative] = source_digest
+                continue
+            # Only the exact placeholder recorded before the first move may
+            # be displaced. Retain it in the backup and never replace an
+            # unknown file that appears at its old path concurrently.
+            if name != '.sentra-install.json' or not _quarantine_placeholder(root, folder, target, manifest):
                 conflicts += 1
-            continue
+                continue
         _disk(target.parent).mkdir(parents=True, exist_ok=True)
         # Copy into the same directory first. A disk error or interruption
         # must not leave a partial file at the original installation path.
@@ -258,14 +278,73 @@ def restore_missing_clean_backup(destination, backup):
             # new file appeared while the backup was being copied.
             os.link(_disk(pending), _disk(target))
             restored += 1
+            verified_targets[relative] = source_digest
         except FileExistsError:
             # A concurrent creator might have installed different bytes; no
             # overwrite occurs. Even identical bytes require another pass.
             conflicts += 1
         finally:
             _disk(pending).unlink(missing_ok=True)
+    # A writer may have changed an earlier file while later files were being
+    # processed. Recheck every successful path before calling this recovery
+    # complete; this cannot prevent a change after the final check.
+    for relative, digest in verified_targets.items():
+        try:
+            target = _assert_unlinked(root, relative)
+            if not _disk(target).is_file() or _digest_file(target) != digest:
+                uncertain += 1
+        except (OSError, InstallationRecoveryError):
+            uncertain += 1
     return {'restored_missing': restored, 'conflicts': conflicts, 'uncertain': uncertain,
             'manual_recovery_required': conflicts > 0 or uncertain > 0}
+
+
+def _rename_no_replace(source, destination):
+    # Windows rename fails if destination exists. POSIX rename can replace an
+    # entry created after any existence check, so fail closed on that platform.
+    if os.name != 'nt':
+        return False
+    try:
+        source.rename(destination)
+    except OSError:
+        return False
+    return True
+
+
+def _quarantine_placeholder(root, folder, marker, manifest):
+    proof = manifest.get('placeholder')
+    if not isinstance(proof, dict):
+        return False  # Old receipts never established placeholder identity.
+    identity, digest, name = proof.get('installation_id'), proof.get('sha256'), proof.get('quarantine')
+    if (not isinstance(identity, str) or not identity or not isinstance(digest, str)
+            or len(digest) != 64 or not isinstance(name, str)
+            or not name.startswith('.sentra-placeholder-') or len(_relative_name(name).parts) != 1):
+        return False
+    quarantine = _assert_unlinked(folder, _relative_name(name))
+
+    def verified(path):
+        try:
+            data = _disk(path).read_bytes()
+            document = json.loads(data)
+            return (hashlib.sha256(data).hexdigest() == digest and isinstance(document, dict)
+                    and document.get('product') == 'SENTRA Desktop'
+                    and document.get('installation_id') == identity and document.get('owned_files') == [])
+        except (OSError, ValueError):
+            return False
+
+    if _disk(quarantine).exists() or not verified(marker):
+        return False
+    if not _rename_no_replace(_disk(marker), _disk(quarantine)):
+        return False
+    if verified(quarantine):
+        return True
+    # The marker changed after inspection. Put it back only if its path is
+    # still vacant, preserving the quarantined bytes even if that fails.
+    try:
+        os.link(_disk(quarantine), _disk(marker))
+    except OSError:
+        pass
+    return False
 
 
 def record_clean_recovery(state, destination, result, status):
