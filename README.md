@@ -22,7 +22,7 @@ pipx install ./SENTRA
 sentra --help
 ```
 
-This installs the Python core from the checked-out source; it does not install the Windows desktop. The package is a development preview, not yet published on PyPI. Windows and Linux container smoke tests use simulated providers; macOS has not yet been validated. On Linux and macOS, protected conversation storage requires a working system keyring. See [contributing](CONTRIBUTING.md) and [starter issues](docs/GOOD_FIRST_ISSUES.md).
+This installs the Python core from the checked-out source; it does not install the Windows desktop. The package is a development preview, not yet published on PyPI. Automated pipx smoke tests have passed on Windows, Linux and macOS using simulated providers and an isolated test keyring. On Linux and macOS, protected conversation storage requires a working system keyring. See [contributing](CONTRIBUTING.md) and [starter issues](docs/GOOD_FIRST_ISSUES.md).
 
 ### Choose a model connection
 
