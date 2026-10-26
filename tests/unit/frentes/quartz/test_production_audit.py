@@ -174,16 +174,16 @@ def test_uncertain_and_unverified_guest_do_not_bind(tmp_path):
         )
 
 
-def test_next_installer_copies_license_docs_and_audit_closure():
+def test_next_installer_wrapper_does_not_claim_unverified_package_contents():
     report = diagnose_installer(INSTALLER, product_version=PRODUCT_VERSION)
-    assert report["defect"] is None
-    assert report["missing"] == []
-    assert report["copies_license"] is True
-    assert report["copies_comercial"] is True
-    assert report["copies_sentra_quality"] is True
-    assert report["version_matches"] is True
-    assert report["marker_version"] == PRODUCT_VERSION
-    assert "sentra_quality/decision_receipt_audit.py" not in report["missing"]
+    assert report["defect"] == "installer_payload_not_inspected"
+    assert report["installer_role"] == "setup_wrapper"
+    assert report["missing"] is None
+    assert report["copies_license"] is None
+    assert report["copies_comercial"] is None
+    assert report["copies_sentra_quality"] is None
+    assert report["version_matches"] is None
+    assert report["marker_version"] is None
     assert report["paywall"] is False
     assert report["local_use_blocked"] is False
     assert report["closes_front_16"] is False

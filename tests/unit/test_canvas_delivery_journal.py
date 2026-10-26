@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sentra_canvas.service import Canvas
+from sentra_canvas.service import Canvas, Session
 from sentra_canvas.graph import GraphStore
 from sentra_core.conversations import ConversationStore
 
@@ -33,7 +33,8 @@ def test_handoff_intent_is_committed_before_write_and_partial_failure_not_replay
             calls.append(data)
             raise OSError("pipe failed after accepting a prefix")
         pty=SimpleNamespace(poll=lambda:None,write=write,close=lambda **kwargs:None)
-        app._sessions[terminal["id"]]=SimpleNamespace(pty=pty,exit_input=b"/exit\r")
+        session=Session();session.pty=pty;session.exit_input=b"/exit\r"
+        app._sessions[terminal["id"]]=session
         with pytest.raises(OSError):
             app.handoff(ws,source["id"],target["id"],message,True,"request-418")
         replay=app.handoff(ws,source["id"],target["id"],message,True,"request-418")

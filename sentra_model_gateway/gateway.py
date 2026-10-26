@@ -2144,7 +2144,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             )
             native_identity=json.loads(request_identity) if request_identity else {}
             correlation=native_identity.get("turn_id") if isinstance(native_identity,dict) else None
-            self.server.audit.emit("model.request.started","ok",{
+            self._audit_route("model.request.started","ok",{
                 "correlation_id":correlation,"thread_id":native_identity.get("thread_id"),"model":model,
             })
             goal_present, goal_text = _extract_codex_goal_signal(value.get("input"))
@@ -2217,7 +2217,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if capability:
                 try:
                     evidence = self.server.turn_authority.telemetry_metadata(capability)
-                    self.server.audit.emit("model.request.finished", (
+                    self._audit_route("model.request.finished", (
                         "completed" if evidence["completion_verified"] else
                         "failed" if proxy_failed else "unverified"
                     ), {

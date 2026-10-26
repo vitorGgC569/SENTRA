@@ -16,7 +16,7 @@ import {recentMobilePanel} from './components/recent-panel';
 import discoveryLicense from './THIRD_PARTY_LICENSES/zeroconf.json';
 import orcaLicense from './THIRD_PARTY_LICENSES/orca-license.json';
 import {MessageSquare,Layers,Folder,Terminal,Monitor,Globe,ArrowUp,RefreshCw,Link as LinkIcon,ShieldCheck,ArrowLeft} from 'lucide-react-native';
-import {MobileClient,EffectJournal,ScopedRefresh,bindRequestContext,requireRequestContext,parseOffer,canonicalIntent,journalIntent,upsertDevice,deviceAtAddress,deviceAtOffer,type Device,type PendingEffect} from '@sentra/mobile-transport';
+import {MobileClient,ReconnectLoop,canActivateSession,EffectJournal,ScopedRefresh,bindRequestContext,requireRequestContext,parseOffer,canonicalIntent,journalIntent,upsertDevice,deviceAtAddress,deviceAtOffer,type Device,type PendingEffect} from '@sentra/mobile-transport';
 import {primitives} from '@sentra/mobile-transport/crypto';
 import {createNativeWebSocket} from './native-websocket';
 
@@ -42,16 +42,19 @@ function Studio(){
  const navigation=useRef(0),lifecycle=useRef(0);
  const journal=useRef(new EffectJournal({read:()=>SecureStore.getItemAsync('sentra-pending-effects-v1',options),write:value=>SecureStore.setItemAsync('sentra-pending-effects-v1',value,options)}));
  const client=useRef<MobileClient|null>(null),vm=useRef<any>(null),activeScreen=useRef(screen),activeConversation=useRef(conversation),activeDevice=useRef(device);
+ const recovery=useRef<ReconnectLoop|null>(null),recoveryBlocked=useRef(new Set<string>()),connectionContext=useRef({foreground,pairing,busy});
+ connectionContext.current={foreground,pairing,busy};
  activeScreen.current=screen;activeConversation.current=conversation;activeDevice.current=device;vm.current=vmStatus;
- function createClient(){const next=new MobileClient(primitives(n=>new Uint8Array(Crypto.getRandomBytes(n))),createNativeWebSocket,value=>{if(client.current===next)setStatus(value)});return next;}
+ function createClient(expectedDeviceId?:string){const next=new MobileClient(primitives(n=>new Uint8Array(Crypto.getRandomBytes(n))),createNativeWebSocket,value=>{if(client.current===next){if(value==='reauth_required'){const identity=expectedDeviceId||activeDevice.current?.device_id;if(identity)recoveryBlocked.current.add(identity);setNotice('O acesso deste dispositivo foi revogado, expirou ou a credencial é inválida. Confira o pareamento no desktop.')}setStatus(value==='connected'&&!next.hasPairedSession?'connecting':value)}});return next;}
  async function save(list:Device[]){await protectedDrafts.write(storageKey+'-chunks',JSON.stringify(list));await SecureStore.deleteItemAsync(storageKey,options);setDevices(list)}
  async function readDevices(){const chunks=await SecureStore.getItemAsync(storageKey+'-chunks',options);return chunks?await protectedDrafts.read(storageKey+'-chunks'):await SecureStore.getItemAsync(storageKey,options)}
- async function connect(item:Device,persistAddress=false){++navigation.current;++lifecycle.current;setBusy(true);setNotice('');try{await release();client.current?.disconnect();setConversation(null);setMessages([]);setInventory(null);setSharedProfile(null);setVmStatus(null);setFrame(null);setEntries([]);setFile(null);const next=createClient();client.current=next;const resumed=await next.resume(item,updated=>save(upsertDevice(devices,updated)));if(persistAddress)await save(upsertDevice(devices,resumed));activeDevice.current=resumed;setDevice(resumed);setPairing(false);await load(next)}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
+ async function connect(item:Device,persistAddress=false){recovery.current?.cancel();++navigation.current;const epoch=++lifecycle.current;setBusy(true);setNotice('');try{await release();if(AppState.currentState!=='active'||lifecycle.current!==epoch)return;client.current?.disconnect();setConversation(null);setMessages([]);setInventory(null);setSharedProfile(null);setVmStatus(null);setFrame(null);setEntries([]);setFile(null);const next=createClient(item.device_id);client.current=next;const resumed=await next.resume(item,updated=>save(upsertDevice(devices,updated)));const valid=()=>canActivateSession(next,client.current,resumed,AppState.currentState==='active',epoch,lifecycle.current);if(!valid()){next.disconnect();return;}if(persistAddress)await save(upsertDevice(devices,resumed));if(!valid()){next.disconnect();return;}recoveryBlocked.current.delete(resumed.device_id);activeDevice.current=resumed;setDevice(resumed);setPairing(false);setStatus('connected');await load(next)}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
  async function rotateCredential(){if(!device||busy)return;const transport=client.current;setBusy(true);try{const updated=await transport!.rotateCredential(async next=>{await save(upsertDevice(devices,next));if(client.current===transport){activeDevice.current=next;setDevice(next)}});if(client.current!==transport)return;activeDevice.current=updated;setDevice(updated);setNotice('Credencial rotacionada. A identidade e os escopos do host foram preservados.');}catch(e:any){setNotice(e.message+' A chave de retomada da rotação foi preservada neste aparelho.')}finally{setBusy(false)}}
- async function resumeCurrent(){const item=activeDevice.current;if(!item)return;try{const next=createClient();client.current?.disconnect();client.current=next;const resumed=await next.resume(item,updated=>save(upsertDevice(devices,updated)));activeDevice.current=resumed;setDevice(resumed);await load(next);}catch(e:any){setNotice(e.message+' O pareamento foi preservado. Confira o endereço LAN.');}}
  async function request(action:string,fields:Record<string,any>={},effect=false){
   const transport=client.current,paired=activeDevice.current;
   const context=bindRequestContext(transport,paired),activity=lifecycle.current;
+  const requirePairedTransport=()=>{if(!transport?.isPairedTo(paired))throw Error('A conexão mudou. A ação não foi enviada para outro dispositivo.');};
+  requirePairedTransport();
   const releasing=action==='dot_vm_handoff'&&fields.holder==='agent';
   const key=effect?Crypto.randomUUID():null;
   const intent=JSON.parse(JSON.stringify({...fields,action,...(key?{request_key:key}:{})}));
@@ -61,6 +64,7 @@ function Studio(){
   try{
    if(tracked){await journal.current.begin({key:key!,slot:[paired!.device_id,action,intent.conversation_id||'',intent.approval_id||'',intent.request?.arguments?.terminal_id||''].join(':'),device_id:paired!.device_id,action,conversation_id:intent.conversation_id,...(action==='dot_computer_action'?{fingerprint:await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256,canonicalIntent(journalIntent(fullRequest)))}:{}),created_at:Date.now()});prepared=true;}
    requireRequestContext(context,client.current,activeDevice.current);
+   requirePairedTransport();
    if(!releasing&&activity!==lifecycle.current)throw Error('O app mudou de contexto. A entrada antiga foi descartada.');
    const relinquish=action==='dot_vm_handoff'&&intent.holder==='agent';
    if(effect&&!relinquish&&['background','inactive'].includes(AppState.currentState))throw Error('O app está suspenso. A ação não foi enviada.');
@@ -91,8 +95,8 @@ function Studio(){
 
  async function openConversation(item:any){const ticket=++navigation.current;try{await release();const value=await request('message_list',{conversation_id:item.conversation_id,tail:true,limit:50});if(ticket!==navigation.current)return;setConversation(item);setMessages(value.items||value.messages||[]);setVmStatus(null);setFrame(null);}catch(e:any){if(ticket===navigation.current)setNotice(e.message)}}
  async function update(){setNotice('');try{await load();if(conversation)await openConversation(conversation);}catch(e:any){setNotice(e.message)}}
- async function pair(uri=pairText){if(busy)return;if(recovering){try{const updated=deviceAtOffer(recovering,parseOffer(uri));setRecovering(null);setCamera(false);await connect(updated,true);}catch(e:any){setNotice(e.message)}return;}++navigation.current;++lifecycle.current;setBusy(true);try{const offer=parseOffer(uri);await release();client.current?.disconnect();setConversation(null);setMessages([]);setVmStatus(null);setFrame(null);const next=createClient();client.current=next;setPending(await next.pair(offer,'SENTRA '+(dark?'mobile':'phone')));setCamera(false);setNotice('Confira o dispositivo no desktop e aprove este pareamento.')}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
- async function claim(){setBusy(true);try{const value=await client.current!.claim(pending);if(!value){setNotice('Aguardando aprovação no desktop.');return;}await save(upsertDevice(devices,value));setPending(null);setDevice(value);setPairing(false);setNotice('Dispositivo pareado.');await load();}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
+ async function pair(uri=pairText){if(busy)return;recovery.current?.cancel();if(recovering){try{const updated=deviceAtOffer(recovering,parseOffer(uri));setRecovering(null);setCamera(false);await connect(updated,true);}catch(e:any){setNotice(e.message)}return;}++navigation.current;++lifecycle.current;setBusy(true);try{const offer=parseOffer(uri);await release();client.current?.disconnect();setConversation(null);setMessages([]);setVmStatus(null);setFrame(null);const next=createClient();client.current=next;setPending(await next.pair(offer,'SENTRA '+(dark?'mobile':'phone')));setCamera(false);setNotice('Confira o dispositivo no desktop e aprove este pareamento.')}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
+ async function claim(){setBusy(true);const transport=client.current,epoch=lifecycle.current;try{const value=await transport!.claim(pending);if(!value){setNotice('Aguardando aprovação no desktop.');return;}await save(upsertDevice(devices,value));if(!canActivateSession(transport!,client.current,value,AppState.currentState==='active',epoch,lifecycle.current))return;recoveryBlocked.current.delete(value.device_id);activeDevice.current=value;setPending(null);setDevice(value);setPairing(false);setStatus('connected');setNotice('Dispositivo pareado.');await load(transport)}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
  async function send(){const selected=conversation,id=selected?.conversation_id,text=draft.value.trim(),epoch=navigation.current;if(!id||!text||busy||!draft.ready)return;setBusy(true);try{await request('message_send',{conversation_id:id,content:text},true);if(epoch!==navigation.current)return;draft.clear(draft.value);const value=await request('message_list',{conversation_id:id,tail:true,limit:50});if(epoch!==navigation.current)return;setMessages(value.items||value.messages||[]);setNotice('Pedido aceito. Acompanhando o resultado.');}catch(e:any){if(epoch===navigation.current)setNotice(e.message)}finally{setBusy(false)}}
  async function files(path=''){setBusy(true);try{const value=await request('project_file_list',{path});setEntries(value.items||[]);setFolder(path);setFile(null)}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
  async function inspect(entry:any){if(entry.directory)return files(entry.path);try{setFile(await request('project_file_preview',{path:entry.path}))}catch(e:any){setNotice(e.message)}}
@@ -104,9 +108,33 @@ function Studio(){
  async function release(){try{if(vm.current?.input?.holder==='human'&&vm.current.input.client_id==='mobile:'+activeDevice.current?.device_id)await handoff('agent');}catch{/* The host lease also expires; atomic gestures own their release. */}finally{vm.current=null;setVmStatus(null);}}
 
 
- useEffect(()=>{let stopped=false;void readDevices().then(raw=>{if(raw&&!stopped){try{setDevices(JSON.parse(raw))}catch{setNotice('Registro local de pareamento inválido. Faça novo pareamento.')}}}).catch(()=>{if(!stopped)setNotice('Não foi possível abrir o pareamento protegido. Desbloqueie o aparelho e retome o app.')});const handle=({url}:{url:string})=>{if(url.startsWith('sentra://pair#')){setPairText(url);setPairing(true)}};void Linking.getInitialURL().then(url=>{if(url)handle({url})});const sub=Linking.addEventListener('url',handle);let retiring=Promise.resolve(),appEpoch=0;const app=AppState.addEventListener('change',state=>{const ticket=++appEpoch;if(state!=='active'){const previous=client.current;retiring=release().finally(()=>previous?.disconnect());}else{void retiring.then(()=>{if(!stopped&&ticket===appEpoch)void resumeCurrent()})}});return()=>{stopped=true;sub.remove();app.remove();client.current?.disconnect()}},[]);
+ useEffect(()=>{let stopped=false;void readDevices().then(raw=>{if(raw&&!stopped){try{setDevices(JSON.parse(raw))}catch{setNotice('Registro local de pareamento inválido. Faça novo pareamento.')}}}).catch(()=>{if(!stopped)setNotice('Não foi possível abrir o pareamento protegido. Desbloqueie o aparelho e retome o app.')});const handle=({url}:{url:string})=>{if(url.startsWith('sentra://pair#')){setPairText(url);setPairing(true)}};void Linking.getInitialURL().then(url=>{if(url)handle({url})});const sub=Linking.addEventListener('url',handle);const app=AppState.addEventListener('change',state=>{if(state!=='active'){recovery.current?.cancel();const previous=client.current;void release().finally(()=>previous?.disconnect());}});return()=>{stopped=true;sub.remove();app.remove();recovery.current?.cancel();client.current?.disconnect()}},[]);
  useEffect(()=>{if(screen==='files'&&device)void files();if(screen==='computer'&&device)void observe();},[screen,device?.device_id]);
  useEffect(()=>{const sub=AppState.addEventListener('change',state=>{lifecycle.current++;setForeground(state==='active')});return()=>sub.remove()},[]);
+ useEffect(()=>{
+  if(!device||!foreground||pairing)return;
+  const expected=device;let stopped=false;
+  const eligible=()=>!stopped&&AppState.currentState==='active'&&connectionContext.current.foreground&&
+   !connectionContext.current.pairing&&!connectionContext.current.busy&&activeDevice.current===expected&&
+   !recoveryBlocked.current.has(expected.device_id);
+  const loop=new ReconnectLoop({eligible,attempt:async signal=>{
+   if(expected.rotation_key)throw Object.assign(Error('Conclua a rotação de credencial manualmente.'),{status:403});
+   if(!eligible()||signal.aborted)throw Error('Conexão cancelada');
+   const epoch=lifecycle.current,next=createClient(expected.device_id);client.current?.disconnect();client.current=next;
+   const cancel=()=>{if(client.current===next){client.current=null;next.disconnect();setStatus('disconnected');}};
+   signal.addEventListener('abort',cancel,{once:true});
+   try{
+    await next.resume(expected);
+    if(signal.aborted||!eligible()||!canActivateSession(next,client.current,expected,AppState.currentState==='active',epoch,lifecycle.current)){cancel();throw Error('Conexão cancelada');}
+    setStatus('connected');
+    void load(next).catch((e:any)=>{if(client.current===next)setNotice('Conectado; não foi possível atualizar os dados: '+e.message)});
+   }finally{signal.removeEventListener('abort',cancel);}
+  },stopOn:error=>[401,403].includes((error as any)?.status)||/Identidade/.test(String((error as any)?.message||'')),
+   onExhausted:error=>{recoveryBlocked.current.add(expected.device_id);setNotice('Não foi possível reconectar. O pareamento foi preservado; confira o acesso e o endereço LAN. '+String((error as any)?.message||''));}});
+  recovery.current=loop;if(status==='disconnected'&&!busy)loop.trigger();
+  return()=>{stopped=true;if(recovery.current===loop)recovery.current=null;loop.cancel();};
+ },[foreground,pairing,device]);
+ useEffect(()=>{if(status==='disconnected'&&!busy)recovery.current?.trigger()},[status,busy]);
  useEffect(()=>{
   if(!foreground||status!=='connected'||!device||pairing)return;
   const transport=client.current,selected=conversation?.conversation_id;
@@ -134,7 +162,7 @@ function Studio(){
    finally{refreshing=false;}
   };
   const detach=transport.observeConversation(selected,{
-   onState:state=>{if(!stopped){setPresentationState(state);if(state==='reauth_required')setNotice('O acesso à conversa foi revogado ou expirou. Confira o pareamento.');}},
+    onState:state=>{if(!stopped){setPresentationState(state);if(state==='reauth_required')setNotice('A conversa não está disponível para este dispositivo. Confira o acesso no desktop.');}},
    onPreview:value=>{
     if(stopped||client.current!==transport)return;
     setPresentation({...value,conversation_id:selected});

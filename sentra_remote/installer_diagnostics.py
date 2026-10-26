@@ -2,11 +2,11 @@
 
 MESSAGES = {
     "destination_unowned": (
-        "A pasta contém arquivos de uma instalação anterior sem identificação válida. Selecione Instalação limpa para guardar uma cópia e substituir somente os componentes do SENTRA, ou escolha uma pasta vazia.",
-        "The destination contains files without valid installation ownership. Select Clean installation to back up and replace SENTRA components, or choose an empty folder."),
+        "A pasta contém arquivos sem identificação válida de propriedade. Escolha uma pasta exclusiva vazia ou revise os arquivos existentes; componentes sem propriedade comprovada não serão substituídos.",
+        "The destination contains files without valid installation ownership. Choose an empty dedicated folder or review the existing files; components without proven ownership will not be replaced."),
     "marker_invalid": (
-        "A identificação da instalação anterior está danificada. Selecione Instalação limpa para preservar uma cópia dos componentes antigos e reinstalar.",
-        "The previous installation marker is damaged. Select Clean installation to preserve a backup of the old components and reinstall."),
+        "A identificação da instalação anterior está danificada. Os arquivos existentes serão preservados; escolha uma pasta exclusiva se a propriedade dos componentes não puder ser comprovada.",
+        "The previous installation marker is damaged. Existing files will be preserved; choose a dedicated folder if ownership of the components cannot be established."),
     "active_installation": (
         "O SENTRA ainda está em execução. Feche o aplicativo e conclua suas sessões antes de tentar novamente. O instalador preservou os processos ativos.",
         "SENTRA is still running. Close the application and finish its sessions before retrying. Setup preserved the active processes."),
@@ -25,6 +25,12 @@ MESSAGES = {
     "unsafe_clean_destination": (
         "Esta pasta não pode ser usada para instalação limpa. Escolha uma pasta exclusiva do aplicativo, fora de diretórios de sistema, projetos Git e links de diretório.",
         "This folder cannot be used for clean installation. Choose a dedicated application folder outside system directories, Git projects and directory links."),
+    "unowned_clean_conflict": (
+        "Um arquivo existente não pertence a uma instalação SENTRA identificada e seria substituído. Ele foi preservado. Escolha uma pasta exclusiva para o aplicativo ou mova o arquivo por conta própria antes de tentar novamente.",
+        "An existing file is not owned by an identified SENTRA installation and would be replaced. It was preserved. Choose a dedicated application folder or move the file yourself before retrying."),
+    "interrupted_clean_recovery": (
+        "Uma instalação limpa anterior foi interrompida. Há arquivos conflitantes, ausentes ou que não puderam ser verificados. Preserve a cópia indicada e resolva a situação antes de instalar novamente.",
+        "A previous clean installation was interrupted. Some files conflict, are missing, or could not be verified. Keep the indicated backup and resolve the issue before installing again."),
     "shortcut_failed": (
         "O Windows impediu a criação do acesso ao SENTRA. Verifique o acesso à Área de Trabalho e ao menu Iniciar. Arquivos antigos não identificados foram preservados.",
         "Windows prevented creating the SENTRA launcher. Check Desktop and Start Menu access. Unidentified old files were preserved."),

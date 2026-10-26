@@ -23,6 +23,13 @@ from .identity_sessions import SessionExecutor,SessionScope,SessionJournal,decla
 from .rpa import ExecutorFailure,effect_checkpoint,AuthorizedPaths,digest,OwnedProcessHandle,_WindowsJob
 
 
+class _PopenOwnedHandle:
+    """Popen retains the original Windows process handle until cleanup."""
+    def __init__(self, process): self.process = process
+    def terminate(self): self.process.kill()
+    def close(self): pass
+
+
 @dataclass(frozen=True)
 class RustDeskPeerBinding:
     capability_id:str
@@ -111,8 +118,9 @@ class RustDeskNativeBackend:
 
     def shutdown(self):
         with self.lock:
-            for item in list(self.running.values()):self._terminate(item)
-            self.running.clear()
+            for ident,item in list(self.running.items()):
+                self._terminate(item)
+                self.running.pop(ident,None)
 
     def _build(self,b):
         executable=Path(b.executable)
@@ -178,13 +186,35 @@ class RustDeskNativeBackend:
         # Stop only this retained kernel handle/job; no pkill/taskkill by name.
         # On POSIX don't reap the leader before killing its new process group:
         # an unreaped PID cannot have been reused by an unrelated process.
-        if job:handle.terminate();job.close()
+        deadline=time.monotonic()+3
+        if job:
+            try:
+                job.terminate()
+                # Also terminate the retained process if assignment failed;
+                # this is harmless if the Job already terminated it.
+                handle.terminate()
+            except Exception as exc:
+                raise ExecutorFailure('rustdesk_owned_process_stop_unconfirmed',uncertain=True) from exc
         elif process.returncode is None:
             try:os.killpg(process.pid,signal.SIGKILL)
             except ProcessLookupError:pass
             handle.terminate()
-        try:process.wait(timeout=3)
-        except subprocess.TimeoutExpired:pass
+        try:exit_code=process.wait(timeout=max(0,deadline-time.monotonic()))
+        except subprocess.TimeoutExpired as exc:
+            # Keep the retained process handle and entry. The host must retain
+            # physical exclusion until an owner can establish the outcome.
+            raise ExecutorFailure('rustdesk_owned_process_stop_unconfirmed',uncertain=True) from exc
+        if type(exit_code) is not int or process.returncode is None:
+            raise ExecutorFailure('rustdesk_owned_process_stop_unconfirmed',uncertain=True)
+        if job:
+            try:
+                while job.active_processes():
+                    remaining=deadline-time.monotonic()
+                    if remaining<=0:raise TimeoutError('owned process tree still active')
+                    time.sleep(min(.05,remaining))
+            except Exception as exc:
+                raise ExecutorFailure('rustdesk_owned_process_stop_unconfirmed',uncertain=True) from exc
+            job.close()
         handle.close()
 
     def run(self,b,a):
@@ -216,10 +246,14 @@ class RustDeskNativeBackend:
                     effect_checkpoint()
                     process=subprocess.Popen([b.executable,'--connect',b.peer_id],env=env,cwd=directory,
                         stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
-                        start_new_session=os.name!='nt',creationflags=0x08000000 if os.name=='nt' else 0)
+                        start_new_session=os.name!='nt',creationflags=0x08000004 if os.name=='nt' else 0)
+                    if job:
+                        # Register immediately, even if obtaining a separate handle
+                        # or assignment fails, so failed cleanup remains retryable.
+                        self.running[row['id']]=(process,_PopenOwnedHandle(process),job,directory)
                     handle=OwnedProcessHandle(process.pid)
-                    if job:job.assign(handle.handle)
                     self.running[row['id']]=(process,handle,job,directory)
+                    if job:job.assign_suspended_pid(process.pid)
                     metadata=dict(row['metadata'],native_pid=process.pid,runtime_directory=str(directory))
                     self.journal.update(row,metadata=metadata)
                     deadline=time.monotonic()+b.timeout_seconds-2
@@ -238,7 +272,8 @@ class RustDeskNativeBackend:
                         time.sleep(.05)
                     raise ExecutorFailure('rustdesk_peer_verification_timeout',uncertain=True,evidence={'session_id':row['id']})
                 except Exception:
-                    if row['id'] in self.running:self._terminate(self.running.pop(row['id']))
+                    if row['id'] in self.running:
+                        self._terminate(self.running[row['id']]);self.running.pop(row['id'],None)
                     else:
                         if handle:handle.terminate();handle.close()
                         if job:job.close()

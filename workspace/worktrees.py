@@ -89,7 +89,7 @@ class WorktreeManager:
             return {**result,'state':'ready','reused':False}
         finally:lock.close()
 
-    def inspect(self,identity):
+    def inspect(self,identity,*,include_diff=True):
         if not re.fullmatch(r'[a-f0-9]{24}',identity):raise ValueError('invalid worktree identity')
         value=json.loads((self.state/(identity+'.json')).read_text())
         if value.get('state')!='ready' or value.get('worktree_id')!=identity:
@@ -97,5 +97,7 @@ class WorktreeManager:
         target=Path(value['path']).resolve(strict=True)
         if not target.is_relative_to(self.root):raise PermissionError('worktree escaped root')
         if not self._registered(target,value['branch']):raise RuntimeError('worktree identity drift')
-        diff=self.git('diff','--no-ext-diff','--no-textconv','--stat',cwd=target)
-        return {**value,'diff_stat':diff,'read_only':True}
+        result={**value,'read_only':True}
+        if include_diff:
+            result['diff_stat']=self.git('diff','--no-ext-diff','--no-textconv','--stat',cwd=target)
+        return result

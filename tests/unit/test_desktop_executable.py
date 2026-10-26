@@ -23,9 +23,12 @@ def test_desktop_executable_repairs_and_removes_only_owned_bytes(tmp_path):
     assert target.read_bytes() == source.read_bytes()
     target.write_bytes(b"unrelated replacement")
     assert install_desktop_executable(install, desktop, remove=True) is None
-    with pytest.raises(FileExistsError):
-        install_desktop_executable(install, desktop)
+    alternate = install_desktop_executable(install, desktop)
+    assert alternate.name == "SENTRA (2).exe"
+    assert alternate.read_bytes() == source.read_bytes()
     assert target.read_bytes() == b"unrelated replacement"
+    assert install_desktop_executable(install, desktop, remove=True) == alternate
+    assert not alternate.exists() and target.read_bytes() == b"unrelated replacement"
 
 
 def test_interrupted_desktop_publish_can_be_retried(tmp_path, monkeypatch):

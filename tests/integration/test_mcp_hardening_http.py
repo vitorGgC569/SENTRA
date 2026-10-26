@@ -29,7 +29,18 @@ def _wait_port(port: int, process: subprocess.Popen[str]) -> None:
                 return
         except OSError:
             time.sleep(0.05)
-    raise AssertionError("MCP HTTP server did not open loopback port")
+    # The fixture's process is private to this test. Collect its diagnostics
+    # before reporting a timeout instead of silently discarding startup errors.
+    process.terminate()
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate(timeout=5)
+    raise AssertionError(
+        "MCP HTTP server did not open loopback port within 15 seconds. "
+        f"stdout tail: {stdout[-4000:]}\nstderr tail: {stderr[-4000:]}"
+    )
 
 
 def _approve_workspace(state_path: Path, request_id: str) -> None:

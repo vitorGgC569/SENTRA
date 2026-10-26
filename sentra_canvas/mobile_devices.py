@@ -17,6 +17,10 @@ MOBILE_ACTIONS=frozenset({'dot_canvas_get','workspace_inventory','workspace_pres
 READ_ACTIONS=MOBILE_ACTIONS-{'message_send','coordinator_approval_reply','dot_computer_action','dot_vm_input','dot_vm_handoff'}
 
 
+class MobileDeviceAuthenticationDenied(PermissionError):
+    """A paired-device credential is invalid, expired, or revoked."""
+
+
 class DeviceRegistry:
     def __init__(self,path,owner):
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True);self.owner=owner
@@ -84,7 +88,7 @@ class DeviceRegistry:
     def authenticate(self,device_id,token,public_key):
         with self.db() as db:row=db.execute('SELECT * FROM mobile_devices WHERE id=? AND owner=?',(device_id,self.owner)).fetchone()
         if not row or row['state']!='active' or row['expires']<time.time() or not hmac.compare_digest(row['public_key'],public_key) or not hmac.compare_digest(row['token_hash'] or '',self.digest(token)):
-            raise PermissionError('mobile device revoked, expired or invalid')
+            raise MobileDeviceAuthenticationDenied('mobile device revoked, expired or invalid')
         return json.loads(row['scope'])
     def rotate(self,device_id,token,public_key,request_key):
         """Recover the same rotation after a lost response; never rotate twice on retry."""
@@ -94,13 +98,13 @@ class DeviceRegistry:
         with self.db() as db:
             row=db.execute('SELECT * FROM mobile_devices WHERE id=? AND owner=?',(device_id,self.owner)).fetchone()
             if not row or row['state']!='active' or row['expires']<time.time() or not hmac.compare_digest(row['public_key'],public_key):
-                raise PermissionError('mobile device revoked, expired or invalid')
+                raise MobileDeviceAuthenticationDenied('mobile device revoked, expired or invalid')
             receipt=db.execute('SELECT * FROM mobile_rotation_receipts WHERE device_id=? AND owner=?',(device_id,self.owner)).fetchone()
             if (receipt and receipt['request_key']==request_key and receipt['expires']>time.time()
                     and hmac.compare_digest(receipt['old_hash'],self.digest(token))):
                 return {'credential':unprotect_secret(receipt['protected_token']),'device_id':device_id,'scope':json.loads(row['scope'])}
             if not hmac.compare_digest(row['token_hash'] or '',self.digest(token)):
-                raise PermissionError('mobile device revoked, expired or invalid')
+                raise MobileDeviceAuthenticationDenied('mobile device revoked, expired or invalid')
             replacement=secrets.token_urlsafe(36)
             db.execute('INSERT OR REPLACE INTO mobile_rotation_receipts VALUES(?,?,?,?,?,?)',
                 (device_id,self.owner,request_key,row['token_hash'],protect_secret(replacement),time.time()+86400))

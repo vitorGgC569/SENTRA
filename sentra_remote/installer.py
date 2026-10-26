@@ -233,14 +233,15 @@ def download_tunnel_client(destination: Path, archive: Path | None = None) -> di
             )
             if executable is None:
                 raise ValueError("tunnel-client.exe is missing from archive")
-            with package.open(executable) as src, (destination / "tunnel-client.exe").open("wb") as dst:
+            from .product_copy import open_product_target
+            with package.open(executable) as src, open_product_target(destination / "tunnel-client.exe", root=destination) as dst:
                 shutil.copyfileobj(src, dst)
             licenses = destination / "licenses" / "tunnel-client"
             licenses.mkdir(parents=True, exist_ok=True)
             for item in members:
                 base = Path(item.filename).name
                 if base.upper() in {"LICENSE", "NOTICE"} or base.endswith((".spdx.json", "-licenses.txt")):
-                    with package.open(item) as src, (licenses / base).open("wb") as dst:
+                    with package.open(item) as src, open_product_target(licenses / base, root=destination) as dst:
                         shutil.copyfileobj(src, dst)
         return {
             "ok": True,
@@ -357,8 +358,14 @@ def _copy_product_files(install_dir: Path) -> list[str]:
         folders.append((bridge_source, "browser-enrollment"))
     elif not getattr(sys, "frozen", False):
         from .enrollment_extension import stage_extensions
-        stage_extensions(Path(__file__).parent / "enrollment_extension", bridge_target)
-        folders.append((bridge_target, "browser-enrollment"))
+        # Generate away from the destination: staging directly there would
+        # overwrite unowned files and incorrectly claim unrelated files.
+        with tempfile.TemporaryDirectory(prefix='sentra-enrollment-stage-') as temporary:
+            staged = Path(temporary) / 'browser-enrollment'
+            stage_extensions(Path(__file__).parent / "enrollment_extension", staged)
+            shutil.copytree(_filesystem_path(staged), _filesystem_path(bridge_target),
+                            dirs_exist_ok=True, copy_function=copy_file)
+            owned.extend(_owned_tree_files(staged, 'browser-enrollment'))
     else:
         raise FileNotFoundError("packaged Setup DOM bridge is missing")
     registration_source = source / "prerequisites/codex-registration"
@@ -409,9 +416,15 @@ def _write_install_marker(install_dir: Path, owned_files: list[str] | None = Non
         "installed_at": time.time(),
         "owned_files": sorted(set(existing_owned + (owned_files or []))),
     }
-    temp = marker.with_suffix(".tmp")
-    temp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    temp.replace(marker)
+    temp = marker.with_name(marker.name + '.' + uuid.uuid4().hex + '.tmp')
+    try:
+        with temp.open('x', encoding='utf-8') as stream:
+            json.dump(payload, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temp.replace(marker)
+    finally:
+        temp.unlink(missing_ok=True)
     return marker
 
 
@@ -707,6 +720,11 @@ def install(**options) -> dict[str, Any]:
     # The coordinated update helper owns this same OS lock across its child.
     lock = nullcontext() if options.get("offline_handoff") is not None else installation_lock(install_dir)
     with lock:
+        # A prior process may have stopped after recording its backup but
+        # before its exception handler could run. Reconcile before inspecting
+        # or writing the installation, for clean installs and normal repairs.
+        from .installer_recovery import recover_interrupted_clean_installs
+        recovered_clean = recover_interrupted_clean_installs(state, install_dir)
         if clean:
             pass  # Explicit recovery is prepared only after payload verification.
         elif (install_dir / INSTALL_MARKER).is_file():
@@ -729,31 +747,71 @@ def install(**options) -> dict[str, Any]:
         options["tunnel_archive"] = prepare_tunnel_archive(state / "downloads", options.get("tunnel_archive"))
         state.mkdir(parents=True, exist_ok=True)
         journal = state / "installer-progress.json"
+        clean_result = None
 
         def record(label, percent, *, status="running"):
             # Only fixed stage labels: credentials and provider output never enter this file.
             document = {"version": PRODUCT_VERSION, "stage": label, "percent": percent,
                         "status": status, "updated_at": time.time()}
+            if clean_result is not None:
+                document['clean_install'] = clean_result
             pending = journal.with_suffix(".tmp")
-            pending.write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
+            with pending.open('w', encoding='utf-8') as stream:
+                json.dump(document, stream, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
             pending.replace(journal)
             if progress:
                 progress(label, percent)
 
         options["progress"] = record
         try:
-            clean_result = None
             if clean:
-                from .installer_recovery import prepare_clean_install
+                from .installer_recovery import prepare_clean_install, planned_clean_targets, record_clean_recovery
                 record("Guardando os componentes anteriores para instalação limpa", 5)
-                clean_result = prepare_clean_install(install_dir, state, PRODUCTS)
-            result = _install_product(**options)
+                incoming = planned_clean_targets(payload_root(), extension_source(), docs_source(), PRODUCTS,
+                    options.get('tunnel_archive'), Path(sys.executable) if getattr(sys, 'frozen', False) else None,
+                    include_registration=options.get('register_system', True))
+                def registered_backup(value):
+                    nonlocal clean_result
+                    record_clean_recovery(state, install_dir, value, 'prepared')
+                    clean_result = value
+                    record("Guardando os componentes anteriores para instalação limpa", 5)
+                clean_result = prepare_clean_install(install_dir, state, PRODUCTS,
+                    incoming=incoming, on_backup=registered_backup)
+            from .product_copy import protect_clean_targets
+            with protect_clean_targets() if clean else nullcontext():
+                result = _install_product(**options)
             if clean_result is not None:
                 result["clean_install"] = clean_result
-        except Exception:
-            record("Instalação interrompida. Abra o instalador para reparar.", 0, status="failed")
+                if clean_result.get('backup'):
+                    record_clean_recovery(state, install_dir, clean_result, 'components_applied')
+        except Exception as exc:
+            if clean_result and clean_result.get('backup'):
+                from .installer_recovery import restore_missing_clean_backup
+                try:
+                    from .app_exit_update import assert_installation_offline
+                    assert_installation_offline(install_dir)
+                    clean_result['recovery'] = restore_missing_clean_backup(install_dir, clean_result['backup'])
+                except Exception:
+                    clean_result['recovery'] = {'manual_recovery_required': True}
+                try:
+                    from .installer_recovery import record_clean_recovery
+                    record_clean_recovery(state, install_dir, clean_result, 'failed')
+                except Exception:
+                    # The pre-move record remains available even if updating it fails.
+                    pass
+                # Make the durable backup visible to the native worker's
+                # report and user-facing message even when installation fails.
+                exc._sentra_clean_install = clean_result
+            try:
+                record("Instalação interrompida. Abra o instalador para reparar.", 0, status="failed")
+            except OSError:
+                pass  # Keep the original error and the pre-move durable backup receipt.
             raise
         result["preflight"] = preflight
+        if recovered_clean:
+            result["interrupted_clean_recoveries"] = recovered_clean
         ready = _installation_ready(result.get("connect_verify") or {}, openai_required=not options.get("local_only", False))
         deferred = bool(options.get("offline_handoff"))
         record("Atualização preparada" if deferred else "SENTRA instalado; contas Web podem ser conectadas no aplicativo" if options.get("local_only") and ready else "Túnel verificado; autorize o plugin no ChatGPT" if ready else "A configuração precisa de atenção",
@@ -1691,7 +1749,8 @@ def _write_setup_report(path: Path, operation: str, result: dict[str, Any], code
         "mcp_roundtrip_verified": browser.get("mcp_roundtrip_verified") is True,
         "diagnostic": diagnose(result, code),
         "clean_install": {"requested": (result.get("clean_install") or {}).get("requested") is True,
-                          "backup_directory": (result.get("clean_install") or {}).get("backup")},
+                          "backup_directory": (result.get("clean_install") or {}).get("backup"),
+                          "recovery": (result.get("clean_install") or {}).get("recovery")},
         "settings_recovered": (result.get("settings_recovery") or {}).get("recovered") is True,
         "homologated": False,
     }
@@ -1783,10 +1842,13 @@ def main(argv: list[str] | None = None) -> int:
                 target = args.failure_message_file
                 target.parent.mkdir(parents=True, exist_ok=True)
                 text = diagnostic["message_pt" if args.setup_language == "pt-BR" else "message_en"] if diagnostic else ""
+                backup = (result.get("clean_install") or {}).get("backup")
+                if backup:
+                    prefix = "Componentes anteriores guardados em: " if args.setup_language == "pt-BR" else "Previous components backed up at: "
+                    text += ('\n' if text else '') + prefix + str(backup)
+                    if ((result.get('clean_install') or {}).get('recovery') or {}).get('manual_recovery_required'):
+                        text += ("\nA restauração automática ficou incompleta. Preserve esta cópia para recuperar os componentes anteriores." if args.setup_language == "pt-BR" else "\nAutomatic restoration was incomplete. Keep this backup to recover the previous components.")
                 if not diagnostic:
-                    backup = (result.get("clean_install") or {}).get("backup")
-                    if backup:
-                        text = ("Componentes anteriores guardados em: " if args.setup_language == "pt-BR" else "Previous components backed up at: ") + str(backup)
                     if (result.get("settings_recovery") or {}).get("recovered"):
                         text += ("\nConfigurações recuperadas no modo Seguro. Projetos e contas preservados." if args.setup_language == "pt-BR" else "\nSettings recovered in Safe mode. Projects and accounts preserved.")
                     if "existing_desktop_executable_preserved" in (result.get("shortcuts") or {}).get("warnings", []):
@@ -1849,6 +1911,9 @@ def main(argv: list[str] | None = None) -> int:
         from .installer_diagnostics import MESSAGES
         reason = getattr(exc, "reason", None)
         failure["failure_reason"] = reason if isinstance(reason, str) and reason in MESSAGES else None
+        recovery = getattr(exc, '_sentra_clean_install', None)
+        if isinstance(recovery, dict):
+            failure['clean_install'] = recovery
         from .openai_auto_setup import CredentialProtectionUnavailable
         if isinstance(exc, CredentialProtectionUnavailable):
             failure["reason"] = "credential_protection_unavailable"

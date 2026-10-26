@@ -176,10 +176,20 @@ def test_packaging_context_embeds_pins_and_records_same_selection(installed, tmp
     monkeypatch.setattr(build, 'ROOT', tmp_path)
     monkeypatch.setattr(build, '_source_fingerprint', lambda: {'source': 'stable'})
     calls = []
-    monkeypatch.setattr(build, '_run', lambda args, **kwargs: calls.append(args))
+    def fake_build(args, **kwargs):
+        calls.append(args)
+        name = args[args.index('--name') + 1]
+        bundle = Path(args[args.index('--distpath') + 1]) / name
+        runtime = bundle / ('_runtime_' + name)
+        runtime.mkdir(parents=True)
+        (bundle / (name + '.exe')).write_bytes(b'synthetic-not-run')
+        (runtime / 'python312.dll').write_bytes(b'synthetic-runtime')
+    monkeypatch.setattr(build, '_run', fake_build)
     dist = tmp_path / 'dist'; dist.mkdir()
     with build._RuntimeBinding(root, required=True):
         build._build('synthetic-component', 'synthetic.py', dist, tmp_path / 'work', tmp_path / 'spec')
+        assert (dist / 'synthetic-component.exe').is_file()
+        assert (dist / '_runtime_synthetic-component' / 'python312.dll').is_file()
         binding = dict(build._RUNTIME_BINDING.get())
         assert any(PIN_RESOURCE in arg for arg in calls[0])
         (dist / 'component.exe').write_bytes(b'synthetic-not-run')

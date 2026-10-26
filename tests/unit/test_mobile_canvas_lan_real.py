@@ -80,7 +80,7 @@ def test_encrypted_mobile_canvas_pairing_scope_and_revocation(shell):
         invite=registry(app).invite()
         offer={**invite,'protocol_version':1,'endpoint':f'ws://127.0.0.1:{port}/sentra/mobile/v1','public_key':ready['public_key']}
         phone=subprocess.Popen([node,str(tsx),str(transport/'test/paired-canvas-driver.ts')],stdin=subprocess.PIPE,stdout=subprocess.PIPE,text=True,creationflags=flags)
-        phone.stdin.write(json.dumps({'offer':offer,'rotate':True})+'\n');phone.stdin.flush()
+        phone.stdin.write(json.dumps({'offer':offer,'rotate':True,'disconnect_before_claim':True,'lose_claim_response':True})+'\n');phone.stdin.flush()
         paired=line_from(phone);assert paired['phase']=='pending'
         owner_control(app,{'action':'approve','device_id':paired['device_id'],'scope':{**scope,'dot_id':first['dot_id'],
             'actions':['workspace_inventory','conversation_list']}})
@@ -88,6 +88,7 @@ def test_encrypted_mobile_canvas_pairing_scope_and_revocation(shell):
         scoped=line_from(phone)
         assert scoped=={'phase':'scoped','protocol':1,'conversations':[own['conversation_id']]}
         assert line_from(phone)=={'phase':'rotated','recovered':True,'old_refused':True}
+        assert line_from(phone)=={'phase':'scope_denied','still_paired':True}
         owner_control(app,{'action':'revoke','device_id':paired['device_id']})
         phone.stdin.write('revoked\n');phone.stdin.flush()
         assert line_from(phone)=={'phase':'revoked','refused':True}

@@ -8,17 +8,18 @@ from sentra_canvas.service import Canvas
 from sentra_executors.conpty_sessions import ExistingConPTYSession
 from sentra_mcp.services.action_consent_gate import ActionConsentService, HostOwnerClickAuthenticator, HostOwnerSession
 from sentra_mcp.services.browser_evidence import BrowserEvidenceService
-from test_governance_coordination import _services
 from test_sentra_cos_chat2_action_and_message import _observe,EXT,SHA,REQ,MSG
 
 
 @pytest.mark.skipif(os.name!="nt", reason="Windows ConPTY only")
 def test_owned_windows_pty_start_write_read_physical_fences(tmp_path):
     canvas=Canvas(tmp_path/"canvas",max_terminals=1)
-    durable,context,cp=_services(tmp_path/"core")
+    # Exercise the same authority used by Canvas terminal possession; a second
+    # unrelated Control Plane cannot authorize a WorkItem in the first one.
+    cp=canvas._shell_service(); durable,context=cp.durable,cp.context
     try:
         ws=canvas.create_workspace("IsolatedConPTYLab")
-        owner=canvas.store.principal
+        owner=canvas._runtime().owner
         run=durable.create_run(owner,workspace=ws["path"],run_id=ws["run_id"])["run_id"]
         cp.ensure_agent(run,owner,agent_id="pty-agent",role="builder")
         wi="WI-physical-pty-2026"
@@ -104,14 +105,15 @@ def test_owned_windows_pty_start_write_read_physical_fences(tmp_path):
         for _ in range(24):
             observed=adapter.read(owner,run_id=run,work_item_id=wi,
                 principal_id="pty-agent",workspace_id=ws["id"],
-                terminal_id=terminal_id,head_chars=8192,tail_chars=8192)["tail"]
+                terminal_id=terminal_id,canvas_principal=canvas.store.principal,
+                head_chars=8192,tail_chars=8192)["tail"]
             if "SENTRA_OWNED_PTY_OK" in observed:
                 break
             time.sleep(0.15)
         assert "SENTRA_OWNED_PTY_OK" in observed
         assert adapter.read(owner,run_id=run,work_item_id=wi,
             principal_id="pty-agent",workspace_id=ws["id"],
-            terminal_id=terminal_id)["live"] is True
+            terminal_id=terminal_id,canvas_principal=canvas.store.principal)["live"] is True
         gc_action=propose("terminal.close",
             {"workspace_id":ws["id"],"terminal_id":terminal_id},
             "lab-click-04-owned-handle-gc")

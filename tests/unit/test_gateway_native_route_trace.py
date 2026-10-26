@@ -10,8 +10,23 @@ import pytest
 from sentra_model_gateway.gateway import GatewayHandler
 
 
+def configure_web_authority(server):
+    retired = []
+    completed = threading.Event()
+    def retire(capability, **kwargs):
+        retired.append(capability)
+        completed.set()
+    server.web_transport_mode = lambda: "legacy"
+    server.turn_authority = SimpleNamespace(
+        issue=lambda **kwargs: "isolated-capability",
+        telemetry_metadata=lambda capability: {"completion_verified": False},
+        retire=retire,
+    )
+    return retired, completed
+
+
 @pytest.mark.parametrize("status", [200, 503])
-def test_native_requests_audited_without_prompts_or_tokens(status):
+def test_web_requests_audited_without_prompts_or_tokens(status):
     events = []
 
     class Audit:
@@ -20,7 +35,7 @@ def test_native_requests_audited_without_prompts_or_tokens(status):
 
     class Handler(GatewayHandler):
         def _body(self):
-            return {"model": "gpt-6.1-sol", "input": "PRIVATE_DO_NOT_AUDIT"}
+            return {"model": "chatgpt-web/gpt-6", "input": "PRIVATE_DO_NOT_AUDIT"}
 
         def _proxy(self, *args, **kwargs):
             self._json(status, {"status": status})
@@ -28,6 +43,7 @@ def test_native_requests_audited_without_prompts_or_tokens(status):
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.audit = Audit()
+    retired, completed = configure_web_authority(server)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
@@ -49,17 +65,19 @@ def test_native_requests_audited_without_prompts_or_tokens(status):
         server.server_close()
         worker.join(timeout=5)
 
-    assert [event[0] for event in events] == [
+    gateway_events = [event for event in events if event[0].startswith("model.gateway.")]
+    assert [event[0] for event in gateway_events] == [
         "model.gateway.received",
         "model.gateway.forwarded",
     ]
-    started, finished = events[0][2], events[1][2]
+    started, finished = gateway_events[0][2], gateway_events[1][2]
     assert started["correlation_id"] == finished["correlation_id"]
     assert started["path"] == finished["path"] == "/v1/responses"
     assert finished["upstream_http_status"] == status
     assert finished["automatic_retry"] is False
     assert finished["elapsed_ms"] >= 0
-    assert events[1][1] == ("ok" if status == 200 else "error")
+    assert gateway_events[1][1] == ("ok" if status == 200 else "error")
+    assert completed.wait(2) and retired == ["isolated-capability"]
     safe = json.dumps(events)
     assert "PRIVATE_DO_NOT_AUDIT" not in safe
     assert "SECRET_DO_NOT_AUDIT" not in safe
@@ -72,7 +90,7 @@ def test_audit_failure_does_not_break_request():
 
     class Handler(GatewayHandler):
         def _body(self):
-            return {"model": "gpt-6.1-sol", "input": "NO_LEAK"}
+            return {"model": "chatgpt-web/gpt-6", "input": "NO_LEAK"}
 
         def _proxy(self, *args, **kwargs):
             self._json(200, {"ok": True})
@@ -80,6 +98,7 @@ def test_audit_failure_does_not_break_request():
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.audit = Audit()
+    retired, completed = configure_web_authority(server)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -95,3 +114,4 @@ def test_audit_failure_does_not_break_request():
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+    assert completed.wait(2) and retired == ["isolated-capability"]

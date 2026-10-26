@@ -36,6 +36,23 @@ _OBSERVABLE_FINAL_STATES = frozenset({
 })
 
 
+def _native_final_candidate(status, messages, previous_sequence):
+    """Only publish a completed last response, never a tool round or draft."""
+    if status.get('state') != 'completed' or status.get('uncertain_calls') or not messages:
+        return None
+    last = messages[-1]
+    if (last.get('seq', 0) <= previous_sequence or last.get('role') != 'assistant'
+            or last.get('kind') != 'assistant_response'):
+        return None
+    content = last.get('content')
+    if not isinstance(content, str) or not content.strip():
+        return None
+    from sentra_cli.agent import DIRECTIVE_RE
+    if DIRECTIVE_RE.search(content):
+        return None
+    return last
+
+
 class CanvasShellRuntime:
     def __init__(self, canvas, control, *, owner):
         self.canvas, self.control, self.owner = canvas, control, owner
@@ -171,6 +188,52 @@ class CanvasShellRuntime:
                 "WHERE conversation_id=? ORDER BY seq", (conversation_id,)).fetchall()
         return [{"seq": row["seq"], "role": row["role"], "kind": row["kind"],
                  "content": _decode(row["protected_content"])} for row in rows]
+
+    def _native_journal_baseline(self, conversation_id):
+        """Snapshot existing turn identities and transcript position together."""
+        with self.conversations._connect() as db:
+            db.execute('BEGIN')
+            self.conversations._owned(db, conversation_id)
+            seq = db.execute('SELECT COALESCE(MAX(seq),0) FROM messages WHERE conversation_id=?',
+                             (conversation_id,)).fetchone()[0]
+            turns = {r[0] for r in db.execute('SELECT id FROM turns WHERE conversation_id=?', (conversation_id,))}
+            return seq, turns
+
+    def _native_journal_final(self, message, dot, workspace, baseline):
+        """Read the host-reserved operation and completed turn in one journal snapshot."""
+        conversation_id = message['conversation_id']
+        scope = {'owner':self.owner, 'principal':self.canvas.store.principal,
+            'workspace':workspace, 'project_id':message['project_id'], 'space_id':message['space_id'],
+            'conversation_id':conversation_id, 'run_id':message['run_id'],
+            'work_item_id':message['work_item_id'], 'agent_id':dot['agent_id'],
+            'operation_id':message['operation_id']}
+        previous_sequence, previous_turns = baseline
+        with self.conversations._connect() as db:
+            db.execute('BEGIN')
+            self.conversations._owned(db, conversation_id, workspace)
+            binding = db.execute('SELECT conversation_id,turn_id,protected_scope FROM canvas_native_turn_bindings '
+                                 'WHERE operation_id=?', (message['operation_id'],)).fetchone()
+            if binding is None or binding['conversation_id'] != conversation_id or _decode(binding['protected_scope']) != scope:
+                return None
+            turns = db.execute('SELECT id,state FROM turns WHERE conversation_id=?', (conversation_id,)).fetchall()
+            new_turns = [r for r in turns if r['id'] not in previous_turns]
+            if (len(new_turns) != 1 or new_turns[0]['state'] != 'completed'
+                    or new_turns[0]['id'] != binding['turn_id']):
+                return None
+            if any(r['state'] == 'running' for r in turns):
+                return None
+            if db.execute("SELECT 1 FROM calls WHERE conversation_id=? AND state='uncertain' LIMIT 1",
+                          (conversation_id,)).fetchone():
+                return None
+            row = db.execute('SELECT m.seq,m.role,m.kind,m.protected_content,a.turn_id '
+                'FROM messages m LEFT JOIN response_message_turns a '
+                'ON a.conversation_id=m.conversation_id AND a.message_seq=m.seq '
+                'WHERE m.conversation_id=? ORDER BY m.seq DESC LIMIT 1', (conversation_id,)).fetchone()
+            if row is None or row['turn_id'] != new_turns[0]['id']:
+                return None
+            last = {'seq':row['seq'], 'role':row['role'], 'kind':row['kind'],
+                    'content':_decode(row['protected_content'])}
+            return _native_final_candidate({'state':'completed','uncertain_calls':[]}, [last], previous_sequence)
 
     def _journal_calls(self, conversation_id):
         with self.conversations._connect() as db:
@@ -598,7 +661,7 @@ class CanvasShellRuntime:
         if self._coordinator_uses_dot_vm(message, dot):
             self._execute_coordinator_in_guest(oid, message, dot)
             return
-        previous_sequence = max((m["seq"] for m in self._journal_messages(sid)), default=0)
+        journal_baseline = self._native_journal_baseline(sid)
         self.conversations.set_model_preferences(sid, dot["model"], dot.get("effort"), workspace=workspace["path"])
         command = self.canvas._cli_command(["--prompt-stdin", "--workspace", workspace["path"],
             "--model", dot["model"], "--no-auto-start", "--timeout", str(SHELL_PROVIDER_TIMEOUT_SECONDS),
@@ -621,10 +684,11 @@ class CanvasShellRuntime:
         try:
             with self.canvas._lock:
                 self._model_grant(message, dot)
-                if self.canvas._agent_port is not None:
-                    actor_token = self.actors.register(message, dot, deadline=deadline)
-                    environment.update(SENTRA_CANVAS_AGENT_TOKEN=actor_token,
-                        SENTRA_CANVAS_AGENT_PORT=str(self.canvas._agent_port), SENTRA_CANVAS_AGENT_SCOPE="shell")
+                if self.canvas._agent_port is None:
+                    raise Denied('native Canvas turn requires the live actor endpoint')
+                actor_token = self.actors.register(message, dot, deadline=deadline)
+                environment.update(SENTRA_CANVAS_AGENT_TOKEN=actor_token,
+                    SENTRA_CANVAS_AGENT_PORT=str(self.canvas._agent_port), SENTRA_CANVAS_AGENT_SCOPE="shell")
                 from .task_workspace import for_work_item
                 assigned=for_work_item(self.control,self.owner,message['work_item_id'],dot['agent_id'])
                 process = TaskProcess(command, cwd=assigned['path'] if assigned else workspace['path'], env=environment,
@@ -662,16 +726,12 @@ class CanvasShellRuntime:
                         self.control.durable.update_operation(oid, self.owner, state="UNCERTAIN",
                             event_type="SHELL_MODEL_INTERRUPTED", progress={"automatic_retry": False})
                         return
-            status = self.conversations.status(sid)
-            messages = self._journal_messages(sid)
-            answers = [m for m in messages if m["role"] == "assistant" and m["seq"] > previous_sequence
-                       and m.get("kind", "message") != "provider_error"]
-            if process.returncode != 0 or status["uncertain_calls"] or not answers:
+            answer = self._native_journal_final(message, dot, workspace['path'], journal_baseline)
+            if process.returncode != 0 or answer is None:
                 self.control.durable.update_operation(oid, self.owner, state="UNCERTAIN",
                     event_type="SHELL_MODEL_RESULT_UNCONFIRMED", progress={"journal_available": True, "automatic_retry": False},
                     error={"code": "shell_provider_unconfirmed", "message": self._delivery_problem(message) or "O provedor não confirmou uma resposta."})
                 return
-            answer = answers[-1]
             content = answer["content"]
             receipt = "conversation:" + sid + ":" + str(answer["seq"])
             timing = self.live.view(message['project_id'], sid).get('timings_ms', {})

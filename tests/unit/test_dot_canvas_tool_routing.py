@@ -1,5 +1,6 @@
 """No provider calls: exercise real Dot scope/journal with isolated SQLite."""
 import sqlite3
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,6 +20,8 @@ class ControlStore:
         db = sqlite3.connect(self.path)
         db.row_factory = sqlite3.Row
         return db
+    def assert_active(self):
+        return None
 
 
 class Store:
@@ -73,6 +76,9 @@ class Pty:
 class Canvas:
     project_dir = Path(".")
     def __init__(self, tmp_path):
+        self.state_dir = tmp_path / "canvas"
+        self.state_dir.mkdir()
+        self._lock = threading.RLock()
         self.store = Store()
         self.control = SimpleNamespace(store=ControlStore(tmp_path / "requests.db"))
         self.graph = FakeGraph()

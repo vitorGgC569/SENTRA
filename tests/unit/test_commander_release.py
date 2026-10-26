@@ -470,7 +470,7 @@ def test_windows_builder_avoids_per_binary_global_clean_and_isolates_cache(tmp_p
         tmp_path / "spec",
     )
     assert "--clean" not in args
-    assert args[:2] == ["--noconfirm", "--onefile"]
+    assert args[:2] == ["--noconfirm", "--onedir"]
 
 
 def test_windows_builder_fails_closed_and_terminates_pyinstaller_tree(

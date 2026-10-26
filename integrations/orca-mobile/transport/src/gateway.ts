@@ -97,7 +97,10 @@ server.on('connection',(socket,request)=>{
       body:JSON.stringify({...body,public_key:session.peer}),signal:controller.signal});
      clearTimeout(handshake);
      if(!response.ok||!response.body||!response.headers.get('content-type')?.startsWith('text/event-stream')){
-      await response.body?.cancel();throw Object.assign(Error('Presentation subscription refused'),{status:response.status});
+      const denied=response.status===403?await response.json().catch(()=>null):null;
+      if(response.status!==403)await response.body?.cancel();
+      throw Object.assign(Error('Presentation subscription refused'),{status:response.status,
+       code:denied?.code==='MOBILE_DEVICE_AUTH_INVALID'?'MOBILE_DEVICE_AUTH_INVALID':undefined});
      }
      send({id:body.id,ok:true,value:{subscription_id:id,protocol_version:1}});
      void(async()=>{const status=503;try{
@@ -118,8 +121,10 @@ server.on('connection',(socket,request)=>{
     headers:{Authorization:'Bearer '+destination.bearer,'Content-Type':'application/json'},
     body:JSON.stringify({...body,public_key:session.peer}),signal:AbortSignal.timeout(14000)});
    const value=await response.json() as any;
-   result=response.ok?{id:body.id,ok:true,value:value.value}:{id:body.id,ok:false,status:response.status,error:'Pedido recusado pelo SENTRA'};
-  }catch(error){result={id:body.id,ok:false,status:(error as any)?.status,error:'Resultado não confirmado. Consulte antes de repetir.'};}
+   result=response.ok?{id:body.id,ok:true,value:value.value}:{id:body.id,ok:false,status:response.status,error:'Pedido recusado pelo SENTRA',
+    ...(response.status===403&&value?.code==='MOBILE_DEVICE_AUTH_INVALID'?{code:'MOBILE_DEVICE_AUTH_INVALID'}:{})};
+  }catch(error){result={id:body.id,ok:false,status:(error as any)?.status,error:'Resultado não confirmado. Consulte antes de repetir.',
+   ...((error as any)?.status===403&&(error as any)?.code==='MOBILE_DEVICE_AUTH_INVALID'?{code:'MOBILE_DEVICE_AUTH_INVALID'}:{})};}
   if(socket.readyState===socket.OPEN){let json=JSON.stringify(result);
    if(Buffer.byteLength(json)>4*1024*1024)json=JSON.stringify({id:body.id,ok:false,error:'Resultado excede o limite mobile; consulte no desktop.'});
    socket.send(session.seal(json));}

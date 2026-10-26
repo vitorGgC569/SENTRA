@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from .service import Canvas
 from .store import Denied
+from .mobile_devices import MobileDeviceAuthenticationDenied
 from sentra_mcp.services.shell_coordinator import ShellConflict
 from sentra_collab.authority import SnapshotConflict
 
@@ -139,6 +140,14 @@ class CanvasHandler(BaseHTTPRequestHandler):
                 batch=runtime.stream.read(project_id,after)
             self.wfile.write(b'0\r\n\r\n')
             self.wfile.flush()
+        except MobileDeviceAuthenticationDenied:
+            if not headers_sent:
+                raise
+            try:
+                emit('end',{'status':403,'code':'MOBILE_DEVICE_AUTH_INVALID','read_only':True})
+            except OSError:
+                pass
+            self.close_connection=True
         except (Denied,PermissionError):
             if not headers_sent:
                 raise
@@ -232,6 +241,8 @@ class CanvasHandler(BaseHTTPRequestHandler):
             self._send(409,{"error":"resource revision changed; reload before saving"})
         except (ValueError,TypeError) as exc:
             self._send(400,{"error":str(exc)[:200]})
+        except MobileDeviceAuthenticationDenied:
+            self._send(403,{"error":"access denied","code":"MOBILE_DEVICE_AUTH_INVALID"})
         except (Denied,PermissionError):
             self._send(403,{"error":"access denied or explicit approval required"})
         except KeyError:
@@ -827,6 +838,9 @@ def main(argv=None):
         try:
             app.shutdown()
         finally:
+            # HTTP is already closed even when resource drain fails; retaining
+            # its endpoint cannot offer a remote retry. A caller that owns the
+            # Canvas object can retry shutdown while the process remains alive.
             if server is not None:
                 remove_endpoint(server)
     return 0

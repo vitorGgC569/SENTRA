@@ -73,6 +73,10 @@ class _WindowsJob:
         self.kernel.CreateJobObjectW.restype = wintypes.HANDLE
         self.kernel.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
         self.kernel.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        self.kernel.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        self.kernel.TerminateJobObject.restype = wintypes.BOOL
+        self.kernel.QueryInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
+        self.kernel.QueryInformationJobObject.restype = wintypes.BOOL
         self.kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
         self.handle = self.kernel.CreateJobObjectW(None, None)
         limits = Extended(); limits.basic.flags = 0x2000  # KILL_ON_JOB_CLOSE
@@ -82,6 +86,30 @@ class _WindowsJob:
     def assign(self, process_handle):
         if not self.kernel.AssignProcessToJobObject(self.handle, process_handle):
             raise ExecutorFailure('owned_process_job_assignment_failed')
+
+    def assign_suspended_pid(self, pid):
+        # Share the existing suspended-thread identity checks with Canvas.
+        from sentra_canvas.owned_process import WindowsJob
+        WindowsJob.assign_suspended_pid(self, pid)
+
+    def terminate(self):
+        import ctypes
+        if not self.handle or not self.kernel.TerminateJobObject(self.handle, 1):
+            raise OSError('owned_process_job_termination_failed', ctypes.get_last_error())
+
+    def active_processes(self):
+        import ctypes
+        from ctypes import wintypes
+        class Accounting(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_int64) for name in
+                ('total_user', 'total_kernel', 'period_user', 'period_kernel')] + [
+                (name, wintypes.DWORD) for name in
+                ('page_faults', 'total_processes', 'active_processes', 'terminated_processes')]
+        info = Accounting()
+        if not self.handle or not self.kernel.QueryInformationJobObject(
+                self.handle, 1, ctypes.byref(info), ctypes.sizeof(info), None):
+            raise OSError('owned_process_job_query_failed', ctypes.get_last_error())
+        return info.active_processes
 
     def close(self):
         if getattr(self, 'handle', None):

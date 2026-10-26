@@ -944,9 +944,14 @@ class SentraAgent:
             if any(c["kind"] == "provider" for c in status["uncertain_calls"]):
                 raise UncertainCall("previous provider delivery is uncertain; inspect /session and resolve it before submitting a new turn")
             if continue_previous:
+                if self.canvas.is_shell_scope:
+                    raise PermissionError('Canvas native turn continuation requires explicit reconciliation')
                 turn, message = self.store.continue_turn(self.session_id)
             else:
-                turn, message = self.store.begin_turn(self.session_id, user_input)
+                if self.canvas.is_shell_scope:
+                    turn, message = self.canvas.begin_native_turn(user_input)
+                else:
+                    turn, message = self.store.begin_turn(self.session_id, user_input)
                 receipt_id = self._claim_canvas_delivery(user_input)
             self.messages.append(message)
             self._turn_id = turn
