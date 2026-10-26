@@ -199,15 +199,26 @@ class CanvasShellRuntime:
             turns = {r[0] for r in db.execute('SELECT id FROM turns WHERE conversation_id=?', (conversation_id,))}
             return seq, turns
 
-    def _native_journal_final(self, conversation_id, baseline):
-        """Read one linked completed turn from one SQLite snapshot, without asserting operation identity."""
+    def _native_journal_final(self, message, dot, workspace, baseline):
+        """Read the host-reserved operation and completed turn in one journal snapshot."""
+        conversation_id = message['conversation_id']
+        scope = {'owner':self.owner, 'principal':self.canvas.store.principal,
+            'workspace':workspace, 'project_id':message['project_id'], 'space_id':message['space_id'],
+            'conversation_id':conversation_id, 'run_id':message['run_id'],
+            'work_item_id':message['work_item_id'], 'agent_id':dot['agent_id'],
+            'operation_id':message['operation_id']}
         previous_sequence, previous_turns = baseline
         with self.conversations._connect() as db:
             db.execute('BEGIN')
-            self.conversations._owned(db, conversation_id)
+            self.conversations._owned(db, conversation_id, workspace)
+            binding = db.execute('SELECT conversation_id,turn_id,protected_scope FROM canvas_native_turn_bindings '
+                                 'WHERE operation_id=?', (message['operation_id'],)).fetchone()
+            if binding is None or binding['conversation_id'] != conversation_id or _decode(binding['protected_scope']) != scope:
+                return None
             turns = db.execute('SELECT id,state FROM turns WHERE conversation_id=?', (conversation_id,)).fetchall()
             new_turns = [r for r in turns if r['id'] not in previous_turns]
-            if len(new_turns) != 1 or new_turns[0]['state'] != 'completed':
+            if (len(new_turns) != 1 or new_turns[0]['state'] != 'completed'
+                    or new_turns[0]['id'] != binding['turn_id']):
                 return None
             if any(r['state'] == 'running' for r in turns):
                 return None
@@ -673,10 +684,11 @@ class CanvasShellRuntime:
         try:
             with self.canvas._lock:
                 self._model_grant(message, dot)
-                if self.canvas._agent_port is not None:
-                    actor_token = self.actors.register(message, dot, deadline=deadline)
-                    environment.update(SENTRA_CANVAS_AGENT_TOKEN=actor_token,
-                        SENTRA_CANVAS_AGENT_PORT=str(self.canvas._agent_port), SENTRA_CANVAS_AGENT_SCOPE="shell")
+                if self.canvas._agent_port is None:
+                    raise Denied('native Canvas turn requires the live actor endpoint')
+                actor_token = self.actors.register(message, dot, deadline=deadline)
+                environment.update(SENTRA_CANVAS_AGENT_TOKEN=actor_token,
+                    SENTRA_CANVAS_AGENT_PORT=str(self.canvas._agent_port), SENTRA_CANVAS_AGENT_SCOPE="shell")
                 from .task_workspace import for_work_item
                 assigned=for_work_item(self.control,self.owner,message['work_item_id'],dot['agent_id'])
                 process = TaskProcess(command, cwd=assigned['path'] if assigned else workspace['path'], env=environment,
@@ -714,7 +726,7 @@ class CanvasShellRuntime:
                         self.control.durable.update_operation(oid, self.owner, state="UNCERTAIN",
                             event_type="SHELL_MODEL_INTERRUPTED", progress={"automatic_retry": False})
                         return
-            answer = self._native_journal_final(sid, journal_baseline)
+            answer = self._native_journal_final(message, dot, workspace['path'], journal_baseline)
             if process.returncode != 0 or answer is None:
                 self.control.durable.update_operation(oid, self.owner, state="UNCERTAIN",
                     event_type="SHELL_MODEL_RESULT_UNCONFIRMED", progress={"journal_available": True, "automatic_retry": False},

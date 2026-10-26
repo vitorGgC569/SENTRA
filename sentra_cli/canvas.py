@@ -25,6 +25,17 @@ class CanvasBridge:
         self.is_shell_scope = os.environ.get('SENTRA_CANVAS_AGENT_SCOPE', '') == 'shell'
         self._binding_path = os.environ.get('SENTRA_CANVAS_AGENT_BINDING_FILE', '') if not self.is_shell_scope else ''
 
+    def begin_native_turn(self, expected_prompt):
+        if not self.is_shell_scope or not self.is_available:
+            raise PermissionError('live shell actor required for native turn')
+        value = self._request({'action':'begin_native_turn', 'workspace':self.workspace})
+        if (not isinstance(value, dict) or not isinstance(value.get('turn_id'), str)
+                or not isinstance(value.get('message'), dict)
+                or value['message'].get('role') != 'user'
+                or value['message'].get('content') != expected_prompt):
+            raise PermissionError('native turn differs from the protected Canvas request')
+        return value['turn_id'], value['message']
+
     def execute(self, raw_args, request_key):
         if not self.is_available:
             raise RuntimeError("SENTRA Canvas connection is unavailable")

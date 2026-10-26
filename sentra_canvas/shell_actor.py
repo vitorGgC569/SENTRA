@@ -618,6 +618,22 @@ class ShellActorService:
         record = self.subject(token, payload)
         message, dot = record["message"], record["dot"]
         action = payload["action"]
+        if action == 'begin_native_turn':
+            if set(payload) != {'action', 'workspace'}:
+                raise Denied('native turn cannot select its own identity or input')
+            scope = {'owner':self.owner, 'principal':self.canvas.store.principal,
+                'workspace':payload['workspace'], 'project_id':message['project_id'],
+                'space_id':message['space_id'], 'conversation_id':message['conversation_id'],
+                'run_id':message['run_id'], 'work_item_id':message['work_item_id'],
+                'agent_id':dot['agent_id'], 'operation_id':message['operation_id']}
+            turn, item = self.runtime.conversations.begin_canvas_turn(
+                message['conversation_id'], message['content'], scope)
+            try:
+                self.subject(token, payload)
+            except BaseException:
+                self.runtime.conversations.end_turn(message['conversation_id'], turn, 'interrupted')
+                raise
+            return {'turn_id':turn, 'message':item}
         if action == 'isolate_work':
             from .task_workspace import isolate
             return isolate(self,message,dot,payload)

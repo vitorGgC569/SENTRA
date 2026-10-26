@@ -30,3 +30,41 @@ def test_real_worktrees_are_isolated_and_require_central_context(tmp_path):
     assert all(Path(r['path'],'sample.txt').read_text()==r['dot_id'] for r in records)
     assert all(manager.inspect(r['worktree_id'])['diff_stat'] for r in records)
     for record in records:git(repo,'worktree','remove','--force',record['path'])
+
+
+def test_authority_inspection_skips_diff_but_still_rejects_branch_drift(tmp_path, monkeypatch):
+    repo=tmp_path/'repository';repo.mkdir();git(repo,'init');git(repo,'config','user.name','SENTRA Test');git(repo,'config','user.email','test@localhost')
+    (repo/'sample.txt').write_text('base');git(repo,'add','sample.txt');git(repo,'commit','-m','base');base=git(repo,'rev-parse','HEAD')
+    manager=WorktreeManager(repo,tmp_path/'state')
+    request=OperationRequest('op-one','agent-one','host','git:worktree','work-one','key-one',{'dot_id':'dot-one','base_commit':base})
+    context=object.__new__(CentralEffectContext);context.request=request;context.checkpoint=lambda:None
+    token=current_effect_context.set(context)
+    try:record=manager.create(request)
+    finally:current_effect_context.reset(token)
+    (Path(record['path'])/'sample.txt').write_text('changed')
+    calls=[];original=manager.git
+    def tracked(*args,**kwargs):
+        calls.append(args[0]);return original(*args,**kwargs)
+    monkeypatch.setattr(manager,'git',tracked)
+    authority=manager.inspect(record['worktree_id'],include_diff=False)
+    assert authority['path']==record['path'] and 'diff_stat' not in authority
+    assert calls==['worktree']
+    assert manager.inspect(record['worktree_id'])['diff_stat']
+    git(Path(record['path']),'checkout','--detach')
+    with pytest.raises(RuntimeError,match='worktree identity drift'):
+        manager.inspect(record['worktree_id'],include_diff=False)
+
+
+def test_authorized_directory_requests_identity_without_presentation_diff(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from sentra_canvas import task_workspace
+    seen=[]
+    def lookup(control,owner,work,agent,*,include_diff=True):
+        seen.append((owner,work,agent,include_diff))
+        return {'path':str(tmp_path),'execution_workspace_id':'workspace-1'}
+    monkeypatch.setattr(task_workspace,'for_work_item',lookup)
+    request=SimpleNamespace(work_item_id='work',principal_id='agent')
+    assert task_workspace.directory(None,'owner',request,tmp_path,expected_workspace_id='workspace-1')==tmp_path
+    assert seen==[('owner','work','agent',False)]
+    with pytest.raises(PermissionError,match='workspace changed'):
+        task_workspace.directory(None,'owner',request,tmp_path,expected_workspace_id='other')

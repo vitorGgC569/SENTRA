@@ -3,7 +3,7 @@ from contextlib import closing
 from pathlib import Path
 
 
-def binding(control,owner,project_id,conversation_id,agent_id=None):
+def binding(control,owner,project_id,conversation_id,agent_id=None,*,include_diff=True):
     with closing(control.store.connect('execution_workspace')) as db:
         rows=db.execute("SELECT execution_workspace_id FROM execution_workspaces WHERE owner=? AND backend='worktree' "
             "ORDER BY created_at DESC",(owner,)).fetchall()
@@ -15,7 +15,7 @@ def binding(control,owner,project_id,conversation_id,agent_id=None):
         if control.durable.operation_status(m['source_operation_id'],owner)['state']!='SUCCEEDED':
             raise RuntimeError('worktree creation is unconfirmed; inspect the original operation')
         from workspace.worktrees import WorktreeManager
-        inspected=WorktreeManager(m['repository'],m['manager_state']).inspect(m['worktree_id'])
+        inspected=WorktreeManager(m['repository'],m['manager_state']).inspect(m['worktree_id'],include_diff=include_diff)
         if (inspected['principal_id']!=m['agent_id'] or inspected['work_item_id']!=item['work_item_id']
                 or Path(inspected['path']).resolve()!=Path(item['physical_ref']).resolve()):
             raise PermissionError('worktree binding changed')
@@ -50,7 +50,7 @@ def register(control,owner,request,manager,result):
     return {**result,'execution_workspace_id':ident,'conversation_id':cid}
 
 
-def for_work_item(control,owner,work_item_id,agent_id):
+def for_work_item(control,owner,work_item_id,agent_id,*,include_diff=True):
     work=control.work_item_info(work_item_id,owner)
     if work.get('assignee_agent_id')!=agent_id:raise PermissionError('execution workspace assignee differs')
     m=work.get('metadata',{});cid=m.get('conversation_id')
@@ -59,14 +59,14 @@ def for_work_item(control,owner,work_item_id,agent_id):
             row=db.execute('SELECT conversation_id FROM shell_messages WHERE owner=? AND work_item_id=? AND role=\'user\' LIMIT 1',
                 (owner,work_item_id)).fetchone()
         cid=row['conversation_id'] if row else None
-    selected=binding(control,owner,m['workspace_id'],cid,agent_id) if cid and m.get('workspace_id') else None
+    selected=binding(control,owner,m['workspace_id'],cid,agent_id,include_diff=include_diff) if cid and m.get('workspace_id') else None
     if selected and selected['authority_run_id']!=work['run_id']:
         raise PermissionError('worktree belongs to a previous Run; select a new coding task')
     return selected
 
 
 def directory(control,owner,request,fallback,*,expected_workspace_id=None):
-    assigned=for_work_item(control,owner,request.work_item_id,request.principal_id)
+    assigned=for_work_item(control,owner,request.work_item_id,request.principal_id,include_diff=False)
     if expected_workspace_id is not None and expected_workspace_id!=(assigned['execution_workspace_id'] if assigned else 'project'):
         raise PermissionError('file workspace changed; reopen before saving')
     return Path(assigned['path']) if assigned else Path(fallback)

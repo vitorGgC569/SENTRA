@@ -169,6 +169,12 @@ class ConversationStore:
                     FOREIGN KEY(conversation_id,message_seq) REFERENCES messages(conversation_id,seq));
                 CREATE INDEX IF NOT EXISTS response_message_turn_lookup
                     ON response_message_turns(conversation_id,turn_id,message_seq);
+                CREATE TABLE IF NOT EXISTS canvas_native_turn_bindings(
+                    operation_id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL REFERENCES conversations(id),
+                    turn_id TEXT NOT NULL UNIQUE REFERENCES turns(id),
+                    protected_scope TEXT NOT NULL,
+                    created REAL NOT NULL);
             """)
             columns={row[1] for row in db.execute("PRAGMA table_info(provider_context)")}
             upgraded=False
@@ -532,6 +538,33 @@ class ConversationStore:
             db.execute("UPDATE conversations SET state='running',updated=? WHERE id=?", (now, ident))
             self._event(db,ident,"conversation.turn.started",turn=turn)
             message = self._append(db, ident, "user", prompt, kind)
+        return turn, message
+
+    def begin_canvas_turn(self, ident, prompt, scope):
+        """Host records one Canvas reservation and input atomically; no result authority."""
+        fields = {'owner','principal','workspace','project_id','space_id','conversation_id',
+                  'run_id','work_item_id','agent_id','operation_id'}
+        if (not isinstance(scope, dict) or set(scope) != fields
+                or any(not isinstance(scope[k], str) or not scope[k] for k in fields)
+                or scope['conversation_id'] != ident or scope['principal'] != self.principal
+                or scope['owner'] != 'canvas:' + self.principal):
+            raise PermissionError('invalid Canvas native turn scope')
+        turn = uuid.uuid4().hex
+        with self._tx() as db:
+            owned = self._owned(db, ident, scope['workspace'])
+            if owned['workspace'] != scope['workspace']:
+                raise PermissionError('Canvas native turn workspace mismatch')
+            if db.execute('SELECT 1 FROM canvas_native_turn_bindings WHERE operation_id=?',
+                          (scope['operation_id'],)).fetchone():
+                # A lost response does not authorize a second provider turn.
+                raise ConversationBusy('Canvas native turn already reserved; inspect without replay')
+            now = time.time()
+            db.execute('INSERT INTO turns VALUES(?,?,?,?,?)', (turn, ident, 'running', now, now))
+            db.execute("UPDATE conversations SET state='running',updated=? WHERE id=?", (now, ident))
+            self._event(db,ident,'conversation.turn.started',turn=turn)
+            message = self._append(db, ident, 'user', prompt, 'user_prompt')
+            db.execute('INSERT INTO canvas_native_turn_bindings VALUES(?,?,?,?,?)',
+                       (scope['operation_id'], ident, turn, _encode(scope), now))
         return turn, message
 
     def end_turn(self, ident, turn, state="completed"):

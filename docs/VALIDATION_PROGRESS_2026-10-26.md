@@ -57,15 +57,23 @@ APK, installed application or public downloads contain them.
   exited, but does not yet prove that all browser descendants have exited.
 - Native journal responses are linked transactionally to their running turn.
   Native publication requires one new completed linked turn and rejects
-  ambiguous or intermediate responses. This does not authenticate the link
-  between a Canvas operation and a turn, reconcile uncertain operations, or
-  preserve a running model process when the broker exits.
+  ambiguous or intermediate responses. The live Canvas actor reserves the
+  turn and protected operation scope in the journal, and selection checks that
+  reservation. The actor authenticates a bearer token rather than the caller's
+  OS process, and the local journal shares the user's authority; this is not
+  independent proof for post-restart reconciliation. It does not reconcile
+  uncertain operations or preserve a running model process when the broker exits.
   A completed turn ending in a tool acknowledgement rather than a final
   assistant message is currently left uncertain; this needs a separately
   verified completion contract before it can be shown as a final result.
 - Playwright startup retains resources when setup fails and refuses to reuse a
   partially guarded browser. Startup without a verifiable process identity can
   still require intervention; interception is not OS-level network isolation.
+- Worktree authorization avoids computing a Git diff summary when it only needs
+  the identity and directory. Registration, branch and ownership checks remain;
+  review and display still request the summary. An isolated eight-sample
+  measurement decreased mean inspection time from 150 ms to 98 ms; the overall
+  effect on real multi-Dot latency has not been measured.
 - Gateway request audit failures no longer interrupt the model request. Native
   models remain outside the Web-only gateway.
 - The older Windows wrapper calls the Inno installer with its supported flags;
@@ -120,6 +128,10 @@ applicable license, notices and pinned provenance.
   media, streaming, and browser startup and shutdown. A separate installed
   Chromium test blocked a redirect to an unauthorized origin; that single
   scenario does not qualify the whole network policy.
+- Forty-seven tests passed for native turn reservations, response selection,
+  actor permissions and journal persistence. A CLI subprocess with a real
+  local Canvas HTTP actor and a disposable worktree used a simulated model;
+  this does not qualify a real provider or installed application.
 - A source-mode run of `tests/qa/dot_worktree_execution.py` passed with the real
   `sentra/codex/current` model. It created three workers and separate Git
   worktrees, verified their edits, checked compatible and conflicting reviews,
@@ -144,6 +156,17 @@ applicable license, notices and pinned provenance.
   replay and closed its owned processes. This is a failed continuity test, not
   a completed multi-Dot task. Evidence:
   `.tmp/goal-dots-inflight-retry-20261026/report.json`.
+- A further source-mode three-Dot worktree run on commit `c510ada` timed out
+  before a verified result. The fixture recorded no automatic effect retry
+  and closed the processes it owned. Three separate worktrees and the expected
+  file edits were observed, as well as 24 completed model calls and 21 completed
+  machine operations. The last three model calls had not confirmed a result
+  when the 240-second deadline was reached. Local machine operations took
+  approximately 14–27 seconds each; the cause remains unproven. This is not a
+  successful final-result or recovery acceptance. Evidence:
+  `.tmp/goal-three-dots-linked-20261026/report.json` and `trace.jsonl`.
+- Ninety-four isolated tests of installation ownership, recovery, resume and
+  desktop behavior passed. They do not execute the current Setup on a clean OS.
 - Android candidate APK: GitHub Actions run `40402687334`, commit
   `618d5401e104b0fdd3122732e89f733d9956f7c8`, package
   `app.sentra.mobile.preview`, versionCode 16. The build verified its v2
@@ -160,10 +183,9 @@ applicable license, notices and pinned provenance.
 
 ## Still required
 
-The Windows candidate started before the interrupted-install recovery change;
-it cannot establish that the new recovery is included in the next Setup.
-Finish validating that candidate, then build the updated sources and verify their
-contents and upgrade paths. Test the
+The prior Windows candidate predates the latest source changes and cannot
+establish that they are included in a Setup. Build the updated sources and
+verify their contents and upgrade paths. Test the
 Android candidate on an actual device. Validate installation on a genuinely clean Windows
 system, update, rollback and reboot; real installed account onboarding and
 model response; interruption and recovery of multi-Dot work without duplicate
