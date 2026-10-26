@@ -9,10 +9,10 @@ SENTRA brings Dots, permanent conversations, terminals, files, browser tools, an
 ## Current status
 
 - **Development preview:** the local Windows app includes the conversation-first Home, central Dot selector, contextual Canvas, durable terminal receipts and LAN/mobile integration. Selected functionality is validated; the complete product is not yet qualified as a stable release.
-- **Current Windows installer:** the unsigned [Setup 1.0.2 preview](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261024-1) includes the October 24 interface and runtime fixes. Isolated installation, upgrade preservation, manual backup rollback and a real multi-Dot recovery journey passed. Stable qualification remains incomplete.
-- **Known limits:** the published 1.0.2 broker has a durable-terminal HTTP cursor bug; the correction is validated in source and a QA executable but requires a new full Setup. Updated user-app Web login/inference, physical mobile/VPN tests and clean-OS installation remain open. The native WebView2 display passed; Electron timed out and the external activity bar is unqualified. MSI and automatic-update packages are excluded from publication. Read the [first-version acceptance review](docs/RELEASE_READINESS_2026-10-24.md).
+- **Current Windows installer:** the unsigned [Setup 1.0.5 preview](https://github.com/vitorGgC569/SENTRA/releases/tag/installer-preview-20261025-3) includes the current interface, the terminal cursor correction and installation recovery options. Isolated installation over residue fixtures and same-version repair passed. It is not yet a qualified stable release.
+- **Known limits:** clean Windows installation, cross-version upgrade, rollback, reboot, the complete installed account-connection flow and physical mobile/VPN tests remain open. The 1.0.5 clean-install path also has ownership and post-backup recovery issues identified in the latest review; inspect backups carefully and avoid using it on folders containing unrelated files. The external activity bar, MSI and signed automatic update require separate qualification. Read the [1.0.5 acceptance record](docs/RELEASE_1_0_5_ACCEPTANCE_2026-10-25.md).
 
-[Headless acceptance follow-up](docs/HEADLESS_ACCEPTANCE_2026-10-24.md): installed-daemon endurance, MSI extraction, protocol tests and the unreleased cursor fix.
+[Historical headless acceptance follow-up](docs/HEADLESS_ACCEPTANCE_2026-10-24.md): installed-daemon endurance, MSI extraction and protocol tests on the builds identified there. Its statement that the cursor fix was unreleased describes that earlier checkpoint.
 
 Some linked documents and application labels remain in Portuguese. Dated reports identify the actual validation scope and remaining work.
 

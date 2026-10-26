@@ -23,7 +23,7 @@ class StreamingStub(BaseHTTPRequestHandler):
     def do_POST(self):
         size = int(self.headers["Content-Length"])
         payload = json.loads(self.rfile.read(size))
-        assert payload["model"] == "gpt-6.1-sol"
+        assert payload["model"] == "chatgpt-web/gpt-6"
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Connection", "close")
@@ -55,7 +55,7 @@ def test_ten_simultaneous_gateway_responses_no_replay_or_lost_frames(tmp_path):
 
     def run_one(index):
         client = http.client.HTTPConnection("127.0.0.1", gateway.server_port, timeout=10)
-        body = json.dumps({"model": "gpt-6.1-sol", "input": f"turn-{index}"}).encode()
+        body = json.dumps({"model": "chatgpt-web/gpt-6", "input": f"turn-{index}"}).encode()
         barrier.wait(timeout=5)
         before = time.perf_counter()
         try:

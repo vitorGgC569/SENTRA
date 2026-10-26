@@ -31,15 +31,24 @@ def diagnose_installer_text(script: str, *, product_version: str) -> dict[str, A
         raise ValueError("installer script required")
     if not isinstance(product_version, str) or not product_version.strip():
         raise ValueError("product version required")
-    missing = [rel for rel in PACKAGE_FILES if rel not in script]
-    marker = re.search(r'product_version\s*=\s*"([^"]+)"', script)
+    executable = '\n'.join(line for line in script.splitlines() if not line.lstrip().startswith('#'))
+    if 'SENTRA-Setup.exe' in executable and re.search(r'\bStart-Process\b', executable, re.I):
+        # A launcher is not a package manifest. Its comments cannot establish
+        # what a setup contains or which version was selected at runtime.
+        return {'defect': 'installer_payload_not_inspected', 'missing': None,
+            'copies_license': None, 'copies_comercial': None, 'copies_sentra_quality': None,
+            'marker_version': None, 'product_version': product_version, 'version_matches': None,
+            'installer_role': 'setup_wrapper', 'paywall': False, 'local_use_blocked': False,
+            'commercial_homologated': False, 'physical_proof': False, 'closes_front_16': False}
+    missing = [rel for rel in PACKAGE_FILES if rel not in executable]
+    marker = re.search(r'product_version\s*=\s*"([^"]+)"', executable)
     marker_version = marker.group(1) if marker else ""
     return {
         "defect": "installer_omits_license_docs_and_diagnosis" if missing else None,
         "missing": missing,
-        "copies_license": "LICENSE" in script,
-        "copies_comercial": "docs/frentes-18/comercial" in script,
-        "copies_sentra_quality": "sentra_quality" in script,
+        "copies_license": "LICENSE" in executable,
+        "copies_comercial": "docs/frentes-18/comercial" in executable,
+        "copies_sentra_quality": "sentra_quality" in executable,
         "marker_version": marker_version,
         "product_version": product_version,
         "version_matches": marker_version == product_version,

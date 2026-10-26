@@ -52,6 +52,8 @@ function Studio(){
  async function request(action:string,fields:Record<string,any>={},effect=false){
   const transport=client.current,paired=activeDevice.current;
   const context=bindRequestContext(transport,paired),activity=lifecycle.current;
+  const requirePairedTransport=()=>{if(!transport?.isPairedTo(paired))throw Error('A conexão mudou. A ação não foi enviada para outro dispositivo.');};
+  requirePairedTransport();
   const releasing=action==='dot_vm_handoff'&&fields.holder==='agent';
   const key=effect?Crypto.randomUUID():null;
   const intent=JSON.parse(JSON.stringify({...fields,action,...(key?{request_key:key}:{})}));
@@ -61,6 +63,7 @@ function Studio(){
   try{
    if(tracked){await journal.current.begin({key:key!,slot:[paired!.device_id,action,intent.conversation_id||'',intent.approval_id||'',intent.request?.arguments?.terminal_id||''].join(':'),device_id:paired!.device_id,action,conversation_id:intent.conversation_id,...(action==='dot_computer_action'?{fingerprint:await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256,canonicalIntent(journalIntent(fullRequest)))}:{}),created_at:Date.now()});prepared=true;}
    requireRequestContext(context,client.current,activeDevice.current);
+   requirePairedTransport();
    if(!releasing&&activity!==lifecycle.current)throw Error('O app mudou de contexto. A entrada antiga foi descartada.');
    const relinquish=action==='dot_vm_handoff'&&intent.holder==='agent';
    if(effect&&!relinquish&&['background','inactive'].includes(AppState.currentState))throw Error('O app está suspenso. A ação não foi enviada.');

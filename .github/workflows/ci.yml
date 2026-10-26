@@ -90,6 +90,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Locked dependency installation failed" }
           python -m pip check
           if ($LASTEXITCODE -ne 0) { throw "Python dependency conflict" }
+      - name: Install Chromium headless shell for account setup tests
+        if: matrix.target == 'tests/unit'
+        run: |
+          python -m playwright install --only-shell chromium
+          if ($LASTEXITCODE -ne 0) { throw "Playwright Chromium fixture unavailable" }
       - name: Install PDFium 4.30.0 from hash-pinned Windows wheel
         run: |
           python -m pip install --no-deps --only-binary=:all: --require-hashes -r scripts/commander/requirements-pdfium-win-amd64.txt

@@ -10,8 +10,18 @@ const client=new MobileClient(primitives(n=>new Uint8Array(randomBytes(n))),url=
 try{
  const pending=await client.pair(config.offer,'Acceptance phone');
  process.stdout.write(JSON.stringify({phase:'pending',device_id:pending.device_id})+'\n');
+ if(config.disconnect_before_claim)client.disconnect();
  if((await lines.next()).value!=='approved')throw Error('owner did not approve');
+ let acknowledgedCredential:string|undefined;
+ if(config.lose_claim_response){
+  const rpc=client.rpc.bind(client);let dropped=false;
+  client.rpc=async body=>{const result=await rpc(body);if(body.method==='claim'&&!dropped){dropped=true;acknowledgedCredential=result.credential;throw Error('simulated lost claim response')}return result};
+  let uncertain=false;try{await client.claim(pending)}catch{uncertain=true}
+  if(!uncertain||!acknowledgedCredential)throw Error('lost claim receipt was not exercised');
+  client.disconnect(); // The next claim is an explicit owner retry, never automatic replay.
+ }
  const device=await client.claim(pending);if(!device)throw Error('device not approved');
+ if(config.lose_claim_response&&device.credential!==acknowledgedCredential)throw Error('claim recovery changed the credential');
  const inventory=await client.request({action:'workspace_inventory'}),conversations=await client.request({action:'conversation_list'});
  process.stdout.write(JSON.stringify({phase:'scoped',protocol:inventory.value.protocol_version,conversations:conversations.value.items.map((c:any)=>c.conversation_id)})+'\n');
  if(config.rotate){

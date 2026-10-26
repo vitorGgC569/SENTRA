@@ -198,7 +198,7 @@
     "src/workspace/ConversationResource.jsx": "5831cd91aa0033d950d58cf90925030404bc6931e17267e68ce097561910440e",
     "src/workspace/DotWorkspace.jsx": "837793be77729c37fe591734bfe7c0c61da8ef6efe84dcd5043488e50eb024b0",
     "src/workspace/GitWorkflow.jsx": "4264c8c34b8c0bca82bf7143c0f52fb78f84b68f3f48435b33275847faff958f",
-    "src/workspace/MobileDevices.jsx": "1f9262897a6047dc2bf2174b97ced7beae715a6beb39d0642061c4f4ea7aa4d7",
+    "src/workspace/MobileDevices.jsx": "89c6a1d422b253d553bdc2640652c1376e8b1d007e4b88c4d8de6c97782b765c",
     "src/workspace/NewSession.jsx": "cae7e2d2f25e84657b8a0c14b437769f82d02faaae1680495baa107ea08c63b3",
     "src/workspace/OrcaSplit.jsx": "465bfe04f77477cf7ff0e632665320fe497cfe4013fb9dfc04af173d692c0918",
     "src/workspace/OrcaTabStrip.jsx": "147a03e415afc7b2fa59d63eca0eb0247214d1e3a162b6b1bec4aeb5e8ab094c",

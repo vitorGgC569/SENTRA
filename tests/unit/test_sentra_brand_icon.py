@@ -25,7 +25,15 @@ def test_official_source_unchanged_and_ico_contains_multiple_sizes():
 
 def test_pyinstaller_embeds_official_icon_and_bundles_runtime_image(monkeypatch,tmp_path):
     seen=[]
-    monkeypatch.setattr(build_windows,"_run",lambda args,**kwargs:seen.append(args))
+    def fake_build(args, **kwargs):
+        seen.append(args)
+        name = args[args.index('--name') + 1]
+        bundle = Path(args[args.index('--distpath') + 1]) / name
+        runtime = bundle / ('_runtime_' + name)
+        runtime.mkdir(parents=True)
+        (bundle / (name + '.exe')).write_bytes(b'synthetic-not-run')
+        (runtime / 'python312.dll').write_bytes(b'synthetic-runtime')
+    monkeypatch.setattr(build_windows,"_run",fake_build)
     from scripts.commander import runtime_dependencies
     monkeypatch.setattr(runtime_dependencies, "require_wasmtime_pin", lambda: None)
     build_windows._build("sentra-canvas","canvas_entry.py",

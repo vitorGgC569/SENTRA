@@ -77,7 +77,7 @@ def test_upstream_503_traces_provider_cf_ray_without_request_secrets(tmp_path, m
         client = http.client.HTTPConnection("127.0.0.1", gateway.server_port, timeout=5)
         try:
             client.request("POST", "/v1/responses",
-                           json.dumps({"model": "gpt-6.1-sol", "input": "DO_NOT_LOG"}).encode(),
+                           json.dumps({"model": "chatgpt-web/gpt-6", "input": "DO_NOT_LOG"}).encode(),
                            {"Authorization": "Bearer DO_NOT_LOG_TOKEN",
                             "Content-Type": "application/json", "Connection": "close"})
             response = client.getresponse()
@@ -122,7 +122,7 @@ def test_upstream_connect_failure_is_correlated_and_never_retried(tmp_path, monk
         client = http.client.HTTPConnection("127.0.0.1", gateway.server_port, timeout=5)
         try:
             client.request("POST", "/v1/responses",
-                           b'{"model":"gpt-6.1-sol","input":"private"}',
+                           b'{"model":"chatgpt-web/gpt-6","input":"private"}',
                            {"Content-Type": "application/json", "Connection": "close"})
             response = client.getresponse()
             assert response.status == 503

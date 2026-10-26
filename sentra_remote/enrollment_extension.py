@@ -164,14 +164,18 @@ def register_native_host(install_dir: Path, state_dir: Path, *, registry=None):
         if Path(existing).resolve() != (target / f"native-{family}.json").resolve():
             raise RuntimeError("enrollment_native_host_owned_by_other_installation")
     target.mkdir(exist_ok=True)
+    from .product_copy import open_product_target
+    def write_owned(path, text):
+        with open_product_target(path, root=root, encoding='utf-8') as stream:
+            stream.write(text)
     config = {"protocol": PROTOCOL, "state_dir": str(Path(state_dir).resolve())}
-    (target / "native-config.json").write_text(json.dumps(config), encoding="utf-8")
+    write_owned(target / "native-config.json", json.dumps(config))
     paths = {}
     for family in ("chromium", "firefox"):
         manifest = {"name": HOST_NAME, "description": "SENTRA authorized Setup DOM connection", "type": "stdio", "path": str(executable)}
         manifest.update({"allowed_extensions": [FIREFOX_ID]} if family == "firefox" else {"allowed_origins": [f"chrome-extension://{CHROMIUM_ID}/"]})
         path = target / f"native-{family}.json"
-        path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        write_owned(path, json.dumps(manifest, indent=2) + "\n")
         paths[family] = str(path)
     for parent in REGISTRY_ROOTS:
         family = "firefox" if "Mozilla" in parent else "chromium"

@@ -42,6 +42,12 @@ test('same mobile login survives broker and LAN endpoint changes without replay'
  const sockets:WebSocket[]=[];
  const client=new MobileClient(p,url=>{const socket=new WebSocket(url);sockets.push(socket);return socket as any});t.after(()=>client.disconnect());
  await client.resume(device);
+ assert.equal(client.isPairedTo(device),true);
+ assert.equal(client.isPairedTo({...device,device_id:'other-phone'}),false);
+ assert.equal(client.isPairedTo({...device,credential:'other-credential'}),false);
+ assert.equal(client.isPairedTo({...device,public_key:'different-host'}),false);
+ assert.equal(client.isPairedTo({...device,scope:{...device.scope,dot_id:'other-dot'}}),false);
+ assert.equal(client.isPairedTo({...device,scope:{...device.scope,actions:['workspace_inventory']}}),false);
  const retired={message:sockets[0].onmessage,error:sockets[0].onerror,close:sockets[0].onclose};
  await assert.rejects(client.request({action:'message_send',request_key:'only-intent'}),/não confirmado/);
  first.child.stdin.write(JSON.stringify({type:'broker_update',available:false})+'\n');
@@ -51,7 +57,7 @@ test('same mobile login survives broker and LAN endpoint changes without replay'
  assert.equal(JSON.parse((await first.lines.next()).value!).runtime_id,'runtime-1');
  assert.equal((await client.request({action:'workspace_inventory'})).host,1);
  assert.equal(seen.filter(v=>v.action==='message_send').length,1);
- client.disconnect();first.child.kill();await once(first.child,'exit');
+ client.disconnect();assert.equal(client.isPairedTo(device),false);first.child.kill();await once(first.child,'exit');
  const second=await gateway();assert.equal(second.ready.public_key,device.public_key);
  await client.resume(deviceAtAddress(device,second.ready.endpoint));
  retired.message?.call(sockets[0],{data:'invalid stale frame'} as any);

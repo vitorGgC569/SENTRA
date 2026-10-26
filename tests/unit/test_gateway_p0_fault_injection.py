@@ -50,7 +50,7 @@ def test_producer_disconnect_during_stream_preserves_uncertainty_no_post_replay(
         client = http.client.HTTPConnection("127.0.0.1", gateway.server_port, timeout=6)
         try:
             client.request("POST", "/v1/responses",
-                           json.dumps({"model": "gpt-6.1-sol", "input": "fault-test"}).encode(),
+                           json.dumps({"model": "chatgpt-web/gpt-6", "input": "fault-test"}).encode(),
                            {"Content-Type": "application/json", "Connection": "close"})
             response = client.getresponse()
             assert response.status == 200  # Initial headers are NOT final completion.
