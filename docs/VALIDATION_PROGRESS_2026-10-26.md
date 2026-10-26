@@ -43,13 +43,29 @@ applicable license, notices and pinned provenance.
 - An additional targeted suite covering PTY service behavior, input receipts,
   recovery, worktree management and coordinator authorization passed 85 tests.
   These tests do not establish clean-machine or installed-daemon acceptance.
-- The current Android JavaScript bundle was exported locally. This is not an
-  APK; producing the native package also requires an Android SDK and JDK.
+- A source-mode run of `tests/qa/dot_worktree_execution.py` passed with the real
+  `sentra/codex/current` model. It created three workers and separate Git
+  worktrees, verified their edits, checked compatible and conflicting reviews,
+  and re-opened the broker after the edits. The report is in
+  `.tmp/goal-three-dots-20261026/report.json`. It did not interrupt a running
+  effect and did not validate the installed build.
+- Android candidate APK: GitHub Actions run `40394905514`, commit
+  `4a90c2217429d9f56115b91f848cf854f055224e`, package
+  `app.sentra.mobile.preview`, versionCode 12. The build verified its v2
+  signature against the existing preview certificate. SHA-256:
+  `cdc9e93c575473c4ae5d16cbe23c2c7983d4f45147f09ecc24efb78cc60c6aa3`.
+  It was downloaded to `.tmp/android-candidate-20261026/app-release.apk`; this
+  is a preview artifact, not proof of a successful physical-device test.
+- CI run `40394884595` reported that the MCP integration fixture did not open
+  its loopback port within 15 seconds. The same integration test passed locally
+  in 11.20 seconds, and a separate local cold-start observation reached the
+  listener in 5.81 seconds. These observations do not identify the CI cause;
+  the failed run remains evidence against full integration acceptance.
 
 ## Still required
 
-Build new Windows and Android packages from the reviewed tree, then verify their
-contents and upgrade paths. Validate installation on a genuinely clean Windows
+Finish the Windows candidate and verify its contents and upgrade paths. Test the
+Android candidate on an actual device. Validate installation on a genuinely clean Windows
 system, update, rollback and reboot; real installed account onboarding and
 model response; interruption and recovery of multi-Dot work without duplicate
 effects; and installed daemon concurrency and recovery. Pair and exercise
