@@ -131,7 +131,7 @@ def test_encrypted_presentation_reconnects_by_cursor_filters_dot_and_stops_on_re
         assert any(after==before_cursor and epoch==journal.epoch for after,epoch in opened[1:]),opened
         # Revocation is checked even when the selected conversation is idle.
         registry(app).revoke(pending['device_id'])
-        assert line_from(phone)=={'phase':'revoked'}
+        assert line_from(phone)=={'phase':'revoked','paired':False}
         phone.stdin.write('finish\n');phone.stdin.flush()
         assert line_from(phone)=={'phase':'finished','seen':2,'encrypted':True}
         phone.wait(timeout=5);assert phone.returncode==0

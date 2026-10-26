@@ -45,10 +45,10 @@ function Studio(){
  const recovery=useRef<ReconnectLoop|null>(null),recoveryBlocked=useRef(new Set<string>()),connectionContext=useRef({foreground,pairing,busy});
  connectionContext.current={foreground,pairing,busy};
  activeScreen.current=screen;activeConversation.current=conversation;activeDevice.current=device;vm.current=vmStatus;
- function createClient(){const next=new MobileClient(primitives(n=>new Uint8Array(Crypto.getRandomBytes(n))),createNativeWebSocket,value=>{if(client.current===next)setStatus(value==='connected'&&!next.hasPairedSession?'connecting':value)});return next;}
+ function createClient(expectedDeviceId?:string){const next=new MobileClient(primitives(n=>new Uint8Array(Crypto.getRandomBytes(n))),createNativeWebSocket,value=>{if(client.current===next){if(value==='reauth_required'){const identity=expectedDeviceId||activeDevice.current?.device_id;if(identity)recoveryBlocked.current.add(identity);setNotice('O acesso deste dispositivo foi revogado, expirou ou a credencial é inválida. Confira o pareamento no desktop.')}setStatus(value==='connected'&&!next.hasPairedSession?'connecting':value)}});return next;}
  async function save(list:Device[]){await protectedDrafts.write(storageKey+'-chunks',JSON.stringify(list));await SecureStore.deleteItemAsync(storageKey,options);setDevices(list)}
  async function readDevices(){const chunks=await SecureStore.getItemAsync(storageKey+'-chunks',options);return chunks?await protectedDrafts.read(storageKey+'-chunks'):await SecureStore.getItemAsync(storageKey,options)}
- async function connect(item:Device,persistAddress=false){recovery.current?.cancel();++navigation.current;const epoch=++lifecycle.current;setBusy(true);setNotice('');try{await release();if(AppState.currentState!=='active'||lifecycle.current!==epoch)return;client.current?.disconnect();setConversation(null);setMessages([]);setInventory(null);setSharedProfile(null);setVmStatus(null);setFrame(null);setEntries([]);setFile(null);const next=createClient();client.current=next;const resumed=await next.resume(item,updated=>save(upsertDevice(devices,updated)));const valid=()=>canActivateSession(next,client.current,resumed,AppState.currentState==='active',epoch,lifecycle.current);if(!valid()){next.disconnect();return;}if(persistAddress)await save(upsertDevice(devices,resumed));if(!valid()){next.disconnect();return;}recoveryBlocked.current.delete(resumed.device_id);activeDevice.current=resumed;setDevice(resumed);setPairing(false);setStatus('connected');await load(next)}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
+ async function connect(item:Device,persistAddress=false){recovery.current?.cancel();++navigation.current;const epoch=++lifecycle.current;setBusy(true);setNotice('');try{await release();if(AppState.currentState!=='active'||lifecycle.current!==epoch)return;client.current?.disconnect();setConversation(null);setMessages([]);setInventory(null);setSharedProfile(null);setVmStatus(null);setFrame(null);setEntries([]);setFile(null);const next=createClient(item.device_id);client.current=next;const resumed=await next.resume(item,updated=>save(upsertDevice(devices,updated)));const valid=()=>canActivateSession(next,client.current,resumed,AppState.currentState==='active',epoch,lifecycle.current);if(!valid()){next.disconnect();return;}if(persistAddress)await save(upsertDevice(devices,resumed));if(!valid()){next.disconnect();return;}recoveryBlocked.current.delete(resumed.device_id);activeDevice.current=resumed;setDevice(resumed);setPairing(false);setStatus('connected');await load(next)}catch(e:any){setNotice(e.message)}finally{setBusy(false)}}
  async function rotateCredential(){if(!device||busy)return;const transport=client.current;setBusy(true);try{const updated=await transport!.rotateCredential(async next=>{await save(upsertDevice(devices,next));if(client.current===transport){activeDevice.current=next;setDevice(next)}});if(client.current!==transport)return;activeDevice.current=updated;setDevice(updated);setNotice('Credencial rotacionada. A identidade e os escopos do host foram preservados.');}catch(e:any){setNotice(e.message+' A chave de retomada da rotação foi preservada neste aparelho.')}finally{setBusy(false)}}
  async function request(action:string,fields:Record<string,any>={},effect=false){
   const transport=client.current,paired=activeDevice.current;
@@ -120,7 +120,7 @@ function Studio(){
   const loop=new ReconnectLoop({eligible,attempt:async signal=>{
    if(expected.rotation_key)throw Object.assign(Error('Conclua a rotação de credencial manualmente.'),{status:403});
    if(!eligible()||signal.aborted)throw Error('Conexão cancelada');
-   const epoch=lifecycle.current,next=createClient();client.current?.disconnect();client.current=next;
+   const epoch=lifecycle.current,next=createClient(expected.device_id);client.current?.disconnect();client.current=next;
    const cancel=()=>{if(client.current===next){client.current=null;next.disconnect();setStatus('disconnected');}};
    signal.addEventListener('abort',cancel,{once:true});
    try{
@@ -162,7 +162,7 @@ function Studio(){
    finally{refreshing=false;}
   };
   const detach=transport.observeConversation(selected,{
-   onState:state=>{if(!stopped){setPresentationState(state);if(state==='reauth_required')setNotice('O acesso à conversa foi revogado ou expirou. Confira o pareamento.');}},
+    onState:state=>{if(!stopped){setPresentationState(state);if(state==='reauth_required')setNotice('A conversa não está disponível para este dispositivo. Confira o acesso no desktop.');}},
    onPreview:value=>{
     if(stopped||client.current!==transport)return;
     setPresentation({...value,conversation_id:selected});

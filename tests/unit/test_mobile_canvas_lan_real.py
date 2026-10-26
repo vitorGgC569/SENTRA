@@ -88,6 +88,7 @@ def test_encrypted_mobile_canvas_pairing_scope_and_revocation(shell):
         scoped=line_from(phone)
         assert scoped=={'phase':'scoped','protocol':1,'conversations':[own['conversation_id']]}
         assert line_from(phone)=={'phase':'rotated','recovered':True,'old_refused':True}
+        assert line_from(phone)=={'phase':'scope_denied','still_paired':True}
         owner_control(app,{'action':'revoke','device_id':paired['device_id']})
         phone.stdin.write('revoked\n');phone.stdin.flush()
         assert line_from(phone)=={'phase':'revoked','refused':True}

@@ -17,14 +17,21 @@ APK, installed application or public downloads contain them.
 - On a later installer start, a durable receipt from a clean installation
   interrupted during replacement is inspected under the installation lock.
   Missing previous files are recovered without overwriting conflicts; unresolved
-  conflicts block subsequent installation attempts and preserve the backup.
-  Multiple unresolved generations require manual recovery.
+  conflicts or unverifiable copies block subsequent installation attempts and
+  preserve the backup. Hashes allow recovery to resume idempotently after a
+  second interruption. Multiple unresolved generations require manual recovery.
 - The LAN pairing dialog retains action errors independently of periodic
   status refreshes. Mobile reconnection checks the pinned host and client
   identity and does not automatically replay an uncertain operation.
 - The mobile client also attempts bounded foreground transport recovery after a
   connection loss. It stops on revocation or a changed identity and does not
   retry business operations. Backgrounding and device changes cancel the loop.
+- A mobile request that times out while its socket remains open now closes the
+  suspect transport; outstanding operations remain uncertain and are not
+  replayed. The reconnect loop can then reopen the pinned session.
+- Paired-device authentication failures use a fixed error code, carried by the
+  encrypted gateway. They close only the matching session; an operation denied
+  by its scope leaves the device session connected.
 - Gateway request audit failures no longer interrupt the model request. Native
   models remain outside the Web-only gateway.
 - The older Windows wrapper calls the Inno installer with its supported flags;
@@ -41,7 +48,7 @@ applicable license, notices and pinned provenance.
 
 - Installer and recovery tests: 83 passed before the final atomic-copy change;
   34 targeted installer, wrapper and distribution tests passed afterwards.
-- After adding recovery on the next installer start, 88 targeted installer,
+- After adding recovery on the next installer start, 92 targeted installer,
   recovery and distribution tests passed. One test exits a private worker
   process during its first file move and verifies recovery on the next start.
 - UI, gateway and mobile acceptance fixtures: 13 passed, two physical-network
@@ -49,9 +56,12 @@ applicable license, notices and pinned provenance.
   a real local Windows ConPTY case.
 - Mobile transport: 25 passed, one optional multicast test skipped; app tests:
   seven passed; both TypeScript typechecks passed.
-- After the foreground reconnect and lifecycle fencing changes, 31 mobile
+- After the foreground reconnect, lifecycle fencing and half-open timeout changes, 32 mobile
   transport tests and seven app tests passed, one optional multicast test was
   skipped, and both typechecks passed. These are not physical-device results.
+- Seven mobile acceptance tests passed with real local Canvas HTTP, the Node
+  gateway and encrypted clients, covering broker restart, scope denial and
+  device revocation. These do not validate a physical phone or actual VPN.
 - The scoped mypy gate reported zero errors in its five configured source files.
   This is not a repository-wide typing result.
 - An additional targeted suite covering PTY service behavior, input receipts,

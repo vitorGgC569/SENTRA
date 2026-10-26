@@ -68,6 +68,7 @@ def test_mobile_login_survives_real_broker_restart_without_new_pairing(shell):
         assert recovered['public_key']==original['public_key'] and recovered['endpoint']==original['endpoint']
         phone.stdin.write('restart\n');phone.stdin.flush()
         assert line_from(phone)=={'phase':'restarted','protocol':1,'conversations':[conversation['conversation_id']]}
+        assert line_from(phone)=={'phase':'scope_denied','still_paired':True}
         assert len(owner_control(new_app,{'action':'list'}))==1
         owner_control(new_app,{'action':'revoke','device_id':pending['device_id']})
         phone.stdin.write('revoked\n');phone.stdin.flush()

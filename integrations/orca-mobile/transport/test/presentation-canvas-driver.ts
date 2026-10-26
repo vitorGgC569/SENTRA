@@ -21,7 +21,7 @@ try{
    if(preview.authoritative||preview.automatic_retry)throw Error('Preview conferred authority');
    seen.push(String(preview.content));console.log(JSON.stringify({phase:'preview',content:preview.content}));
   },
-  onState:state=>{if(state==='connected'&&!readyAnnounced){readyAnnounced=true;console.log(JSON.stringify({phase:'ready'}));}if(state==='reauth_required')console.log(JSON.stringify({phase:'revoked'}));},
+  onState:state=>{if(state==='connected'&&!readyAnnounced){readyAnnounced=true;console.log(JSON.stringify({phase:'ready'}));}if(state==='reauth_required')console.log(JSON.stringify({phase:'revoked',paired:client.isPairedTo(device)}));},
  });
  if((await lines.next()).value!=='finish')throw Error('Finish gate missing');
  if(seen.some(text=>text.includes('FOREIGN-PRIVATE')))throw Error('Foreign Dot leaked');
