@@ -7,7 +7,7 @@ import {fileURLToPath} from 'node:url';
 import {once} from 'node:events';
 import {createInterface} from 'node:readline';
 import WebSocket from 'ws';
-import {MobileClient,type Device} from '../src/client';
+import {MobileClient,ReconnectLoop,type Device} from '../src/client';
 import {primitives} from '../src/primitives';
 import {deviceAtAddress} from '../src/pairing-state';
 
@@ -24,9 +24,9 @@ test('same mobile login survives broker and LAN endpoint changes without replay'
   t.after(()=>{server.closeAllConnections();server.close()});}
  const target=(host:number)=>({broker:'http://127.0.0.1:'+(brokers[host].address() as any).port,bearer:'host-'+host,runtime_id:'runtime-'+host});
  const secret=randomBytes(32).toString('base64');
- async function gateway(key=secret){
+ async function gateway(key=secret,fixedPort?:number){
   const reserve=createServer();reserve.listen(0,'127.0.0.1');await once(reserve,'listening');
-  const port=(reserve.address() as any).port;await new Promise<void>(resolve=>reserve.close(()=>resolve()));
+  const port=fixedPort??(reserve.address() as any).port;await new Promise<void>(resolve=>reserve.close(()=>resolve()));
   const child=spawn(process.execPath,[fileURLToPath(new URL('../node_modules/tsx/dist/cli.mjs',import.meta.url)),
    fileURLToPath(new URL('../src/gateway.ts',import.meta.url))],{stdio:['pipe','pipe','pipe'],windowsHide:true});
   t.after(()=>child.kill());
@@ -58,8 +58,18 @@ test('same mobile login survives broker and LAN endpoint changes without replay'
  assert.equal((await client.request({action:'workspace_inventory'})).host,1);
  assert.equal(seen.filter(v=>v.action==='message_send').length,1);
  client.disconnect();assert.equal(client.isPairedTo(device),false);first.child.kill();await once(first.child,'exit');
- const second=await gateway();assert.equal(second.ready.public_key,device.public_key);
- await client.resume(deviceAtAddress(device,second.ready.endpoint));
+ let attempts=0,completed=false,failed:unknown;
+ const recovery=new ReconnectLoop({eligible:()=>true,baseDelayMs:100,maxAttempts:10,
+  attempt:async()=>{attempts++;await client.resume(device);},stopOn:()=>false,
+  onExhausted:error=>{failed=error;}});
+ recovery.trigger();recovery.trigger();
+ await new Promise(resolve=>setTimeout(resolve,150));assert.ok(attempts>=1);
+ const second=await gateway(secret,Number(new URL(device.endpoint).port));
+ assert.equal(second.ready.public_key,device.public_key);
+ const deadline=Date.now()+12000;
+ while(recovery.active&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,20));
+ completed=!recovery.active&&client.isPairedTo(device);
+ assert.equal(failed,undefined);assert.equal(completed,true);
  retired.message?.call(sockets[0],{data:'invalid stale frame'} as any);
  retired.error?.call(sockets[0],{} as any);retired.close?.call(sockets[0],{} as any);
  assert.equal((await client.request({action:'workspace_inventory'})).accepted,true);

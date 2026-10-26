@@ -22,6 +22,9 @@ APK, installed application or public downloads contain them.
 - The LAN pairing dialog retains action errors independently of periodic
   status refreshes. Mobile reconnection checks the pinned host and client
   identity and does not automatically replay an uncertain operation.
+- The mobile client also attempts bounded foreground transport recovery after a
+  connection loss. It stops on revocation or a changed identity and does not
+  retry business operations. Backgrounding and device changes cancel the loop.
 - Gateway request audit failures no longer interrupt the model request. Native
   models remain outside the Web-only gateway.
 - The older Windows wrapper calls the Inno installer with its supported flags;
@@ -63,7 +66,8 @@ applicable license, notices and pinned provenance.
   signature against the existing preview certificate. SHA-256:
   `cdc9e93c575473c4ae5d16cbe23c2c7983d4f45147f09ecc24efb78cc60c6aa3`.
   It was downloaded to `.tmp/android-candidate-20261026/app-release.apk`; this
-  is a preview artifact, not proof of a successful physical-device test.
+  predates the foreground reconnect changes and is not proof of a successful
+  physical-device test. A fresh build must include those changes.
 - CI run `40394884595` reported that the MCP integration fixture did not open
   its loopback port within 15 seconds. The same integration test passed locally
   in 11.20 seconds, and a separate local cold-start observation reached the

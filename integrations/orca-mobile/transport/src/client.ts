@@ -7,6 +7,7 @@ import {directEndpoint} from './pairing-state';
 export {canonicalIntent,journalIntent} from './intent-fingerprint.js';
 export {EffectJournal,type PendingEffect} from './effect-journal';
 export {upsertDevice,deviceAtAddress,deviceAtOffer,directEndpoint} from './pairing-state';
+export {ReconnectLoop} from './reconnect';
 export {TerminalFeed,type TerminalDelivery} from './terminal-feed';
 export type {TerminalOutputFrame} from './contracts';
 export {bindRequestContext,requireRequestContext} from './request-context';
