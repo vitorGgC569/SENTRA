@@ -55,6 +55,17 @@ APK, installed application or public downloads contain them.
 - Browser shutdown reports failed context, browser or driver closure as
   uncertain and retains references. It checks the main browser process has
   exited, but does not yet prove that all browser descendants have exited.
+- Native journal responses are linked transactionally to their running turn.
+  Native publication requires one new completed linked turn and rejects
+  ambiguous or intermediate responses. This does not authenticate the link
+  between a Canvas operation and a turn, reconcile uncertain operations, or
+  preserve a running model process when the broker exits.
+  A completed turn ending in a tool acknowledgement rather than a final
+  assistant message is currently left uncertain; this needs a separately
+  verified completion contract before it can be shown as a final result.
+- Playwright startup retains resources when setup fails and refuses to reuse a
+  partially guarded browser. Startup without a verifiable process identity can
+  still require intervention; interception is not OS-level network isolation.
 - Gateway request audit failures no longer interrupt the model request. Native
   models remain outside the Web-only gateway.
 - The older Windows wrapper calls the Inno installer with its supported flags;
@@ -104,6 +115,11 @@ applicable license, notices and pinned provenance.
 - Browser shutdown tests include simulated closure failures and a real local
   process handle. Tests requiring a real Playwright browser were skipped; the
   browser process tree and an installed interactive session remain unverified.
+- Seventy-eight tests passed, twelve optional browser tests were skipped, and
+  four subtests passed for journal links, late replies, native selection,
+  media, streaming, and browser startup and shutdown. A separate installed
+  Chromium test blocked a redirect to an unauthorized origin; that single
+  scenario does not qualify the whole network policy.
 - A source-mode run of `tests/qa/dot_worktree_execution.py` passed with the real
   `sentra/codex/current` model. It created three workers and separate Git
   worktrees, verified their edits, checked compatible and conflicting reviews,

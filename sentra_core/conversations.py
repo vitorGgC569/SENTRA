@@ -161,6 +161,14 @@ class ConversationStore:
                     turn_id TEXT PRIMARY KEY REFERENCES turns(id),
                     conversation_id TEXT NOT NULL REFERENCES conversations(id),
                     protected_text TEXT NOT NULL, updated REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS response_message_turns(
+                    conversation_id TEXT NOT NULL,
+                    message_seq INTEGER NOT NULL,
+                    turn_id TEXT NOT NULL REFERENCES turns(id),
+                    PRIMARY KEY(conversation_id,message_seq),
+                    FOREIGN KEY(conversation_id,message_seq) REFERENCES messages(conversation_id,seq));
+                CREATE INDEX IF NOT EXISTS response_message_turn_lookup
+                    ON response_message_turns(conversation_id,turn_id,message_seq);
             """)
             columns={row[1] for row in db.execute("PRAGMA table_info(provider_context)")}
             upgraded=False
@@ -560,12 +568,31 @@ class ConversationStore:
     def finish_response(self, ident, turn, text):
         with self._tx() as db:
             self._owned(db, ident)
+            if not db.execute("SELECT 1 FROM turns WHERE id=? AND conversation_id=? AND state='running'", (turn, ident)).fetchone():
+                raise PermissionError("response requires an active owned turn")
             message = self._append(db, ident, "assistant", text, "assistant_response")
+            seq = db.execute("SELECT MAX(seq) FROM messages WHERE conversation_id=?", (ident,)).fetchone()[0]
+            db.execute("INSERT INTO response_message_turns(conversation_id,message_seq,turn_id) VALUES(?,?,?)",
+                       (ident, seq, turn))
             db.execute("DELETE FROM response_drafts WHERE turn_id=? AND conversation_id=?", (turn, ident))
             db.execute("UPDATE calls SET state='completed',updated=? WHERE conversation_id=? AND turn_id=? AND kind='provider' AND state='received'",
                        (time.time(), ident, turn))
             self._event(db,ident,"provider.response.committed","completed",{"characters":len(text)},turn=turn)
             return message
+
+    def response_messages_for_turn(self, ident, turn, *, limit=1000):
+        """Return associated journal messages; association is not finality or authority."""
+        if type(limit) is not int or not 1 <= limit <= 10000:
+            raise ValueError("message limit must be between 1 and 10000")
+        with self._connect() as db:
+            self._owned(db, ident)
+            if not db.execute("SELECT 1 FROM turns WHERE id=? AND conversation_id=?", (turn, ident)).fetchone():
+                raise PermissionError("turn not accessible")
+            rows = db.execute("SELECT m.seq,m.role,m.protected_content FROM response_message_turns a "
+                "JOIN messages m ON m.conversation_id=a.conversation_id AND m.seq=a.message_seq "
+                "WHERE a.conversation_id=? AND a.turn_id=? ORDER BY m.seq LIMIT ?", (ident, turn, limit)).fetchall()
+        return [{"role": r["role"], "content": _decode(r["protected_content"]),
+                 "id": uuid.uuid5(uuid.NAMESPACE_URL, f"{ident}:{r['seq']}").hex} for r in rows]
 
     def checkpoint_response(self, ident, turn, text):
         """Encrypted partial only; never prompt history, receipt or tool authority."""

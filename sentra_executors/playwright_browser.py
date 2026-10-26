@@ -355,6 +355,9 @@ class PlaywrightBrowserBackend:
         self._diagnostic_lock = threading.Lock()
         self._diagnostics = {}
         self._browser_handle = None
+        self._launch_state = 'empty'
+        self._driver_start_attempted = False
+        self._launch_attempted = False
         self._deadline_terminated = False
         self.profile_store = None
 
@@ -411,6 +414,8 @@ class PlaywrightBrowserBackend:
 
     def _launch(self, b, deadline):
         dependency('playwright', (1, 51, 0))
+        if self._launch_state in {'starting', 'failed'}:
+            raise ExecutorFailure('browser_launch_unconfirmed_restart_required', uncertain=True)
         if self._browser is not None:
             if self._headless != b.headless:
                 raise ExecutorFailure('browser_launch_profile_mismatch')
@@ -419,42 +424,45 @@ class PlaywrightBrowserBackend:
             return
         from playwright.sync_api import sync_playwright
         effect_checkpoint()
-        pw = sync_playwright().start()
+        self._launch_state = 'starting'
         try:
+            self._driver_start_attempted = True
+            pw = sync_playwright().start()
+            self._playwright = pw
             if not Path(pw.chromium.executable_path).is_file():
                 raise ExecutorFailure('playwright_chromium_binary_missing', evidence={
                     'install_command': 'python -m playwright install chromium'})
+            self._launch_attempted = True
             browser = pw.chromium.launch(headless=b.headless,
                 timeout=max(1, int((deadline - time.monotonic()) * 1000)),
                 args=['--disable-background-networking', '--no-first-run',
                       '--force-webrtc-ip-handling-policy=disable_non_proxied_udp','--site-per-process'])
-        except Exception:
-            pw.stop()
-            raise
-        self._playwright, self._browser, self._headless = pw, browser, b.headless
-        self._root = browser.new_browser_cdp_session()
-        self._root.on('Target.attachedToTarget', lambda p: self._attached(self._root, p))
-        self._root.on('Target.receivedMessageFromTarget', self._received)
-        self._root.on('Target.detachedFromTarget', self._detached)
-        try:
+            self._browser, self._headless = browser, b.headless
+            self._root = browser.new_browser_cdp_session()
+            self._root.on('Target.attachedToTarget', lambda p: self._attached(self._root, p))
+            self._root.on('Target.receivedMessageFromTarget', self._received)
+            self._root.on('Target.detachedFromTarget', self._detached)
+            # Capture the owned process before enabling page operations. If
+            # attachment subsequently fails, shutdown can still prove exit.
+            processes = self._root.send('SystemInfo.getProcessInfo')['processInfo']
+            browser_pids = [int(p['id']) for p in processes if p['type'] == 'browser']
+            if len(browser_pids) != 1:
+                raise ExecutorFailure('browser_process_ownership_ambiguous')
+            self._browser_handle = OwnedProcessHandle(browser_pids[0])
             self._root.send('Target.setAutoAttach', {'autoAttach': True,
                 'waitForDebuggerOnStart': True, 'flatten': True})
+            self._launch_state = 'ready'
         except Exception as exc:
-            # Do not fall back to late page interception: targets must remain
-            # guarded before scripts/network run. New CDP requires a transport
-            # adaptation, not a silent reduction of the network policy.
-            try:browser.close()
-            finally:
-                pw.stop();self._browser=self._playwright=self._root=None
+            # Never reuse a partially guarded browser or discard the only
+            # references to resources whose termination is not proven.
+            self._launch_state = 'failed'
             if 'Only flatten protocol is supported' in str(exc):
-                raise ExecutorFailure('browser_cdp_transport_incompatible',evidence={
+                raise ExecutorFailure('browser_cdp_transport_incompatible',uncertain=True,evidence={
                     'available':False,'requires_flatten':True,'policy_bypassed':False}) from None
-            raise
-        processes = self._root.send('SystemInfo.getProcessInfo')['processInfo']
-        browser_pids = [int(p['id']) for p in processes if p['type'] == 'browser']
-        if len(browser_pids) != 1:
-            raise ExecutorFailure('browser_process_ownership_ambiguous')
-        self._browser_handle = OwnedProcessHandle(browser_pids[0])
+            if isinstance(exc, ExecutorFailure):
+                raise ExecutorFailure(exc.code, uncertain=exc.uncertain or self._launch_attempted
+                    or self._playwright is None, evidence=exc.evidence) from exc
+            raise ExecutorFailure('browser_launch_unconfirmed', uncertain=True) from exc
 
     def _received(self, params):
         channel = self._channels.get(params['sessionId'])
@@ -1022,6 +1030,10 @@ class PlaywrightBrowserBackend:
         return bool(readable)
 
     def _shutdown(self):
+        if self._driver_start_attempted and self._playwright is None:
+            raise ExecutorFailure('browser_driver_start_unconfirmed', uncertain=True)
+        if self._launch_attempted and self._browser is None and self._browser_handle is None:
+            raise ExecutorFailure('browser_process_exit_unconfirmed', uncertain=True)
         for s in list(self._sessions.values()):
             s.invalidate()
             s.context.close()
