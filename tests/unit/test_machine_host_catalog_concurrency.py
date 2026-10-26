@@ -181,7 +181,7 @@ def test_drain_waits_for_already_admitted_host_call(tmp_path):
         release.set(); host.close(); control.durable.close()
 
 
-def test_failed_partial_teardown_keeps_admission_fenced_until_retry(tmp_path):
+def test_failed_partial_teardown_is_not_retried_without_proof(tmp_path):
     from types import SimpleNamespace
     control = ControlPlaneService.from_store(tmp_path / 'central'); host = MachineHost(control, owner='owner')
     attempts = []
@@ -195,7 +195,167 @@ def test_failed_partial_teardown_keeps_admission_fenced_until_retry(tmp_path):
             host.close()
         with pytest.raises(RuntimeError, match='draining'):
             host.inventory('workspace')
-        host.close()
-        assert host._closed and len(attempts) == 2
+        with pytest.raises(RuntimeError, match='outcome uncertain'):
+            host.close()
+        assert not host._closed and len(attempts) == 1
     finally:
+        # Test fixture recovery after asserting the production failure state.
+        host._teardown_progress[('factory', id(host._factories['machine']))] = 'done'
+        while host._teardown_locks: host._teardown_locks.pop().release()
+        host.close(); control.durable.close()
+
+
+def test_cancelled_thread_work_keeps_host_owned_until_it_finishes(tmp_path):
+    import asyncio
+    control = ControlPlaneService.from_store(tmp_path / 'central'); host = MachineHost(control, owner='owner')
+    entered = threading.Event(); release = threading.Event()
+    def work():
+        entered.set(); assert release.wait(5)
+    async def start():
+        await asyncio.to_thread(work)
+    try:
+        with pytest.raises(TimeoutError):
+            host._call(start(), timeout=.15)
+        assert entered.is_set()
+        with pytest.raises(RuntimeError, match='thread workers'):
+            host.close(drain_timeout=.1)
+        assert not host._closed and host._thread.is_alive()
+        release.set()
+        host.close(drain_timeout=2)
+        assert host._closed and not host._thread.is_alive()
+    finally:
+        release.set(); host.close(); control.durable.close()
+
+
+def test_timed_out_backend_shutdown_never_starts_again(tmp_path):
+    from types import SimpleNamespace
+    control = ControlPlaneService.from_store(tmp_path / 'central'); host = MachineHost(control, owner='owner')
+    entered = threading.Event(); release = threading.Event(); stopped = threading.Event(); calls = []
+    def shutdown():
+        calls.append('started'); entered.set(); release.wait(5); stopped.set()
+    backend = SimpleNamespace(shutdown=shutdown)
+    host._factories['machine'] = SimpleNamespace(
+        _declarations={'one': SimpleNamespace(adapter=SimpleNamespace(backend=backend))})
+    from sentra_runtime.effect_boundary import _ResourceLock, ResourceEffectBusy
+    competitor = _ResourceLock(control.durable.root / 'effect-locks', 'machine')
+    host._teardown_timeout = .15
+    try:
+        with pytest.raises(RuntimeError, match='shutdown still running'):
+            host.close()
+        assert entered.is_set()
+        with pytest.raises(ResourceEffectBusy):
+            competitor.acquire(0)
+        with pytest.raises(RuntimeError, match='shutdown still running'):
+            host.close()
+        assert calls == ['started']
+        release.set(); assert stopped.wait(2)
+        host.close()
+        assert calls == ['started'] and host._closed
+        competitor.acquire(0)
+        competitor.release()
+    finally:
+        release.set(); stopped.wait(2); competitor.release()
+        host.close(); control.durable.close()
+
+
+def test_completed_backend_not_repeated_after_later_failure(tmp_path):
+    from types import SimpleNamespace
+    control = ControlPlaneService.from_store(tmp_path / 'central'); host = MachineHost(control, owner='owner')
+    calls = []
+    async def first(): calls.append('first')
+    async def second():
+        calls.append('second'); raise RuntimeError('failed')
+    a = SimpleNamespace(shutdown=first, _declarations={})
+    b = SimpleNamespace(shutdown=second, _declarations={})
+    host._factories.update(first=a, second=b)
+    try:
+        with pytest.raises(RuntimeError, match='failed'):
+            host.close()
+        with pytest.raises(RuntimeError, match='outcome uncertain'):
+            host.close()
+        assert calls == ['first', 'second'] and not host._closed
+    finally:
+        host._teardown_progress[('factory', id(b))] = 'done'
+        while host._teardown_locks: host._teardown_locks.pop().release()
+        host.close(); control.durable.close()
+
+
+def test_loop_still_stopping_keeps_resources_until_a_later_join(tmp_path, monkeypatch):
+    control = ControlPlaneService.from_store(tmp_path / 'central'); host = MachineHost(control, owner='owner')
+    original_join = host._thread.join
+    original_alive = host._thread.is_alive
+    try:
+        with monkeypatch.context() as context:
+            context.setattr(host._thread, 'join', lambda timeout=None: None)
+            context.setattr(host._thread, 'is_alive', lambda: True)
+            with pytest.raises(RuntimeError, match='loop has not stopped'):
+                host.close()
+        assert not host._closed and host._loop_stopping and host._draining
+        host.close()
+        assert host._closed and not original_alive()
+    finally:
+        original_join(3); host.close(); control.durable.close()
+
+
+def test_completed_backend_is_not_closed_twice_when_next_backend_fails(tmp_path):
+    from types import SimpleNamespace
+    from sentra_runtime.effect_boundary import _ResourceLock, ResourceEffectBusy
+    control = ControlPlaneService.from_store(tmp_path / 'central'); host = MachineHost(control, owner='owner')
+    calls = []
+    def first(): calls.append('first')
+    def second():
+        calls.append('second'); raise RuntimeError('backend failed')
+    a = SimpleNamespace(shutdown=first); b = SimpleNamespace(shutdown=second)
+    host._factories['machine'] = SimpleNamespace(_declarations={
+        'first': SimpleNamespace(adapter=SimpleNamespace(backend=a)),
+        'second': SimpleNamespace(adapter=SimpleNamespace(backend=b))})
+    try:
+        with pytest.raises(RuntimeError, match='backend failed'):
+            host.close()
+        with pytest.raises(RuntimeError, match='outcome uncertain'):
+            host.close()
+        assert calls == ['first', 'second']
+        probe = _ResourceLock(control.durable.root / 'effect-locks', 'machine')
+        with pytest.raises(ResourceEffectBusy):
+            probe.acquire(0)
+    finally:
+        host._teardown_progress[('backend', id(b))] = 'done'
+        while host._teardown_locks: host._teardown_locks.pop().release()
+        host.close(); control.durable.close()
+
+
+def test_failed_shutdown_retains_lock_while_internal_worker_is_uncertain(tmp_path):
+    from types import SimpleNamespace
+    from sentra_runtime.effect_boundary import _ResourceLock, ResourceEffectBusy
+    control = ControlPlaneService.from_store(tmp_path / 'central'); host = MachineHost(control, owner='owner')
+    release = threading.Event(); entered = threading.Event(); threads = []
+    def worker():
+        entered.set(); release.wait(5)
+    def shutdown():
+        thread = threading.Thread(target=worker); threads.append(thread); thread.start()
+        assert entered.wait(2)
+        raise RuntimeError('backend returned before internal worker stopped')
+    backend = SimpleNamespace(shutdown=shutdown)
+    host._factories['machine'] = SimpleNamespace(
+        _declarations={'one': SimpleNamespace(adapter=SimpleNamespace(backend=backend))})
+    competitor = _ResourceLock(control.durable.root / 'effect-locks', 'machine')
+    try:
+        with pytest.raises(RuntimeError, match='internal worker stopped'):
+            host.close()
+        assert threads[0].is_alive() and not host._closed
+        with pytest.raises(ResourceEffectBusy):
+            competitor.acquire(0)
+        with pytest.raises(RuntimeError, match='physical locks retained'):
+            host.close()
+        release.set(); threads[0].join(2)
+        # Even a finished thread alone does not prove the backend cleaned up.
+        with pytest.raises(ResourceEffectBusy):
+            competitor.acquire(0)
+    finally:
+        release.set()
+        for thread in threads: thread.join(2)
+        competitor.release()
+        # This fixture controls and knows its synthetic backend has no work.
+        host._teardown_progress[('backend', id(backend))] = 'done'
+        while host._teardown_locks: host._teardown_locks.pop().release()
         host.close(); control.durable.close()

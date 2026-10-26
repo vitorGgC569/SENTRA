@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import os
 import time
 import uuid
 import base64
@@ -345,6 +346,8 @@ class PlaywrightBrowserBackend:
         self._headless = None
         self._sessions = {}
         self._closed = False
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_state = 'open'
         self._root = None
         self._contexts, self._channels = {}, {}
         self._manual_attaching = set()
@@ -984,36 +987,59 @@ class PlaywrightBrowserBackend:
 
     def shutdown(self):
         """Host lifecycle hook, not Operation cleanup; closes every owned context."""
-        if self._closed:
-            return
-        self._closed = True
+        with self._shutdown_lock:
+            if self._shutdown_state == 'done':
+                return
+            if self._shutdown_state != 'open':
+                raise ExecutorFailure('browser_shutdown_unconfirmed', uncertain=True)
+            self._shutdown_state = 'started'
+            self._closed = True
         try:
             self._actor.submit(self._shutdown).result(timeout=15)
-        finally:
-            self._actor.shutdown(wait=False, cancel_futures=True)
+        except Exception as exc:
+            with self._shutdown_lock:
+                self._shutdown_state = 'uncertain'
+            # Keep the actor and all retained references; the host must retain
+            # physical exclusion, and a second call must not repeat teardown.
+            raise ExecutorFailure('browser_shutdown_unconfirmed', uncertain=True) from exc
+        with self._shutdown_lock:
+            self._shutdown_state = 'done'
+        self._actor.shutdown(wait=False, cancel_futures=True)
+
+    def _browser_process_exited(self):
+        handle = self._browser_handle
+        if handle is None or handle._closed:
+            return False
+        if os.name == 'nt':
+            import ctypes
+            from ctypes import wintypes
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+            kernel.WaitForSingleObject.restype = wintypes.DWORD
+            return kernel.WaitForSingleObject(handle.handle, 3000) == 0
+        import select
+        readable, _, _ = select.select([handle.handle], [], [], 3)
+        return bool(readable)
 
     def _shutdown(self):
-        try:
-            for s in list(self._sessions.values()):
-                s.invalidate()
-                try: s.context.close()
-                except Exception: pass
-            self._sessions.clear()
-            self._contexts.clear()
-            self._channels.clear()
-            self._guarded_targets.clear()
-            self._manual_attaching.clear()
-            if self._browser is not None:
-                try: self._browser.close()
-                except Exception: pass  # Watchdog may already have terminated it.
-        finally:
-            if self._playwright is not None:
-                try: self._playwright.stop()
-                except Exception: pass
-            self._browser = self._playwright = None
-            if self._browser_handle is not None:
-                self._browser_handle.close()
-                self._browser_handle = None
+        for s in list(self._sessions.values()):
+            s.invalidate()
+            s.context.close()
+        if self._browser is not None:
+            self._browser.close()
+        if self._browser is not None or self._browser_handle is not None:
+            if not self._browser_process_exited():
+                raise ExecutorFailure('browser_process_exit_unconfirmed', uncertain=True)
+        if self._playwright is not None:
+            self._playwright.stop()
+        if self._browser_handle is not None:
+            self._browser_handle.close()
+        self._sessions.clear()
+        self._contexts.clear()
+        self._channels.clear()
+        self._guarded_targets.clear()
+        self._manual_attaching.clear()
+        self._browser = self._playwright = self._root = self._browser_handle = None
 
 
 class PlaywrightBrowserExecutor(DiagnosedExecutor):

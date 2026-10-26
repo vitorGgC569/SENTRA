@@ -43,6 +43,18 @@ APK, installed application or public downloads contain them.
   timeout expires, resources remain owned and an in-process caller may retry.
   Once the HTTP server is closed, its endpoint is removed even if shutdown
   fails; there is no remote retry through a closed endpoint.
+- Physical thread work remains tracked even if an awaiting coroutine times out.
+  Completed shutdown stages are not repeated, and an uncertain teardown stage
+  stays fenced rather than being repeated without proof. Physical locks remain
+  owned through teardown and, after an uncertain failure, for the lifetime of
+  the host. Process exit still releases operating-system locks. RustDesk and
+  Daytona retain references and report uncertainty if their owned processes or
+  local connections cannot be confirmed closed. On Windows, RustDesk starts
+  suspended, enters its Job before resuming, and retains its handles until the
+  Job reports no active processes.
+- Browser shutdown reports failed context, browser or driver closure as
+  uncertain and retains references. It checks the main browser process has
+  exited, but does not yet prove that all browser descendants have exited.
 - Gateway request audit failures no longer interrupt the model request. Native
   models remain outside the Web-only gateway.
 - The older Windows wrapper calls the Inno installer with its supported flags;
@@ -78,6 +90,20 @@ applicable license, notices and pinned provenance.
 - An additional targeted suite covering PTY service behavior, input receipts,
   recovery, worktree management and coordinator authorization passed 85 tests.
   These tests do not establish clean-machine or installed-daemon acceptance.
+- Sixty-five targeted backend, machine-host, shutdown, federation, turn-memory and terminal
+  possession tests passed after the
+  thread-drain changes. They include timed-out physical work and a held lock;
+  they do not prove the continuity of a model process after broker shutdown or
+  verify Daytona and RustDesk against live external services.
+- Thirty-five tests covering uncertain model turns and terminal possession
+  passed with the current host-drain changes.
+- Sixty-five additional host and executor tests passed, six service-dependent
+  tests were skipped and four subtests passed. These include a real Windows
+  Job with a child process; they do not establish a real RustDesk or Daytona
+  service session.
+- Browser shutdown tests include simulated closure failures and a real local
+  process handle. Tests requiring a real Playwright browser were skipped; the
+  browser process tree and an installed interactive session remain unverified.
 - A source-mode run of `tests/qa/dot_worktree_execution.py` passed with the real
   `sentra/codex/current` model. It created three workers and separate Git
   worktrees, verified their edits, checked compatible and conflicting reviews,
@@ -96,14 +122,20 @@ applicable license, notices and pinned provenance.
   remained active. The temporary fixture initially failed to persist its
   report when cleanup also failed; it has since been corrected. This does not
   prove any duplicate or the absence of effects outside the recorded scope.
-- Android candidate APK: GitHub Actions run `40394905514`, commit
-  `4a90c2217429d9f56115b91f848cf854f055224e`, package
-  `app.sentra.mobile.preview`, versionCode 12. The build verified its v2
+- A follow-up source-mode attempt recorded all three worker turns as `RUNNING`
+  before broker interruption and confirmed that the broker reopened. The first
+  worker status checked afterwards was `UNCERTAIN`; the fixture stopped without
+  replay and closed its owned processes. This is a failed continuity test, not
+  a completed multi-Dot task. Evidence:
+  `.tmp/goal-dots-inflight-retry-20261026/report.json`.
+- Android candidate APK: GitHub Actions run `40402687334`, commit
+  `618d5401e104b0fdd3122732e89f733d9956f7c8`, package
+  `app.sentra.mobile.preview`, versionCode 16. The build verified its v2
   signature against the existing preview certificate. SHA-256:
-  `cdc9e93c575473c4ae5d16cbe23c2c7983d4f45147f09ecc24efb78cc60c6aa3`.
-  It was downloaded to `.tmp/android-candidate-20261026/app-release.apk`; this
-  predates the foreground reconnect changes and is not proof of a successful
-  physical-device test. A fresh build must include those changes.
+  `93c83976513ac38d44d3265714bed44d66921498de45cdb78e5eefc1446e1ddd`.
+  It was downloaded to `.tmp/android-candidate-618d540/app-release.apk`; this
+  is not proof of a successful physical-device test. The structured revocation
+  response also requires a compatible desktop gateway.
 - CI run `40394884595` reported that the MCP integration fixture did not open
   its loopback port within 15 seconds. The same integration test passed locally
   in 11.20 seconds, and a separate local cold-start observation reached the

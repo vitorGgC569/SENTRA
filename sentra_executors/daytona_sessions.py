@@ -351,14 +351,23 @@ class DaytonaSessionBackend:
     def shutdown(self):
         """Release local streams only; never delete borrowed cloud resources."""
         with self.lock:
-            for handle in self.handles.values():
-                try:handle.disconnect()
-                except Exception:pass
-            self.handles.clear()
-            for manager,*_ in self.log_streams.values():
+            for ident,handle in list(self.handles.items()):
+                connected=getattr(handle,'is_connected',None)
+                if not callable(connected):
+                    raise ExecutorFailure('daytona_disconnect_unverifiable',uncertain=True)
+                try:
+                    handle.disconnect()
+                    if connected() is not False:
+                        raise RuntimeError('connection still active or state unavailable')
+                except Exception as exc:
+                    # Do not lose the only reference to a possibly live stream.
+                    raise ExecutorFailure('daytona_disconnect_unconfirmed',uncertain=True) from exc
+                self.handles.pop(ident,None)
+            for ident,(manager,*_) in list(self.log_streams.items()):
                 try:manager.__exit__(None,None,None)
-                except Exception:pass
-            self.log_streams.clear()
+                except Exception as exc:
+                    raise ExecutorFailure('daytona_log_stream_close_unconfirmed',uncertain=True) from exc
+                self.log_streams.pop(ident,None)
 
     def _poll_pty(self,handle,row,b,a):
         # Public SDK wait(timeout) only checks time after data arrives; the pinned

@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 import hashlib
 import json
@@ -21,6 +22,29 @@ from sentra_runtime.authority_bridge import BoundWorkItemPolicy
 from sentra_runtime.central_authority import CentralDurableIntentAuthority
 from sentra_runtime.contracts import OperationRequest
 from sentra_runtime.executor import AuthorizationRequired
+
+
+class _TrackingExecutor(ThreadPoolExecutor):
+    """Keep physical thread work visible after its awaiting task is cancelled."""
+    def __init__(self):
+        super().__init__(thread_name_prefix='sentra-machine-io')
+        self._tracking_lock = threading.RLock()
+        self._outstanding = set()
+
+    def submit(self, fn, /, *args, **kwargs):
+        with self._tracking_lock:
+            future = super().submit(fn, *args, **kwargs)
+            self._outstanding.add(future)
+            future.add_done_callback(self._forget)
+            return future
+
+    def _forget(self, future):
+        with self._tracking_lock:
+            self._outstanding.discard(future)
+
+    def has_outstanding(self):
+        with self._tracking_lock:
+            return bool(self._outstanding)
 
 
 class MachineHost:
@@ -36,13 +60,20 @@ class MachineHost:
         self._telemetry=None
         self._diagnostic_errors=0
         self._loop = asyncio.new_event_loop()
+        self._executor = _TrackingExecutor()
+        self._loop.set_default_executor(self._executor)
         self._ready = threading.Event()
         self._closed = False
         self._draining = False
         self._teardown_started = False
+        self._loop_stopping = False
         self._admission_lock = threading.Lock()
         self._close_lock = threading.Lock()
         self._active_calls: set[asyncio.Task[Any]] = set()
+        self._teardown_progress: dict[tuple[str, int], str] = {}
+        self._teardown_future = None
+        self._teardown_timeout = 60.0
+        self._teardown_locks = []
         self._factories: dict[str, Callable] = {}
         self._inventory: dict[str, dict[str, Any]] = {}
         self._catalog_reads: set[asyncio.Task[Any]] = set()
@@ -876,48 +907,119 @@ class MachineHost:
                 with self._admission_lock:
                     # A busy preflight has changed no resources and may reopen
                     # admission. Partial teardown must stay fenced on failure.
-                    self._draining = self._teardown_started and not self._closed
+                    running = self._teardown_future is not None and not self._teardown_future.done()
+                    self._draining = (self._teardown_started or running) and not self._closed
 
     def _close_draining(self, drain_timeout):
+        if self._loop_stopping:
+            self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                raise RuntimeError('machine host loop has not stopped; resources retained')
+            self._closed = True
+            return
+        if self._teardown_future is None and self._teardown_locks:
+            raise RuntimeError('machine host shutdown outcome uncertain; physical locks retained')
         async def cleanup():
             from .effect_boundary import _ResourceLock, ResourceEffectBusy
             deadline = time.monotonic() + drain_timeout
+            held = []
+            def release_all():
+                error = None
+                while held:
+                    try:
+                        held.pop().release()
+                    except Exception as exc:
+                        error = error or exc
+                if error is not None:
+                    raise error
             while True:
                 busy = None
-                if any(not reader.done() for reader in self._catalog_reads):
+                for machine_id in self._factories:
+                    probe = _ResourceLock(self.control.durable.root / "effect-locks", machine_id)
+                    try:
+                        probe.acquire(0)
+                    except ResourceEffectBusy:
+                        busy = 'physical workers have not stopped; machine host retained'
+                        break
+                    except BaseException:
+                        release_all()
+                        raise
+                    else:
+                        held.append(probe)
+                if busy is not None:
+                    pass  # Keep the established physical-worker retry contract.
+                elif any(not reader.done() for reader in self._catalog_reads):
                     busy = 'catalog readers have not stopped; machine host retained'
                 elif self._active_calls:
                     busy = 'host calls have not stopped; machine host retained'
-                else:
-                    for machine_id in self._factories:
-                        probe = _ResourceLock(self.control.durable.root / "effect-locks", machine_id)
-                        try:
-                            probe.acquire(0)
-                        except ResourceEffectBusy:
-                            busy = 'physical workers have not stopped; machine host retained'
-                            break
-                        else:
-                            probe.release()
+                elif self._executor.has_outstanding():
+                    busy = 'host thread workers have not stopped; machine host retained'
                 if busy is None:
                     break
+                release_all()
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError(busy)
                 await asyncio.sleep(min(.05, remaining))
             self._teardown_started = True
-            seen = set()
-            for factory in self._factories.values():
-                direct_shutdown=getattr(factory,"shutdown",None)
-                if callable(direct_shutdown):await direct_shutdown()
-                for declaration in getattr(factory,'_declarations',{}).values():
-                    backend = getattr(declaration.adapter, "backend", None)
-                    if backend is not None and id(backend) not in seen:
-                        seen.add(id(backend))
-                        shutdown = getattr(backend, "shutdown", None)
-                        if callable(shutdown):
-                            await asyncio.to_thread(shutdown)
-        self._call(cleanup(), timeout=10 + drain_timeout, _drain=True)
+            self._teardown_locks = held
+            async def shutdown_once(kind, component, invoke):
+                key = (kind, id(component))
+                state = self._teardown_progress.get(key)
+                if state == 'done':
+                    return
+                if state is not None:
+                    raise RuntimeError('machine host shutdown outcome uncertain; resource retained')
+                self._teardown_progress[key] = 'started'
+                try:
+                    await invoke()
+                except BaseException:
+                    # A throwing or cancelled shutdown may have performed an
+                    # effect; without a receipt it must never be rerun blindly.
+                    self._teardown_progress[key] = 'uncertain'
+                    raise
+                self._teardown_progress[key] = 'done'
+            try:
+                seen = set()
+                for factory in self._factories.values():
+                    direct_shutdown=getattr(factory,"shutdown",None)
+                    if callable(direct_shutdown):
+                        await shutdown_once('factory', factory, direct_shutdown)
+                    for declaration in getattr(factory,'_declarations',{}).values():
+                        backend = getattr(declaration.adapter, "backend", None)
+                        if backend is not None and id(backend) not in seen:
+                            seen.add(id(backend))
+                            shutdown = getattr(backend, "shutdown", None)
+                            if callable(shutdown):
+                                await shutdown_once('backend', backend, lambda: asyncio.to_thread(shutdown))
+            except BaseException:
+                # A backend can report failure while its own internal threads
+                # still touch the resource. Keep exclusion for this host's
+                # lifetime; no implicit retry or lock release is safe.
+                raise
+            else:
+                release_all()
+                self._teardown_locks = []
+        if self._teardown_future is None:
+            self._teardown_future = asyncio.run_coroutine_threadsafe(cleanup(), self._loop)
+        try:
+            self._teardown_future.result(timeout=self._teardown_timeout + drain_timeout)
+        except TimeoutError:
+            if self._teardown_future.done():
+                self._teardown_future = None
+                raise
+            # Keep the same live cleanup task and its locks. A later close
+            # observes its result; it never starts the stages a second time.
+            raise RuntimeError('machine host shutdown still running; resources retained') from None
+        except BaseException:
+            # Completed failures may be checked again, but progress entries
+            # prevent any started or completed teardown from being repeated.
+            self._teardown_future = None
+            raise
         if self._telemetry:self._telemetry.close()
-        self._closed = True
+        self._loop_stopping = True
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=2)
+        if self._thread.is_alive():
+            raise RuntimeError('machine host loop has not stopped; resources retained')
+        self._closed = True
