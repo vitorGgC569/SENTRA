@@ -19,7 +19,11 @@ APK, installed application or public downloads contain them.
   Missing previous files are recovered without overwriting conflicts; unresolved
   conflicts or unverifiable copies block subsequent installation attempts and
   preserve the backup. Hashes allow recovery to resume idempotently after a
-  second interruption. Multiple unresolved generations require manual recovery.
+  second interruption. A verified temporary marker can be quarantined on
+  Windows without replacing an unknown file. Multiple unresolved generations
+  or unverified conflicts require manual recovery. An unrecognized marker is
+  preserved and blocks replacement. Recovered files are checked again before
+  completion; this cannot prevent a later write by another process.
 - The LAN pairing dialog retains action errors independently of periodic
   status refreshes. Mobile reconnection checks the pinned host and client
   identity and does not automatically replay an uncertain operation.
@@ -32,6 +36,8 @@ APK, installed application or public downloads contain them.
 - Paired-device authentication failures use a fixed error code, carried by the
   encrypted gateway. They close only the matching session; an operation denied
   by its scope leaves the device session connected.
+- Credential rotation fences concurrent requests and stale responses while the
+  new credential is stored. The durable rotation receipt supports recovery.
 - Gateway request audit failures no longer interrupt the model request. Native
   models remain outside the Web-only gateway.
 - The older Windows wrapper calls the Inno installer with its supported flags;
@@ -48,7 +54,7 @@ applicable license, notices and pinned provenance.
 
 - Installer and recovery tests: 83 passed before the final atomic-copy change;
   34 targeted installer, wrapper and distribution tests passed afterwards.
-- After adding recovery on the next installer start, 92 targeted installer,
+- After adding recovery on the next installer start, 105 targeted installer,
   recovery and distribution tests passed. One test exits a private worker
   process during its first file move and verifies recovery on the next start.
 - UI, gateway and mobile acceptance fixtures: 13 passed, two physical-network
@@ -56,7 +62,7 @@ applicable license, notices and pinned provenance.
   a real local Windows ConPTY case.
 - Mobile transport: 25 passed, one optional multicast test skipped; app tests:
   seven passed; both TypeScript typechecks passed.
-- After the foreground reconnect, lifecycle fencing and half-open timeout changes, 32 mobile
+- After the reconnect, lifecycle, timeout and rotation changes, 33 mobile
   transport tests and seven app tests passed, one optional multicast test was
   skipped, and both typechecks passed. These are not physical-device results.
 - Seven mobile acceptance tests passed with real local Canvas HTTP, the Node
