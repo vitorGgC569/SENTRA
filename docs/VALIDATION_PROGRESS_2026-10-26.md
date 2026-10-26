@@ -49,6 +49,9 @@ applicable license, notices and pinned provenance.
   a real local Windows ConPTY case.
 - Mobile transport: 25 passed, one optional multicast test skipped; app tests:
   seven passed; both TypeScript typechecks passed.
+- After the foreground reconnect and lifecycle fencing changes, 31 mobile
+  transport tests and seven app tests passed, one optional multicast test was
+  skipped, and both typechecks passed. These are not physical-device results.
 - The scoped mypy gate reported zero errors in its five configured source files.
   This is not a repository-wide typing result.
 - An additional targeted suite covering PTY service behavior, input receipts,
@@ -60,6 +63,11 @@ applicable license, notices and pinned provenance.
   and re-opened the broker after the edits. The report is in
   `.tmp/goal-three-dots-20261026/report.json`. It did not interrupt a running
   effect and did not validate the installed build.
+- An earlier frozen Windows candidate passed a private crash test: a broker was
+  stopped while a terminal command was running, the daemon retained the same
+  worker, and the receipt was reconciled without resending. The command ran
+  once. Evidence: `.tmp/candidate-20261026-frozen-crash/report.json`. This
+  candidate predates the latest installer and mobile changes.
 - Android candidate APK: GitHub Actions run `40394905514`, commit
   `4a90c2217429d9f56115b91f848cf854f055224e`, package
   `app.sentra.mobile.preview`, versionCode 12. The build verified its v2
