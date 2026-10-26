@@ -14,6 +14,11 @@ APK, installed application or public downloads contain them.
   manual recovery. Recovery uses a fully written temporary file and an atomic
   no-replace link; a failed copy does not expose a partial original file. The
   backup is retained. This is not a guarantee of automatic full rollback.
+- On a later installer start, a durable receipt from a clean installation
+  interrupted during replacement is inspected under the installation lock.
+  Missing previous files are recovered without overwriting conflicts; unresolved
+  conflicts block subsequent installation attempts and preserve the backup.
+  Multiple unresolved generations require manual recovery.
 - The LAN pairing dialog retains action errors independently of periodic
   status refreshes. Mobile reconnection checks the pinned host and client
   identity and does not automatically replay an uncertain operation.
@@ -33,6 +38,9 @@ applicable license, notices and pinned provenance.
 
 - Installer and recovery tests: 83 passed before the final atomic-copy change;
   34 targeted installer, wrapper and distribution tests passed afterwards.
+- After adding recovery on the next installer start, 88 targeted installer,
+  recovery and distribution tests passed. One test exits a private worker
+  process during its first file move and verifies recovery on the next start.
 - UI, gateway and mobile acceptance fixtures: 13 passed, two physical-network
   tests skipped. Desktop and execution tests: 55 passed, one skipped, including
   a real local Windows ConPTY case.
@@ -64,7 +72,10 @@ applicable license, notices and pinned provenance.
 
 ## Still required
 
-Finish the Windows candidate and verify its contents and upgrade paths. Test the
+The Windows candidate started before the interrupted-install recovery change;
+it cannot establish that the new recovery is included in the next Setup.
+Finish validating that candidate, then build the updated sources and verify their
+contents and upgrade paths. Test the
 Android candidate on an actual device. Validate installation on a genuinely clean Windows
 system, update, rollback and reboot; real installed account onboarding and
 model response; interruption and recovery of multi-Dot work without duplicate

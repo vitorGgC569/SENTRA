@@ -263,6 +263,69 @@ def record_clean_recovery(state, destination, result, status):
     return target
 
 
+def recover_interrupted_clean_installs(state, destination):
+    """Reconcile pre-move receipts left by an interrupted installer.
+
+    A prepared receipt is durable before the first move. Restore only missing
+    bytes and stop if anything has since occupied an old path; never begin a
+    second installation on top of an uncertain partial replacement.
+    """
+    root = resolved_path(Path(destination))
+    directory = Path(state) / 'installer-clean-recoveries'
+    if not _disk(directory).exists():
+        return []
+    if _disk(directory).is_symlink() or _disk(directory).is_junction() or not _disk(directory).is_dir():
+        raise InstallationRecoveryError('unsafe_clean_destination')
+    pending = []
+    for receipt in _disk(directory).glob('.sentra-clean-*.json'):
+        if receipt.is_symlink() or receipt.is_junction() or not receipt.is_file():
+            raise InstallationRecoveryError('unsafe_clean_destination')
+        try:
+            record = json.loads(receipt.read_text(encoding='utf-8'))
+        except (ValueError, OSError):
+            raise InstallationRecoveryError('unsafe_clean_destination') from None
+        if not isinstance(record, dict) or record.get('schema') != 1:
+            raise InstallationRecoveryError('unsafe_clean_destination')
+        if record.get('recovery') is not None and not isinstance(record['recovery'], dict):
+            raise InstallationRecoveryError('unsafe_clean_destination')
+        needs_recovery = (record.get('status') in ('prepared', 'interrupted_manual')
+                          or (record.get('status') == 'failed'
+                              and (record.get('recovery') or {}).get('manual_recovery_required') is True))
+        if record.get('install_dir') == str(root) and needs_recovery:
+            pending.append(record)
+    if not pending:
+        return []
+    if len(pending) != 1:
+        # Different interrupted generations cannot safely be merged by guessing
+        # their order. Keep every backup and ask for explicit recovery.
+        result = {'requested': True, 'backup': pending[0].get('backup_directory'),
+                  'recovery': {'manual_recovery_required': True}}
+        error = InstallationRecoveryError('interrupted_clean_recovery')
+        error._sentra_clean_install = result
+        raise error
+    from .app_exit_update import assert_installation_offline
+    assert_installation_offline(root)
+    recovered = []
+    for record in pending:
+        result = {'requested': True, 'previous_components': True,
+                  'backup': record.get('backup_directory')}
+        try:
+            result['recovery'] = restore_missing_clean_backup(root, result['backup'])
+        except Exception as exc:
+            result['recovery'] = {'manual_recovery_required': True}
+            error = InstallationRecoveryError('interrupted_clean_recovery')
+            error._sentra_clean_install = result
+            raise error from exc
+        record_clean_recovery(state, root, result, 'interrupted_recovered'
+                              if not result['recovery']['manual_recovery_required'] else 'interrupted_manual')
+        recovered.append(result)
+        if result['recovery']['manual_recovery_required']:
+            error = InstallationRecoveryError('interrupted_clean_recovery')
+            error._sentra_clean_install = result
+            raise error
+    return recovered
+
+
 def load_install_settings(path, *, repair_damaged=False):
     """A reset requires the owner's explicit setup choice and uses Safe mode."""
     path = Path(path)

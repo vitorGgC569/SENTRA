@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -228,6 +230,9 @@ def test_failed_install_restores_missing_without_overwriting_partial_or_user_fil
     # A later installer progress update does not overwrite this independent receipt.
     (state/'installer-progress.json').write_text('{"status":"new run"}')
     assert json.loads(retained[0].read_text())['backup_directory']==str(backup)
+    with pytest.raises(recovery.InstallationRecoveryError, match='interrupted_clean_recovery'):
+        installer.install(install_dir=app,state_dir=state,local_only=True)
+    assert (app/'sentra-canvas.exe').read_bytes()==b'new or concurrent bytes'
 
 
 def test_failed_install_does_not_restore_while_installation_is_active(tmp_path,offline,monkeypatch):
@@ -325,3 +330,94 @@ def test_restore_copy_failure_never_exposes_a_partial_original(tmp_path, offline
     assert not (app / 'sentra-canvas.exe').exists()
     assert not list(app.glob('.sentra-restore-*.tmp'))
     assert (Path(result['backup']) / 'sentra-canvas.exe').read_bytes() == b'original executable'
+
+
+def test_interrupted_clean_install_recovers_missing_files_before_next_install(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    marker = app / '.sentra-install.json'
+    marker.write_text(json.dumps({'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'),
+    )
+    # Model interruption after the moves but before the new marker was created.
+    marker.unlink()
+    recovered = recovery.recover_interrupted_clean_installs(state, app)
+    assert (app / 'sentra-canvas.exe').read_bytes() == b'old canvas'
+    assert json.loads(marker.read_text())['owned_files'] == ['sentra-canvas.exe']
+    assert recovered[0]['recovery']['manual_recovery_required'] is False
+    assert recovery.recover_interrupted_clean_installs(state, app) == []
+    assert (Path(result['backup']) / 'sentra-canvas.exe').read_bytes() == b'old canvas'
+
+
+def test_recovery_receipt_survives_process_exit_during_first_move(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    marker = app / '.sentra-install.json'
+    marker.write_text(json.dumps({'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe']}))
+    script = '''
+import os, sys
+from pathlib import Path
+from sentra_remote import installer_recovery as recovery, app_exit_update
+app, state = map(Path, sys.argv[1:])
+app_exit_update.assert_installation_offline = lambda _: None
+rename = Path.rename
+def exit_after_move(self, target):
+    result = rename(self, target)
+    if self.name == '.sentra-install.json':
+        os._exit(19)
+    return result
+Path.rename = exit_after_move
+recovery.prepare_clean_install(app, state, ('sentra-canvas.exe',),
+    on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'))
+'''
+    proc = subprocess.run([sys.executable, '-c', script, str(app), str(state)],
+                          cwd=Path(__file__).resolve().parents[2], timeout=30,
+                          capture_output=True, creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    assert proc.returncode == 19, proc.stderr.decode('utf-8', 'replace')
+    assert not marker.exists()
+    assert (app / 'sentra-canvas.exe').read_bytes() == b'old canvas'
+    recovered = recovery.recover_interrupted_clean_installs(state, app)
+    assert recovered[0]['recovery']['manual_recovery_required'] is False
+    assert json.loads(marker.read_text())['owned_files'] == ['sentra-canvas.exe']
+
+
+def test_interrupted_clean_conflict_stops_each_retry_without_overwriting(tmp_path, offline, monkeypatch):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    (app / '.sentra-install.json').write_text(json.dumps({
+        'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe'],
+    }))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'),
+    )
+    (app / 'sentra-canvas.exe').write_bytes(b'new or unknown bytes')
+    payload_check = Mock()
+    monkeypatch.setattr(installer, 'check_install_payload', payload_check)
+    for _ in range(2):
+        with pytest.raises(recovery.InstallationRecoveryError, match='interrupted_clean_recovery') as error:
+            installer.install(install_dir=app, state_dir=state, local_only=True)
+        assert error.value._sentra_clean_install['backup'] == result['backup']
+        assert error.value._sentra_clean_install['recovery']['manual_recovery_required'] is True
+        assert (app / 'sentra-canvas.exe').read_bytes() == b'new or unknown bytes'
+    payload_check.assert_not_called()
+    assert (Path(result['backup']) / 'sentra-canvas.exe').read_bytes() == b'old canvas'
+
+
+def test_interrupted_recovery_never_modifies_active_installation(tmp_path, offline):
+    app = tmp_path / 'app'; app.mkdir(); state = tmp_path / 'state'
+    (app / 'sentra-canvas.exe').write_bytes(b'old canvas')
+    (app / '.sentra-install.json').write_text(json.dumps({
+        'product': 'SENTRA Desktop', 'owned_files': ['sentra-canvas.exe'],
+    }))
+    result = recovery.prepare_clean_install(
+        app, state, ('sentra-canvas.exe',),
+        on_backup=lambda value: recovery.record_clean_recovery(state, app, value, 'prepared'),
+    )
+    offline.side_effect = RuntimeError('installation is active')
+    with pytest.raises(RuntimeError, match='installation is active'):
+        recovery.recover_interrupted_clean_installs(state, app)
+    assert not (app / 'sentra-canvas.exe').exists()
+    assert (Path(result['backup']) / 'sentra-canvas.exe').read_bytes() == b'old canvas'

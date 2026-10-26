@@ -720,6 +720,11 @@ def install(**options) -> dict[str, Any]:
     # The coordinated update helper owns this same OS lock across its child.
     lock = nullcontext() if options.get("offline_handoff") is not None else installation_lock(install_dir)
     with lock:
+        # A prior process may have stopped after recording its backup but
+        # before its exception handler could run. Reconcile before inspecting
+        # or writing the installation, for clean installs and normal repairs.
+        from .installer_recovery import recover_interrupted_clean_installs
+        recovered_clean = recover_interrupted_clean_installs(state, install_dir)
         if clean:
             pass  # Explicit recovery is prepared only after payload verification.
         elif (install_dir / INSTALL_MARKER).is_file():
@@ -805,6 +810,8 @@ def install(**options) -> dict[str, Any]:
                 pass  # Keep the original error and the pre-move durable backup receipt.
             raise
         result["preflight"] = preflight
+        if recovered_clean:
+            result["interrupted_clean_recoveries"] = recovered_clean
         ready = _installation_ready(result.get("connect_verify") or {}, openai_required=not options.get("local_only", False))
         deferred = bool(options.get("offline_handoff"))
         record("Atualização preparada" if deferred else "SENTRA instalado; contas Web podem ser conectadas no aplicativo" if options.get("local_only") and ready else "Túnel verificado; autorize o plugin no ChatGPT" if ready else "A configuração precisa de atenção",
