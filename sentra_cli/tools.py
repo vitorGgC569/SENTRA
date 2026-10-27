@@ -106,6 +106,8 @@ def git_diff(workspace: Path) -> str:
             cwd=str(workspace),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=15,
         )
         output = res.stdout.strip()
@@ -122,6 +124,8 @@ def git_status(workspace: Path) -> str:
             cwd=str(workspace),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=10,
         )
         output = res.stdout.strip()
@@ -141,6 +145,8 @@ def run_tests(workspace: Path, target: str = "all", timeout: float = 60.0) -> st
             cwd=str(workspace),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         combined = (res.stdout + "\n" + res.stderr).strip()
