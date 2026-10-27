@@ -19,7 +19,8 @@ from typing import Optional
 
 from playwright.async_api import async_playwright, Page, BrowserContext
 
-STATE_FILE = Path(__file__).parent / "runs" / "swarm_state.json"
+ROOT = Path(__file__).resolve().parents[2]
+STATE_FILE = ROOT / "runs" / "swarm_state.json"
 
 
 def load_state() -> dict:
@@ -162,7 +163,7 @@ async def cmd_send_batch(args) -> None:
         results = await asyncio.gather(*tasks, return_exceptions=True)
         save_state(state)
 
-    out_dir = Path(args.out_dir) if args.out_dir else Path(__file__).parent / "runs" / "swarm_responses"
+    out_dir = Path(args.out_dir) if args.out_dir else ROOT / "runs" / "swarm_responses"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for role, result in zip(batch.keys(), results):

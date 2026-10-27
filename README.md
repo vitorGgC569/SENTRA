@@ -1,10 +1,71 @@
 # SENTRA
 
-**Auditable coordination and execution with AI agents.**
+**Auditable coordination and execution with AI agents — models propose, the runtime verifies.**
 
-SENTRA brings Dots, permanent conversations, terminals, files, browser tools, and computer access into a shared workspace. Models propose actions; the runtime enforces permissions, records execution, and checks evidence. Model consensus alone does not establish correctness.
+> "Model consensus alone does not establish correctness."
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue) ![Windows](https://img.shields.io/badge/platform-Windows-blue) ![Edge MV3](https://img.shields.io/badge/edge-MV3-orange) ![Tests pytest](https://img.shields.io/badge/tests-pytest-green) ![CI](https://github.com/vitorGgC569/SENTRA/actions/workflows/ci.yml/badge.svg)
+
+Checked-in interface previews (Home, Canvas, and the assistant selector) are in [SENTRA Desktop](#sentra-desktop). A demo recording is not in the repository.
+
+## Why SENTRA is different
+
+- **Verification over trust.** Agents propose actions; the runtime enforces permissions, records execution, and checks evidence (real tests, three validators, and the quality gate) before anything counts as done.
+- **Nothing is applied silently.** OMA writes `handoff.md`, `handoff.json`, and `candidate.patch` for an isolated candidate. Promotion is an explicit manual step (`CANDIDATE_READY` is not `APPLIED`).
+- **Durable, honest execution.** Central Grants, WorkItems, Runs, and Operations track work. A stream that ends without confirmation stays an uncertain draft: it is not a success receipt and does not authorize tools or automatic resending.
+- **One workspace for agents and real resources.** Dots, permanent conversations, terminals, files, browser tools, and authorized computer access, exposed through a Windows desktop, a CLI, and an MCP server.
+
+## Quick start (offline, no model charges)
+
+Windows 10/11 and Python 3.11 or newer. Continuous integration uses Python 3.12 on `windows-latest`. These commands do not call live models.
+
+```powershell
+git clone https://github.com/vitorGgC569/SENTRA
+cd SENTRA
+python -m pip install -r requirements.txt
+python -B main.py --demo
+```
+
+`python -B main.py --demo` creates `.oma/demo-<8 hex characters>/` unless you pass an empty `--workspace`, writes a `math_utils.py` fixture, and runs scripted models with real local tests on the host. It exercises the local state machine. It does **not** demonstrate live models, Edge, or browser integration. See [Development quick start](#development-quick-start) for the live workflow and [CONTRIBUTING.md](CONTRIBUTING.md) for a virtualenv.
+
+## How it compares
+
+High-level positioning, not a benchmark. SENTRA is a development preview.
+
+| | SENTRA | CrewAI | AutoGen | OpenHands |
+|---|---|---|---|---|
+| Core focus | Auditable execution: permissions, receipts, evidence gates | Role-based agent crews | Multi-agent conversation framework | Autonomous software-dev agent |
+| Acceptance of results | Real tests + 3 validators + quality gate, then **manual** promotion | Defined by your flow | Defined by your flow | Agent edits workspace; you review |
+| Authorization model | Central Grants / WorkItems; runtime-enforced permissions | App-level | App-level | Sandbox |
+| Surfaces | Windows Desktop, CLI, MCP server, Edge extension, LAN/mobile preview | Python library | Python library / Studio | Web UI / CLI |
+| Model transport | ChatGPT/Gemini Web via local gateway, local (Ollama/vLLM), OpenAI | API providers | API providers | API providers |
+| Maturity | Development preview, Windows-first | Stable | Stable | Stable |
+
+## Glossary
+
+| Term | Meaning in SENTRA |
+|---|---|
+| **Dot** | An assistant you converse with, chosen from the central Dot selector on Home. Each Dot has a workspace. The Desktop labels this list "Assistentes". |
+| **Canvas** | A Dot's workspace: tabs and split terminal panels (`sentra_canvas/`). |
+| **Spaces** | Desktop areas that group conversations, assistants, and documents. |
+| **Grant** | A central authorization for an agent to use a capability or resource. The runtime enforces it. |
+| **WorkItem** | A tracked unit of work that Grants and Runs are bound to. |
+| **Run / Operation** | A tracked execution and the individual effects it performs. Each is recorded durably. |
+| **OMA** | The multi-agent orchestrator (`orchestrator/`): a DAG and queue. The default run uses five fixed seats — master, executor, and three validators (logic, requirements, adversarial). Planner and judge share the master seat; repair shares the executor seat. `config.yaml` sets `oma.max_seats` to 5, which refuses a sixth chat. A `MASTER_QUEUE` job may set its own `agents` count (1–8) as that run's seat cap. |
+| **Candidate** | An isolated result (`candidate.patch`, `handoff.md`, and `handoff.json`) waiting for explicit promotion. |
+| **Quality gate** | Acceptance check combining real tests and validator review. The release bar is `oma.min_release_score` (9.5 on a 0–10 scale in `config.yaml`). `oma.validators_required` is 3. |
+| **MASTER_QUEUE** | Persistent queue (`--queue` / `--supervise`) that grows larger projects through accumulated small runs. An example manifest is `docs/MASTER_QUEUE.example.json`. |
+| **Commander** | Multi-device layer: clients reach Cloud MCP and the relay over outbound connections. Filesystem, terminal, browser, Git, and sandbox operations execute on the local agent. |
+| **Secure MCP Tunnel** | Connects external MCP clients (for example the ChatGPT app) to the local SENTRA MCP. It is separate from Web Models transport and from the Edge extension. |
+
+## Contributing
+
+Contributions are welcome in **Portuguese or English**.
+
+- Read [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), and the [suggested starter issues](docs/GOOD_FIRST_ISSUES.md). Those suggestions are not opened as GitHub issues until a maintainer files them.
+- Suggested GitHub labels, after the maintainer creates them: [`good first issue`](https://github.com/vitorGgC569/SENTRA/labels/good%20first%20issue) and [`help wanted`](https://github.com/vitorGgC569/SENTRA/labels/help%20wanted).
+- Useful first contributions: translate Portuguese docs and UI labels, extend tests, or report a reproducible bug.
+- Security issues: see [SECURITY.md](SECURITY.md). Do not report vulnerabilities in public issues.
 
 ## Current status
 
@@ -251,10 +312,11 @@ Historical installer checkpoints: [October 13 report](docs/INSTALADOR_AUTOMATICO
 | `dashboard/` | Read-only monitoring |
 | `self_improvement/`, `research/` | Improvement loop and supporting verifiers |
 | `skills/oma_operator/`, `skills/sentra_repo/` | Operator runbook and repository gateway |
+| `scripts/` | CI, release, and one-off helpers. `scripts/legacy/` is the old CDP swarm driver, not a product entry point |
 
 ## Documentation
 
-[Start here](docs/START_HERE.md) · [quick start](docs/QUICKSTART.md) · [using SENTRA](docs/USING_SENTRA.md) · [CLI](docs/SENTRA_CLI.md) · [Web Models](docs/WEB_MODELS.md) · [architecture](docs/ARCHITECTURE.md) · [security](SECURITY.md) · [releases](docs/RELEASE.md) · [operator runbook](skills/oma_operator/SKILL.md) · [known pitfalls](docs/traps.md) · [OMA specification](docs/OMA_Orquestrador_Multiagente.md).
+[Start here](docs/START_HERE.md) · [quick start](docs/QUICKSTART.md) · [using SENTRA](docs/USING_SENTRA.md) · [CLI](docs/SENTRA_CLI.md) · [Web Models](docs/WEB_MODELS.md) · [architecture](docs/ARCHITECTURE.md) · [security](SECURITY.md) · [contributing](CONTRIBUTING.md) · [starter issues](docs/GOOD_FIRST_ISSUES.md) · [releases](docs/RELEASE.md) · [operator runbook](skills/oma_operator/SKILL.md) · [known pitfalls](docs/traps.md) · [OMA specification](docs/OMA_Orquestrador_Multiagente.md).
 
 ## Third-party licenses
 
@@ -284,4 +346,4 @@ Required dependency licenses, copyright notices and engineering provenance are p
   </tr>
 </table>
 
-Contributions through issues, documentation, reproducible bug reports, and pull requests are welcome. See the [complete contributor history](https://github.com/vitorGgC569/SENTRA/graphs/contributors).
+Contributions through issues, documentation, reproducible bug reports, and pull requests are welcome in Portuguese or English. See [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), and the [complete contributor history](https://github.com/vitorGgC569/SENTRA/graphs/contributors).

@@ -9,7 +9,8 @@ import json
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-STATE_FILE = Path(__file__).parent / "runs" / "swarm_state.json"
+ROOT = Path(__file__).resolve().parents[2]
+STATE_FILE = ROOT / "runs" / "swarm_state.json"
 
 
 async def poll(roles, cdp_url, out_dir):

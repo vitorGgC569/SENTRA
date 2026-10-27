@@ -87,11 +87,14 @@ class CommandRunner:
                 # script is a ratchet: existing reviewed debt is tolerated, but
                 # any increase fails the operation.
                 return [self._python(), str(baseline.resolve())]
+            # Used only when scripts/check_mypy_baseline.py is absent.
+            # The CDP swarm drivers live under scripts/legacy/.
             targets = [
                 "browser", "dashboard", "local_model", "native_bridge",
                 "orchestrator", "repository", "sentra_mcp",
                 "sentra_model_gateway", "sentra_remote", "workspace",
-                "main.py", "swarm.py", "swarm_poll.py", "sentra_version.py",
+                "main.py", "scripts/legacy/swarm.py", "scripts/legacy/swarm_poll.py",
+                "sentra_version.py",
             ]
             existing = [
                 str(resolve_workspace_path(self.cwd, item))

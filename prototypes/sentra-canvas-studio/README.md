@@ -1,5 +1,7 @@
 # SENTRA Studio — protótipo independente
 
+**English:** Navigable redesign preview of SENTRA Canvas. It does not change the installed interface, services, sessions, cookies, or accounts. The steps below are the Portuguese evaluation script. Responses inside the prototype are simulated.
+
 Prévia navegável de um redesign do SENTRA Canvas. Não altera a interface instalada, serviços, sessões, cookies ou contas do SENTRA.
 
 ## Abrir
